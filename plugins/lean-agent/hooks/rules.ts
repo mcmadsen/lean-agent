@@ -601,16 +601,17 @@ export type RulesStats = { loaded: Record<string, number>; never: string[]; neve
 export const unverifiedLine = (project: string, s: Pick<RulesStats, 'logRows'>) => `no rule load has ever been recorded${s.logRows ? ` for ${project}` : ' (log absent)'}: loading unverified`
 
 // The load log: `fs.read` rejects a file over 4 MiB (readJsonl then gives nothing, which would read as "log absent"): the newest 3 MB come
-// from `tail` instead (its first line is cut and dropped); a log that is really absent still gives nothing.
+// from `tail` instead (its first line is cut and dropped); a log that is really absent still gives nothing. `since` (ms): the time of the
+// oldest row kept when the log was cut (0 = the whole log was read): a rule written before it cannot be called "never loaded".
 const LOG_TAIL_BYTES = 3_000_000
-async function readLoadLog<T>(h: Host, path: string): Promise<T[]> {
+async function readLoadLog<T extends { ts?: number }>(h: Host, path: string): Promise<{ rows: T[]; since: number }> {
   const rows = await readJsonl<T>(h, path)
-  if (rows.length) return rows
+  if (rows.length) return { rows, since: 0 }
   const size = await fileSize(h, path)
-  if (!size) return []
+  if (!size) return { rows: [], since: 0 }
   const from = Math.max(1, size - LOG_TAIL_BYTES + 1)
   const r = await h.process.run(['tail', '-c', `+${from}`, path]).catch(() => null)
-  if (!r || r.exitCode !== 0 || !r.stdout.trim()) return []
+  if (!r || r.exitCode !== 0 || !r.stdout.trim()) return { rows: [], since: 0 }
   const out: T[] = []
   for (const line of r.stdout.split('\n').slice(from > 1 ? 1 : 0)) { // (a cut first line is dropped; a whole file keeps it)
     if (!line.trim()) continue
@@ -620,13 +621,13 @@ async function readLoadLog<T>(h: Host, path: string): Promise<T[]> {
       /* a torn or damaged line is skipped */
     }
   }
-  return out
+  return { rows: out, since: from > 1 ? (typeof out[0]?.ts === 'number' ? out[0].ts * 1000 : Number.MAX_SAFE_INTEGER) : 0 } // (no readable first row: nothing is confirmed)
 }
 
 export async function rulesStats(h: Host, project: string): Promise<RulesStats> {
   const home = await homeDir(h)
   type Row = { ts?: number; rule?: string; project?: string; sha?: string; session?: string; agent?: string; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }
-  const log = await readLoadLog<Row>(h, RULES_LOG(home))
+  const { rows: log, since } = await readLoadLog<Row>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
   const seen = new Set<string>()
   let lastEvent = 0
@@ -677,6 +678,10 @@ export async function rulesStats(h: Host, project: string): Promise<RulesStats> 
   const never = have.filter(n => !loaded[n])
   const events = Object.values(loaded).reduce((s, c) => s + c, 0)
   // a rule is only "never loaded" when a load was recorded after it was written (a rule learned later than the last event had no chance)
-  const neverConfirmed = never.filter(n => !lastEvent ? false : (learn.areas?.[n.replace(/\.md$/, '')]?.at ?? 0) <= lastEvent)
+  // (a log read from its tail only covers the time since `since`: a rule written before that may have loaded in the part not read)
+  const neverConfirmed = never.filter(n => {
+    const at = learn.areas?.[n.replace(/\.md$/, '')]?.at ?? 0
+    return !!lastEvent && at <= lastEvent && (!since || at >= since)
+  })
   return { loaded, never, neverConfirmed, events, verified: events > 0, logRows: log.length, scriptCandidates, overCap }
 }

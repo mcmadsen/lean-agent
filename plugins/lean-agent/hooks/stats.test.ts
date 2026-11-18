@@ -157,6 +157,19 @@ test('a split sends the 1.0 rows of a past month to their own file: ledger.jsonl
   expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }))
 })
 
+test('a split into an existing past-month file that ends in a torn line does not glue a row to it; a row whose ts is no date is damaged, never a throw', async () => {
+  const h = setup()
+  const sep = Date.UTC(2026, 8, 20)
+  h.files.set(`${L}/ledger-2026-09.jsonl`, row(sep - 1000, { usd: 2 }) + '{"ts":1') // torn, no newline
+  h.files.set(`${L}/ledger.jsonl`, old('2026-09-01T08:00:00') + row(sep, { usd: 4 }) + row(1e16, { usd: 9 }))
+  await rotateLedger(h.host)
+  expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep - 1000, { usd: 2 }) + '{"ts":1\n' + row(sep, { usd: 4 }))
+  expect(h.files.has(`${L}/ledger.jsonl`)).toBe(false) // nothing of this month: the next row creates it
+  expect(h.files.has(`${L}/ledger-legacy.jsonl.rot`)).toBe(false) // no staging file is left behind
+  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-09-01T08:00:00') + row(1e16, { usd: 9 })) // the damaged row stays with the old ones
+  expect((await syncRollup(h.host)).bad).toBeGreaterThan(0) // counted as bad, no exception
+})
+
 test('a rule-load log over 4 MiB is read from its tail, not reported as absent', async () => {
   const h = setup()
   const filler = JSON.stringify({ ts: 1_700_000_000, rule: 'x.md', project: 'other', session: 's'.repeat(40), agent: '' }) + '\n'
@@ -168,6 +181,11 @@ test('a rule-load log over 4 MiB is read from its tail, not reported as absent',
   const s = await rulesStats(h.host, 'p')
   expect(s.loaded['api.md']).toBe(1) // the newest rows come from the tail
   expect(s.verified).toBe(true)
+  // a rule with no recorded load is NOT "never loaded" for sure: the part of the log that was not read may hold its loads
+  h.files.set(`${L}/p/rules/old.md`, '# old\n')
+  const t = await rulesStats(h.host, 'p')
+  expect(t.never).toContain('old.md')
+  expect(t.neverConfirmed).not.toContain('old.md')
   // a log that really is absent is still "unverified"
   const g = setup()
   g.files.set(`${L}/p/rules/api.md`, '# api\n')

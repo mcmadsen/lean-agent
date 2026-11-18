@@ -34,7 +34,7 @@ const shortAgent = (a: string) => a.replace(/^lean-agent:/, '')
 export function normalizeRow(o: unknown): Norm | null {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null
   const r = o as Record<string, any>
-  if (typeof r.ts === 'number' && Number.isFinite(r.ts) && typeof r.usd === 'number') {
+  if (typeof r.ts === 'number' && Number.isFinite(r.ts) && Math.abs(r.ts) <= 8.64e15 && typeof r.usd === 'number') { // (a ts that is no date would throw in dayOf: a damaged row)
     return { ts: r.ts, role: str(r.role) || 'unknown', tN: str(r.tN) || '-', agent: shortAgent(str(r.agent)) || 'main', model: str(r.model) || '?', in: num(r.in), out: num(r.out), cr: num(r.cache_read), cw: num(r.cache_write), usd: r.usd, legacy: false, ...(str(r.effort) ? { effort: str(r.effort) } : {}), ...(str(r.tmodel) ? { tmodel: str(r.tmodel) } : {}) }
   }
   if (typeof r.ts === 'string' && ('cost_usd' in r || (r.usage && typeof r.usage === 'object'))) {
@@ -307,7 +307,8 @@ async function appendNew(h: Host, path: string, rows: string[]): Promise<boolean
   if (size && enc.encode(have).length !== size) return false
   const there = new Set(have.split('\n'))
   const fresh = rows.filter(l => !there.has(l))
-  return !fresh.length || (await append(h, path, fresh.join('\n') + '\n'))
+  // (a file that ends in a torn line, no newline: the first new row would be glued to it and lost to every reader)
+  return !fresh.length || (await append(h, path, (have && !have.endsWith('\n') ? '\n' : '') + fresh.join('\n') + '\n'))
 }
 
 // Returns {kept, moved, done}: the 1.0 rows appended to ledger.jsonl and the file rewritten with the 0.45 (and unreadable) rows only;
@@ -325,6 +326,20 @@ async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept:
   const lines = text.split('\n').filter(l => l.trim())
   const keep = lines.filter(isNew)
   if (!keep.length) return { kept: 0, moved: 0, done: true }
+  // a 1.0 row of THIS month goes to ledger.jsonl; an older one to its own ledger-YYYY-MM.jsonl: ledger.jsonl must not start in a past
+  // month, or the next start would rotate the whole file (today's rows with it) away again. (A `ts` that is no date goes to ledger.jsonl.)
+  const month = dayOf(await h.clock.now()).slice(0, 7)
+  const targets = new Map<string, string[]>()
+  for (const l of keep) {
+    let m = month
+    try {
+      m = dayOf(normalizeRow(JSON.parse(l))!.ts).slice(0, 7)
+    } catch {
+      /* not a date: stays in the current ledger */
+    }
+    const file = m < month ? `ledger-${m}.jsonl` : LEDGER
+    targets.set(file, [...(targets.get(file) ?? []), l])
+  }
   const old = lines.filter(l => !isNew(l))
   const oldText = old.length ? old.join('\n') + '\n' : ''
   const tmp = `${path}${ROT}`
@@ -332,15 +347,6 @@ async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept:
   await h.fs.write(tmp, oldText)
   if (((await fileSize(h, tmp)) ?? 0) !== enc.encode(oldText).length) { await drop(); return null }
   if ((await fileSize(h, path)) !== size0) { await drop(); return null } // another process appended to it meanwhile: the next start tries again
-  // a 1.0 row of THIS month goes to ledger.jsonl; an older one to its own ledger-YYYY-MM.jsonl: ledger.jsonl must not start in a past
-  // month, or the next start would rotate the whole file (today's rows with it) away again
-  const month = dayOf(await h.clock.now()).slice(0, 7)
-  const targets = new Map<string, string[]>()
-  for (const l of keep) {
-    const m = dayOf(normalizeRow(JSON.parse(l))!.ts).slice(0, 7)
-    const file = m < month ? `ledger-${m}.jsonl` : LEDGER
-    targets.set(file, [...(targets.get(file) ?? []), l])
-  }
   for (const [file, rows] of targets) if (!(await appendNew(h, file === LEDGER ? cur : `${leanDir(home)}/${file}`, rows))) { await drop(); return null }
   const r = await h.process.run(['mv', '-f', tmp, path])
   return { kept: keep.length, moved: old.length, done: r.exitCode === 0 }

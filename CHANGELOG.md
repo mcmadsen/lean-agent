@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.6
+
+One combined release: checkpoints (threads and the desk), the 1.0.6b reply, delivery and feedback-export fixes, lazy loading per
+project (profiles, needs, usage counter), and the urgent rule-loading, sync, 0.45 guide and ledger fixes.
 
 ### Added
 - **Checkpoints are back (threads and the desk).** A session has a 1M-token window, so the engine's own auto-compact comes very late and
@@ -159,7 +162,8 @@ copies deleted, a stale 0.45 guide still loaded, today's rows moved out of `ledg
   handover; the pane's Answers list has it), so checkpoints no longer put a long handover into the desk's own context.
 - **The ledger split sends 1.0 rows of a past month to their own `ledger-YYYY-MM.jsonl`** instead of appending them to `ledger.jsonl`
   (which would then start in a past month and be rotated away whole at the next start, today's rows with it).
-- **Rule stats read a load log over 4 MiB from its tail** (the newest 3 MB) instead of calling it "log absent: loading unverified".
+- **Rule stats read a load log over 4 MiB from its tail** (the newest 3 MB) instead of calling it "log absent: loading unverified";
+  a rule written before the oldest row read is never reported as "never loaded" (`--trim` is not told about it).
 - `session.compact` forgets the context size and re-arms the rule loader on the same condition (the compaction went ahead).
 
 ## 1.0.5

@@ -332,7 +332,7 @@ test('a checkpoint report reaches the desk cut (the fresh thread session reads i
   const t = renderReports([{ ts: 1, from: 't1', kind: 'report', state: 'checkpoint', text: long }, { ts: 2, from: 't2', kind: 'report', state: 'done', text: long }])
   const [ck, done] = t.split('\n') as [string, string]
   expect(ck.length).toBeLessThan(600)
-  expect(ck).toContain('(cut: the thread continues in a fresh session')
+  expect(ck).toContain("(cut to 300 characters: the full text is in the pane's Answers list)")
   expect(done.length).toBeGreaterThan(2500)
   expect(renderReports([{ ts: 3, from: 't1', kind: 'report', state: 'checkpoint', text: 'short handover' }])).toContain('short handover')
 })
