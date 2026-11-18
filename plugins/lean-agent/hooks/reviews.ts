@@ -1,7 +1,8 @@
 // Review records (the push gate's input). A record carries an HMAC-SHA256 over project, sha and verdict, keyed with a
 // secret that lives ONLY in the mod's own store ($.store, a file outside every project and outside what a session can
 // read through the mod's tools): no file a session can read holds the key, so a forged or copied record fails
-// verification and no path or glob guard is needed. The only writer is the mod tool `lean_review` (delivery.ts).
+// verification and no path or glob guard is needed. The writers are the mod tool `lean_review` (delivery.ts) and, for a push the
+// user approved in the desk chat, `approve-push` of the desk's lean_thread (threads.ts): a signed, single-use, expiring record.
 import { homeDir, leanDir, readJson, writeJson } from './state'
 import type { Host } from './state'
 import { slugOk } from './rules'
@@ -92,3 +93,51 @@ export async function greenReview(h: Host, project: string, sha: string): Promis
   const want = await sign(key, project, sha, true)
   return rec.sig.length === want.length && rec.sig === want
 }
+
+// ---- push approval: the user's yes for ONE sha, given in the desk (a thread has no tool that writes it) ----------------
+export const APPROVAL_TTL_MS = 2 * 60 * 60 * 1000
+export type Approval = { project: string; sha: string; thread: string; reason?: string; ts: number; exp: number; sig: string }
+export const approvalFile = (home: string, project: string, sha: string) => `${leanDir(home)}/${project}/approvals/${sha}.json`
+const signApproval = async (key: string, project: string, sha: string, thread: string, exp: number): Promise<string> => {
+  const enc = new TextEncoder()
+  return hex(hmac(enc.encode(key), enc.encode(`approve-push\n${project}\n${sha}\n${thread}\n${exp}`)))
+}
+export async function writeApproval(h: Host, a: { project: string; sha: string; thread: string; reason?: string }): Promise<string> {
+  if (!/^[0-9a-f]{40,64}$/.test(a.sha)) throw new Error('approve-push needs the full commit sha (git rev-parse <ref>)')
+  if (!slugOk(a.project)) throw new Error('approve-push needs a project name')
+  if (!/^t\d+$/.test(a.thread)) throw new Error('approve-push needs a thread id')
+  const home = await homeDir(h)
+  const key = await secret(h, true)
+  const ts = await h.clock.now()
+  const exp = ts + APPROVAL_TTL_MS
+  const file = approvalFile(home, a.project, a.sha)
+  await writeJson(h, file, { ...a, ts, exp, sig: await signApproval(key, a.project, a.sha, a.thread, exp) } satisfies Approval)
+  await h.store.set(`approval.used.${exp}.${a.project}.${a.sha}.${a.thread}`, false) // a re-approval starts unused (a failure surfaces: no approval is reported that could never be used)
+  return file
+}
+// Consumption lives in the mod's own store (outside what a session can edit), never in the record: a thread that rewrites the file
+// cannot make a used approval valid again. One approval per (project, sha, thread, exp); a re-approval has a new exp.
+const usedKey = (r: { project: string; sha: string; thread: string; exp: number }) => `approval.used.${r.exp}.${r.project}.${r.sha}.${r.thread}`
+// (in one process: each session has its own mod, so two sessions could both read `unused`; an approval is bound to one thread, which keeps that window narrow)
+let gate: Promise<unknown> = Promise.resolve()
+const exclusive = <T>(f: () => Promise<T>): Promise<T> => { const r = gate.then(f, f); gate = r.catch(() => undefined); return r }
+async function validApproval(h: Host, project: string, sha: string, thread: string): Promise<Approval | null> {
+  const home = await homeDir(h)
+  const rec = await readJson<Partial<Approval> | null>(h, approvalFile(home, project, sha), null)
+  if (!rec || typeof rec.sig !== 'string' || typeof rec.exp !== 'number' || rec.project !== project || rec.sha !== sha || rec.thread !== thread || !thread) return null
+  if ((await h.clock.now()) > rec.exp) return null
+  const key = await secret(h, false)
+  if (!key || rec.sig !== (await signApproval(key, project, sha, thread, rec.exp))) return null
+  if ((await h.store.get(usedKey(rec as Approval)).catch(() => true)) !== false) return null // used, unknown or unreadable: not valid
+  return rec as Approval
+}
+// peek: is there an unused, valid approval (nothing is consumed)
+export const hasApproval = (h: Host, project: string, sha: string, thread: string): Promise<boolean> => validApproval(h, project, sha, thread).then(r => !!r)
+// take: consume it, once, atomically
+export const takeApproval = (h: Host, project: string, sha: string, thread: string): Promise<boolean> =>
+  exclusive(async () => {
+    const rec = await validApproval(h, project, sha, thread)
+    if (!rec) return false
+    await h.store.set(usedKey(rec), true)
+    return true
+  })

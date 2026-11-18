@@ -1,3 +1,4 @@
+import { writeApproval } from './reviews'
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { goalsLocked, unconsumed, wakeMark } from './delivery'
@@ -15,6 +16,7 @@ export type Thread = {
   project: string
   state: ThreadState
   sid: string // the background session's id, empty until started
+  sids?: string[] // every session id that was resolved as this thread (mod reload, compaction, resume): the mod appends
   created: number
   lastWake: number // ms of the last start/wake, 0 = never
   delivered: number // inbox.jsonl lines already handed to the session
@@ -108,6 +110,8 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 }
 
 // ---- templates -----------------------------------------------------------------------------------------------
+// config.json `attribution` (default false) as one line for the thread's CLAUDE.md: a thread cannot read the setting otherwise
+export const attributionLine = (on: boolean) => (on ? 'attribution: on - end commits and PR text with the attribution lines the session was given' : 'attribution: off - no Co-Authored-By trailers, no generated-with lines')
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
 export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice): Promise<string> {
@@ -140,7 +144,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -161,7 +165,13 @@ async function load(h: Host, home: string, id: string): Promise<Thread | null> {
   const t = await readJson<Thread | null>(h, `${tpath(home, id)}/thread.json`, null)
   return t && t.id === id ? t : null
 }
-const save = (h: Host, home: string, t: Thread) => writeJson(h, `${tpath(home, t.id)}/thread.json`, t)
+// the session's own mod appends to `sids` from another process: a save keeps whatever ids are on disk
+async function save(h: Host, home: string, t: Thread): Promise<void> {
+  const file = `${tpath(home, t.id)}/thread.json`
+  const disk = await readJson<{ sids?: unknown } | null>(h, file, null)
+  const ids = [...(Array.isArray(disk?.sids) ? disk!.sids : []), ...(t.sids ?? [])].filter((x): x is string => typeof x === 'string')
+  await writeJson(h, file, ids.length ? { ...t, sids: [...new Set(ids)].slice(-20) } : t)
+}
 
 async function nextId(h: Host, home: string): Promise<string> {
   let max = 0
@@ -218,7 +228,8 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
   const dir = tpath(home, id)
   await mkdirp(h, dir)
   const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0 }
-  const vars = { id, title, project: t.project, lean: leanDir(home) }
+  const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
+  const vars = { id, title, project: t.project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true) }
   await h.fs.write(`${dir}/CLAUDE.md`, fill(await template(h, root, 'thread.md'), vars))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -368,8 +379,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           return { ok: true, text: `${id} closed` }
         }
         // the goals file belongs to the mod: the desk sets or clears a thread's goal here (a thread uses lean_goal)
-        case 'goal-set': {
-          const text = (i.text ?? '').trim()
+        case 'goal-set': {          const text = (i.text ?? '').trim()
           if (!text) return err('goal-set needs text')
           await goalsLocked(async () => {
             const goals = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/goals.json`, {})
@@ -386,6 +396,20 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             await writeJson(h, `${leanDir(home)}/goals.json`, goals)
             return { ok: true, text: `${id} goal cleared` }
           })
+        }
+        case 'approve-push': {
+          // the user said yes in the desk chat; only the desk's lean_thread reaches this. One sha, one push, two hours.
+          const sha = (i.sha ?? '').trim().toLowerCase()
+          if (!t.project) return err(`${id} has no project, so there is nothing to approve a push for`)
+          const pj = (await readJson<Record<string, { private?: boolean }>>(h, `${leanDir(home)}/projects.json`, {}))?.[t.project]
+          if (pj?.private === true) return err(`${t.project} is a private project: it is never pushed, an approval would never be used. Give the user the manual push command instead`)
+          try {
+            await writeApproval(h, { project: t.project, sha, thread: id, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
+          } catch (e) {
+            return err(String((e as Error)?.message ?? e))
+          }
+          await appendJsonl(h, `${tpath(home, id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'approve-push', sha, project: t.project, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
+          return { ok: true, text: `approved: one push of ${sha.slice(0, 8)} for ${t.project} by ${id}, valid 2 h, single use` }
         }
         case 'park':
           t.state = 'parked'

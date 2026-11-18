@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
-import { writeReview } from './reviews'
+import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
+import { leanThread } from './threads'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const desk = { kind: 'desk' } as const
@@ -337,7 +338,8 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git log main..abc1234 --oneline')).toBeNull()
   expect(await bash('git show abc1234')).toBeNull()
   expect(await bash('git merge-base main abc1234')).toBeNull()
-  expect(await bash('git diff main...abc1234 | cat')).toContain('granted')
+  expect(await bash('git diff main...abc1234 | sh')).toContain('granted')
+  expect(await bash('git diff main...abc1234 | head -5')).toBeNull() // a pipe between two built-in reads
   expect(await bash('git push origin x')).toContain('granted')
   expect(await bash('git diff')).toBeNull() // built in for a reviewer
   expect(await bash('git merge-base main x')).toContain('granted')
@@ -378,7 +380,8 @@ test('built-in read-only git: the explorer runs ls-files / log without a grant; 
     expect(await bash('git diff --stat main...HEAD', t)).toBeNull()
     expect(await bash('git status --short', t)).toBeNull()
     expect(await bash('git rev-parse HEAD', t)).toBeNull()
-    expect(await bash('git -C /r/sub log -2', t)).toBeNull()
+    expect(await bash('git -C /h/.lean-agent/worktrees/app/t1 log -2', t)).toBeNull()
+    expect(await bash('git -C /r/sub log -2', t)).toContain('granted') // the session cwd alone is no root
   }
   expect(await bash('git diff --ext-diff', 'lean-agent:reader-haiku')).toContain('granted')
   for (const c of ['git log --{output=/tmp/x,}', 'git log {--output=/tmp/x,}', 'git diff {--ext-diff,}', 'git -C ~ log', 'git -C sub/../.. log', 'git -C a -C b log', 'git diff --ext x', 'git log --exec=x', 'git diff --no-index a b', 'git log --help', 'git log -h', 'git log --$"output=x"', 'git ls-files *'])
@@ -442,4 +445,161 @@ test('an unknown or root session cwd widens no git -C root; a desk subagent with
     expect(await run(h, thread, { tool: 'Bash', command: 'git -C /h/other log' }, cwd, 'lean-agent:explorer', 'e1'), cwd).toContain('granted')
   const desk = { kind: 'desk' } as any
   expect(await run(h, desk, { tool: 'Bash', command: 'git log' }, '/r', undefined as any, 'x1')).toContain('type unresolved')
+})
+
+test('approve-push: the desk approves one sha once, for 2 h; forged, wrong-sha and expired records fail; the refusal names it and the manual command', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  const push = { tool: 'Bash', command: 'git push origin feature' }
+  const refusal = (await run(h, thread, push)) as string
+  expect(refusal).toContain(`ask the desk: approve-push t1 ${SHA}`)
+  expect(refusal).toContain('git -C /r/app push origin feature')
+  await writeApproval(h.host, { project: 'app', sha: 'c'.repeat(40), thread: 't1' }) // make sure the signing key exists: the signature is what fails below
+  // a thread-written record carries no valid signature
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ project: 'app', sha: SHA, exp: h.clock.t + 1e6, sig: 'f'.repeat(64) }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  expect((await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: 'abc' })).ok).toBe(false) // a short sha
+  expect((await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: SHA, reason: 'user said yes' })).ok).toBe(true)
+  expect(String(h.files.get('/h/.lean-agent/threads/t1/history.jsonl'))).toContain('approve-push')
+  expect(await run(h, thread, push)).toBeNull() // accepted like a green review
+  expect(await run(h, thread, push)).toContain('no green review') // single use
+  // a thread restoring the consumed record (it may edit ~/.lean-agent) gains nothing: consumption lives in the mod's store
+  const rec = JSON.parse(String(h.files.get(`/h/.lean-agent/app/approvals/${SHA}.json`)))
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ ...rec, used: false }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  h.clock.t += APPROVAL_TTL_MS + 1
+  expect(await run(h, thread, push)).toContain('no green review') // expired
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't2' })
+  expect(await run(h, thread, push)).toContain('no green review') // approved for t2: t1 cannot use it
+  const t2 = { kind: 'thread', id: 't2' } as const
+  const recT = JSON.parse(String(h.files.get(`/h/.lean-agent/app/approvals/${SHA}.json`)))
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ ...recT, exp: recT.exp + 3_600_000 }))
+  expect(await run(h, t2, push)).toContain('no green review') // a record with an extended expiry fails its signature
+})
+
+test('a private project is never pushed, approval or not', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', private: true } }))
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature' })).toContain('private project')
+})
+
+test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside the roots; pipes only between proven read-only commands', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
+  const ok = ['rg foo src', "rg 'a|b' src", 'rg -n --glob "*.ts" foo /h/code/app/src', 'rg foo', 'grep -rn foo src', "grep -rn '/api/v1' src", 'grep -rn foo /h/code/app', 'find . -name "*.ts"', 'find /h/code/app -type f -name x',
+    'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
+  for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat src/*', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
+    'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'sed -n 1p x', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
+  for (const c of bad) expect(await as('lean-agent:reader-sonnet')(c), c).toContain('granted')
+  // foreign, bare and worker types get no search built in (a worker is not restricted by it either)
+  for (const t of ['other:explorer', 'explorer', 'reader-haiku']) expect(await as(t)('rg foo src'), t).toContain('granted')
+  expect(await as('lean-agent:worker-sonnet')('rg foo src')).toBeNull()
+})
+
+test('search commands refuse a relative path when the session cwd is unknown or root', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  for (const cwd of ['', '/']) {
+    expect(await run(h, thread, { tool: 'Bash', command: 'cat src/a.ts' }, cwd, 'lean-agent:explorer', 'x1'), cwd).toContain('granted')
+    expect(await run(h, thread, { tool: 'Bash', command: 'rg foo' }, cwd, 'lean-agent:explorer', 'x1'), cwd).toContain('granted')
+  }
+})
+
+test('an Agent call with allow-cmd / allow-edit lines is refused up front unless a thread makes it', async () => {
+  const h = fakeHost(null)
+  const call = (role: any, agentId?: string) => run(h, role, { tool: 'Agent', prompt: 'Look.\nallow-cmd: git log\n', subagent_type: 'lean-agent:reader-haiku' }, '/r', agentId ? 'lean-agent:reader-haiku' : undefined, agentId)
+  expect(await call({ kind: 'plain' })).toContain('cannot own grants')
+  expect(await call({ kind: 'plain' })).toContain('a plain session')
+  expect(await call({ kind: 'thread', id: 't1' }, 'x1')).toContain('a subagent')
+  expect(await call({ kind: 'thread', id: 't1' })).toBeNull()
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Agent', prompt: 'Look around' })).toBeNull() // no grant lines: not refused
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Task', prompt: 'allow-edit: /x\nallow-cmd: ls', subagent_type: 'lean-agent:worker-haiku' })).toContain('allow-cmd and allow-edit')
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Agent', prompt: 'allow-cmd: x', subagent_type: 'general-purpose' })).toBeNull() // not one of ours: grants mean nothing, not refused
+})
+
+test('the desk may run read-only search under ~/.lean-agent only', async () => {
+  const h = setup()
+  const desk = { kind: 'desk' } as any
+  const bash = (c: string) => run(h, desk, { tool: 'Bash', command: c }, '/h/lean-agent-desk')
+  for (const c of ['rg stale /h/.lean-agent/projects.json', 'ls /h/.lean-agent/threads', 'cat /h/.lean-agent/threads/t1/brief.md | head -5']) expect(await bash(c), c).toBeNull()
+  expect(await bash('ls /h/.lean-agent/threads')).toBeNull()
+  expect(await bash('cat /h/.lean-agent/threads/t1/brief.md | head -5')).toBeNull()
+  expect(await bash('rg foo /r/app')).toContain('route this to a thread')
+  expect(await bash('rg foo')).toContain('route this to a thread') // the desk folder is outside the root
+  expect(await bash('cat /h/.lean-agent/x > /tmp/y')).toContain('route this to a thread')
+  expect(await bash('find /h/.lean-agent -delete')).toContain('route this to a thread')
+})
+
+test('approve-push: a push naming one sha twice, or two shas where one lacks approval, burns nothing; private projects cannot be approved', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature feature:other' })).toBeNull() // one sha, two refspecs
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: (a.join(' ').includes('other') ? 'f'.repeat(40) : SHA) + '\n' } : { exitCode: 1, stdout: '' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature other:x' })).toContain('no green review') // the second sha has none
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: SHA + '\n' } : { exitCode: 1, stdout: '' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature' })).toBeNull() // the first approval was not spent
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', private: true } }))
+  const r = await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: SHA })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('private project')
+})
+
+test('search: attached and clustered -e/-f, symlink-following flags, recursion without a path, tail abbreviations, a cwd outside every root', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-haiku', 'x1')
+  const lean = at('/h/.lean-agent/worktrees/app/t1')
+  for (const c of ['grep -rf /etc/passwd src', 'rg -nf/etc/shadow x', 'rg -nfpats x src', 'rg -L secret src', 'rg --follow secret src', 'grep -R x src', 'grep --dereference-recursive x src', 'find -L . -name x', 'find -H . -name x', 'find . -follow', "find . -exec ls '{}' ';'", "find . -execdir ls '{}' ';'", "find . -ok ls '{}' ';'", "find . -okdir ls '{}' ';'", 'tail --fo x', 'tail --ret x', 'tail --follow=name x'])
+    expect(await lean(c), c).toContain('granted')
+  for (const c of ['grep -ePAT src', "grep -rn -e '/api' src", "rg -e 'a..b' src", "grep -rn 'foo\\|bar' src", 'grep -rn "\\bword\\b" src', 'git log HEAD~1', 'git diff @{u}', 'git log -3 --format="%h %s"', "rg 'x|y' src | head -3"])
+    expect(await lean(c), c).toBeNull()
+  for (const c of ['git log {a,b}', 'git log {1..3}', 'git log ~x', 'cat ~/x'])
+    expect(await lean(c), c).toContain('granted')
+  for (const cwd of ['/h', '/tmp', '/h/.ssh', '/']) {
+    expect(await at(cwd)('cat id_rsa'), cwd + ' cat').toContain('granted')
+    expect(await at(cwd)('rg -r x .'), cwd + ' rg').toContain('granted')
+    expect(await at(cwd)('grep -rn password'), cwd + ' grep').toContain('granted')
+  }
+  expect(await at('/h/code/app/src')('rg foo')).toBeNull() // inside a registered project
+})
+
+test('search: separate-value options do not shift the pattern; rg --files; grep abbreviations; files0-from; a symlink in a root', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  h.links.set('/h/.lean-agent/worktrees/app/t1/link', '/h/.ssh')
+  h.files.set('/h/.ssh/id_rsa', 'secret')
+  h.files.set('/h/.lean-agent/worktrees/app/t1/src/a.ts', 'x')
+  const thread = { kind: 'thread', id: 't1' } as any
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-sonnet', 'x1')
+  const out = at('/h/.ssh')
+  for (const c of ["rg -m 1 '/h/.lean-agent/|'", "rg --hidden -m 1 '/h/.lean-agent/|'", "rg -g '*.ts' '/h/.lean-agent/x'", "rg -t ts -A 2 '/h/code/app/'", "rg --max-count 1 '/h/.lean-agent/'", "grep -r -A 1 '/h/.lean-agent/|'", "grep -rn -m 1 '/h/code/app|'", 'rg --files /etc', 'rg --files /', 'grep --rec password', 'grep --directories=recurse x', 'grep --dir=recurse x', 'grep --fil /etc/passwd x', 'grep --exclude-from /etc/x y', 'find /h/.lean-agent -files0-from /etc/x', 'wc --files0-from=-', 'wc --files0-from=/etc/x'])
+    expect(await out(c), c).toContain('granted')
+  const lean = at('/h/.lean-agent/worktrees/app/t1')
+  for (const c of ['cat link/id_rsa', 'ls link', 'rg x link', 'grep -rn x link', 'find link -name x', 'cat link/../x']) expect(await lean(c), c).toContain('granted') // symlink to outside
+  for (const c of ["rg -m 1 'x' src", "rg -g '*.ts' foo src", "grep -rn -A 2 -m 3 foo src", 'rg --files src', 'rg --files', "grep --include='*.ts' -rn foo src", 'grep --ignore-case foo src/a.ts', 'ls -la | head', 'rg foo | grep bar']) expect(await lean(c), c).toBeNull()
+  // piped grep with no path reads stdin: fine even where the cwd is no root (the desk)
+  const desk = { kind: 'desk' } as any
+  expect(await run(h, desk, { tool: 'Bash', command: 'cat /h/.lean-agent/memory/notes.jsonl | grep foo' }, '/h/lean-agent-desk')).toBeNull()
+  expect(await run(h, desk, { tool: 'Bash', command: 'grep foo' }, '/h/lean-agent-desk')).toContain('route this')
+})
+
+test('search: every flag must be on the command\'s own list (the reviewers\' bypass shapes)', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-haiku', 'x1')
+  const app = at('/h/code/app/src')
+  for (const c of ['rg -v -- -x /etc/shadow', 'grep -rv -- -x /etc', 'grep -rv - /etc', 'rg -v - /etc', 'grep -r --color pat /etc', 'grep -r -5f /etc/passwd src', 'grep /etc -rn5e pat', 'ls -RL .', 'ls -L .', 'ls -H .', 'ls --dereference .', 'ls -I x', 'tail -5f x', 'rg --ignore-file /etc/x pat', 'rg -f /etc/x pat', 'grep -f /etc/x pat', 'rg --type-add x:y pat', 'rg -z pat', 'find . -newer /etc/passwd', 'find . -name', 'wc -c --files0-from=x', 'head --foo x', 'cat -f x', 'grep -d recurse x', 'rg --pat x'])
+    expect(await app(c), c).toContain('granted')
+  const home = at('/h')
+  for (const c of ['find -newer /h/code/app/a.ts -name x', 'grep --null-data x src', 'rg -vnA 2 .lean-agent', 'grep -rvnA 2 .lean-agent', 'find -name .lean-agent/x', 'ls -w 80', 'ls', 'rg -v pat', 'grep -r pat', 'grep pat']) expect(await home(c), c).toContain('granted')
+  for (const c of ['rg -- -x src', 'grep -rv -e -x src', 'grep -rn -A 2 -m 3 foo .', 'find . -newer a.ts -name x', 'find src -type f -mtime -1 -name "*.ts"', 'ls -RFh src', 'ls -1 src', 'head -n 5 a.ts', 'tail -c 20 a.ts', 'wc -lw a.ts', 'cat -n a.ts', 'rg -C3 foo', 'rg --max-count=2 -ni foo src']) expect(await app(c), c).toBeNull()
 })

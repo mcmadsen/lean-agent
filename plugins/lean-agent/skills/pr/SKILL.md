@@ -37,7 +37,7 @@ with the token in the header, read from an environment variable and never printe
 
 - **create** (thread only): `git push -u origin <branch>` (after a green review), then `gh pr create --title "<title>" --body-file <file>`
   or `az repos pr create --source-branch <branch> --target-branch <base> --title "<title>" --description "<text>"`. The body is what
-  changed and why, plus how it was tested. Add the attribution lines only if `~/.lean-agent/config.json` `attribution` says so.
+  changed and why, plus how it was tested. Add the attribution lines only if `~/.lean-agent/config.json` `attribution` is true (your thread CLAUDE.md states the value; default off).
   Then thread: `lean_report` the URL (state done only when nothing else is left); desk: relay the URL to the user.
 - **status** (desk or thread; the desk's folder is not a repo, so it names the repo: github `--repo {owner}/{repo}`, Azure
   `--organization https://dev.azure.com/{org} --project {project} --repository {repo}`): github: `gh pr view <n> --json state,reviewDecision,statusCheckRollup,url,isDraft,mergeable`;

@@ -9,7 +9,8 @@ roles: thread
 
 Run in a thread, in the repo or worktree to push. The push guard allows `git push` only when
 `lean_review` recorded a green verdict for the full HEAD sha (registered projects only); any new commit changes the sha, so
-the review must be redone after every change.
+the review must be redone after every change. Without a green review the refusal says what to do: ask the desk for
+`approve-push <tN> <sha>` (the user's yes, one sha, single use, 2 hours) or push by hand with the printed `git -C ... push` command.
 
 1. `git rev-parse HEAD` (full sha), `git diff <base>...HEAD --stat`; base defaults to the default branch.
 2. Pass 1: spawn the `lean-agent:reviewer` agent with the diff command and the project's test command. It lists findings by
@@ -17,7 +18,7 @@ the review must be redone after every change.
    exactly these lines in its prompt, with the real base and full HEAD sha filled in (a grant matches the command
    or a prefix of it followed by a space; nothing else, no pipes or redirects):
    `allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>`
-   Tell it to use them as written and to use Read/Grep for everything else; it has no other shell access.
+   Tell it to use them as written; `git diff|log|show|status|rev-parse` and read-only `rg`/`grep`/`find`/`ls`/`cat` are built in, and Read covers the rest; it has no other shell access.
 3. Fix every blocker and major finding (edit, test, commit), then run pass 2 on the new HEAD. Stop after at most 3
    passes; if blockers remain, record `green: false` and report with `lean_report`.
 4. Record the verdict with the `lean_review` tool (`mcp__lean-agent__lean_review`): `project` (the name in

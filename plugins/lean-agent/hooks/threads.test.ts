@@ -440,3 +440,27 @@ test('the desk sets and clears a thread goal through lean_thread; nothing else i
   expect(Object.keys(g)).toEqual(['t9'])
   expect((await call({ action: 'goal-clear', tN: 't1' })).text).toBe('t1 has no goal')
 })
+
+test('new writes the attribution line into the thread CLAUDE.md: off by default, on from config.json', async () => {
+  const mk = async (cfg?: unknown) => {
+    const s = setup()
+    s.h.files.set(`${ROOT}/templates/thread.md`, '{{attribution}}')
+    if (cfg) s.h.files.set('/h/.lean-agent/config.json', JSON.stringify(cfg))
+    await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
+    return String(s.h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md'))
+  }
+  expect(await mk()).toContain('attribution: off - no Co-Authored-By trailers')
+  expect(await mk({ attribution: false })).toContain('attribution: off')
+  expect(await mk({ attribution: true })).toContain('attribution: on')
+})
+
+test('a desk save keeps the session ids the thread\'s own mod appended meanwhile', async () => {
+  const s = setup()
+  await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
+  const f = '/h/.lean-agent/threads/t1/thread.json'
+  s.h.files.set(f, JSON.stringify({ ...JSON.parse(String(s.h.files.get(f))), sids: ['sess-a'] })) // appended by the session's mod
+  await leanThread(s.h.host, ROOT, { action: 'park', tN: 't1' }) // the desk loaded before and saves now
+  const rec = JSON.parse(String(s.h.files.get(f)))
+  expect(rec.state).toBe('parked')
+  expect(rec.sids).toEqual(['sess-a'])
+})

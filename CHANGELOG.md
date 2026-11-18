@@ -31,6 +31,47 @@
   extracts the Bash commands a skill gives the desk; `hooks/skills-roles.test.ts` runs them through `deskBashOk`.
   `hooks/skills-desk-commands.ts` is generated (`node plugins/lean-agent/hooks/skills-contract.mjs --write`).
 
+## 1.0.4
+
+### Added
+- **Push approval.** The review-gate refusal named an override that did not exist. Now the desk's `lean_thread` has
+  `approve-push` (tN, full sha, reason?): a signed (same HMAC store as `lean_review`), single-use record, valid 2 hours, logged in
+  the thread's `history.jsonl`; the push gate accepts it like a green review. Only the desk has the tool; the record is bound to
+  project, sha and thread, consumption is kept in the mod's store (a thread that rewrites the record cannot revive it), it is
+  taken atomically and only when every pushed sha is covered. It is not bound to a remote or branch, and it is consumed when the
+  guard accepts the command (a push that then fails needs a new approval). The desk template says to use it only when the user explicitly approved in the chat. The refusal says
+  "ask the desk: approve-push tN <sha>" and prints the manual `git -C <worktree> push <remote> <branch>`. Private projects are
+  still never pushed.
+- **Read-only search without Grep/Glob.** This Claude Code build has neither tool. `lean-agent:reader-*`, `reviewer` and
+  `explorer` now always run `rg`, `grep`, `find` (not `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*`, `-fls`),
+  `ls`, `wc`, `head`, `tail`, `cat` on paths inside `~/.lean-agent` (thread folders, worktrees) or a registered project (the session
+  folder alone is no root), and pipes
+  between such commands (and the built-in git reads). A strict scanner proves each pipeline plain: no redirect, substitution,
+  `;`/`&`/`||`, and no unquoted glob, `{a,b}` brace expansion, word-initial tilde or `$`; quote patterns. Each command has an allow-list of flags (and `find` of predicates): any other flag, abbreviation or
+  cluster letter refuses the command, so there is no `-exec`, `-delete`, `-fprint*`, `-L`/`-H`/`--follow`, `-f`/`--file`,
+  `--pre`, `-z`, `tail -f`, `--files0-from`; any `..` word is refused. The desk may run the same under `~/.lean-agent`.
+  The agent prompts, the learn / review / find / lean-mode skills and the templates say so.
+- An Agent call for one of our agent types (`lean-agent:` or the bare name a grant also binds to) with `allow-cmd` / `allow-edit` lines from a session that cannot own grants (not a
+  thread's own loop) is refused up front, with the reason.
+- The worktree skill installs dependencies in a fresh worktree from the lockfile (`yarn install --frozen-lockfile` / `--immutable`
+  by yarn version, `npm ci`, `pnpm install --frozen-lockfile`) through a worker and reports it; it never symlinks
+  `node_modules` (borrowing only from a donor with byte-identical lockfile and `link:` / `file:` targets, and it says which),
+  and it can **adopt** a worktree made with plain `git worktree add`.
+- A thread can report `superseded: true` with `lean_report` (its brief was replaced by a later user message); the desk text and the
+  pane row show it.
+- New threads get the attribution setting in their CLAUDE.md (`attribution: off - ...`), from config.json `attribution` (default
+  false); existing threads keep the file they have.
+
+### Changed
+- A session first resolved as thread tN records its id in `threads/tN/thread.json` `sids` (`sid` stays; the desk's saves keep ids
+  written meanwhile), so a later start from any folder resolves by id; a closed thread or an id held by two records matches nothing. Every refusal of a role-bound tool says the tool, the role, where the session started and what
+  its id matched.
+- A tidy, once per version and also on `migrate`, runs for everyone, also on 1.0.x: `CLAUDE.md` guides that mention lean-agent and 1.0
+  did not write, above a thread or worktree folder or under a project folder (the 0.45 ones tell threads to use the removed CLI),
+  and `current-thread.json` (written by the 0.45 CLI; 1.0 never reads it) move to `legacy-0.45/` (an earlier backup is never
+  overwritten). A user's own notes that do not mention lean-agent stay. `lean_doctor check` flags such files, also a per-thread
+  one (that one is moved by hand).
+
 ## 1.0.3
 
 ### Fixed

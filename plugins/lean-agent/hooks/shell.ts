@@ -324,18 +324,59 @@ export function analyze(c: string): Verdict {
   return v
 }
 
-// The words of ONE plain simple command (quotes and escapes resolved), or null when it is anything else: several commands,
-// a heredoc / here-string, an expansion or substitution in a word, or text that cannot be lexed. Redirections are dropped by the
-// lexer, so callers that must refuse them check the raw text too (hasMeta in guard.ts).
-export function plainWords(c: string): string[] | null {
-  const v: Verdict = { push: false, write: false, unsure: false, pushes: [] }
-  try {
-    const segs = lex(c, 0, v)
-    const s = segs[0]
-    if (segs.length !== 1 || !s || s.docs.length || !s.words.length || v.unsure) return null
-    return s.words.some(w => w.includes(EXP)) ? null : s.words
-  } catch (e) {
-    if (e instanceof Bad) return null
-    throw e
+// A pipeline of plain simple commands as word lists (quotes resolved), or null for anything the scanner cannot PROVE plain.
+// The general lexer above drops redirections and flattens ; & | ( ), so it cannot prove "no redirect"; this scanner is strict
+// instead: outside quotes words and the pipe `|` are accepted (no ; & < > ( ) backtick $ * ? [ \ ! # newline, no `||`, no
+// empty segment, no word-initial ~, no `{a,b}` / `{1..3}` brace expansion; `HEAD~1` and `@{u}` are plain); inside single quotes everything is data; inside double quotes
+// `$` and backtick are refused. Globs, braces and tildes must be quoted (then they
+// are data for the program) or not used.
+export function plainPipeline(c: string): string[][] | null {
+  const segs: string[][] = []
+  let words: string[] = []
+  let cur = ''
+  let has = false
+  const endWord = () => { if (has) words.push(cur); cur = ''; has = false }
+  const endSeg = (): boolean => { endWord(); if (!words.length) return false; segs.push(words); words = []; return true }
+  const n = c.length
+  for (let i = 0; i < n; i++) {
+    const ch = c[i]!
+    if (ch === "'") { const j = c.indexOf("'", i + 1); if (j < 0) return null; cur += c.slice(i + 1, j); has = true; i = j; continue }
+    if (ch === '"') {
+      has = true
+      let j = i + 1
+      for (; j < n && c[j] !== '"'; j++) {
+        const d = c[j]!
+        if (d === '$' || d === '`') return null
+        if (d === '\\') { const e = c[j + 1] ?? ''; if (e === '"' || e === '\\') cur += e; else cur += '\\' + e; j++; continue } // bash keeps other backslashes literally ("a\|b")
+        cur += d
+      }
+      if (j >= n) return null
+      i = j
+      continue
+    }
+    if (ch === ' ' || ch === '\t') { endWord(); continue }
+    if (ch === '|') { if (c[i + 1] === '|' || !endSeg()) return null; continue }
+    if (ch === '{') { // `@{u}` is literal; `{a,b}` / `{1..3}` would be expanded by the shell
+      const j = c.indexOf('}', i)
+      const inner = j < 0 ? ',' : c.slice(i + 1, j)
+      if (j < 0 || /,|\.\.|[\s;&<>|`$'"]/.test(inner)) return null
+      cur += c.slice(i, j + 1); has = true; i = j
+      continue
+    }
+    if (ch === '~' && !has) return null // tilde expansion only at the start of a word (`HEAD~1` is plain)
+    if (ch === '~') { cur += ch; continue }
+    if (/[;&<>()`$}*?[\]\\!\n\r#]/.test(ch)) return null
+    cur += ch
+    has = true
   }
+  if (!endSeg()) return null
+  return segs
+}
+
+// The words of ONE plain simple command (quotes resolved), or null for anything else: a pipe, several commands, a redirect,
+// an expansion or substitution, an unquoted glob. It is plainPipeline with exactly one segment, so the proof of "plain" is the
+// same strict scanner (a redirect is refused there, not dropped).
+export function plainWords(c: string): string[] | null {
+  const segs = plainPipeline(c)
+  return segs && segs.length === 1 ? segs[0]! : null
 }

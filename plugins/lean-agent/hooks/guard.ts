@@ -2,8 +2,8 @@
 // read-only and --allow-edit grants for worker subagents. `decide` answers a deny text or null (allow).
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
-import { greenReview } from './reviews'
-import { analyze, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
+import { greenReview, hasApproval, takeApproval } from './reviews'
+import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -199,7 +199,7 @@ async function protectedOne($: Host, args: string[], dir: string): Promise<strin
   return bad ? `lean-agent: ${force ? 'force-pushing' : 'deleting'} protected branch ${bad} is never allowed` : null
 }
 
-async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
+async function pushDenial($: Host, c: string, cwd: string, role?: Role): Promise<string | null> {
   const a = analyze(c)
   const pushing = a.push
   const text = privateText(c)
@@ -233,7 +233,18 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
     if (!/^[0-9a-f]{7,64}$/.test(sha)) return `lean-agent push gate: cannot resolve ${ref} here, so no review can unlock the push`
     shas.push(sha)
   }
-  for (const sha of shas) if (!(await greenReview($, p.slug, sha))) return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
+  // every distinct sha needs a green review or an approval; approvals are consumed only when ALL are covered
+  const thread = role?.kind === 'thread' ? role.id : ''
+  const need: string[] = []
+  for (const sha of [...new Set(shas)]) {
+    if (await greenReview($, p.slug, sha)) continue
+    if (await hasApproval($, p.slug, sha, thread)) { need.push(sha); continue }
+    const first = pushArgs(segs[0] ?? []).rest
+    const manual = `git -C ${dir} push ${first[0] ?? '<remote>'} ${first[1] ?? '<branch>'}`
+    const who = role?.kind === 'thread' ? `ask the desk: approve-push ${role.id} ${sha}` : `the desk's lean_thread approve-push <tN> ${sha}`
+    return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}). Run the review skill first, or have the user approve this exact commit (${who}); or the user can push by hand: ${manual}`
+  }
+  for (const sha of need) if (!(await takeApproval($, p.slug, sha, thread))) return `lean-agent push gate: the approval for ${sha.slice(0, 8)} was just used by another push; ask the desk to approve again`
   return null
 }
 
@@ -267,7 +278,16 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const p = await resolve($, raw, ctx.cwd)
     return within(p, await realPath($, leanDir(await homeDir($)))) || within(p, leanDir(await homeDir($))) ? null : `${ROUTE}: ${e.tool} only under ${leanDir(await homeDir($))}`
   }
-  if (e.tool === DESK_BASH) return deskBashOk(String(e.command ?? '')) ? null : ROUTE
+  if (e.tool === DESK_BASH) {
+    const c = String(e.command ?? '')
+    if (deskBashOk(c)) return null
+    // read-only search under ~/.lean-agent (this build has no Grep / Glob): rg, grep, find, ls, wc, head, tail, cat
+    const segs = plainPipeline(c)
+    const lean = leanDir(await homeDir($))
+    const roots = [norm(lean), norm(await realPath($, lean))]
+    if (segs && (await Promise.all(segs.map((w, i) => searchOk($, ctx, w, roots, i === 0)))).every(Boolean)) return null
+    return ROUTE
+  }
   if (DESK_FREE.has(e.tool) || e.tool.startsWith(LEAN_TOOLS)) return null
   return `${ROUTE}: ${e.tool} is not for the desk`
 }
@@ -345,7 +365,8 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
 
 // Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
 // other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
-// (shell.ts lexer, no meta character, no expansion), the only global options are --no-pager and -C <dir inside those roots>,
+// (shell.ts plainPipeline: no redirect, substitution, expansion, glob, brace or tilde outside quotes), the only global options are
+// --no-pager and one absolute -C <dir inside those roots>,
 // and no option that writes a file, runs a program or reads outside the repository. Accepted residual risk: the repository's own
 // config can run programs for status (core.fsmonitor) and diff/show/log -p (diff.external, textconv drivers), git status refreshes
 // .git/index, and `git diff A B` with paths outside the work tree reads them; -c / --ext-diff / -C escapes are what is refused.
@@ -361,23 +382,119 @@ const BAD_LONG = (o: string, sub: string) =>
   (o.length > 0 && ('output'.startsWith(o) || 'ext-diff'.startsWith(o) || 'exec-path'.startsWith(o) || 'help'.startsWith(o) || 'no-index'.startsWith(o))) || /^exec/.test(o) || /^ext-d/.test(o)
 // -o <file> (git has no -o for log/diff/show, the spec refuses it anyway) and -h (help starts a pager)
 const SHORT_O = (a: string) => a.startsWith('-o') || a === '-h'
-// where `git -C <dir>` may point: the session folder, ~/.lean-agent (threads, worktrees) and the registered projects' folders
+// where `git -C <dir>` and the search commands may reach: ~/.lean-agent (thread folders, worktrees) and the registered projects' folders
 async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
   const home = await homeDir($)
   const projs = await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {})
-  const raw = [...(ctx.cwd && ctx.cwd !== '/' ? [ctx.cwd] : []), leanDir(home), // an unknown or root cwd widens nothing
+  const raw = [leanDir(home), // the session cwd is NOT a root by itself: a reader started in $HOME or /tmp reads nothing there
      ...Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/'))]
   const out: string[] = []
   for (const r of raw) out.push(norm(r), norm(await realPath($, r)))
   return out
 }
+// ---- read-only search commands (this Claude Code build has no Grep / Glob: a reader can only search through Bash) ----------------
+// rg, grep, find, ls, wc, head, tail, cat on paths inside the same roots as `git -C`; pipes only between commands the scanner
+// (shell.ts plainPipeline) proves plain and that are each allowed here. Relative words resolve against the session cwd, which must
+// itself be inside the roots when a command names no path.
+const SEARCH_CMDS = new Set(['rg', 'grep', 'find', 'ls', 'wc', 'head', 'tail', 'cat'])
+// Every flag a built-in search command may carry is listed here; ANY other flag (or abbreviation, or cluster letter) refuses the
+// command, so no option can shift which word is a pattern, read a file, run a program, write, or follow a symlink out of the roots.
+// no: letters without a value; val: letters whose value is attached or the next word; lnone / lval: long names without / with a value
+// (`--name=v` or `--name v`); digits: `-5` / `-A5` style counts.
+type Spec = { no: string; val: string; lnone: string[]; lval: string[]; digits?: boolean }
+const SPECS: Record<string, Spec> = {
+  rg: { no: 'nNiSslcvwxFoqIuUHha', val: 'ABCmgtTMde', digits: true,
+    lnone: ['hidden', 'files', 'no-ignore', 'no-ignore-vcs', 'no-ignore-parent', 'no-ignore-dot', 'ignore-case', 'case-sensitive', 'smart-case', 'line-number', 'no-line-number', 'count', 'files-with-matches', 'files-without-match', 'fixed-strings', 'word-regexp', 'line-regexp', 'invert-match', 'only-matching', 'heading', 'no-heading', 'column', 'with-filename', 'no-filename', 'no-messages', 'sort-files', 'trim', 'type-list', 'stats', 'text', 'multiline', 'unrestricted', 'vimgrep', 'no-config', 'crlf'],
+    lval: ['max-count', 'glob', 'iglob', 'type', 'type-not', 'context', 'after-context', 'before-context', 'regexp', 'max-depth'] },
+  grep: { no: 'rnilLcvwxFEGoqsHhIaTbU', val: 'ABCme', digits: true,
+    lnone: ['ignore-case', 'no-ignore-case', 'line-number', 'recursive', 'count', 'files-with-matches', 'files-without-match', 'no-filename', 'with-filename', 'invert-match', 'word-regexp', 'fixed-strings', 'extended-regexp', 'perl-regexp', 'basic-regexp', 'only-matching', 'quiet', 'silent', 'no-messages', 'null', 'color', 'colour', 'text', 'line-buffered', 'initial-tab', 'byte-offset'],
+    lval: ['include', 'exclude', 'exclude-dir', 'max-count', 'context', 'after-context', 'before-context', 'regexp'] },
+  ls: { no: 'laAhrRtSsd1FpiknGCxXuUcvmq', val: '', lnone: ['all', 'almost-all', 'human-readable', 'recursive', 'reverse', 'directory', 'classify', 'color'], lval: [] },
+  cat: { no: 'nbsAETv', val: '', lnone: ['number', 'number-nonblank', 'squeeze-blank', 'show-all', 'show-ends', 'show-tabs'], lval: [] },
+  head: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] },
+  tail: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] }, // no -f / -F / --follow / --retry
+  wc: { no: 'lwcmL', val: '', lnone: ['lines', 'words', 'bytes', 'chars', 'max-line-length'], lval: [] },
+}
+// find: starting points are the words before the first predicate; only these predicates (argument count) exist for us
+const FIND_PRED: Record<string, number> = { '-name': 1, '-iname': 1, '-path': 1, '-ipath': 1, '-wholename': 1, '-regex': 1, '-type': 1, '-maxdepth': 1, '-mindepth': 1, '-size': 1, '-mtime': 1, '-atime': 1, '-ctime': 1, '-mmin': 1, '-user': 1, '-group': 1, '-perm': 1, '-newer': 1, '-empty': 0, '-print': 0, '-print0': 0, '-prune': 0, '-not': 0, '-a': 0, '-o': 0, '-true': 0, '-false': 0, '-readable': 0, '-writable': 0, '-executable': 0, '-depth': 0, '-xdev': 0, '-mount': 0 }
+
+async function pathOk($: Host, ctx: Ctx, roots: string[], word: string): Promise<boolean> {
+  if (!ctx.cwd || ctx.cwd === '/' || word.split('/').includes('..')) return false // `..` after a symlink would leave the roots: no `..` at all
+  const d = await resolve($, word, ctx.cwd)
+  return roots.some(r => within(d, r))
+}
+// flags parsed against the spec; the positional words come back (null = a flag that is not allowed)
+function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolean; recursive: boolean; noPattern: boolean } | null {
+  const sp = SPECS[cmd]!
+  const pos: string[] = []
+  let given = false
+  let recursive = false
+  let noPattern = false
+  let dashdash = false
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!
+    if (dashdash || x === '-' || !x.startsWith('-')) { pos.push(x); continue }
+    if (x === '--') { dashdash = true; continue }
+    if (x.startsWith('--')) {
+      const eq = x.indexOf('=')
+      const name = x.slice(2, eq < 0 ? undefined : eq)
+      if (sp.lnone.includes(name) && eq < 0) { if (name === 'recursive') recursive = true; if (name === 'files' || name === 'type-list') noPattern = true; continue }
+      if (sp.lval.includes(name)) { if (name === 'regexp') given = true; if (eq < 0) { if (i + 1 >= rest.length) return null; i++ } continue }
+      if ((name === 'color' || name === 'colour') && eq > 0 && cmd === 'grep') continue
+      return null
+    }
+    for (let k = 1; k < x.length; k++) { // a short cluster, letter by letter
+      const c = x[k]!
+      if (sp.no.includes(c)) { if (c === 'r' && cmd === 'grep') recursive = true; if (c === 'R' && cmd === 'ls') recursive = true; continue }
+      if (/\d/.test(c) && sp.digits) continue
+      if (sp.val.includes(c)) {
+        if (c === 'e') given = true
+        if (k === x.length - 1) { if (i + 1 >= rest.length) return null; i++ } // the value is the next word
+        break // else the rest of the word is the value
+      }
+      return null
+    }
+  }
+  return { pos, given, recursive, noPattern }
+}
+async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first = true): Promise<boolean> {
+  const cmd = w[0]!
+  if (!SEARCH_CMDS.has(cmd)) return false
+  const rest = w.slice(1)
+  if (cmd === 'find') {
+    let i = 0
+    const starts: string[] = []
+    const newer: string[] = [] // -newer names a file to compare with: a path, but not a starting point
+    for (; i < rest.length && !rest[i]!.startsWith('-'); i++) starts.push(rest[i]!)
+    for (; i < rest.length; i++) {
+      const n = FIND_PRED[rest[i]!]
+      if (n === undefined) return false // -exec, -delete, -fprint*, -L, -files0-from ... and anything unknown
+      if (n === 1) { if (i + 1 >= rest.length) return false; i++; if (rest[i - 1] === '-newer') newer.push(rest[i]!) }
+    }
+    for (const p of [...starts, ...newer]) if (!(await pathOk($, ctx, roots, p))) return false
+    return starts.length > 0 || (await pathOk($, ctx, roots, '.')) // no starting point: the cwd
+  }
+  const f = parseFlags(cmd, rest)
+  if (!f) return false
+  const grepLike = cmd === 'grep' || cmd === 'rg'
+  const paths = grepLike && !f.given && !f.noPattern ? f.pos.slice(1) : f.pos // the first positional of grep / rg is the pattern: data
+  if (grepLike && !f.given && !f.noPattern && !f.pos.length) return false // no pattern
+  for (const p of paths) if (!(await pathOk($, ctx, roots, p))) return false
+  // rg and ls always look at the cwd when no path is named; grep when it is first in its pipeline or recursive; the others read stdin
+  const needCwd = !paths.length && (cmd === 'rg' || cmd === 'ls' || f.recursive || (cmd === 'grep' && first))
+  return !needCwd || (await pathOk($, ctx, roots, '.'))
+}
+// the whole command: every pipeline segment is a built-in git read or a search command
 async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
-  const allowed = builtinGit(ctx.agentType)
-  // hasMeta also refuses ; | < > inside quotes; { } ~ $ * ? [ \ are refused anywhere too: the shell expands them after this check
-  // (brace expansion `--{output=x,}`, `-C ~`, globs that could name a file `--output=x`). Quote-free pathspecs only.
-  if (!allowed.length || hasMeta(c) || /[{}~$*?[\\]/.test(c)) return false
-  const w = plainWords(c)
-  if (!w || w[0] !== 'git') return false
+  const git = builtinGit(ctx.agentType)
+  if (!git.length) return false
+  const segs = plainPipeline(c)
+  if (!segs) return false
+  const roots = await cRoots($, ctx)
+  for (let i = 0; i < segs.length; i++) { const w = segs[i]!; if (!(w[0] === 'git' ? await gitOk($, ctx, w, git, roots) : await searchOk($, ctx, w, roots, i === 0))) return false }
+  return true
+}
+async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: string[]): Promise<boolean> {
   let i = 1
   let seenC = false // one -C only (git chains them)
   for (; i < w.length && w[i]!.startsWith('-'); ) {
@@ -385,7 +502,7 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
     else if (w[i] === '-C' && w[i + 1] && !seenC && w[i + 1]!.startsWith('/') && !w[i + 1]!.split('/').includes('..')) {
       seenC = true
       const d = await resolve($, w[i + 1]!, ctx.cwd)
-      if (!(await cRoots($, ctx)).some(r => within(d, r))) return false
+      if (!roots.some(r => within(d, r))) return false
       i += 2
     } else return false
   }
@@ -428,6 +545,16 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
 
 // ---- entry ---------------------------------------------------------------------------------------------------
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit lines from anyone else would start a
+  // subagent that can do nothing, so it is refused up front with the reason
+  const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''
+  if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$)/.test(sub) && !(ctx.role.kind === 'thread' && !ctx.agentId)) {
+    const g = parseGrants(e.prompt)
+    if (g.edit?.length || g.cmds?.length) {
+      const who = ctx.agentId ? 'a subagent' : `a ${ctx.role.kind} session`
+      return `lean-agent: this Agent call carries ${[g.cmds?.length ? 'allow-cmd' : '', g.edit?.length ? 'allow-edit' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
+    }
+  }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
     const d = await deskDenial($, ctx, e)
     if (d) return d
@@ -437,6 +564,6 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
     const d = await workerDenial($, ctx, e)
     if (d) return d
   }
-  if (e.tool === 'Bash') return await pushDenial($, String(e.command ?? ''), ctx.cwd)
+  if (e.tool === 'Bash') return await pushDenial($, String(e.command ?? ''), ctx.cwd, ctx.role)
   return null
 }

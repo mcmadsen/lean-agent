@@ -10,7 +10,7 @@ import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from '.
 import type { Role } from './role'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.3'
+export const VERSION = '1.0.4'
 const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', stuck: 'red', quiet: 'gray' }
 
 let lastError = ''
@@ -202,6 +202,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box key={`a-${a.n}`}>
             <Text dimColor={!a.unread}>
               {a.rec.kind === 'ask' ? '? ' : ''}
+              {a.rec.superseded ? '↻ brief superseded: ' : ''}
               {a.rec.from}: {short(a.rec.text, 70)}
             </Text>
             {a.unread && <Button key={`ack-${a.n}`} label="ack" onPress={act('ack', async () => ackRows(host, a.n))} />}

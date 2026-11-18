@@ -16,8 +16,8 @@ never symlink (symlinked rule folders do not load).
    first-level source folders. Skip areas the repo's own `CLAUDE.md` or `.claude/rules` already covers. With `--area`
    do only that one.
 2. Per area start one `lean-agent:explorer` subagent (Agent tool). Its brief names the area, lists the area
-   folders to look at (it lists them with Glob/Grep; `git ls-files <folder>` and `git log` are built in for the explorer, no
-   `allow-cmd` line needed), and lists the gaps from `~/.lean-agent/<project>/gaps.jsonl` and the memory notes for that
+   folders to look at (it lists them with Glob/Grep, or with `git ls-files <folder>`, `rg`, `find`, `ls` through Bash: all built in for the
+   explorer, no `allow-cmd` line needed), and lists the gaps from `~/.lean-agent/<project>/gaps.jsonl` and the memory notes for that
    path. It returns at most 25 lines.
 3. Write `rules/<area>.md` (at most 25 lines of body):
 

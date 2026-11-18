@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { readJsonl } from './state'
 import { RELAY_GAP_MS, consumeWake, markRead, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
@@ -133,4 +134,14 @@ test('relay: one desk turn for a question or a done/blocked report; never for pr
   for (let n = 0; n < 30; n++) await Promise.resolve()
   expect(await takeReports(h.host)).toContain('mid') // handed over once more with the next delivery, not lost
   expect(await takeReports(h.host)).toBeNull()
+})
+
+test('lean_report superseded: true is kept, shown to the desk text and the pane row', async () => {
+  const h = fakeHost(null)
+  await threadTool(h.host, 't1', 'lean_report', { text: 'user changed the target branch', superseded: true })
+  await threadTool(h.host, 't1', 'lean_report', { text: 'plain' })
+  const recs = await readJsonl<any>(h.host, '/h/.lean-agent/desk/inbox.jsonl')
+  expect(recs[0].superseded).toBe(true)
+  expect(recs[1].superseded).toBeUndefined()
+  expect(renderReports(recs)).toContain('[brief superseded by a later user message]: user changed')
 })

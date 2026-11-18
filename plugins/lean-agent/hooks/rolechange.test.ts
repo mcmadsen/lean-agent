@@ -83,19 +83,19 @@ test('a desk session that moves elsewhere stays the desk: its tools work and str
   const s = await start($, on, '/h/lean-agent-desk')
   await s.move('/h/code/proj')
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
-  expect(JSON.stringify(r)).not.toContain('only the desk')
+  expect(JSON.stringify(r)).not.toContain('needs a desk session')
   const d: any = await $.tool.call({ tool: 'Write', file_path: '/h/code/proj/x', content: 'x' } as any)
   expect(JSON.stringify(d)).toContain('deny') // the desk's allow-list still applies
   await s.move('/h/lean-agent-desk')
-  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
 test('a plain session refuses the desk tool, re-resolving once first', async ($, on) => {
   const s = await start($, on, SPARE)
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
-  expect(JSON.stringify(r)).toContain('only the desk')
+  expect(JSON.stringify(r)).toContain('needs a desk session')
   s.set('/h/lean-agent-desk') // no CwdChanged came: the refusal path looks again and finds the desk
-  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
 test('a failing migration does not stop the desk tools from registering', async ($, on) => {
@@ -191,7 +191,7 @@ test('the spawned agent type is read from AgentInfo.type (prefixed), not only su
 // ---- a thread keeps its role (a Bash `cd` into the repo moves the session cwd) ---------------------------------------
 const callRules = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_rules', action: 'stats', project: 'proj' } as any)
 const callReport = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_report', text: 'hi' } as any)
-const refused = (r: any) => JSON.stringify(r).includes('only a thread')
+const refused = (r: any) => JSON.stringify(r).includes('needs a thread session')
 
 test('a thread session that cd\'s into the repo is still a thread (lean_rules and lean_report work), and cd back too', async ($, on) => {
   const s = await start($, on, '/h/.lean-agent/threads/t1')
@@ -231,7 +231,7 @@ test('a sid match never demotes a desk', async ($, on) => {
   const d = await start($, on, '/h/lean-agent-desk')
   d.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x'))
   await d.move('/h/code/proj')
-  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('only the desk')
+  expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
 test('a sid match ignores closed records, and two records with one sid match nobody', async ($, on) => {
@@ -241,4 +241,41 @@ test('a sid match ignores closed records, and two records with one sid match nob
   p.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x'))
   p.h.files.set('/h/.lean-agent/threads/t2/thread.json', rec('t2', 'sess-x'))
   expect(refused(await callRules($))).toBe(true)
+})
+
+test('a session first resolved as a thread records its id in thread.json sids (sid stays); a later start from another folder resolves by it', async ($, on) => {
+  const s = await start($, on, '/h/.lean-agent/threads/t1')
+  const rec = JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/thread.json')))
+  expect(rec.sids).toEqual(['sess-x'])
+  expect(rec.sid).toBe('')
+  expect(rec.title).toBe('x') // the rest of the record is kept
+  await $.session.start({ cwd: '/h/code/proj', surface: 'desktop', isInteractive: true } as any) // mod reload / resume elsewhere
+  expect(refused(await callRules($))).toBe(false)
+  expect(JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/thread.json'))).sids).toEqual(['sess-x']) // no duplicate
+})
+
+test('a sid another thread already holds is never recorded for a second thread', async ($, on) => {
+  const s = await start($, on, '/h/code/proj')
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: '', state: 'open', sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 }))
+  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', title: 'y', project: '', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  await s.move('/h/.lean-agent/threads/t2') // a plain session that holds t1's id walks into t2's folder: it IS t1 (by id), t2 gets nothing
+  expect(JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t2/thread.json'))).sids).toBeUndefined()
+})
+
+test('a refusal names the tool, the role, where the session started and what its id matched', async ($, on) => {
+  await start($, on, '/h/code/proj')
+  const t = JSON.stringify(await callReport($))
+  expect(t).toContain('lean-agent: lean_report needs a thread session; this session is plain (started in /h/code/proj, session id not in any thread.json)')
+  const d = JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))
+  expect(d).toContain('lean_thread needs a desk session; this session is plain')
+})
+
+test('the refusal text tells ambiguous and closed session ids apart', async ($, on) => {
+  const s = await start($, on, '/h/code/proj')
+  const rec = (id: string, state: string) => JSON.stringify({ id, title: 'x', project: '', state, sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 })
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'closed'))
+  expect(JSON.stringify(await callReport($))).toContain('belongs to thread t1, which is closed')
+  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', rec('t2', 'open'))
+  s.h.files.set('/h/.lean-agent/threads/t3/thread.json', rec('t3', 'open'))
+  expect(JSON.stringify(await callReport($))).toContain('is in several thread.json files (t1, t2, t3)')
 })

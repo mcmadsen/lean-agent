@@ -1,4 +1,4 @@
-import { deskDir, homeDir, realPath, threadsDir } from './state'
+import { deskDir, homeDir, readJson, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 
 export type Role = { kind: 'desk' } | { kind: 'thread'; id: string } | { kind: 'plain' }
@@ -20,20 +20,24 @@ export async function detectRole($: Host, cwd: string): Promise<Role> {
 }
 
 // A session whose id is a thread's recorded `sid` IS that thread, wherever its working directory is.
-export async function roleBySid($: Host, sid: string): Promise<Role | null> {
-  if (!sid) return null
+export async function sidHolders($: Host, sid: string): Promise<{ id: string; state: string }[]> {
+  if (!sid) return []
   const dir = threadsDir(await homeDir($))
-  const hits: string[] = []
+  const hits: { id: string; state: string }[] = []
   for (const e of await $.fs.list(dir).catch(() => [] as { name: string }[])) {
     if (!/^t\d+$/.test(e.name)) continue
     try {
       const t = JSON.parse(String(await $.fs.read(`${dir}/${e.name}/thread.json`)))
-      if (t && typeof t.sid === 'string' && t.sid === sid && t.state !== 'closed') hits.push(e.name) // a closed record keeps its old sid
+      if (t && (t.sid === sid || (Array.isArray(t.sids) && t.sids.includes(sid)))) hits.push({ id: e.name, state: String(t.state ?? '') })
     } catch {
       /* an unreadable record is not a match */
     }
   }
-  return hits.length === 1 ? { kind: 'thread', id: hits[0]! } : null // two records with one sid: no match, the folder decides
+  return hits
+}
+export async function roleBySid($: Host, sid: string): Promise<Role | null> {
+  const open = (await sidHolders($, sid)).filter(x => x.state !== 'closed') // a closed record keeps its old sid
+  return open.length === 1 ? { kind: 'thread', id: open[0]!.id } : null // two records with one sid: no match, the folder decides
 }
 
 // The ONE role function. Order: a desk stays the desk; the session id (a thread's sid); the role the session already has (sticky: a desk or
@@ -47,4 +51,28 @@ export async function resolveRole($: Host, o: { cwd: string; root?: string; sid?
   let r = await detectRole($, o.cwd)
   if (r.kind === 'plain' && o.useRoot !== false && o.root && o.root !== o.cwd) r = await detectRole($, o.root)
   return r
+}
+
+// When a session is first resolved as thread tN, its id goes into thread.json `sids` (`sid` stays as the desk wrote it), so a
+// later session.start from ANY folder (mod reload, compaction, resume) resolves it by id. Never steals an id another thread holds.
+export async function recordSid($: Host, id: string, sid: string): Promise<boolean> {
+  if (!sid || !/^t\d+$/.test(id)) return false
+  const file = `${threadsDir(await homeDir($))}/${id}/thread.json`
+  const t = await readJson<Record<string, any> | null>($, file, null)
+  if (!t || typeof t !== 'object' || t.id !== id || t.state === 'closed') return false
+  if (t.sid === sid || (Array.isArray(t.sids) && t.sids.includes(sid))) return true
+  const other = await roleBySid($, sid)
+  if (other && other.kind === 'thread' && other.id !== id) return false
+  const fresh = await readJson<Record<string, any> | null>($, file, null) // the desk may have saved meanwhile: write onto the latest record
+  if (!fresh || fresh.id !== id || fresh.state === 'closed') return false
+  await writeJson($, file, { ...fresh, sids: [...new Set([...(Array.isArray(fresh.sids) ? fresh.sids : []), sid])].slice(-20) })
+  return true
+}
+
+// why a role-bound tool refuses: the role, where the session started, what its id matched
+export async function roleReport($: Host, o: { tool: string; need: 'thread' | 'desk'; role: Role; startDir: string; sid: string }): Promise<string> {
+  const have = o.role.kind === 'thread' ? `thread ${o.role.id}` : o.role.kind
+  const holders = o.sid ? await sidHolders($, o.sid).catch(() => []) : []
+  const idText = !o.sid ? 'session id unknown' : holders.length === 0 ? 'session id not in any thread.json' : holders.length > 1 ? `session id is in several thread.json files (${holders.map(x => x.id).join(', ')}), so it decides nothing` : holders[0]!.state === 'closed' ? `session id belongs to thread ${holders[0]!.id}, which is closed` : `session id belongs to thread ${holders[0]!.id}`
+  return `lean-agent: ${o.tool} needs a ${o.need} session; this session is ${have} (started in ${o.startDir || 'an unknown folder'}, ${idText})`
 }
