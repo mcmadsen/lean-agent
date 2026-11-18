@@ -120,6 +120,57 @@ test('protected branches are never force-pushed or deleted, in any repo', async 
   expect(await run(h, plain, { tool: 'Bash', command: 'git push --force' }, '/elsewhere')).toBeNull()
 })
 
+// ported from 0.45 tests (test_push_guards): plain pushes to guarded branches are refused, shell level
+test('guarded branches: a plain push to main/master/develop/release/* is refused; per-project guards.push-deny; local and override pass', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' }, loose: { path: '/r/loose', guards: { 'push-deny': ['prod-*'] } }, open: { path: '/r/open', guards: { 'push-deny': [] } } }))
+  let branch = 'feature'
+  let url = 'git@github.com:o/r.git'
+  h.git.handler = a => {
+    if (a.includes('get-url')) return { exitCode: 0, stdout: url + '\n' }
+    if (a.includes('symbolic-ref')) return { exitCode: 0, stdout: branch + '\n' }
+    if (a.includes('--abbrev-ref')) return { exitCode: 1, stdout: '' }
+    if (a.includes('config')) return { exitCode: 1, stdout: '' }
+    return { exitCode: 0, stdout: SHA + '\n' }
+  }
+  const go = (command: string, cwd = '/elsewhere') => run(h, plain, { tool: 'Bash', command }, cwd)
+  for (const c of ['git push origin main', 'git push origin master', 'git push origin develop', 'git push origin release/1.0', 'git push origin HEAD:main', 'git push origin feature:refs/heads/main', 'git push origin HEAD:release/r-1', 'git push --all origin'])
+    expect([c, await go(c)]).toEqual([c, expect.stringContaining('lean-agent')])
+  expect(await go('git push origin main')).toContain('Push your own branch and open a pull request')
+  expect(await go('git -C /r/app push origin main')).toContain('Push your own branch')
+  expect(['git push origin bugfix/b-1', await go('git push origin bugfix/b-1')]).toEqual(['git push origin bugfix/b-1', null])
+  expect(['git push origin HEAD', await go('git push origin HEAD')]).toEqual(['git push origin HEAD', null]) // current branch feature
+  branch = 'main'
+  expect(await go('git push')).toContain('main') // no refspec: the current branch
+  expect(await go('git push origin HEAD')).toContain('main')
+  branch = 'feature'
+  // per-project list replaces the defaults, even an empty one
+  expect(await go('git push origin main', '/r/loose')).toContain('no green review') // not guarded here: only the review gate answers
+  expect(await go('git push origin prod-1', '/r/loose')).toContain('prod-1')
+  expect(await go('git push origin main', '/r/open')).toContain('no green review') // not guarded here: only the review gate answers
+  // a push to a local path / file:// URL is not checked (LEAN_AGENT_PUSH_GUARD_LOCAL=1 checks it anyway)
+  url = '/srv/bare.git'
+  expect(['git push origin main', await go('git push origin main')]).toEqual(['git push origin main', null])
+  url = 'file:///srv/bare.git'
+  expect(['git push origin main', await go('git push origin main')]).toEqual(['git push origin main', null])
+  url = 'git@github.com:o/r.git'
+  // the override variable of 0.45 (set in the session env, not by the command)
+  h.host.env = { get: async (n: string) => (n === 'HOME' ? '/h' : n === 'LEAN_AGENT_PUSH_GUARD_OVERRIDE' ? '1' : undefined) }
+  expect(['git push origin main', await go('git push origin main')]).toEqual(['git push origin main', null])
+})
+
+test('push gate: the review must be green for the pushed ref, not for HEAD', async () => {
+  const h = setup()
+  const OTHER = '9999999def5678abc1234def5678abc1234def56'
+  h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'git@h:o/r.git\n' } : a.some(x => x.startsWith('topic')) ? { exitCode: 0, stdout: OTHER + '\n' } : { exitCode: 0, stdout: SHA + '\n' })
+  await writeReview(h.host, { green: true, sha: SHA, project: 'app' }) // HEAD is green, topic is not
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin HEAD:feature' })).toBeNull()
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin topic:feature' })).toContain('9999999')
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin HEAD:a topic:b' })).toContain('9999999')
+  await writeReview(h.host, { green: true, sha: OTHER, project: 'app' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin HEAD:a topic:b' })).toBeNull()
+})
+
 test('threads never ask the user directly; neither do subagents', async () => {
   const h = setup()
   expect(await run(h, thread, { tool: 'AskUserQuestion' })).toContain('lean_ask')

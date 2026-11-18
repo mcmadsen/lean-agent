@@ -77,6 +77,101 @@ export async function projectOf($: Host, dir: string): Promise<{ slug: string; p
   return slug ? { slug, private: false } : null
 }
 
+// ---- guarded branches (0.45 push_guard.py): a plain push to a guarded branch is refused, registered project or not ----
+export const DEFAULT_PUSH_DENY = ['release/*', 'develop', 'main', 'master']
+const globRe = (g: string) => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$')
+export const guardedBy = (branch: string, pats: string[]) => pats.find(p => globRe(p).test(branch.replace(/^refs\/heads\//, ''))) ?? null
+
+// a project's own `guards.push-deny` list (even an empty one), else the defaults; a lean-agent worktree counts as its project
+export async function patternsFor($: Host, dir: string): Promise<string[]> {
+  const home = await homeDir($)
+  const projs = await readJson<Record<string, any>>($, `${leanDir(home)}/projects.json`, {})
+  const real = await realPath($, dir)
+  const lean = await realPath($, leanDir(home))
+  for (const [k, v] of Object.entries(projs ?? {})) {
+    if (!v || typeof v !== 'object') continue
+    const p = v.path ? await realPath($, norm(v.path)) : ''
+    const wt = `${lean}/worktrees/${k}`
+    if ((p && within(real, p)) || within(real, wt)) {
+      const pd = v.guards?.['push-deny']
+      return Array.isArray(pd) ? pd.filter((x: unknown) => typeof x === 'string') : DEFAULT_PUSH_DENY
+    }
+  }
+  return DEFAULT_PUSH_DENY
+}
+
+const isLocalDest = (d: string) => !!d && (d.startsWith('file://') || (!d.includes('://') && !/^([^/@]+@)?[^/:]+:/.test(d)))
+async function git1($: Host, dir: string, ...a: string[]): Promise<string | null> {
+  const r = await $.process.run(['git', '-C', dir, ...a])
+  return r.exitCode === 0 ? r.stdout.trim() : null
+}
+// the push words after `push`: flags dropped (with the values of -o/--repo/...), then [remote, ...refspecs]
+function pushArgs(args: string[]): { flags: string[]; rest: string[] } {
+  const flags: string[] = []
+  const rest: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const x = args[i]!
+    if (['-o', '--push-option', '--repo', '--receive-pack', '--exec'].includes(x)) i++
+    else if (x.startsWith('--repo=')) rest.unshift(x.slice(7))
+    else if (x.startsWith('-')) flags.push(x)
+    else rest.push(x)
+  }
+  return { flags, rest }
+}
+// remote branches the push would update (null: all of them)
+export async function pushDestinations($: Host, args: string[], dir: string): Promise<string[] | null> {
+  const { flags, rest } = pushArgs(args)
+  if (flags.some(f => ['--all', '--mirror', '--branches'].includes(f))) return null
+  const specs = rest.slice(1)
+  const cur = async () => (await git1($, dir, 'symbolic-ref', '--quiet', '--short', 'HEAD')) ?? ''
+  if (!specs.length) {
+    if (flags.includes('--tags')) return []
+    const up = await git1($, dir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')
+    if (up && up.includes('/') && !/^[0-9a-f]{40,64}$/.test(up)) return [up.split('/').slice(1).join('/')]
+    const b = await cur()
+    return b ? [b] : []
+  }
+  const out: string[] = []
+  for (const raw of specs) {
+    const spec = raw.replace(/^\+/, '')
+    if (spec.startsWith('refs/tags/')) continue
+    let dst = spec.includes(':') ? spec.split(':').slice(1).join(':') : spec
+    if (dst === 'HEAD' || dst === '@') dst = (await cur()) || 'HEAD'
+    if (dst) out.push(dst.replace(/^refs\/heads\//, ''))
+  }
+  return out
+}
+
+async function pushIsLocal($: Host, args: string[], dir: string): Promise<boolean> {
+  if ((await $.env.get('LEAN_AGENT_PUSH_GUARD_LOCAL')) === '1') return false
+  const { rest } = pushArgs(args)
+  let remote = rest[0]
+  if (!remote) {
+    const b = await git1($, dir, 'symbolic-ref', '--quiet', '--short', 'HEAD')
+    remote = (b && ((await git1($, dir, 'config', `branch.${b}.pushRemote`)) || (await git1($, dir, 'config', `branch.${b}.remote`)))) || 'origin'
+  }
+  const url = await git1($, dir, 'remote', 'get-url', '--push', remote)
+  return isLocalDest(url && !/^[0-9a-f]{40,64}$/.test(url) ? url : remote)
+}
+
+// the refusal text, or null: `git push` words (the whole command) run in dir
+async function guardedDenial($: Host, c: string, dir: string): Promise<string | null> {
+  if ((await $.env.get('LEAN_AGENT_PUSH_GUARD_OVERRIDE')) === '1') return null
+  const w = words(c)
+  const at = w.indexOf('push')
+  if (at < 0) return null
+  const args = w.slice(at + 1)
+  const pats = await patternsFor($, dir)
+  if (!pats.length || (await pushIsLocal($, args, dir))) return null
+  const dests = await pushDestinations($, args, dir)
+  if (dests === null) return `lean-agent: \`git push --all/--mirror\` would update every branch, including guarded ones (${pats.join(', ')}). Push only your own branch.`
+  for (const d of dests) {
+    const hit = guardedBy(d, pats)
+    if (hit) return `lean-agent: \`git push\` would update ${d}, which lean-agent never pushes to (guard '${hit}'). Push your own branch and open a pull request.`
+  }
+  return null
+}
+
 // A push that rewrites or deletes a shared branch is refused in every repo, registered or not.
 export const PROTECTED = /^(main|master|develop|dev|trunk|prod|production|stable|release([/-].*)?)$/
 async function protectedDenial($: Host, c: string, dir: string): Promise<string | null> {
@@ -113,13 +208,23 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
   const dir = dirs[dirs.length - 1]!
   const prot = await protectedDenial($, c, dir)
   if (prot) return prot
+  const gd = await guardedDenial($, c, dir)
+  if (gd) return gd
   const p = await projectOf($, dir)
   if (!p) return null // the review gate is for registered projects; other repos push as before
-  const r = await $.process.run(['git', '-C', dir, 'rev-parse', 'HEAD'])
-  const sha = r.exitCode === 0 ? r.stdout.trim() : ''
-  if (!/^[0-9a-f]{7,64}$/.test(sha)) return 'lean-agent push gate: cannot read HEAD here, so no review can unlock the push'
-  if (await greenReview($, p.slug, sha)) return null
-  return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
+  // the review is for the commit each pushed ref points at (the refspec's source), HEAD when the push names none
+  const w = words(c)
+  const { flags, rest } = pushArgs(w.indexOf('push') < 0 ? [] : w.slice(w.indexOf('push') + 1))
+  const srcs = flags.some(f => ['--all', '--mirror', '--branches'].includes(f)) ? [] : rest.slice(1).map(x => x.replace(/^\+/, '')).filter(x => !x.startsWith(':') && !x.startsWith('refs/tags/')).map(x => (x.includes(':') ? x.split(':')[0]! : x))
+  const shas: string[] = []
+  for (const ref of srcs.length ? srcs : ['HEAD']) {
+    const r = await $.process.run(['git', '-C', dir, 'rev-parse', '--verify', '--end-of-options', `${ref === '@' ? 'HEAD' : ref}^{commit}`])
+    const sha = r.exitCode === 0 ? r.stdout.trim() : ''
+    if (!/^[0-9a-f]{7,64}$/.test(sha)) return `lean-agent push gate: cannot resolve ${ref} here, so no review can unlock the push`
+    shas.push(sha)
+  }
+  for (const sha of shas) if (!(await greenReview($, p.slug, sha))) return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
+  return null
 }
 
 // ---- strict mode (desk): an allow-list, every other tool is denied ----------------------------------------------
