@@ -305,7 +305,8 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git log main..abc1234 --oneline')).toBeNull()
   expect(await bash('git show abc1234')).toBeNull()
   expect(await bash('git merge-base main abc1234')).toBeNull()
-  expect(await bash('git diff main...abc1234 | cat')).toContain('granted')
+  expect(await bash('git diff main...abc1234 | sh')).toContain('granted')
+  expect(await bash('git diff main...abc1234 | head -5')).toBeNull() // a pipe between two built-in reads
   expect(await bash('git push origin x')).toContain('granted')
   expect(await bash('git diff')).toBeNull() // built in for a reviewer
   expect(await bash('git merge-base main x')).toContain('granted')
@@ -439,4 +440,53 @@ test('a private project is never pushed, approval or not', async () => {
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', private: true } }))
   await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature' })).toContain('private project')
+})
+
+test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside the roots; pipes only between proven read-only commands', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
+  const ok = ['rg foo src', "rg 'a|b' src", 'rg -n --glob "*.ts" foo /h/code/app/src', 'rg foo', 'grep -rn foo src', "grep -rn '/api/v1' src", 'grep -rn foo /h/code/app', 'find . -name "*.ts"', 'find /h/code/app -type f -name x',
+    'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
+  for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat src/*', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
+    'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'sed -n 1p x', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
+  for (const c of bad) expect(await as('lean-agent:reader-sonnet')(c), c).toContain('granted')
+  // foreign, bare and worker types get no search built in (a worker is not restricted by it either)
+  for (const t of ['other:explorer', 'explorer', 'reader-haiku']) expect(await as(t)('rg foo src'), t).toContain('granted')
+  expect(await as('lean-agent:worker-sonnet')('rg foo src')).toBeNull()
+})
+
+test('search commands refuse a relative path when the session cwd is unknown or root', async () => {
+  const h = fakeHost(null)
+  const thread = { kind: 'thread', id: 't1' } as any
+  for (const cwd of ['', '/']) {
+    expect(await run(h, thread, { tool: 'Bash', command: 'cat src/a.ts' }, cwd, 'lean-agent:explorer', 'x1'), cwd).toContain('granted')
+    expect(await run(h, thread, { tool: 'Bash', command: 'rg foo' }, cwd, 'lean-agent:explorer', 'x1'), cwd).toContain('granted')
+  }
+})
+
+test('an Agent call with allow-cmd / allow-edit lines is refused up front unless a thread makes it', async () => {
+  const h = fakeHost(null)
+  const call = (role: any, agentId?: string) => run(h, role, { tool: 'Agent', prompt: 'Look.\nallow-cmd: git log\n', subagent_type: 'lean-agent:reader-haiku' }, '/r', agentId ? 'lean-agent:reader-haiku' : undefined, agentId)
+  expect(await call({ kind: 'plain' })).toContain('cannot own grants')
+  expect(await call({ kind: 'plain' })).toContain('a plain session')
+  expect(await call({ kind: 'thread', id: 't1' }, 'x1')).toContain('a subagent')
+  expect(await call({ kind: 'thread', id: 't1' })).toBeNull()
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Agent', prompt: 'Look around' })).toBeNull() // no grant lines: not refused
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Task', prompt: 'allow-edit: /x' })).toContain('allow-edit')
+})
+
+test('the desk may run read-only search under ~/.lean-agent only', async () => {
+  const h = setup()
+  const desk = { kind: 'desk' } as any
+  const bash = (c: string) => run(h, desk, { tool: 'Bash', command: c }, '/h/lean-agent-desk')
+  for (const c of ['rg stale /h/.lean-agent/projects.json', 'ls /h/.lean-agent/threads', 'cat /h/.lean-agent/threads/t1/brief.md | head -5']) expect(await bash(c), c).toBeNull()
+  expect(await bash('ls /h/.lean-agent/threads')).toBeNull()
+  expect(await bash('cat /h/.lean-agent/threads/t1/brief.md | head -5')).toBeNull()
+  expect(await bash('rg foo /r/app')).toContain('route this to a thread')
+  expect(await bash('rg foo')).toContain('route this to a thread') // the desk folder is outside the root
+  expect(await bash('cat /h/.lean-agent/x > /tmp/y')).toContain('route this to a thread')
+  expect(await bash('find /h/.lean-agent -delete')).toContain('route this to a thread')
 })

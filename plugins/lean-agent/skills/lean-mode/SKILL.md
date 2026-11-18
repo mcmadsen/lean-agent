@@ -6,7 +6,7 @@ description: Work in a token-frugal way for long or unattended agent runs. Use w
 Follow these rules for the rest of the session:
 
 **Reading**
-- Search before you read: Grep or Glob for the symbol, then Read only the
+- Search before you read: Grep or Glob (or `rg` / `find` through Bash) for the symbol, then Read only the
   lines you need with `offset`/`limit`. Never read a whole large file to find
   one function.
 - Don't re-read a file you already have in context unless it changed.

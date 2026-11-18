@@ -6,7 +6,7 @@ argument-hint: <text>
 
 # Find
 
-Search under `~/.lean-agent` with Grep (not shell grep), most useful first:
+Search under `~/.lean-agent` with Grep (or `rg` through Bash where there is no Grep tool), most useful first:
 
 1. `threads/*/thread.json` and `brief.md` (titles, briefs) to name the thread, then its `notes.md`.
 2. `memory/`, `handovers/`, `<project>/gaps.jsonl`, `todo.json`.

@@ -202,6 +202,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box key={`a-${a.n}`}>
             <Text dimColor={!a.unread}>
               {a.rec.kind === 'ask' ? '? ' : ''}
+              {a.rec.superseded ? '↻ brief superseded: ' : ''}
               {a.rec.from}: {short(a.rec.text, 70)}
             </Text>
             {a.unread && <Button key={`ack-${a.n}`} label="ack" onPress={act('ack', async () => ackRows(host, a.n))} />}

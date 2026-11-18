@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { consumeWake, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { readJsonl } from './state'
+import { consumeWake, sweep, takeBatch, renderReports, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -80,4 +81,14 @@ test('lean_report, lean_ask, lean_goal and lean_remember write; the desk reads e
   expect(text).toContain('question from t1')
   expect(text).toContain('a | b')
   expect(await takeReports(h.host)).toBeNull()
+})
+
+test('lean_report superseded: true is kept, shown to the desk text and the pane row', async () => {
+  const h = fakeHost(null)
+  await threadTool(h.host, 't1', 'lean_report', { text: 'user changed the target branch', superseded: true })
+  await threadTool(h.host, 't1', 'lean_report', { text: 'plain' })
+  const recs = await readJsonl<any>(h.host, '/h/.lean-agent/desk/inbox.jsonl')
+  expect(recs[0].superseded).toBe(true)
+  expect(recs[1].superseded).toBeUndefined()
+  expect(renderReports(recs)).toContain('[brief superseded by a later user message]: user changed')
 })

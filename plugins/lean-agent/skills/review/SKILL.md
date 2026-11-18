@@ -17,7 +17,7 @@ the review must be redone after every change. Without a green review the refusal
    exactly these lines in its prompt, with the real base and full HEAD sha filled in (a grant matches the command
    or a prefix of it followed by a space; nothing else, no pipes or redirects):
    `allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>`
-   Tell it to use them as written and to use Read/Grep for everything else; it has no other shell access.
+   Tell it to use them as written; `git diff|log|show|status|rev-parse` and read-only `rg`/`grep`/`find`/`ls`/`cat` are built in, and Read covers the rest; it has no other shell access.
 3. Fix every blocker and major finding (edit, test, commit), then run pass 2 on the new HEAD. Stop after at most 3
    passes; if blockers remain, record `green: false` and report with `lean_report`.
 4. Record the verdict with the `lean_review` tool (`mcp__lean-agent__lean_review`): `project` (the name in
