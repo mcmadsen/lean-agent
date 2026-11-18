@@ -35,13 +35,3 @@ export async function chase(h: Host, send: (id: string, text: string) => Promise
   }
   return chased
 }
-
-// ---- review record (push gate): written by the review skill's tool call, read by guard.pushDenial ---------------
-export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; ts?: number }
-export async function writeReview(h: Host, r: Review): Promise<string> {
-  if (!/^[0-9a-f]{7,64}$/.test(r.sha)) throw new Error('review needs a full commit sha')
-  const home = await homeDir(h)
-  const file = `${leanDir(home)}/${r.project}/reviews/${r.sha}.json`
-  await writeJson(h, file, { ...r, ts: await h.clock.now() })
-  return file
-}

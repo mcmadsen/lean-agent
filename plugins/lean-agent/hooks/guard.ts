@@ -1,13 +1,16 @@
 // Guards for `tool.call` (design 2.6): strict mode for the desk, push gate and private projects everywhere,
 // read-only and --allow-edit grants for worker subagents. `decide` answers a deny text or null (allow).
 // register.tsx wraps it fail-closed: a throwing guard denies.
-import { homeDir, leanDir, readJson, realPath, threadsDir } from './state'
+import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
+import { greenReview, keyFile } from './reviews'
 import type { Host } from './state'
 import type { Role } from './role'
 
-export type Ctx = { role: Role; cwd: string; agentType?: string } // agentType: set inside a subagent loop
+export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string } // agentType/agentId: set inside a subagent loop
 export type Call = { tool: string; [k: string]: any }
 export type Grants = { edit?: string[]; cmds?: string[] }
+type GrantRec = Grants & { call: string; type?: string }
+type GrantDoc = { pending: GrantRec[]; agents: Record<string, GrantRec> }
 
 export const ROUTE = 'lean-agent strict mode: route this to a thread (thread skill)'
 
@@ -38,7 +41,7 @@ function words(c: string): string[] {
 
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
-export const PUBLISH = /\bgh\b[^;&|\n]*\b(pr\s+create|pr\s+comment|issue\s+comment|comment|review\s+[^;&|\n]*--(comment|body|approve|request-changes))\b/
+export const PUBLISH = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge|edit|close|reopen|ready|review)|issue\s+(create|comment|edit|close|reopen)|release\s+(create|upload|edit|delete)|api|comment|review\s+[^;&|\n]*--(comment|body|approve|request-changes))\b/
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
   const out = [cwd]
@@ -63,6 +66,28 @@ export async function projectOf($: Host, dir: string): Promise<{ slug: string; p
   return slug ? { slug, private: false } : null
 }
 
+// A push that rewrites or deletes a shared branch is refused in every repo, registered or not.
+export const PROTECTED = /^(main|master|develop|dev|trunk|prod|production|stable|release([/-].*)?)$/
+async function protectedDenial($: Host, c: string, dir: string): Promise<string | null> {
+  const w = words(c)
+  const at = w.indexOf('push')
+  if (at < 0) return null
+  const args = w.slice(at + 1)
+  const flags = args.filter(a => a.startsWith('-') && a.length > 1)
+  const rest = args.filter(a => !a.startsWith('-'))
+  const force = flags.some(f => /^--force(-with-lease|-if-includes)?(=.*)?$/.test(f) || /^-[a-zA-Z]*f[a-zA-Z]*$/.test(f)) || rest.slice(1).some(a => a.startsWith('+'))
+  const del = flags.some(f => f === '--delete' || f === '-d') || rest.slice(1).some(a => a.startsWith(':'))
+  if (flags.includes('--mirror') || (flags.includes('--all') && force)) return 'lean-agent: --mirror / forced --all pushes rewrite shared branches and are refused'
+  if (!force && !del) return null
+  let targets = rest.slice(1).map(a => a.replace(/^\+/, '').split(':').pop()!.replace(/^refs\/heads\//, '')).filter(Boolean)
+  if (!targets.length) {
+    const r = await $.process.run(['git', '-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'])
+    targets = [r.exitCode === 0 ? r.stdout.trim() : 'main'] // unknown: assume protected
+  }
+  const bad = targets.find(t => PROTECTED.test(t) || t === 'HEAD')
+  return bad ? `lean-agent: ${force ? 'force-pushing' : 'deleting'} protected branch ${bad} is never allowed` : null
+}
+
 async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
   const publishing = PUBLISH.test(c)
   const pushing = PUSH.test(c)
@@ -74,19 +99,41 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
   }
   if (!pushing) return null
   const dir = dirs[dirs.length - 1]!
+  const prot = await protectedDenial($, c, dir)
+  if (prot) return prot
+  const p = await projectOf($, dir)
+  if (!p) return null // the review gate is for registered projects; other repos push as before
   const r = await $.process.run(['git', '-C', dir, 'rev-parse', 'HEAD'])
   const sha = r.exitCode === 0 ? r.stdout.trim() : ''
   if (!/^[0-9a-f]{7,64}$/.test(sha)) return 'lean-agent push gate: cannot read HEAD here, so no review can unlock the push'
-  const p = await projectOf($, dir)
-  if (!p) return `lean-agent push gate: this folder belongs to no lean-agent project; review ${sha.slice(0, 8)} first`
-  const rec = await readJson<any>($, `${leanDir(await homeDir($))}/${p.slug}/reviews/${sha}.json`, null)
-  if (rec && (rec.green === true || rec.verdict === 'green')) return null
-  return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first`
+  if (await greenReview($, p.slug, sha)) return null
+  return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}); run the review skill first (an override needs the user's approval)`
 }
 
-// ---- strict mode (desk) --------------------------------------------------------------------------------------
-const DESK_DENY = new Set(['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task', 'WebFetch'])
+// ---- review records and the signing key are the mod's alone -----------------------------------------------------
+async function reviewStoreDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  const home = await homeDir($)
+  const lean = leanDir(home)
+  const isStore = (p: string) => (within(p, lean) && /\/reviews(\/|$)/.test(p.slice(lean.length))) || p === keyFile(home)
+  const NO = 'lean-agent: review records are written only by the lean_review tool'
+  const pathTools = ['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob']
+  if (pathTools.includes(e.tool)) {
+    const raw: string = e.file_path ?? e.notebook_path ?? e.path ?? ''
+    if (!raw) return null
+    const p = await resolve($, raw, ctx.cwd)
+    return isStore(p) || isStore(norm(raw)) ? NO : null
+  }
+  if (e.tool === 'Bash') {
+    const c = String(e.command ?? '')
+    if (/review\.key/.test(c) || /\.lean-agent\S*\/reviews|\/reviews\/[0-9a-f]{7,}/.test(c)) return NO
+    if (/(^|[\s;&|(])cd\s/.test(c) && /\breviews\b/.test(c) && /\.lean-agent/.test(c)) return NO
+  }
+  return null
+}
+
+// ---- strict mode (desk): an allow-list, every other tool is denied ----------------------------------------------
 const DESK_READ = new Set(['Read', 'Grep', 'Glob'])
+const DESK_FREE = new Set(['Skill', 'ToolSearch', 'TodoWrite', 'AskUserQuestion'])
 
 function deskBashOk(c: string): boolean {
   if (hasMeta(c)) return false
@@ -98,7 +145,6 @@ function deskBashOk(c: string): boolean {
 }
 
 async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
-  if (DESK_DENY.has(e.tool)) return `${ROUTE}: ${e.tool} is not for the desk`
   if (DESK_READ.has(e.tool)) {
     const raw: string = e.file_path ?? e.path ?? ''
     if (!raw) return `${ROUTE}: ${e.tool} only under ${leanDir(await homeDir($))}`
@@ -106,21 +152,79 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     return within(p, await realPath($, leanDir(await homeDir($)))) || within(p, leanDir(await homeDir($))) ? null : `${ROUTE}: ${e.tool} only under ${leanDir(await homeDir($))}`
   }
   if (e.tool === 'Bash') return deskBashOk(String(e.command ?? '')) ? null : ROUTE
-  return null
+  if (DESK_FREE.has(e.tool) || e.tool.startsWith('mcp__lean-agent__')) return null
+  return `${ROUTE}: ${e.tool} is not for the desk`
 }
 
 // ---- workers -------------------------------------------------------------------------------------------------
-export const isReader = (t?: string) => !!t && (/^reader-/.test(t) || t === 'reviewer' || t === 'explorer')
 export const isWorker = (t?: string) => !!t && /^worker-/.test(t)
+// every subagent that is not a known worker (readers, the reviewer, explorer, general-purpose, an unknown type) is read-only
+export const isReader = (t?: string) => !!t && !isWorker(t)
 
 export async function grantsFile($: Host, role: Role): Promise<string> {
   const home = await homeDir($)
   return role.kind === 'thread' ? `${threadsDir(home)}/${role.id}/grants.json` : `${leanDir(home)}/grants.json`
 }
 
+// Grants are written by the mod when the thread calls the Agent tool (register.tsx): `allow-edit: /abs, /abs` and
+// `allow-cmd: cmd` lines in the prompt. The subagent id is not known yet, so the grant waits as pending and is bound
+// to the first subagent of that type that acts; it is removed when the Agent call returns.
+export function parseGrants(prompt: unknown): Grants {
+  const t = typeof prompt === 'string' ? prompt : ''
+  const list = (key: string) => [...t.matchAll(new RegExp(`^\\s*-{0,2}${key}\\s*[:=]\\s*(.+)$`, 'gim'))].flatMap(m => m[1]!.split(',')).map(x => x.trim().replace(/^["'`]|["'`]$/g, '')).filter(Boolean)
+  return { edit: list('allow-edit').filter(x => x.startsWith('/')), cmds: list('allow-cmd') }
+}
+
+let chain: Promise<unknown> = Promise.resolve()
+function locked<T>(f: () => Promise<T>): Promise<T> {
+  const r = chain.then(f, f)
+  chain = r.catch(() => undefined)
+  return r
+}
+async function readDoc($: Host, file: string): Promise<GrantDoc> {
+  const d = await readJson<Partial<GrantDoc>>($, file, {})
+  return { pending: Array.isArray(d.pending) ? d.pending : [], agents: d.agents && typeof d.agents === 'object' && !Array.isArray(d.agents) ? d.agents : {} }
+}
+
+export function recordGrant($: Host, role: Role, call: string, type: string | undefined, g: Grants): Promise<void> {
+  return locked(async () => {
+    const file = await grantsFile($, role)
+    const d = await readDoc($, file)
+    d.pending.push({ call, type, edit: g.edit ?? [], cmds: g.cmds ?? [] })
+    await writeJson($, file, d)
+  })
+}
+
+export function releaseGrant($: Host, role: Role, call: string): Promise<void> {
+  return locked(async () => {
+    const file = await grantsFile($, role)
+    const d = await readDoc($, file)
+    d.pending = d.pending.filter(g => g.call !== call)
+    for (const [id, g] of Object.entries(d.agents)) if (g.call === call) delete d.agents[id]
+    await writeJson($, file, d)
+  })
+}
+
+async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
+  if (!ctx.agentId) return {}
+  return locked(async () => {
+    const file = await grantsFile($, ctx.role)
+    const d = await readDoc($, file)
+    const bound = d.agents[ctx.agentId!]
+    if (bound) return bound
+    const i = d.pending.findIndex(g => !g.type || g.type === ctx.agentType)
+    if (i < 0) return {}
+    const [g] = d.pending.splice(i, 1)
+    d.agents[ctx.agentId!] = g!
+    await writeJson($, file, d)
+    return g!
+  })
+}
+
 async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const t = ctx.agentType
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
+  if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   if (isReader(t)) {
     if (edits) return `lean-agent: ${t} is read-only`
     if (e.tool === 'Bash' && t === 'explorer') {
@@ -128,7 +232,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
       return !hasMeta(c) && /^git (log|ls-files)( |$)/.test(c) ? null : 'lean-agent: explorer may run only git log and git ls-files'
     }
     if (e.tool === 'Bash') {
-      const g = await readJson<Grants>($, await grantsFile($, ctx.role), {})
+      const g = await grantFor($, ctx)
       const c = String(e.command ?? '').trim()
       const ok = !hasMeta(c) && (g.cmds ?? []).some(x => c === x || c.startsWith(x + ' '))
       return ok ? null : `lean-agent: ${t} may run only the commands the thread granted (allow-cmd)`
@@ -136,7 +240,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     return null
   }
   if (isWorker(t) && edits) {
-    const g = await readJson<Grants>($, await grantsFile($, ctx.role), {})
+    const g = await grantFor($, ctx)
     const raw: string = e.file_path ?? e.notebook_path ?? ''
     if (!raw) return 'lean-agent: edit without a path'
     const p = await resolve($, raw, ctx.cwd)
@@ -148,10 +252,13 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
 
 // ---- entry ---------------------------------------------------------------------------------------------------
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  const store = await reviewStoreDenial($, ctx, e)
+  if (store) return store
   if (ctx.role.kind === 'desk' && !ctx.agentType) {
     const d = await deskDenial($, ctx, e)
     if (d) return d
   }
+  if (ctx.role.kind === 'thread' && !ctx.agentType && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
   if (ctx.agentType) {
     const d = await workerDenial($, ctx, e)
     if (d) return d

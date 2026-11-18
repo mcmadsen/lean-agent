@@ -6,6 +6,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, thread
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
 import { checkStale, recordLearn, rulesStats, slugOk, syncRules } from './rules'
+import { writeReview } from './reviews'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -67,6 +68,7 @@ export type Tool = { name: string; description: string; inputSchema: unknown }
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
+  { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
   { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
@@ -94,6 +96,11 @@ export async function threadTool(h: Host, id: string, name: string, i: any): Pro
       await appendJsonl(h, `${leanDir(home)}/questions.jsonl`, { ts, from: id, question: str(i.question), options, answered: false })
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'ask', text: str(i.question), options } satisfies DeskRec)
       return { ok: true, text: 'question sent; the answer arrives as a desk message' }
+    }
+    if (name === 'lean_review') {
+      const project = str(i.project) || (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project || ''
+      const file = await writeReview(h, { project, sha: str(i.sha), green: i.green === true, passes: Number(i.passes) || undefined, findings: Array.isArray(i.findings) ? i.findings.filter((x: unknown) => typeof x === 'string') : undefined })
+      return { ok: true, text: `review recorded (${i.green === true ? 'green' : 'not green'}) in ${file}` }
     }
     if (name === 'lean_goal') {
       if (!str(i.update)) return { ok: false, text: 'lean_goal needs update' }

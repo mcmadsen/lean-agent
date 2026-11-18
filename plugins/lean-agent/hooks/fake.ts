@@ -43,7 +43,9 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
       if (c === 'mv') { const s = files.get(a[0]); if (s === undefined) { const ks = [...files.keys()].filter(k => k.startsWith(a[0] + '/')); if (!ks.length) return { exitCode: 1, stdout: '', stderr: 'no such file' }; for (const k of ks) { files.set(a[1] + k.slice(a[0].length), files.get(k)!); files.delete(k) } return ok() } files.set(a[1], s); files.delete(a[0]); return ok() }
       if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) for (const k of [...files.keys()]) if (k === x || k.startsWith(x + '/')) files.delete(k); return ok() }
-      if (c === 'mkdir' || c === 'chmod' || c === 'launchctl') return ok()
+      if (c === 'mkdir' || c === 'chmod' || c === 'systemctl' || c === 'launchctl') return ok()
+      if (c === 'shasum') { let x = 5381; for (const ch of call.stdin ?? '') x = ((x * 33) ^ ch.charCodeAt(0)) >>> 0; return ok(x.toString(16).padStart(8, '0').repeat(8) + '  -') }
+      if (c === 'openssl') return ok('ab'.repeat(32))
       if (c === 'id') return ok('501')
       if (c === 'uname') return ok('Darwin')
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }

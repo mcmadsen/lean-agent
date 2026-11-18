@@ -7,7 +7,7 @@ argument-hint: [base-branch]
 # Review and push gate
 
 Run in a thread, in the repo or worktree to push. The push guard allows `git push` only when
-`~/.lean-agent/<project>/reviews/<full HEAD sha>.json` exists with `"green": true`; any new commit changes the sha, so
+`lean_review` recorded a green verdict for the full HEAD sha (registered projects only); any new commit changes the sha, so
 the review must be redone after every change.
 
 1. `git rev-parse HEAD` (full sha), `git diff <base>...HEAD --stat`; base defaults to the default branch.
@@ -15,7 +15,8 @@ the review must be redone after every change.
    severity with `path:line`.
 3. Fix every blocker and major finding (edit, test, commit), then run pass 2 on the new HEAD. Stop after at most 3
    passes; if blockers remain, record `green: false` and report with `lean_report`.
-4. Write `~/.lean-agent/<project>/reviews/<sha>.json` (Write tool; project = the name in `projects.json`):
-   `{"green": true|false, "sha": "<full sha>", "project": "<name>", "passes": N, "findings": ["<open finding>", ...]}`
-   Green means: tests pass, no open blocker or major finding. Never write green for a sha you did not review.
+4. Record the verdict with the `lean_review` tool (`mcp__lean-agent__lean_review`): `project` (the name in
+   `projects.json`), `sha` (full), `green`, `passes`, `findings` (open ones). Never write the file yourself: only the tool
+   signs a record, and an unsigned one is ignored. Green means: tests pass, no open blocker or major finding. Never
+   record green for a sha you did not review.
 5. Say the verdict in one line. Private projects are never pushed whatever the record says.

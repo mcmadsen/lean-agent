@@ -4,7 +4,7 @@
 import { ackRows, loadView, threadStatus } from './view'
 import type { GoalTone, View } from './view'
 import { leanThread } from './threads'
-import { hostOf } from './register'
+import { hostOf } from './host'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.0'

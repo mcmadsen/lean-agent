@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { decide } from './guard'
+import { decide, parseGrants, recordGrant, releaseGrant } from './guard'
+import { writeReview } from './reviews'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const desk = { kind: 'desk' } as const
@@ -13,7 +14,7 @@ function setup() {
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' }, secret: { path: '/r/secret', private: true } }))
   return h
 }
-const run = (h: any, role: any, e: any, cwd = '/r/app', agentType?: string) => decide(h.host, { role, cwd, agentType }, e)
+const run = (h: any, role: any, e: any, cwd = '/r/app', agentType?: string, agentId = agentType ? 'a1' : undefined) => decide(h.host, { role, cwd, agentType, agentId }, e)
 
 const deskTable: [string, any, boolean][] = [
   ['Edit', { tool: 'Edit', file_path: '/h/x' }, false],
@@ -40,6 +41,10 @@ const deskTable: [string, any, boolean][] = [
   ['ls', { tool: 'Bash', command: 'ls' }, false],
   ['lean_thread', { tool: 'mcp__lean-agent__lean_thread', action: 'list' }, true],
   ['TodoWrite', { tool: 'TodoWrite' }, true],
+  ['Skill', { tool: 'Skill' }, true],
+  ['WebSearch', { tool: 'WebSearch' }, false],
+  ['foreign MCP', { tool: 'mcp__other__x' }, false],
+  ['unknown tool', { tool: 'SomethingNew' }, false],
 ]
 test('desk strict mode: table of allowed and denied calls', async () => {
   const h = setup()
@@ -47,46 +52,90 @@ test('desk strict mode: table of allowed and denied calls', async () => {
   expect(await run(h, desk, { tool: 'Edit', file_path: '/x' }, '/h/lean-agent-desk')).toContain('route this to a thread')
 })
 
-test('push gate: green review for HEAD unlocks that sha only', async () => {
+test('push gate: only a signed green review for HEAD unlocks that sha, and only registered projects are gated', async () => {
   const h = setup()
   const push = { tool: 'Bash', command: 'git push origin feature' }
   expect(await run(h, thread, push)).toContain('no green review')
-  h.files.set(`/h/.lean-agent/app/reviews/${SHA}.json`, JSON.stringify({ green: false }))
+  await writeReview(h.host, { green: false, sha: SHA, project: 'app' })
   expect(await run(h, thread, push)).toContain('no green review')
+  // a record a thread wrote itself (no valid signature) is not trusted
   h.files.set(`/h/.lean-agent/app/reviews/${SHA}.json`, JSON.stringify({ green: true }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  h.files.set(`/h/.lean-agent/app/reviews/${SHA}.json`, JSON.stringify({ green: true, sig: 'f'.repeat(64) }))
+  expect(await run(h, thread, push)).toContain('no green review')
+  await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   expect(await run(h, thread, push)).toBeNull()
   expect(await run(h, plain, { tool: 'Bash', command: 'cd /r/app && git push' })).toBeNull()
   h.git.handler = () => ({ exitCode: 0, stdout: 'ffff' + SHA.slice(4) + '\n' }) // HEAD moved on
   expect(await run(h, thread, push)).toContain('no green review')
   expect(await run(h, thread, { tool: 'Bash', command: 'git status' })).toBeNull()
   expect(await run(h, thread, { tool: 'Bash', command: 'bash -c "git push"' })).toContain('no green review')
-  expect(await run(h, plain, push, '/elsewhere')).toContain('no lean-agent project')
+  // nothing else demands a review; an unregistered repo pushes as before
+  expect(await run(h, plain, push, '/elsewhere')).toBeNull()
+  expect(await run(h, thread, { tool: 'Bash', command: 'git commit -m x' })).toBeNull()
+})
+
+test('review records and the key are the mod\'s alone', async () => {
+  const h = setup()
+  await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
+  for (const e of [
+    { tool: 'Write', file_path: `/h/.lean-agent/app/reviews/${SHA}.json` },
+    { tool: 'Edit', file_path: '/h/.lean-agent/app/reviews/x.json' },
+    { tool: 'Read', file_path: '/h/.lean-agent/review.key' },
+    { tool: 'Bash', command: `echo '{}' > ~/.lean-agent/app/reviews/${SHA}.json` },
+    { tool: 'Bash', command: 'cat /h/.lean-agent/review.key' },
+  ])
+    for (const role of [thread, plain]) expect([e.tool, await run(h, role, e)]).toEqual([e.tool, expect.stringContaining('lean_review')])
+  expect(await run(h, thread, { tool: 'Write', file_path: '/h/.lean-agent/app/notes.md' })).toBeNull()
+})
+
+test('protected branches are never force-pushed or deleted, in any repo', async () => {
+  const h = setup()
+  h.git.handler = a => (a.includes('--abbrev-ref') ? { exitCode: 0, stdout: 'main\n' } : { exitCode: 0, stdout: SHA + '\n' })
+  for (const command of ['git push --force origin main', 'git push -f', 'git push origin +master', 'git push --force-with-lease origin release/1.0', 'git push origin --delete main', 'git push --mirror'])
+    for (const cwd of ['/r/app', '/elsewhere']) expect([command, cwd, await run(h, plain, { tool: 'Bash', command }, cwd)]).toEqual([command, cwd, expect.stringContaining('lean-agent')])
+  h.git.handler = a => (a.includes('--abbrev-ref') ? { exitCode: 0, stdout: 'feature\n' } : { exitCode: 0, stdout: SHA + '\n' })
+  expect(await run(h, plain, { tool: 'Bash', command: 'git push --force origin feature' }, '/elsewhere')).toBeNull()
+  expect(await run(h, plain, { tool: 'Bash', command: 'git push --force' }, '/elsewhere')).toBeNull()
+})
+
+test('threads never ask the user directly; neither do subagents', async () => {
+  const h = setup()
+  expect(await run(h, thread, { tool: 'AskUserQuestion' })).toContain('lean_ask')
+  expect(await run(h, thread, { tool: 'AskUserQuestion' }, '/r', 'worker-sonnet')).toContain('never asks')
+  expect(await run(h, plain, { tool: 'AskUserQuestion' })).toBeNull()
 })
 
 test('private projects never push or publish, review or not', async () => {
   const h = setup()
   h.files.set(`/h/.lean-agent/secret/reviews/${SHA}.json`, JSON.stringify({ green: true }))
-  for (const command of ['git push', 'git -C /r/secret push origin x', 'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh issue comment 4 -b hi'])
+  for (const command of ['git push', 'git -C /r/secret push origin x', 'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh issue comment 4 -b hi', 'gh issue create -t x', 'gh pr merge 3', 'gh api -X POST repos/o/r/issues', 'gh release create v1'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   expect(await run(h, thread, { tool: 'Bash', command: 'git -C /r/secret push' }, '/r/app')).toContain('private project')
   expect(await run(h, thread, { tool: 'Bash', command: 'gh pr view 3' }, '/r/secret')).toBeNull()
 })
 
-test('workers: readers are read-only, allow-cmd and allow-edit grants', async () => {
+test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {
   const h = setup()
-  const grant = { edit: ['/h/.lean-agent/worktrees/app/t1'], cmds: ['git log', 'ls'] }
-  h.files.set('/h/.lean-agent/threads/t1/grants.json', JSON.stringify(grant))
+  expect(parseGrants('do it\nallow-edit: /a/b, /c\nallow-cmd: git log, ls\n--allow-edit=rel')).toEqual({ edit: ['/a/b', '/c', ], cmds: ['git log', 'ls'] })
+  await recordGrant(h.host, thread, 'call1', 'reader-sonnet', { cmds: ['git log', 'ls'] })
+  await recordGrant(h.host, thread, 'call2', 'worker-sonnet', { edit: ['/h/.lean-agent/worktrees/app/t1'] })
   const edit = (p: string) => ({ tool: 'Edit', file_path: p })
   expect(await run(h, thread, edit('/anything'), '/r', 'reader-haiku')).toContain('read-only')
-  expect(await run(h, thread, { tool: 'Bash', command: 'git log -5' }, '/r', 'reader-sonnet')).toBeNull()
-  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'reader-sonnet')).toContain('granted')
-  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'reader-sonnet')).toContain('granted')
-  expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'reader-sonnet')).toBeNull()
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'worker-sonnet')).toBeNull()
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'worker-sonnet')).toContain('outside')
-  expect(await run(h, thread, edit('/etc/x'), '/r', 'worker-opus')).toContain('outside')
-  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'worker-opus')).toContain('outside') // no grants file for plain
+  expect(await run(h, thread, edit('/anything'), '/r', 'unknown')).toContain('read-only')
+  expect(await run(h, thread, edit('/anything'), '/r', 'general-purpose')).toContain('read-only')
+  expect(await run(h, thread, { tool: 'Bash', command: 'git log -5' }, '/r', 'reader-sonnet', 'r1')).toBeNull()
+  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'reader-sonnet', 'r1')).toContain('granted')
+  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'reader-sonnet', 'r1')).toContain('granted')
+  expect(await run(h, thread, { tool: 'Bash', command: 'git log' }, '/r', 'unknown', 'u1')).toContain('granted')
+  expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'reader-sonnet', 'r1')).toBeNull()
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'worker-sonnet', 'w1')).toBeNull()
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'worker-sonnet', 'w1')).toContain('outside')
+  expect(await run(h, thread, edit('/etc/x'), '/r', 'worker-opus', 'w2')).toContain('outside')
+  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'worker-opus', 'w3')).toContain('outside') // no grants for plain
   expect(await run(h, thread, edit('/anything'), '/r')).toBeNull() // the thread's own main loop is not a worker
+  await releaseGrant(h.host, thread, 'call2')
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'worker-sonnet', 'w1')).toContain('outside')
 })
 
 test('a throwing guard denies (fail closed)', async ($, on) => {
@@ -96,6 +145,6 @@ test('a throwing guard denies (fail closed)', async ($, on) => {
   h.git.handler = () => { throw new Error('boom') }
   on('tool.call', { tool: 'Bash' }, () => ({ result: 'ran' }) as any)
   await $.session.start({ cwd: '/r/app', surface: 'desktop', isInteractive: true } as any)
-  const r: any = await $.tool.call({ tool: 'Bash', command: 'git push' } as any)
+  const r: any = await $.tool.call({ tool: 'Bash', command: 'git push --force' } as any)
   expect(r.deny).toBeDefined()
 })

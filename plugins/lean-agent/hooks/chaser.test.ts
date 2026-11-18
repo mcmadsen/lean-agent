@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { CHASE_TEXT, chase, writeReview } from './chaser'
+import { CHASE_TEXT, chase } from './chaser'
+import { greenReview, writeReview } from './reviews'
 import { decide } from './guard'
 
 const HOUR = 60 * 60_000
