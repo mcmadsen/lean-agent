@@ -18,7 +18,8 @@ async function secret(h: Host, create: boolean): Promise<string> {
   if (typeof k === 'string' && k.length >= 32) return k
   if (!create) return ''
   const bytes = new Uint8Array(32)
-  try { crypto.getRandomValues(bytes) } catch { for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256) }
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') throw new Error('lean-agent: no secure random source, cannot create the review key')
+  crypto.getRandomValues(bytes)
   const fresh = hex(bytes)
   await h.store.set(KEY, fresh)
   return fresh
@@ -31,7 +32,7 @@ async function dropLegacy(h: Host, home: string) {
 
 // HMAC-SHA256 in plain JS: the hooks sandbox has no crypto.subtle.importKey, and the key never leaves the store
 const K = Array.from({ length: 64 }, (_, i) => { let p = 0; for (let n = 2, c = 0; c <= i; n++) if (Array.from({ length: n - 2 }, (_, d) => d + 2).every(d => n % d)) { p = n; c++ } return Math.floor((Math.cbrt(p) % 1) * 2 ** 32) >>> 0 })
-function sha256(m: Uint8Array): Uint8Array {
+export function sha256(m: Uint8Array): Uint8Array {
   const H = [2, 3, 5, 7, 11, 13, 17, 19].map(p => Math.floor((Math.sqrt(p) % 1) * 2 ** 32) >>> 0)
   const len = m.length
   const padded = new Uint8Array(((len + 9 + 63) >> 6) << 6)
@@ -57,7 +58,7 @@ function sha256(m: Uint8Array): Uint8Array {
   H.forEach((x, i) => new DataView(out.buffer).setUint32(i * 4, x))
   return out
 }
-function hmac(key: Uint8Array, msg: Uint8Array): Uint8Array {
+export function hmac(key: Uint8Array, msg: Uint8Array): Uint8Array {
   const k = new Uint8Array(64)
   k.set(key.length > 64 ? sha256(key) : key)
   const cat = (p: number, x: Uint8Array) => { const o = new Uint8Array(64 + x.length); for (let i = 0; i < 64; i++) o[i] = k[i]! ^ p; o.set(x, 64); return o }

@@ -166,7 +166,11 @@ All fail closed (a guard that throws denies):
   `gh repo view|list`, `gh run view|list`, `gh auth status`, `gh api` with no write method or field flags, `az ... list|show|query|get`.
   Subcommands are matched by position, so `gh issue list --label release` passes. Commands that cannot be parsed (unbalanced quotes,
   `eval`, a `$variable` as program name) are denied. Everything else (gist, workflow run, secret set, ...) is denied as not on the list.
-  `git fetch|log|status` pass. Other projects only get the push gate and the protected-branch / `--force` guard.
+  `git fetch|log|status` pass. A whole-text check also refuses `git push`, `gh ... create|comment|merge`, `-c core.hooksPath=` and
+  `GIT_CONFIG_COUNT/KEY_*` anywhere in the command, quoted or not. Residual risk: wrappers such as `python -c`, `ssh`, `flock`,
+  `parallel` or `awk system()` are not parsed; `git push` from them is still refused by the pre-push hook, a backstop installed for
+  thread sessions (it chains to the repo's own hooks, husky and git-lfs included, and fails closed if its private list is unreadable;
+  `--no-verify` skips it, which is why the shell check refuses that). Other projects only get the push gate and the protected-branch / `--force` guard.
 - **Workers**: readers are read-only; an edit grant is explicit (`allow-edit`).
 
 ## State files
@@ -200,7 +204,7 @@ Writes are atomic (temp file then rename); appends are single `O_APPEND` writes;
 claude plugin validate plugins/lean-agent
 sh plugins/lean-agent/opener/open-desk.test.sh   # opener, with a fake pgrep and claude
 sh plugins/lean-agent/hooks/rules-loaded.test.sh
-sh plugins/lean-agent/hooks/githooks.test.sh   # pre-push hook, real git in temp repos
+sh plugins/lean-agent/hooks/githooks.test.sh   # hook wrappers (private check + chaining), real git in temp repos
 claude plugin test plugins/lean-agent            # mod specs (*.test.ts, *.test.tsx); no sign-in needed
 ```
 

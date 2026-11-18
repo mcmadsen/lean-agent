@@ -9,6 +9,9 @@ export type Verdict = { push: boolean; write: boolean; unsure: boolean }
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
+// cheap whole-text check for private projects (wrappers like python -c / ssh are not parsed; a documented residual risk):
+// git push, gh create|comment|merge anywhere in the text, and the ways to skip the pre-push backstop
+export const PRIVATE_TEXT = /\bgit\b[^\n]*\bpush\b|\bgh\b[^\n]*\b(create|comment|merge)\b|(^|[\s'"])-c\s*["']?core\.hooksPath|\bGIT_CONFIG_(COUNT|KEY_\d*|PARAMETERS)/i
 const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\breview\b[^;&|\n]*--(post|comment)\b)/
 const GHAZ = /(^|[^\w./-])(gh|az)($|[^\w-])/
 const DYNAMIC = /(^|[;&|(`\n]|\$\()\s*(\w+=\S*\s+)*["']?\$[\w{(]/

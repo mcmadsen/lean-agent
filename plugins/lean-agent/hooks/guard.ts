@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview } from './reviews'
-import { analyze } from './shell'
+import { analyze, PRIVATE_TEXT } from './shell'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -50,7 +50,8 @@ export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
 //   gh: pr view|list|diff|checks|status; issue view|list|status; repo view|list; run view|list; auth status; api without
 //       a write method or -f/-F/--field/--raw-field/--input; no subcommand (gh, gh --version).  az: list/show/query/get verbs.
 // Unlexable commands are denied only if they also mention a gh/az token or a variable program. This is the fast first
-// line; git itself refuses a push through the pre-push hook (githooks.ts) whatever the shell form.
+// line; the pre-push hook (githooks.ts) is only a backstop (--no-verify and config overrides skip it, so those are refused here).
+// Wrappers such as python -c / ssh / flock are not parsed (documented residual risk); a whole-text check still catches `git push` and `gh ... create|comment|merge`.
 // In non-private projects none of this applies: only the push gate and the protected-branch / --force guard do.
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
@@ -101,7 +102,8 @@ async function protectedDenial($: Host, c: string, dir: string): Promise<string 
 async function pushDenial($: Host, c: string, cwd: string): Promise<string | null> {
   const a = analyze(c)
   const pushing = a.push
-  if (!a.push && !a.write) return null
+  const text = PRIVATE_TEXT.test(c)
+  if (!a.push && !a.write && !text) return null
   const dirs = dirsOf(c, cwd)
   for (const d of dirs) {
     const p = await projectOf($, d)
