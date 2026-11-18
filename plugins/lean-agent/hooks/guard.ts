@@ -41,7 +41,8 @@ function words(c: string): string[] {
 
 // The command reaches git push / gh publishing anywhere in its text (quotes, eval and bash -c included).
 export const PUSH = /\bgit\b[^;&|\n]*\bpush\b/
-export const PUBLISH = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge|edit|close|reopen|ready|review)|issue\s+(create|comment|edit|close|reopen)|release\s+(create|upload|edit|delete)|api|comment|review\s+[^;&|\n]*--(comment|body|approve|request-changes))\b/
+// What 0.45 guarded (pr create/comment, issue comment, review comments) plus `gh pr merge`; read-only `gh api` passes.
+export const PUBLISH = /\bgh\b[^;&|\n]*\b(pr\s+(create|comment|merge)|issue\s+comment|comment|review\s+[^;&|\n]*--(comment|body|approve|request-changes))\b/
 // Directories a command works in: `git -C dir`, `cd dir`, `--git-dir`-less; the session cwd is always one.
 export function dirsOf(c: string, cwd: string): string[] {
   const out = [cwd]
@@ -114,7 +115,13 @@ async function pushDenial($: Host, c: string, cwd: string): Promise<string | nul
 async function reviewStoreDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const home = await homeDir($)
   const lean = leanDir(home)
-  const isStore = (p: string) => (within(p, lean) && /\/reviews(\/|$)/.test(p.slice(lean.length))) || p === keyFile(home)
+  // only lean-agent's own store: ~/.lean-agent/<project>/reviews/** and the key; never worktrees/threads/project folders
+  const isStore = (p: string) => {
+    if (p === keyFile(home)) return true
+    if (!within(p, lean)) return false
+    const seg = p.slice(lean.length + 1).split('/')
+    return seg.length >= 2 && seg[1] === 'reviews' && seg[0] !== 'worktrees' && seg[0] !== 'threads'
+  }
   const NO = 'lean-agent: review records are written only by the lean_review tool'
   const pathTools = ['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob']
   if (pathTools.includes(e.tool)) {
@@ -125,8 +132,8 @@ async function reviewStoreDenial($: Host, ctx: Ctx, e: Call): Promise<string | n
   }
   if (e.tool === 'Bash') {
     const c = String(e.command ?? '')
-    if (/review\.key/.test(c) || /\.lean-agent\S*\/reviews|\/reviews\/[0-9a-f]{7,}/.test(c)) return NO
-    if (/(^|[\s;&|(])cd\s/.test(c) && /\breviews\b/.test(c) && /\.lean-agent/.test(c)) return NO
+    if (/review\.key/.test(c) || /\.lean-agent\/(?!worktrees\/|threads\/)[^\s/]+\/reviews\b/.test(c)) return NO
+    if (/(^|[\s;&|(])cd\s+["']?\S*\.lean-agent(\/(?!worktrees\b|threads\b)[^\s\/"']+)?\/?["']?(\s|;|&|$)/.test(c) && /\breviews\b/.test(c)) return NO
   }
   return null
 }

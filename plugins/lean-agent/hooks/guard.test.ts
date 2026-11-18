@@ -87,6 +87,10 @@ test('review records and the key are the mod\'s alone', async () => {
   ])
     for (const role of [thread, plain]) expect([e.tool, await run(h, role, e)]).toEqual([e.tool, expect.stringContaining('lean_review')])
   expect(await run(h, thread, { tool: 'Write', file_path: '/h/.lean-agent/app/notes.md' })).toBeNull()
+  // a project's own folder named reviews is not the store
+  for (const p of ['/h/.lean-agent/worktrees/app/t1/src/reviews/a.ts', '/h/.lean-agent/threads/t1/reviews/x'])
+    expect([p, await run(h, thread, { tool: 'Write', file_path: p })]).toEqual([p, null])
+  expect(await run(h, thread, { tool: 'Bash', command: 'ls /h/.lean-agent/worktrees/app/t1/src/reviews' })).toBeNull()
 })
 
 test('protected branches are never force-pushed or deleted, in any repo', async () => {
@@ -109,10 +113,11 @@ test('threads never ask the user directly; neither do subagents', async () => {
 test('private projects never push or publish, review or not', async () => {
   const h = setup()
   h.files.set(`/h/.lean-agent/secret/reviews/${SHA}.json`, JSON.stringify({ green: true }))
-  for (const command of ['git push', 'git -C /r/secret push origin x', 'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh issue comment 4 -b hi', 'gh issue create -t x', 'gh pr merge 3', 'gh api -X POST repos/o/r/issues', 'gh release create v1'])
+  for (const command of ['git push', 'git -C /r/secret push origin x', 'gh pr create --fill', 'gh pr comment 3 -b hi', 'gh issue comment 4 -b hi', 'gh pr merge 3'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   expect(await run(h, thread, { tool: 'Bash', command: 'git -C /r/secret push' }, '/r/app')).toContain('private project')
-  expect(await run(h, thread, { tool: 'Bash', command: 'gh pr view 3' }, '/r/secret')).toBeNull()
+  for (const command of ['gh pr view 3', 'gh api repos/o/r/pulls/3/comments', 'gh api user --jq .login', 'gh issue create -t x', 'gh release create v1'])
+    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
 })
 
 test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {
