@@ -1,6 +1,8 @@
 # lean-agent Live Map: design brief
 
-> The hosted page was dropped in 0.45.91; the Claude Code pane is the surface now.
+> The hosted page was dropped in 0.45.91. As of 1.0 the surface is the desk pane (goals, answers, threads with
+> Resume / Start, status line) in `plugins/lean-agent/hooks/pane.tsx`; the CLI text form and the `lean-agent` command
+> mentioned below no longer exist. This brief is background for a visual redesign of that pane.
 
 A brief for a designer. It describes what the Live Map is, who uses it, what data it has, what it shows today and
 where it falls short. It ends with what we would like from you. Screens today work and are tested; the visual design

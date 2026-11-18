@@ -1,1183 +1,204 @@
 # lean-agent
 
-**An orchestrator for Claude Code that runs worker agents on as few tokens as possible.**
+Token-frugal orchestration for Claude Code, as one plugin. A **desk** session in the Claude desktop app routes work to
+**threads** (background Claude sessions, one folder each); cheap **workers** do the mechanical parts; learned
+**path-scoped rules** replace long project briefings; review gates, private projects and daily budgets keep it safe and
+cheap. Version 1.0 is pure Claude Code: skills, subagents, a TypeScript mod and plain state files. There is no CLI and no
+Python.
 
-You talk to one lean-agent orchestrator, from your phone through Remote Control, the Claude Desktop app, or
-a terminal. It never does project work itself. For each piece of work it decides:
+- [How it fits together](#how-it-fits-together)
+- [Install](#install)
+- [Upgrade from 0.45](#upgrade-from-045)
+- [Use](#use)
+- [Skills](#skills)
+- [Workers](#workers)
+- [Learned rules](#learned-rules)
+- [Reviews and the push gate](#reviews-and-the-push-gate)
+- [Budgets](#budgets)
+- [Guards](#guards)
+- [State files](#state-files)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
 
-- **which context** the worker needs, chosen from a library learned from your project's `CLAUDE.md`, rules and skills
-- **which model** (Sonnet by default, Haiku for cheap read-only work, Opus only when it's worth it)
-- **which tools and limits** (read-only or not, max turns, max $)
+## How it fits together
 
-Then it starts an isolated worker. Workers report back which context they used and what was missing, and the
-library tunes itself: cards that are always used become *core*, unused ones are archived, and recurring gaps become new cards.
-
-```
- you ──▶ orchestrator  (~/.lean-agent/home, Sonnet, short playbook CLAUDE.md, session budget)
-            │  lean-agent suggest / run / stats / optimize
-            ├──▶ worker  sonnet  cards: testing, code-style      tools: all      ─┐
-            ├──▶ worker  haiku   cards: (none)       --read-only tools: R/Glob/Grep├─▶ ledger + card stats
-            └──▶ worker  sonnet  --resume <run>                                   ─┘
-                     cwd ~/.lean-agent/work/<run>,  --add-dir <your project>
-```
-
-## Why workers are cheap
-
-A normal Claude Code session in your project loads the project's `CLAUDE.md`, every skill (project, user,
-plugins), your plugins' hooks, MCP servers and dozens of tool schemas, and resends all of it on every turn.
-lean-agent workers run with:
-
-```
-claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --tools Bash,Read,Edit,Write,Glob,Grep \
-          --add-dir <project> --append-system-prompt-file <protocol + selected cards> \
-          --model <chosen> --max-turns N --max-budget-usd X
-```
-
-from a scratch folder, not your project, so nothing project-level auto-loads. Measured on Claude Code 2.1.301:
-
-| Same one-line prompt | Context per turn |
+| Piece | What it is |
 |---|---|
-| Default session started in the project | ~36,000 tokens |
-| lean-agent worker | **~8,100 tokens** |
+| **Desk** | A local Claude desktop session in `~/lean-agent-desk`. Its generated `CLAUDE.md` makes it a router: it never reads code or edits files, it starts and talks to threads |
+| **Threads** | Background sessions (`claude --bg`), one folder each under `~/.lean-agent/threads/tN`, visible in the Claude app. A thread works in its own git worktree and reports back with `lean_report` / `lean_ask` / `lean_goal` |
+| **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when a cheaper one failed; read-only readers and a reviewer |
+| **Pane** | The desk's side pane: goals, answers (with acknowledge), threads with Resume / Start buttons, a status line with spend |
+| **Opener** | A login item that waits for the Claude app (never launches it) and opens the desk folder with `claude --desktop` |
+| **Rules** | What the `learn` skill writes per project: short `paths:`-scoped rules that load only when a matching file is read |
 
-That gap is paid on *every* turn of *every* worker.
-
-End to end, a headless Sonnet orchestrator was given *"orders with a discount are charged too little, the discount
-seems applied twice; fix it and add a regression test"* in a sample monorepo with API, web and infra
-`CLAUDE.md` files. It ran `suggest`, started one Sonnet worker with just the `api-layout` and `api-testing`
-cards (why: *"bug fix plus test, moderate reasoning"*), and reported back. The worker fixed the bug with a 2-line
-diff and added a regression test that failed before the fix. Total: **$0.07** (orchestrator $0.036, worker $0.030). A real run, "add `multiply()` to calc.py with a test",
-took a Sonnet worker 3 turns, **9.4K weighted tokens and $0.02**. It followed the two cards it was given (type
-hints, docstrings, the test command) and never saw the rest.
+The desk and threads talk through small files under `~/.lean-agent`: a message to a thread is queued and handed over
+once at the thread's next tool call (or, if the thread is idle, by waking it once). A thread's report reaches the desk
+the same way. A thread that is running is never resumed; an idle one is woken at most once per 30 seconds.
 
 ## Install
 
-Requirements: Claude Code 2.1.300+ (CLI or Claude Desktop) and `python3`. No other dependencies.
+Requirements: Claude Code 2.1.327 or newer, the Claude desktop app, macOS for the login opener (the plugin itself also
+runs without it).
 
 ```sh
-git clone https://github.com/mcmadsen/lean-agent ~/lean-agent
-~/lean-agent/install          # puts `lean-agent` on your PATH, installs the plugin, creates ~/.lean-agent/home
-# open a new terminal, then:
-lean-agent trust              # once: accept Claude Code's trust dialog for the orchestrator folder
+claude plugin marketplace add mcmadsen/lean-agent
+claude plugin install lean-agent@lean-agent
 ```
 
-**Releases and updates:** every version that passes CI gets a GitHub release (`v<version>`); a version whose tests fail gets none. `lean-agent sync` follows releases: it fast-forwards to the newest release that descends from your checkout, and stays put when you are already ahead of it (for example on main). `lean-agent sync --main` follows main once, and `lean-agent config update-channel release|main` sets the default (release). `lean-agent sync --check` shows the current version, the latest release and whether an update is available. After a rewrite of the remote history `sync` can't fast-forward; with a clean working tree run `lean-agent sync --reset` (fetch + reset --hard to the target).
+1. Open the Claude app and start a new **local** session in the folder `~/lean-agent-desk` (create it in the folder
+   chooser if it is missing).
+2. Type `doctor fix`. The desk creates the folder, installs the opener at `~/.lean-agent/bin/open-desk.sh` plus the
+   launch agent `com.lean-agent.desk`, and trusts the desk folder.
+3. From the next login the desk opens by itself once the Claude app is running.
 
-**Updating:** run `lean-agent sync` (or ask the orchestrator to). It:
-- pulls the clone (fast-forward only, and never with local changes) and re-runs itself on the new code
-- runs `claude plugin marketplace update` and `claude plugin update`
-- regenerates the orchestrator guides (the full guide for thread sessions in `CLAUDE.md`, a short front-desk guide for the main session in `.claude/rules/front-desk.md`) and settings; orchestrator sessions start with no MCP servers, no skills and no user custom agents
-- re-learns every project, keeping card stats, and refreshes the repo blocks.
+## Upgrade from 0.45
 
-You don't need to close Claude Desktop or restart `lean-agent up`. The installed plugin's hooks and in-session
-`lean-agent` command hand over to your clone (`~/.lean-agent/source`), so pulled code takes effect immediately, and
-each new orchestrator session reads the refreshed guide and settings. `sync` says when a restart *is* needed (only
-if the server's own settings changed), and an open session can re-read the rules with `lean-agent guide`.
+1. Quit a hosted 0.45 desk if one is running.
+2. `claude plugin update lean-agent`.
+3. In the Claude app open a local session in `~/lean-agent-desk` and type `migrate`.
 
-`./install` links `lean-agent` into `~/.local/bin` (`LEAN_AGENT_BIN_DIR` changes this) and, if that folder isn't on
-your PATH, adds one marked line to your shell's startup file (`~/.zshrc`, `~/.bash_profile`/`~/.bashrc`, fish
-config or `~/.profile`). Running it again changes nothing. `./install --no-plugin` skips the plugin, and
-`./install --uninstall` removes the link and the PATH line but keeps `~/.lean-agent`. To update, run `git pull` in the
-clone; the link points at it, so there's nothing to reinstall.
+Migration is one-time and idempotent (it writes `~/.lean-agent/migrated-1.0.json`):
 
-`trust` matters. Claude Code ignores a folder's permission rules until the folder is trusted, and Remote Control
-never shows the trust dialog, so without it every `lean-agent` call the orchestrator makes waits for your approval.
-`lean-agent trust` opens Claude once in the orchestrator home so you can accept the dialog.
-`lean-agent trust --write-config` sets `hasTrustDialogAccepted` in `~/.claude.json` directly, after a backup.
+| 0.45 data | What happens |
+|---|---|
+| projects, handovers, reviews, passes, memory, todos, worktrees, config, ledger | kept as they are |
+| goals without a thread, open questions to the desk | converted to `goals.json` / `questions.jsonl`; the old files are archived |
+| **threads** | **all open threads are closed**; nothing is carried over. A readable list stays in `~/.lean-agent/legacy-0.45/closed-threads.md` |
+| recipes | become project skills: `~/.lean-agent/<project>/skills/<name>/SKILL.md` |
+| cards | moved to `legacy-0.45/`; run the `learn` skill per project to build rules |
+| service, window, cap, update files and locks | moved to `legacy-0.45/` |
+| old `com.lean-agent.up` service | unloaded; its plist archived |
+| old `lean-agent` command on PATH | removed (1.0 has no CLI) |
 
-The plugin can also be added in **Claude Desktop**: **+** next to the prompt → **Plugins** → **Add plugin** →
-marketplace `mcmadsen/lean-agent`.
+The CLI commands are gone. What each one did now lives in a skill (see [Skills](#skills)) or in the pane. The old
+`lean-agent-map` pane is retired.
 
 ## Use
 
-```sh
-lean-agent learn ~/code/shop --name shop    # index CLAUDE.md files, .claude/rules, .claude/skills
-lean-agent up                               # orchestrator via Remote Control (Sonnet)
-```
+Talk to the desk in plain language. It starts a thread for anything that touches code:
 
-Open the Claude app → Code → **lean-agent**, and ask for work: *"In shop, fix the flaky checkout test and add a
-regression test."* The orchestrator follows its playbook (`~/.lean-agent/home/CLAUDE.md`): picks cards, picks
-a model, runs workers, and reports back briefly.
+- "Fix the flaky login test in the api project": the desk calls `lean_thread new`, the thread works in a worktree and
+  reports; the report appears in the pane and in the desk's next answer.
+- "Tell t2 to also update the changelog": queued for t2, handed over at its next step.
+- "What is everyone working on?": the `goals` skill lists one line per thread.
+- "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a running session.
+- After a restart nothing is running. The pane offers **Resume** for threads that had a session and **Start** for the
+  ones that never started.
 
-`up` runs **one** interactive orchestrator session (in a pseudo-terminal it owns, also under launchd or systemd), and
-everything else shares it: the Claude app (Remote Control) and the terminal are views of the same
-conversation. A restart of `up` continues the conversation (`--fresh` starts a new one). Other lean-agent processes
-type into it through a local socket (`~/.lean-agent/session.sock`, or `/tmp/lean-agent-<uid>/<digest>.sock` when
-that path is too long for a unix socket; mode 0600).
+`/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
+lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
 
-Other ways to run the orchestrator:
-- `lean-agent up --local`: interactive in your terminal
-- Claude Desktop: open the folder `~/.lean-agent/home` in the Code tab (`lean-agent home` prints the path)
+## Skills
 
-`up` options: `--model` (default `sonnet`, `default` = your own default model), `--name`, extra flags for
-`claude remote-control` after `--` (e.g. `lean-agent up -- --debug --debug-file /tmp/rc.log`), `--budget` (orchestrator session, weighted tokens),
-`--budget-5h` / `--budget-week` (see Budgets), `--permission-mode`.
-
-### Commands the orchestrator uses (you can too)
-
-| Command | |
+| Skill | Use |
 |---|---|
-| `lean-agent projects` / `learn <path> [--name n] [--as-worktree]` | Register a project, or refresh its cards after CLAUDE.md changes. Card stats survive. `learn` indexes code and docs (CLAUDE.md, rules, skills) into cards; lessons from PR comments are `review learn`. `--as-worktree` with `--name <existing>` refreshes that project from another checkout (a worktree) without moving its registration. |
-| `lean-agent unlearn <project> [--move-todos p \| --close-todos] [--force] [--remove-worktrees] [--dry-run]` | Unregister a project. The repository is never touched; its lean-agent data moves to `archive/<project>-<time>/`. Open todos, open threads and live runs block it unless you say what to do with them. |
-| `lean-agent cards <project> [filter]` | Cards with size and hit rate (`used/sent`). `*` = core. Filter by id, title or path, e.g. `cards shop infra`. |
-| `lean-agent suggest <project> "<task>"` | Task type (read/change/browser), recommended model (from your `stats` per type, else defaults; Haiku when a budget is low), a gather/judge split hint, then core cards plus relevant cards with cost and reason, or an explicit "No relevant cards". |
-| `lean-agent run <project> -m <model> --why "..." [--cards a,b \| auto] [--read-only] [--chrome[=tools]] [--mcp s:t] [--max-usd X] [--max-turns N] -- "<task>"` | Run an isolated worker. Model and reason are **required**. `--read-only` allows Read/Glob/Grep and read-only `git -C <project> show/log/grep/diff/blame/fetch`. |
-| `lean-agent run <project> ... --read-only --ref <branch>` | A read-only worker on a branch that isn't checked out: it's told to read with `git show <sha>:<path>` and search with `git grep ... <sha>`. Starting the same task again while it runs or right after it finished is refused (`--again` to run it anyway). |
-| `lean-agent recipe add <project> <name> -m <model> --why "..." --task-file F [--read-only] [--mcp s:p] [--evidence "..."] [--apply-task-file F2 --apply-mcp s:p]` | Save a named recipe: a stored run with `{placeholders}`, evidence hints (strongest first) and an optional apply step. `lean-agent recipes` lists them. |
-| `lean-agent do <project> <recipe> [key=value ...] [--apply [--allow-send "<approved>"]]` | Run a recipe in one command. `--apply` runs its apply step with the last check's answer as its plan (`--from <run-id>`, or `--fresh` to re-derive); outward changes stop with the list until the user approves them. A recipe saved with `--fields id,title,state` tells workers to fetch only those; with `--complete` every item must be listed (OK / change / unclear) or the run fails. |
-| `lean-agent text-len <file> [-p project]` | Characters, words, lines, checked against limits named in the project's tracker notes (e.g. a description limit). |
-| `lean-agent card shorten <project> <id> [--save]` | A shorter text for a card (one Haiku call); lists headings, `code`, paths, names and numbers that would be lost, and saves only if none are. |
-| `lean-agent reviews --branch X [--project P] [--json]` | Every review run of a branch: run id, time, head, base, model, cost, verdict, blocker/major/minor counts, open and declined findings, carry-overs, total cost ("verdict unknown" for old runs). |
-| `lean-agent runs --all` (alias `--internal`) | Helper runs (advisor, librarian, composer, review-learn, tracker-discover, gap-decider, reuse-check) are internal: they print no `run ... started` line and are left out of `runs`, thread run lists, `runs --wait all` and the `week` run counts (their cost still counts, shown as `helpers`). `--all` lists them too. |
-| `lean-agent runs --running` | Runs in progress. Every run prints `run <id> started` first, so a background launch is visible. A run's work happens in a detached process, so killing the command (or a clear) doesn't stop it; Ctrl-C does. |
-| `lean-agent runs --lost [--clear]` | Runs whose supervisor died without a result (hidden from `--running`). `--lost --clear` marks them acknowledged so they stop appearing; `runs --stop <id>` still closes one by id. `--clear` alone is a usage error. |
-| `lean-agent runs --wait <id\|all\|last> [--timeout S]` | Blocks until those runs are recorded, then prints each result as `run` printed it. Exit 1 if one failed, 124 on timeout. After a clear: `lean-agent runs --wait all`. |
-| `lean-agent run --resume <run-id> "<follow-up>"` | Continue a worker's session (cheap: its context is cached). |
-| `lean-agent card show\|add\|rm\|core\|unarchive\|protect <project> <id>` | Inspect or edit cards; `add` creates *note* cards from what workers had to discover. `protect` (`--off` to undo) keeps `optimize` from archiving, demoting or trimming a card; `unarchive` brings one back (`core` on an archived card unarchives it too). `optimize --apply --skip a,b` leaves those cards out. |
-| `lean-agent optimize <project> [--apply [ids]] [--accept ids] [--reject ids] [--unreject ids]` | Promote/demote core cards, archive dead ones, flag big cards to trim, list recent context gaps, and draft new recipe cards and MCP presets from what workers actually did. |
-| `lean-agent runs [--last] [--tokens] [--show [id]] [--details] [--grep TEXT] [--tail [N]]` | Recent runs; a run that fails, stops or hits a limit ends its output with `run <id> failed: <reason>`, and `--show <id> --tail N` (default 20) prints just the last N lines of its summary, reason included; `--tokens` prints the latest run's run/tokens/context lines again, `--show` its whole summary (saved per run, so a `| tail` can't lose it), `--details` its details file, `--grep` only matching lines. |
-| `lean-agent run ... --answer-lines N` | The worker answers in at most N lines (default 25 in the orchestrator, `LEAN_AGENT_ANSWER_LINES`) and puts tables, lists and evidence after a `=== DETAILS ===` line; lean-agent saves that part to a file and prints only its path. An answer far past N lines is cut there and the rest opens the file. `0` = whole answer. Reviewers and other roles are never cut. |
-| `lean-agent run ... --escalate haiku,sonnet` | Run on haiku; only if that run fails (or errors, or stops), run the task again on sonnet. `suggest` recommends it and shows how similar earlier tasks did per model ("similar tasks ran on haiku: 6/6 done"). |
-| `lean-agent run ... --max-reads TOKENS` | Stop a worker once it has re-read this much context over all its calls (default 6,000,000; 0 = off; not for reviewers). The run can be resumed; the message says how to split the task instead. |
-| `lean-agent stats [--today] [--project p] [--top N]` | Runs, success rate, avg/total weighted tokens and cost per model; `--top N` lists the biggest runs with turns, context per turn and task. |
-| `lean-agent budget [--by-run [N]]` | This orchestrator session: tokens, context per call by quarter, what re-reading context above ~67K cost, the orchestrator's share next to its workers, and with `--by-run` its biggest runs. |
-| `lean-agent handoff [--note TEXT [--kind decision\|reminder\|fyi]] [--done N\|all]` | The hand-off note a compacted or new orchestrator session starts with (injected at SessionStart after a compaction, and at startup when there was work in the last 12 hours): open items and pending decisions, standing rules (feedback memories), recent runs with their details files, running runs, items and branches touched (`PR 512 (feature/x)`, never a bare commit), latest reviews. Recent runs show their result's first sentence; standing rules are de-duplicated and ranked: core or protected memory cards first, then ones about the current work, the most used, the newest (10 at most). `--note` answers just `note N added`. |
-| `lean-agent review <project> --goal "<task or PR title>"` | Completeness: the reviewer states what the change promises and walks the whole chain (code, config, build, signing, hosting, update path, pipeline, docs). lean-agent scans the added lines (code and docs, and untracked files in a working-tree review) and the commit messages for self-declared gaps ("not done yet", "not yet wired", "installs nothing", TODO, FIXME, placeholder, stub, `<host>` in a doc) and gives every hit to the reviewer; one it doesn't address sends it back once. A gap that keeps the goal from working, not scoped out, is a major finding. Every gap is listed as a "known gap" (`g1`, `g2` ...) until the user decides: `review decline <project> g1 --why "out of scope: ..."`; `review --status` exits 2 while one is open, and an approval with open gaps says to ask the user first. `--all-gaps` acknowledges them all; an acknowledgement carries over to later tips by file and text. In code only comments count (not names like a `renderPlaceholders` helper), and a gap that only repeats a nit stays a nit. When the CI pipeline checks out only some folders (`sparseCheckoutDirectories`, `sparse-checkout`), tests the change adds that read other top-level folders become checks ("CI parity"): they pass in a worker's full worktree and fail in CI. |
-| `lean-agent run ... --worktree origin/<branch>` | Reusing a worktree never throws away commits that aren't on the ref (e.g. a worker's merge): it says so and keeps them; `--reset-worktree` discards them on purpose. Every run prints the worktree's HEAD, and when it moved. A detached worktree of `origin/<branch>` pushes to `<branch>` with `worktree push`; a clean merge of the base branch (no hand-made conflict edits, none of the PR's own files touched) keeps the PR's approving review. |
-| Status line | The orchestrator home's settings give Claude Code a status line: `lean-agent · ctx 34k/67k · week 48% on pace · 2 running · 3 todo · next job Mon 08:45` (a status line you set yourself stays). |
-| `lean-agent grep-log <file> [PATTERN] [-C N]` | The lines that matter in a saved CI or build log (plain text, or JSON such as `{"value": [lines]}`): errors and failures by default, with context, at most 80 lines. |
-| `lean-agent run ... --todo N` | The run works on work-queue item N: an open item becomes doing, and the run is listed on that item. A resumed run keeps it. `review` and `do` take it too; `--todo none` marks a quick lookup that isn't queue work. In the orchestrator, a worker start with neither is refused with the open items listed, so the queue stays current (`LEAN_AGENT_TODO_REMINDER=0` turns that off); the guide has the rest: every request is an item with its `--ref`, finished items are closed, decisions you owe are hand-off notes. |
-| `lean-agent run ... --timeout DUR` | Stops the worker after DUR (e.g. `45m`, `2h`; 30 s to 12 h; default the `config run-timeout`, 30m). At 80% the worker is told to commit and summarise. A timed-out run keeps its tokens, an estimated cost and a partial summary (last words, last tool calls), is marked `timed out`, and `runs --show` lists what is still uncommitted. |
-| `lean-agent run ... --allow-edit "<path-or-glob>"` | The worker may edit this repo-owned path (worktree-relative, repeatable), e.g. `.claude/rules/**` or `CLAUDE.md`, which Claude Code otherwise refuses in a worker. Claude Code ignores allow rules for these files, so the run registers a PermissionRequest hook that approves only edit-tool calls on files inside the worktree that match the globs; each approval is logged and `runs --show` lists it as `edited (allowed): <path>`. `.claude/settings*.json`, `.claude/hooks/**` and `.git` stay refused unless named exactly. A refused worker reports `needs: --allow-edit <path>`. Per project: `lean-agent config allow-edit <project> <glob>... [--clear]` (`learn` hints at it). |
-| `lean-agent run ... --read-only --allow-cmd "<prefix>"` | A read-only worker may also run exactly this read-only command (e.g. `az pipelines runs show`); prefixes with a changing verb are refused. Without it a read-only worker already runs read-only git (`reflog`, `log -g`, `show-ref`, `rev-list`, `merge-base`, ...), `find` (never `-exec`/`-delete`), `ls`/`stat`/`wc`/`head`/`tail`/`grep`/`rg`/`cat`/`du`/`file`/`realpath`, also behind `cd dir &&` and pipes; a PreToolUse hook checks every `&&`/`;`/`|` segment. A refused command is listed as `refused: <command>` in `lean-agent runs --show`, so you know which `--allow-cmd` to add. A read-only task that names a CLI without it gets a warning. |
-| `lean-agent find <query> [--type T] [--project P] [--all]` | One search, no model call, across todos (text, notes, ref), threads, runs, memories, handovers and review records. A PR or work-item number also matches `PR 123`, `!123`, `#123`, `pullrequest/123` and branch names like `feature/123-...`. One table, newest first (Type, Id, Date, State, Match, Open: the exact command to open the hit), 15 rows unless `--all`. Narrower lists: `todo list --ref X`, `thread list --grep TEXT --pr N --item N --open`, `runs --pr N --item N --grep TEXT`. |
-| `lean-agent pr tN \| <PR number> \| list \| mine \| own \| stale [--days N] \| find <text> [--comments] [--ci] [--diff] [--refresh] [--no-live] [--async] [-p P]` | PR status per thread. Prints the known state at once (no network: the thread's PR refs from goals, todos, runs and reviews; last review verdict and open findings, last push, goal state, last report line), then `fetching live state (haiku, ~$0.01)…` and, from ONE read-only helper (role `pr-status`, `az repos pr` / `az devops invoke` GET for Azure DevOps remotes, `gh pr view` / `gh api` GET for GitHub; it never comments, votes or changes anything), status, draft, votes, CI and the open comment threads (human vs bot). Cached per PR in `pr-cache.json` for 10 minutes (config `pr-cache-minutes`); `--refresh` refetches, `--no-live` shows the known state only, `--async` starts the helper and returns (the table arrives as a report line). Every PR number is a link to its web page (from the remote, or the URL the live data returns). `--comments` lists all active comment threads in full, `--ci` the checks (failing first, latest build link), `--diff` the changed files with +/- lines; `pr mine` the open PRs waiting for your vote, `pr stale` your own PRs without activity for N days, `pr find <text>` open PRs by author, reviewer, title, branch or work item (known refs only without live data); a PR number no thread knows uses `-p`, the current project or the single learned one. `pr list` covers every open thread (and closed ones with an open PR goal) and refreshes all PRs with one helper. |
-| `lean-agent todo add\|list\|next\|start\|done\|note\|edit\|rm` | The work queue across sessions and days: `todo add "<text>" -p <project> --ref "PR 512" --prio high --due 2026-10-24`; `next` picks what's in progress, then by priority and due date. The hand-off note shows the open items, so a new conversation picks up the queue. |
-| `lean-agent schedule add "<when>" <lean-agent command>` | Recurring work: `"hourly"`, `"every 2h"`, `"daily 09:00"`, `"weekdays 08:45"`, `"mon,wed 10:00"`; the command is a lean-agent one (`do <project> <recipe>`, `run ...`, `review ...`, `week`), never arbitrary shell, so outward actions still stop for approval. `list`, `rm N`, `run N` (now), `pause N`, `resume N`; `schedule defaults` adds an update check every morning (`sync --check`, installs nothing), a weekly `optimize` report per project and a Friday `week` report. Jobs run while `lean-agent up` runs (a timer in it), else from the orchestrator's next tool call; a slot missed by more than 6 hours waits for the next one. Results go to `~/.lean-agent/scheduled/`; the running conversation is told when one finishes, and the hand-off note lists them. |
-| `lean-agent week [--days N]` | The week: pace against your plan, runs by model and project, savings, the biggest runs, reviews, pushes, todos done and open, scheduled runs. |
-| `lean-agent sync --check` | Whether an update is available (version and commits); installs nothing. |
-| `lean-agent handover "<title>" [--project P] [--task-file F\|-] [--as-is] [--thread tN\|none]` | Writes a handover as a plain Markdown file: `<LEAN_AGENT_HOME>/<project>/handovers/<title slug>.md`, and prints `handover: <path>`. A read-only worker (sonnet, `--safe-mode`, Read/Glob/Grep) writes it from the request in the input; with `--as-is` the input is the document. The file starts with `# <title>` and `_<date> · thread tN_`. Writing the same title again moves the old file to `<slug>.prev.md`; an empty reply writes nothing and exits non-zero. Recorded like other role runs (not resumable) under the current thread; `thread show` lists it as `handover <path>`. The strict orchestrator may run it. |
-| `lean-agent handover "<title>" ... --out PATH` (alias `--to`) `[--force]` | Also writes a copy to PATH (`~` expanded): a file, or an existing folder → `<folder>/<slug>.md`. No folder is created; an existing file is refused unless `--force`. Prints `handover: <path>` and `copy: <path>`. The front desk may run it with `--as-is` (no worker). |
-| `lean-agent handover --show <name> --out PATH` (or `handover copy <name> PATH`) | Copies an existing handover to PATH, same rules; no model call, allowed in the front desk |
-| `lean-agent handover --list [--project P]` | Existing handovers, newest first: path, title, date |
-| `lean-agent remember "<what>" [--project P] [--task-file -]` | Files something to keep through a small librarian worker (sonnet, `--cards auto`, read-only to project code, may run only lean-agent's memory/card/todo/handoff commands): memory, project card, todo, feedback rule or hand-off note, updating an existing entry instead of duplicating and reporting a conflict instead of overwriting. Prints `REMEMBERED <where> <id>`, `UNCHANGED ...` or `CONFLICT ...` lines (exit 1 on a conflict). |
-| `lean-agent advise "<request>" [--project P] [--thread TAG] [--task-file -]` | Before the orchestrator acts on a NEW user request: a cheap worker (haiku, `--cards auto`, read-only) reads the memories, open todos, hand-off notes and latest checkpoint, and is given the card titles, the last ~10 runs, the latest review of the project and the user's last 5 requests in the thread (it starts no runs). It first prints the routing line (`lean_threads.decide`: the same reference/ownership routing the hook uses, e.g. `Belongs to t5 (owns PR 4711)`; it is also given to the advisor as an authoritative fact, which may only refine an "Unsure" result, and a different thread the advisor suggests is reported as `advisor suggested tX; kept t5 (...)`), so the routing shows even when the model part fails; the model call is always made, as advise does more than routing. Then it prints `Understood as: <one line>` (plus `Ambiguous: <two readings>` and an "ask the user first: yes" when the request has two readings: show it to the user before starting a worker), then at most 15 lines starting with `ADVICE`, with `user already asked: proceed` instead of a question when the user already asked for the action explicitly: `known` (facts and earlier decisions), `project` and cards, `suggested` (one exact `lean-agent run ...` or `remember ...` command, or "answer from state"), `risks` (e.g. open review gaps, a decision the request contradicts) and `ask the user first` (yes + the question, or no). Printed and stored in `~/.lean-agent/advice/` (last 50) with the thread tag. The guide has the orchestrator run it for every new request (not for follow-ups in a thread, answers, status checks or resumes), deviate only with a one-line reason, and ask with AskUserQuestion about a risk or conflict unless the user's own request already answers it. |
-| `lean-agent service install\|status\|start\|stop\|restart [--clear] [--yes]\|logs\|uninstall` | Optional: keep `lean-agent up` running across logins, restarts and closed terminals. See [Run it as a service](#run-it-as-a-service). |
-| `lean-agent context [--apply] [--keep TOOL] [--undo] [--no-probe]` | What fills the orchestrator's context and what goes unused: its start-up size (one small Haiku call; `--no-probe` skips it), the instruction files it loads, the tools it never called in its recent sessions, agents, skills and MCP servers that load anyway, and the biggest items in the current conversation's messages (worker answers, command output, file reads, long replies, pasted text) with what to change. `--apply` denies the never-used tools and excludes the extra files in the home's settings (from the next session or /clear; `--keep` protects a tool, `--undo` reverts). Standing rule: at 80% of the compaction point the orchestrator is told to run it, save open items with `handoff --note` and tell you, before Claude Code compacts. |
-| `lean-agent guard list\|add\|rm [<project>] [push-deny <pattern> ...]` | Branches lean-agent never pushes to, per project (globs; default `release/*`, `develop`, `main`, `master`). Matched against the remote branch a push would update, not the local branch name. `worktree push` refuses them whatever was approved (exit 3; only `--override-guard "<why>"`, logged in `pushes.jsonl`, gets past). Workers and the orchestrator run git with lean-agent's hooks folder (`core.hooksPath` via `GIT_CONFIG_*`), whose pre-push refuses guarded destinations however the push is written (`HEAD:<branch>`, `--force`, `--all`, `--mirror`); every other hook runs the repository's own. A guarded `git` first on their PATH checks every push too, so `--no-verify` doesn't get past. `require-pr` is accepted as the same kind (`guard add <project> require-pr develop`). `doctor` shows the guards; `sync` keeps them. `worktree push` names the files when the shared worktree has uncommitted changes; `--only-commits` pushes what is committed. |
-| `lean-agent mcp preset <server> [<name> <tool,...>] [--desc TEXT] [--grep TEXT]` | Presets with a description; `--grep pull` finds the presets whose name, description or tools match. `--mcp server:a,server:b` means `server:a,b`. |
-| `lean-agent mcp check <server>` | Start the server as a worker would (its config, plus the auth variables it needs from your environment: PAT/TOKEN/API_KEY/AZURE_* ...), call one cheap read-only tool and say ok / unauthorized (anonymous) / failed, with the fix. `doctor` shows the last result. A run stops early (`run <id> failed: MCP <server> is not authenticated`) when the server answers anonymous, and records a reference memory so `run` and `advise` warn next time. |
-| `lean-agent mcp ignore <server> [--rm]` | Mark an MCP server you don't use (full name or alias): `doctor` skips it (also `doctor --ignore <server>`) and `mcp list` marks it; `--mcp <server>` still works when asked for explicitly. |
-| `lean-agent --version` | The installed version (`sync` prints it last too). |
-| `lean-agent output <command> [--grep TEXT]` | In brief mode (`LEAN_AGENT_BRIEF=1`, set for the orchestrator, or `--brief`), `optimize`, `tracker`, `stats`, `budget`, `cards`, `limits`, `projects`, `recipes` and `savings` print one line per item (at most 20); this prints what was left out. `--full` prints a command in full. `lean-agent output <path|task-id>` also reads a Claude Code background task's output file (only under a claude temp `tasks/` dir) and prints its first and last 20 lines. Reviews in brief mode print the verdict and one line per finding; `runs --show <id>` has the rest. |
-| `lean-agent savings [--days 7] [-p project] [--measure]` | Estimated tokens saved: worker context (vs a normal Claude Code turn in that project: measured with `--measure`, one tiny Haiku call, else assumed 30,000), model choice (vs Sonnet for every worker), and output the squeezer shortened. Each run's summary also has a `saved ~N` line. |
+| `thread` | start, message, wake, park, close, list threads |
+| `goals` | one line per thread; the chaser asks a thread that has been quiet for an hour for a status |
+| `handover` | write a handover note for the next session |
+| `worktree` | create, list, remove worktrees under `~/.lean-agent/worktrees` and sync learned rules into them |
+| `branch` | branch names the way the project wants them (no `lean/` prefix, optional type and task id) |
+| `pr` | open, inspect and update pull requests with `gh` |
+| `review` | review the branch diff in passes and record the verdict for HEAD |
+| `review-learn` | learn from review comments on pull requests |
+| `learn` | write path-scoped rules for a project |
+| `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
+| `stats`, `budget` | what sessions and workers cost, which rules load, caps |
+| `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
+| `feedback` | draft a bug report; posting needs the user's OK |
+| `lean-mode` | work frugally on long unattended runs |
+| `doctor` | check and repair the install, migrate from 0.45 |
 
-## Pane
+## Workers
 
-The Claude desktop app (local sessions) shows a "lean-agent" pane beside the front desk's chat. It has a header line (service, desk, inbox),
-**Goals** (the open goals, newest activity first: green working, amber waiting on you, red stuck, dim quiet) and **Answers** (answers to your
-questions, unread first, with an **ack** button per answer and **ack all**, which run only `lean-agent myq ack qN`), and a footer with the last
-refresh and any error. It refreshes every 5 s while it is visible (30 s while the service is down), never when closed. `/lean-agent` shows or
-hides it (`/live-map` is the old name for one more release). The data is one cheap call, `lean-agent pane --json`; more panels can follow.
-`lean-agent map --json`, `--svg [--mini]`, `--alerts`, `--usage`, `--watch` and `--pane-check` still print the map data in the terminal.
+Agent definitions in `plugins/lean-agent/agents/`:
 
-## Run it as a service
-
-Why: `lean-agent up` (the front desk and the thread sessions) keeps running across logins, restarts and closed
-terminals, so Remote Control always shows lean-agent in the Claude app. Everything works without it.
-
-```sh
-lean-agent trust               # once, if you haven't (see Install): Remote Control can't show the trust dialog
-lean-agent service install     # [--name NAME]: the session name in the Claude app (default: the name `up` uses)
-lean-agent service status
-```
-
-`install` writes the unit file, enables it and starts it. It runs `lean-agent up --name NAME` at login and restarts it
-60 seconds after it stops.
-
-| Platform | Unit file | Manager |
-|---|---|---|
-| macOS | `~/Library/LaunchAgents/com.lean-agent.up.plist` (LaunchAgent, `RunAtLoad`, `KeepAlive`) | `launchctl` (`gui/<uid>`) |
-| Linux | `~/.config/systemd/user/lean-agent.service` (`Restart=always`, `WantedBy=default.target`) | `systemctl --user` |
-
-Output of `up` goes to `~/.lean-agent/logs/service.log` (under `LEAN_AGENT_HOME` if you set it).
-
-| Command | What it does |
+| Agent | For |
 |---|---|
-| `lean-agent service install [--name NAME]` | Write the unit file, enable it and start it. Running it again rewrites the file. |
-| `lean-agent service status` | Whether the unit is running, loaded or not loaded, plus the compaction setting and `clear-at`. |
-| `lean-agent service start` | Start it (says so if it is already running). |
-| `lean-agent service stop [--yes]` | Stop it; the orchestrator session shuts down, which can take up to a minute. |
-| `lean-agent service restart [--clear] [--yes]` | Stop and start it so `up` picks up new settings. It refuses while workers that are not detached are running; `--yes` restarts anyway. `--clear` has the orchestrator checkpoint first (up to 120 s) and starts a new session from the brief. |
-| `lean-agent service logs [-n N]` | The last N lines of `service.log`. |
-| `lean-agent service uninstall` | Stop the service and remove the unit file. `~/.lean-agent` is kept. |
-
-Runs are detached, in their own session, so they survive a restart; `lean-agent runs --wait all` collects them.
-
-**Updating:** `lean-agent sync`, then `lean-agent service restart`. Hooks, the guide and the `lean-agent` command
-pick up pulled code without a restart, but the running `up` process (the session bridge, thread reports, clears) keeps
-the code it started with until it restarts, and `config` changes such as `compact-window` also need one. Detached runs
-survive the restart.
-
-**Is it healthy?** `lean-agent service status` (running), `lean-agent doctor` (setup, trust, guide, guards), and
-`lean-agent thread sessions` (the main session and the thread sessions that are up; it needs `up` to be running). If it isn't running,
-`lean-agent service logs`.
-
-**Stop using it:** `lean-agent service uninstall`. **Without the service:** run `lean-agent up` in a terminal; it
-lasts until you close it or log out, and a restart of `up` continues the conversation.
-
-## Front desk in the Claude desktop app (with Remote Control)
-
-Opt-in for now: `lean-agent config desk auto` (the default is `hosted`, as before 0.45.88). In auto mode the service hosts a front desk session with Remote Control as before. If you open a
-local session in the Claude desktop app ("on this computer", which can show the plugin pane) with the
-folder `~/.lean-agent/home` (the front desk's own folder), that session attaches itself (SessionStart hook) and waits as "pending":
-it is a normal session, and reports keep going to the hosted main, until the service has stopped hosting its own
-main, which happens as soon as that main is idle (no turn running, nothing typed for a minute; it is checkpointed like a normal stop). When
-the app session's heartbeat has been gone for 30 minutes (app closed, Mac asleep) the service resumes hosting its own Remote
-Control main, so the phone keeps working. No flapping: at least 10 minutes between switches; every switch is logged and
-shown in `doctor`, `lean-agent desk status` and the map ("desk: app session" or "desk: hosted (Remote Control)").
-
-The service creates a shortcut `~/lean-agent-desk` -> the desk folder (macOS and Linux; at service start, `home` and `update`;
-only if that path does not exist or already is this symlink, nothing else is ever overwritten; `lean-agent config desk-shortcut off`
-to skip it): open `~/lean-agent-desk` in the Claude app. A session started there is the same desk as one in `~/.lean-agent/home`.
-
-**On Mac:** the service starts at login (launchd). To have the app desk come back by itself, run `lean-agent config desk auto` once
-and open the desk session once in `~/lean-agent-desk` with Remote Control on. When the service starts (also after a reboot) and the
-app was the last desk owner, it runs `lean-agent desk open` once by itself: `claude --desktop --resume <last desk session id>` from the
-desk folder (`--continue` when no id is known), detached; when that session resumes, its SessionStart attaches it like a new one.
-`config.json` `desk_open_at_start` on|off (default on in auto mode, off otherwise) controls it; `lean-agent desk open` does it by hand
-(on Linux there is no Desktop app: it says so). The service never reopens the app on its own later: if the app is closed the desk
-heartbeat expires and main is hosted after 30 minutes as before. `claude --help` does not say that `--desktop` starts the app when it
-is not running, so keep the Claude app in Login Items (System Settings > General > Login Items) as the fallback. `lean-agent doctor`
-shows the last open attempt. The service remembers who the desk was: when it
-was the app, a restarted service waits up to 3 minutes (`desk_boot_wait_s` in `config.json`, default 180) for the app desk to attach before
-hosting its own main (reports wait in the inbox meanwhile); if it attaches in time no hosted main is ever started. The 10-minute
-gap between switches does not apply to the first switch after a service start, nor to a hosted main nobody has typed into yet.
-
-While an app desk is pending, new thread reports are no longer typed into the hosted main: they stay queued and reach the app desk
-through its hooks right after the switch. Only what a user typed counts for the idle rule (not what the service typed). A pending
-desk waits at most 5 minutes (`desk_max_pending_s` in `config.json`): after that the switch happens as soon as the hosted main is
-not mid-turn and has no dialog open, even after recent typing. A transcript quiet for 10 minutes no longer counts as mid-turn. A refused
-checkpoint is retried twice, then the main is stopped without it, and its process tree is killed if it does not end within 10 s.
-`lean-agent desk status` and `doctor` show why a pending switch waits, in one line.
-
-**Context size of the app desk.** The hosted desk starts with CLI flags (`--strict-mcp-config`, `--disable-slash-commands`, `--settings`) that
-an app session cannot get. The desk folder's `.claude/settings.json` and `settings.local.json` (written by `lean-agent home`, `update`
-and the service start, lean-agent keys only, never your global settings) therefore carry what settings can express:
-`enabledPlugins` false for every plugin except lean-agent, `disableClaudeAiConnectors`, `enableAllProjectMcpServers`
-false, deny rules for the tools of your user/desktop MCP servers, `disableBundledSkills` and `syncClaudeAiSkills` false,
-`Agent(<name>)` deny for your custom agents, a deny list of built-in tools the desk never uses, and `claudeMdExcludes` for your
-global `CLAUDE.md`, `~/.claude/rules` and instruction files above the folder. The desk folder's model is sonnet unless one is set there or
-`up --model default` was chosen (`up --model` decides at every start; `default` means your own model). The app desk starts as sonnet with effort high: `effortLevel` high is written to the desk folder's settings with a marker
-(`desk-effort.json`), so a value you set yourself is never overwritten; the hosted desk gets `--effort` on its launch command
-(`LEAN_AGENT_DESK_EFFORT=low|medium|high|xhigh|max`, or `default` to leave it to Claude Code). Thread sessions run in
-their own folder and carry no `effortLevel`, so they keep Claude Code's default or your own effort. `lean-agent doctor` compares the attached app desk's
-first-turn context (from its transcript) with the hosted desk's and warns above 1.5x.
-
-Estimate, not measured here (the container's Claude Code is too old to start a desk and has no sign-in), from a field report of an
-app session at ~52k (MCP tools 18.8k, system tools 17.2k, memory files 11.6k, system prompt 10.6k, skills 10k, custom agents 0.7k, MCP
-server instructions 3k) against ~15k for the hosted desk: with the keys above honoured, MCP tools, MCP instructions, skills and custom
-agents (~32k) go and most of the system tools (denied tools leave the list) follow, leaving roughly 16k. **What settings cannot cut:**
-the Claude Code system prompt (~10k). Thread sessions start in their own folder (`<home>/threads`, which holds the full thread guide
-`CLAUDE.md` and the thread settings), so the desk folder (`<home>/home`) carries only the short front-desk rule (~1.5k): the app desk
-no longer loads the ~8k thread guide and lands near the hosted desk. Threads that started in the desk folder keep working: their
-transcripts are copied to the new folder on update or service start and resumed from there. Check your own numbers with `/context` in the app session and the doctor line.
-
-The only manual steps: open a new local session in the Claude app with the folder `~/lean-agent-desk` (or `~/.lean-agent/home`; the app remembers it) and
-flip the app's Remote Control switch if you want it on your phone. The folder's settings (lean-agent's own keys only: env, trimming, and the `model` default described above, never
-your global settings; nothing is written to `~/.lean-agent` itself) are written and refreshed by `lean-agent home`, `update` and the service start itself.
-
-```sh
-lean-agent desk status           # who is the desk now, and whether THIS session is the desk (strict mode applies to the desk only)
-lean-agent config desk auto      # opt in; hosted = always the service's own main (the default); external = never hosted
-lean-agent desk attach           # make THIS session the desk now (works in auto too; one desk only)
-lean-agent desk detach           # let go of the desk (attaches again at the next session start; an expired desk re-attaches on its next hook event)
-```
-
-- Strict mode and the orchestrator rules apply only to the real front desk (the hosted main, or the attached app session). Any
-  other local session, in any folder including `~/.lean-agent` and a pending desk, is a normal session: never restricted, even after it ran
-  lean-agent commands. The attached app desk may use the app's own session tools (prefix list `DESK_APP_TOOL_PREFIXES` in
-  `budget_hook.py`); other MCP tools and plain Bash stay refused for it.
-- Thread reports reach an app desk through hooks: at SessionStart and with each prompt, at tool boundaries, and at the end of
-  a turn (the Stop hook hands pending reports over once per batch, never while a question dialog is open). An idle desk cannot
-  be woken: the reports show in the map pane ("desk: app session, attached 3m ago · 2 waiting for you") and, on macOS, as a
-  local notification (`lean-agent config desk-notify on|off`).
-- Back to the old behaviour: `lean-agent config desk hosted`, then `lean-agent service restart`.
-- The map pane asks the service on the same socket path as the CLI. If it says "Service down", the message names the
-  socket it looked at; if the app session resolves another home than the service, set `LEAN_AGENT_HOME` in the app's settings env (`desk setup` and the folder refresh already do this when it is set for them).
-
-## Sign-in
-
-Claude Code's browser login (`/login`) does not work from Remote Control, and the stored login can expire while the
-service runs ("Claude Code ... needs to sign in again"). lean-agent therefore signs in with a long-lived token:
-
-```
-lean-agent login            # in a terminal on the machine: runs `claude setup-token`, one browser step
-lean-agent login --status   # stored token (age, expiry estimate) and `claude auth status`
-lean-agent login --forget   # remove the stored token
-lean-agent login --token-stdin   # if capture fails: paste the token from `claude setup-token` on stdin
-```
-
-The token (about a year) goes to the macOS Keychain (service `lean-agent`), elsewhere to `~/.lean-agent/secrets/` (0600);
-only its creation date is recorded. It is passed as `CLAUDE_CODE_OAUTH_TOKEN` in the environment (never on a command line)
-to the front desk, thread sessions, workers and helper runs, read at each spawn: a new login reaches new spawns at once and
-running sessions on their restart (`lean-agent service restart`). `env` and `doctor` never print it; `doctor` warns 30 days
-before the expiry estimate.
-
-When a sign-in failure shows up (a session's terminal, a worker's output: "needs to sign in again", "OAuth token has
-expired", "Invalid API key"), lean-agent shows one line, adds a waiting item of kind `auth` and pauses the watchdog chases,
-stuck restarts and follow-up starts, since they would all fail. Run `lean-agent login` in a terminal on the machine; they
-resume by themselves and the item closes once a new token is stored and `claude auth status` says loggedIn (or a run succeeds).
-`lean-agent login` is refused in Remote Control sessions; the front desk may run `login --status`.
-
-## MCP servers in workers
-
-Workers get **no MCP servers** unless the orchestrator asks for them, and then only the tools it names:
-
-```sh
-lean-agent mcp list -p shop --probe        # servers from ~/.claude.json, <project>/.mcp.json, Claude Desktop, plugins
-lean-agent mcp tools tickets               # per-tool cost of the tool definitions, biggest first
-lean-agent run -p shop -m sonnet --why "triage needs tracker" --read-only \
-    --mcp tickets:get_ticket "Fetch ticket T-42 and say which file is responsible"
-```
-
-- Workers run with `--setting-sources "" --strict-mcp-config` (no user or project CLAUDE.md, rules, settings, plugins,
-  custom agents, output style or MCP servers; the hooks lean-agent passes with `--settings` still run). Not `--safe-mode`:
-  it also disables every hook, so the push guard, the wrap-up note and `--allow-edit` would never run. A run with `--mcp`
-  adds `--mcp-config <file>`: the same isolation plus exactly the chosen servers.
-- `server:tool,tool` blocks every other tool of that server with `--disallowedTools`, which removes their
-  definitions from context. Example server: all tools ~2,150 tokens per turn, only `get_ticket` ~90.
-- `mcp tools` asks stdio servers for their tool list directly, with no model call. The estimates were
-  within 5% of a real measurement. HTTP servers are listed by connecting the way a worker does (one tiny Haiku
-  call, cached); the per-tool cost is the measured total split evenly. `--measure` gives the exact total.
-- The config is copied into the run folder owner-only (`0600`) and **deleted when the run ends**, because MCP
-  configs often contain tokens. Server names and tool-call counts go into the ledger; configs don't.
-- **Presets:** `lean-agent mcp preset <server> <name> <tool,tool>` saves a named set, and
-  `--mcp <server>:<name>` uses it. Every server whose tool list is known gets an automatic `read` preset
-  (get/list/search/query/... tools). `run` prints each server's chosen tools and per-turn cost before it starts,
-  e.g. `mcp: tracker 6/40 tools ~1,900 tok per turn (whole server ~18,800)`.
-- lean-agent records which MCP tools each worker called, in order. The run summary says how many tools it was
-  given and how many it used (`MCP/browser tools ~25,000 (40 offered, 3 used)`), and which `--mcp` spec or saved
-  preset would have been enough. `optimize` suggests narrowing a server or dropping it after 2 runs.
-- **Servers from Claude Code plugins** (`claude mcp list` shows them as `plugin:<plugin>:<server>`) are found in
-  the enabled plugins' `.mcp.json`/`plugin.json`, with `${CLAUDE_PLUGIN_ROOT}`, `${user_config.*}` (from the
-  plugin's options in your settings) and `${ENV}` filled in. Use the full name or the short alias `mcp list`
-  shows, e.g. `--mcp datadog:read` when no other server is called `datadog`, else
-  `--mcp plugin:datadog:mcp:read`. Workers get the server under the same name and config, and Claude Code keys a
-  stored OAuth login by exactly those, so the login you already did is reused: no second sign-in.
-  If a plugin is both installed and synced from claude.ai, the installed copy is used, or, once `doctor` has
-  seen `claude mcp list`, whichever copy Claude Code itself connects to.
-  `lean-agent doctor` connects to each plugin server as a worker (once a day) and says whether it's usable.
-  When Claude Code connects but a worker gets needs-auth, doctor compares lean-agent's copy with
-  `claude mcp get`: a different `type` or URL is corrected and retried automatically, and a header difference is
-  named but not copied (header values can be secrets).
-- **Big MCP results are trimmed before the model reads them:** every MCP worker gets a PostToolUse hook that
-  compacts results over 3,000 chars (links, URLs, avatars, descriptors and empty values dropped, identities as
-  names) and, for a recipe saved with `--fields`, keeps only those fields plus ids. The full result is saved
-  and its path is in the first line. Measured on a 30-item list: 26,193 -> 1,309 chars, the run 1,439 -> 287
-  sonnet-eq, same answer. A `--complete` recipe also says when it needed more than one tracker call per item.
-- **Results saved to a file:** when a result is too big and Claude Code saves it to a file, workers are pointed at
-  `lean-json <file> [--fields a,b.c] [--grep TEXT] [--exclude TEXT]`, which prints a compact view (links, URLs,
-  avatars and empty values dropped, identities as names, one line per item). Read-only workers may run it too.
-- **Exact identifiers for external systems:** every worker given `--mcp` gets the repository's identity from its
-  git `origin` remote (Azure DevOps organization, project and repository; GitHub/GitLab owner and repository) and
-  is told never to use lean-agent's project name as a tracker project, and to stop with `needs-input` if a
-  lookup finds nothing. When the remote doesn't say, set it once: `lean-agent tracker <project> project=<name>`
-  (also `org=`, `repo=`).
-- **Who you are in the tracker, and its rules:** `lean-agent tracker <project> --discover --mcp <tracker>` lets
-  a read-only worker find your identity id, name and email, each work item type's states (from the type
-  definition, cross-checked with real items), and whether rules hold (voting needs you as a reviewer, delete
-  or a Removed state, a description length limit): each `verified`, `false` or `unknown`, never guessed. A
-  re-run replaces what discovery found and keeps your own notes; `tracker` and `doctor` warn when the tracker
-  knows you by another email than your Claude account, and `tracker` warns when one of your notes contradicts a
-  discovered fact about the same work item type (`--supersede N` keeps the note but stops giving it to workers);
-  `--ack-email` silences the email warning once you've seen it. Add your own with `--note "..."` or `me_id=... me_name=...`. Every MCP worker gets
-  them, so assigning, voting or closing doesn't have to fail first (`@me` often isn't accepted).
-- **Variables without a token on disk:** a plugin config that uses `${VAR}` (e.g. a GitHub token) can get it
-  from a command run when a worker starts: `lean-agent mcp env GITHUB_PERSONAL_ACCESS_TOKEN --command "gh auth
-  token"` (or a macOS keychain item: `security find-generic-password -s <name> -w`). Only the command is saved;
-  the value goes into the run's owner-only MCP config, which is deleted when the run ends. Options
-  marked sensitive live in Claude Code's credentials store; lean-agent can't read them and doctor says so.
-  `${VAR:-default}` uses it too, and a plain value works for things that aren't secrets:
-  `lean-agent mcp env OBS_DOMAIN mcp.example.eu` (`--rm` removes any entry).
-- **The right plugin copy:** when a plugin is both installed and synced from claude.ai, workers use a copy that
-  is set up: a copy whose URL host is still a placeholder (a plugin's `${DOMAIN:-not-setup}` before its setup ran)
-  is never picked, and `doctor` says which copy is used and which isn't set up. The orchestrator home switches off
-  every plugin, synced ones included (Claude Code calls those `<name>@synced`); workers get plugin servers with `--mcp`.
-- **Why a server fails:** `mcp list` and `doctor` give the reason, not only "failed": a placeholder host, a variable
-  that isn't set, an `Authorization` header with no token or a line break in it, or the server's own answer
-  (e.g. "HTTP 400: malformed Authorization header", "host not found"). `run` warns before it starts a worker with
-  a config like that.
-- Not covered: claude.ai connectors (they aren't in a local config file).
-
-## The orchestrator's own context
-
-Every orchestrator turn re-reads the whole conversation, so it's kept short:
-
-- **Loads only its guide:** the home's settings keep your own instruction files out (`~/CLAUDE.md`,
-  `~/.claude/CLAUDE.md`, `~/.claude/rules/`, and the same in folders above the home); `doctor` and `up` list what
-  is still loaded on every call, with sizes. The CLI reference isn't in the guide: `lean-agent guide --cli`.
-- **Shows its size at start:** `lean-agent up` prints the guide's size and the last orchestrator session's
-  start-up context (system prompt, tools, guide), calls, average and peak context per call.
-- **Compaction is Claude Code's call:** no overrides are set, so the orchestrator compacts where Claude Code does
-  (~167K on a 200K window). `lean-agent config compact-window N|default` and `compact-pct P|default` (or `up --compact-at N`)
-  opt in to earlier compaction; they take effect on `service restart`. Limits: compact-window 100000 or more
-  (Claude Code's minimum; to compact earlier on a bigger window lower compact-pct), compact-pct 10-95.
-- **Keeps what matters:** a PreCompact hook (lean-agent's home only) tells the summary to keep the user's goals
-  and open requests, every approval word for word, runs in progress, branches and PRs, unfixed findings and
-  decisions, and to drop worker answers, command output, file contents and the guide: lean-agent stores those.
-- **Picks up cheaply:** after a compaction, and when a new session starts after recent work, a SessionStart
-  hook gives the orchestrator the hand-off note from lean-agent's records (open items, standing rules, runs in
-  progress, recent runs, items touched, latest review per branch), so it doesn't rebuild that from memory.
-  Any run's full answer is one `lean-agent runs --show <id>` away. `lean-agent handoff --note` adds open items,
-  so a topic can end with a fresh session instead of a long one.
-- **Short results, clear on request:** `lean-agent run` prints a short result (about 1,200 characters of the answer,
-  questions kept, a pointer to `runs --show <id>`; `--verbose` adds the token lines, `--full` everything). Context is
-  handled by Claude Code's autocompact, so the session stays the same session in the Claude app. The orchestrator clears
-  only when you ask ("clear the session", "start fresh"): it runs `lean-agent clear`, which queues a clear for the end
-  of the turn (the orchestrator saves its soft state with `lean-agent checkpoint`, then `up` clears the session; the new
-  session starts with `lean-agent brief`, the checkpoint first). It waits only for a pending permission prompt; running
-  workers are detached and survive (collect them with `lean-agent runs --wait all`). Opt-in automatic clearing:
-  `lean-agent config clear-at auto|N` (`auto` = 8,000 tokens below where Claude Code compacts; default `off`;
-  `doctor` and `service status` show it): above it, after a finished turn, never within 30 s of typing or twice in
-  10 minutes, and not while a worker runs unless the context is within 3,000 tokens of compaction. Each clear is
-  logged in `logs/debug.log` (component `auto-clear`).
-- **Restart with a clean context:** `lean-agent service restart --clear` and `lean-agent up --clear` have a live
-  session checkpoint first (the same prompt as `lean-agent clear`, up to 120 s for 'checkpointed'), then the next session
-  is a new one (a new session id in `up.json`) that starts from the brief, like after a clear.
-- **Clear everything from the chat:** `lean-agent clear --all` checkpoints and clears every open thread session (one with a
-  live run is listed and skipped; `--force` clears it too, its runs keep going), then main at the end of the turn, and prints
-  a Thread | Result table. `--restart` instead restarts `up` with clean contexts once the turn has ended (a detached helper;
-  the threads come back fresh from their brief). Run from main only; the front desk uses it when you ask to restart or reset.
-- **Short answers in:** workers answer in at most 25 lines and put the rest in a details file; lean-agent's
-  report commands print one line per item (brief mode); reviews print the verdict and one line per finding.
-- **No MCP servers of its own:** `lean-agent up` switches your user-scope and plugin MCP servers off for the
-  orchestrator home only (the per-folder list `/mcp` uses), so none connect or warn at its start; workers get
-  them with `--mcp`.
-- **Stays responsive:** in the orchestrator, `lean-agent run`, `review`, `do` and `tracker --discover` must be
-  started as background Bash commands (the hook refuses a foreground start), so you can keep talking to it while
-  workers run; it's notified when each one finishes. `LEAN_AGENT_BACKGROUND_RUNS=0` turns this off.
-- **No dumps:** reading a long lean-agent run file with `cat`, `less` or a long `tail` is refused with the
-  command to use instead.
-- **Told when it grows:** past 100,000 tokens of context the hook says what compacting would save per 100
-  calls, and whether the session predates lean-agent's early compaction (then restart `lean-agent up` once).
-  `lean-agent budget` shows the context per call by quarter and what re-reading above ~67K cost.
-- **Paced for the week:** `limits`, `week` and the hand-off note compare your weekly plan usage with the share of
-  the week gone ("48% used, 43% of the week gone: on pace"); ahead of pace, `suggest` recommends haiku.
-- **Fresh conversations:** after a conversation's second compaction, the orchestrator is asked to suggest a fresh
-  one (`lean-agent clear`) at the next stopping point; the hand-off note and the work queue carry everything over.
-- **Routing:** `lean-agent up --model haiku` runs a pure routing session on Haiku (switch up with `/model` when
-  a step needs judgement); `--escalate haiku,sonnet` does the same for workers.
-
-In short: `lean-agent run` hands the orchestrator a compact result, `lean-agent checkpoint` saves its soft state, and
-Claude Code decides when to compact the orchestrator's context; the session is cleared only on `lean-agent clear` (or
-with the opt-in `clear-at`).
-
-## Threads
-
-Each thread is its own Remote Control session. The main session is the front desk: it gets a short guide
-(`.claude/rules/front-desk.md`), does no project work (work commands such as `run`, `review` and `do` are refused
-there), answers in short tables, asks anything that waits on you with AskUserQuestion, and a Stop hook sends back a
-turn that ends with a prose question. Thread reports (a thread's finished turn, error or question) arrive in main
-collapsed as one line, `lean-agent: 2 thread reports (t18 done, t21 question) [r1a2b3c]`; `lean-agent thread reports`
-prints the full text again, and `lean-agent config thread-reports on|questions-only|off|default` sets what is sent.
-Its prompt hook adds one line per request, without a model call, and says why. The order: (1) explicit references
-(`t7`, PR numbers as `PR 4711` / `!4711` / `.../pullrequest/4711`, work items as `AB#12` / `bug 12`, branches, run and
-todo ids) are looked up in what threads own, with the same records `lean-agent find` searches (thread title and refs,
-linked todos, runs, reviews, pushes); a unique owner wins (`Belongs to t5 (owns PR 4711)`), several owners are listed
-(`Unsure: ...`), none gives `New topic (PR 4720 has no thread)`; a closed thread is only suggested when the reference is
-unique to it; (2) the user's words (`new thread`, `resume that thread`); (3) front-desk jobs that never go to a thread
-(`Front desk job (feedback)`: feedback, budget/savings/limits/usage, memory, schedule, sync/update/restart/clear, thread
-overviews); (4) only then topic similarity on distinctive title words (generic words like review, PR, check, fix, test
-count for nothing, recency barely), and only with a clear margin: otherwise `Unsure: t2 or t6 (digest)`. Hand a
-`Belongs to` request over with `lean-agent thread send t7 --prompt-file -`, start a `New topic` with
-`lean-agent thread new "<title>" --prompt-file -`; `Status question` is answered in main with `lean-agent now`. The line is
-a hint: a reference the user named wins over it.
-Notifications of background work attach to their run's thread silently. A thread session never guesses: every prompt
-belongs to its thread, its context line is just `Thread t7 "..."` (once, at session start and after a clear), and
-everything started there is tagged t7. The thread is stored in the state of every run, review, todo, note, handover and
-push that follows; `--thread tN|none` overrides it, workers inherit it through `LEAN_AGENT_THREAD`.
-
-| Command | What it does |
-|---|---|
-| `lean-agent feedback add "<what happened>" [--kind bug\|friction\|idea\|praise] [--severity low\|normal\|high] [--repro "<steps>"]`, `list [--all] [--kind K] [--since DATE]`, `done fN`, `rm fN`, `export [--all] [--out PATH]` | Feedback about lean-agent itself, kept in `<home>/feedback/feedback.jsonl` (near-duplicates bump a count; a crashing command adds a `bug` by itself). `list` and `export` cover open items only (`--all` adds done ones, marked as done). `export` writes `feedback-DATE.md` (newest version first, bugs first, high severity first) and marks the items exported; `now` shows `feedback: N open (M high)`, and the front desk offers an export at 5 open items or a high-severity bug, once a day. |
-| `lean-agent now` | Open threads by last activity (at most 25 lines): state (running, open review, open todos, idle), last action, age. Closes threads idle for 7 days (`LEAN_AGENT_THREAD_IDLE_DAYS` or `thread_idle_days` in config.json); nothing is deleted |
-| `lean-agent thread show tN [--all]` | Everything for the topic in time order: requests, runs, reviews, todos, notes, handovers, pushes |
-| `lean-agent thread close tN [tM ...] [--force]` / `--all [--except tA tB]` / `--idle 2h` / `reopen tN` / `thread stop tN [--force]` / `stop --idle [DUR]` (session only, thread stays open) | Hide finished topics from `now` and from matching (one checkpoint per thread, a summary line at the end; a thread with a live run or mid-turn is not closed unless `--force` (its runs keep going, detached); `--idle` skips sessions with a running run; at `max-thread-sessions` a new session closes only an eligible one: not the caller, not mid-turn, no running or just-launched run, idle 60+ min, past the prompt-cache lifetime; `LEAN_AGENT_CLOSE_MIN_IDLE` seconds overrides; default cap 20). The service also stops a thread session idle 3h+ (`lean-agent config session-idle-stop 3h|90m|off|default`; checkpointed, one service-log line, no message): the thread stays open, shown as `idle, session stopped`, and its next message starts a session again / bring one back: a closed thread starts a new session from a short brief built from its record, `--resume-old` continues the previous transcript instead |
-| `lean-agent thread discard tN [msg-id ...\|--all]` | Drop undelivered queued messages of a thread (and mark their requests handled); `thread show tN` lists the ids. Closing a thread discards its queue with one summary line; closed and user-parked threads are never nudged or chased. |
-| `lean-agent thread new "<title>" [--prompt-file F\|-]` / `list` | Start a thread with its own Remote Control session (with a first message) / list threads |
-| `lean-agent thread send tN --prompt-file F\|-` / `open tN` / `sessions [--context]` | Hand a message to the thread's session (starting or resuming it) / bring its session back / list main and the running thread sessions: pid, idle time, context, `waiting on main` questions, running runs (`N running`), `mid-turn`, `fresh on next send`. `--context` prints only the table Session \| Title \| Context \| % of compact \| Idle \| State, largest first. Needs `up` running |
-| `lean-agent thread reports` | The thread reports delivered to main, in full |
-| `lean-agent thread ask "<question>" [--options "a\|b\|c"]` / `answer tN [qN] "<answer>"` | A thread session asks main instead of the user (the thread waits, status "needs you / waiting on you: qN"; it is pushed to main at once with the AskUserQuestion hint and the exact answer command, re-pushed once after 2 minutes, and never counts as running or done); main answers it or asks the user, and `answer` sends the reply into the thread session as its next turn |
-| `lean-agent thread merge tB tA` / `unmerge tB` | Fold thread B into A / give B its own tag back |
-| `lean-agent thread move tN` | Wrong thread: move the latest request, the current thread and the work recorded since to tN |
-
-`now` and `doctor` show each thread's session (running or closed, with its Remote Control name). The brief after a clear
-in the main session starts with the open threads; in a thread session it covers only that thread. Strict mode allows all of these: they only read or change
-the registry.
-
-### Clearing
-
-| Command | What it does |
-|---|---|
-| `lean-agent clear` | Main: checkpoint, then at the end of the turn replace the session with a new one that starts from the brief. |
-| `lean-agent clear --thread tN` | The same for that thread's own session. |
-| `lean-agent clear --all [--restart] [--force]` | Every open thread session, then main at the end of the turn; prints a Thread \| Result table. A thread with a live run or mid-turn is skipped unless `--force`. `--restart` restarts `up` with clean contexts after the turn. Run it from main. |
-| `lean-agent clear --status` | When each session was last cleared, or why a clear is pending. |
-
-A clear replaces the session from a checkpoint; it never kills running workers. Runs are detached, in their own
-session, so they keep going and `lean-agent runs --wait all` collects them. No one types `/clear`.
-
-Two settings clear a session without being asked. `lean-agent config thread-fresh-after idle=30m,context=120k|50%|off|default`:
-`thread send` to an open session that has been idle that long, with that much context, checkpoints it and continues
-in a new session started from a short brief ("fresh on next send" in `thread sessions`). `lean-agent config main-fresh-at
-2x|800k|off|default` is the safety net: a main or thread session above that many tokens at a turn end gets a checkpoint
-and is replaced by a fresh session (thread reports wait meanwhile).
-
-### Asking the front desk
-
-Say it in the chat; main runs the command and shows the result as a table.
-
-| You say | It runs |
-|---|---|
-| "Restart and clear everything" | `lean-agent clear --all --restart` (`clear --all` for a clear without a restart) |
-| "How much context do the threads use?" | `lean-agent thread sessions --context` |
-| "Make a feedback file" | `lean-agent feedback export` (prints the path) |
-| "What's waiting on me?" | `lean-agent waiting`, `lean-agent now --short` and the thread reports |
-
-Anything that needs you (a finished review to vote on, a thread question, an approval) is asked with a prompt in the same turn, with options; the table row is only the record. lean-agent keeps these in `<home>/waiting.json` (`lean-agent waiting`, `waiting add`, `waiting done <id>`), and a Stop hook sends the front desk back once if a turn ended without asking.
-
-## Front desk shortcuts
-Reply to the front desk with one of these on its own; its prompt hook turns it into the exact command to run, and never sends it to a thread. `lean-agent shortcuts` prints the same table. The Show column of the status table lists the codes that fit a row (`s21 · a21 · f21`; `f21` only when the thread has files).
-
-| Reply | Meaning |
-|---|---|
-| `?` / `shortcuts` / `help` | this list |
-| `status` / `now` | the status table (needs-you and running threads first, max 10 rows) |
-| `map` | the map data: `lean-agent map --json`, `--svg [--mini]`, `--alerts`, `--usage`, `--watch`, `--pane-check`; `lean-agent pane --json` is what the desktop pane shows |
-| `more` | all threads, when the table ends with `+N more threads` |
-| `s21` | summary of t21: last report, open questions, running work, next step (also `s t21`, `summary t21`, `show t21`) |
-| `a21 <question>` | send the question to t21 unchanged (`ask t21 <question>`); `a21` alone asks what to ask |
-| `f21` | the files t21 made for you, numbered, with size, time and kind; missing ones are marked `(gone)` |
-| `f21 2` | file 2's content (Markdown/text only, about 200 lines / 12k chars; a binary file is refused with its path) |
-| `q` | `lean-agent myq`: your questions (`a21 ...` to a thread, or asked at the front desk), open first, newest first, with the answer in one line |
-| `q12` | `lean-agent myq 12`: question 12 in full with its answer and source (bare `q12` is your question; a thread's own question is answered with `thread answer tN qN`) |
-| `ack` / `ack 35` / `ack q35` / `ack 34 35` | `lean-agent myq ack [qN ...]`: acknowledge answers. While any answer is unread the front desk opens its reply with an `ANSWERS FOR YOU` block (before any table), the status table header says `N unread answers (q34, q35)`, and an answer unread for 10 min gets one reminder |
-| `q unread` | `lean-agent myq unread`: the unread answers in full; bare `q` lists them first |
-| `q open` / `q t21` | `lean-agent myq --open` (unanswered only) / `--thread t21` (questions to t21) |
-| `goals` | `lean-agent goals` |
-| `waiting` | `lean-agent waiting` |
-| `pr21` | `lean-agent pr t21`: PR status of t21 (known state, then live state; PR numbers are links) |
-| `pr21 c` / `pr21 ci` / `pr21 diff` | `pr t21 --comments` (all active comments in full), `--ci` (checks, failing first, build link), `--diff` (files with +/- lines) |
-| `pr list` / `pr mine` | all PRs of every open thread / open PRs waiting for your vote |
-| `pr own` | all your own open PRs: votes, comments, CI, thread |
-| `pr stale [days]` | your own open PRs with no activity for N days (default 3) |
-| `pr find <text>` | open PRs by author, reviewer, title, branch or work item id, with the owning thread |
-| `x21` / `x21 x22 x30` / `x 21 22 30` | `lean-agent thread close t21 t22 t30` (a thread with a live run or mid-turn is skipped and named; a trailing `force` closes it anyway; never main or the calling thread; queued messages are discarded) |
-| `x all` / `x all but 152 153` | `thread close --all` / `--all --except t152 t153` (`except` works as well as `but`) |
-| `x idle 2h` | `thread close --idle 2h` |
-| `stop21` / `stop 21 22` / `stop idle [2h]` | `thread stop t21 t22` / `--idle [DUR]`: checkpoint and stop the SESSION only (parked as `user-stop`); the thread stays open, queued messages are kept and delivered when the next message restarts it, nudges skip it; `force` as for close |
-| `o21` | `thread reopen t21 --resume-old` |
-| `pr21 fix` / `pr21 reply` / `pr21 review` | sent to t21 as a request with a fixed text: fix the open comments with a worker and report once; draft replies and post nothing until you approve; review the latest head and report the verdict with the vote question |
-
-Your questions are recorded without a model in `<home>/my-questions.json`: an `a21 <question>` is stored once with target t21 and answered by t21's next report (`done`, `needs-you`; a counter-question via `thread ask` keeps it open); a short question to the front desk itself (ends with `?` or starts with how/why/what/...) is stored with target main and answered by its reply. A thread's open question older than `myq-stale-minutes` (config key, default 30) shows as `your question q12 unanswered (40m)` in the status table's Needs, and the goals watchdog nudges the thread once per period with `answer the user's question q12: ...` (no model).
-
-Files are recorded when lean-agent writes them for you (handovers and their `--out` copies, `doc write`, `feedback export`) in `<home>/files.json`; older handovers of a thread are found from `handovers.json`.
-
-## Goals and follow-up
-The front desk owns every deliverable until it is done. `lean-agent goals` lists the open goals (Goal | Ref | Thread | State | Quiet | Next);
-`lean-agent goal add "<ref>" [tN]`, `goal done <id>`, `goal drop <id>`, `goal next <id> "<text>"` edit them, and `lean-agent now` shows them after
-what waits on the user. A goal (`<home>/goals.json`) is created when a thread is given work naming a PR or work item (`thread new/send`, `todo add --ref`,
-a run on a PR), is kept fresh by thread reports and runs, waits on the user when a final report proposes a push/post, and is done once that happened.
-
-A watchdog in the service looks at the active goals every few minutes (it only messages threads, it never starts workers): a thread with a lost
-worker is asked to resume or restart it and send ONE consolidated final report; a quiet thread (no worker, no open question, longer than `LEAN_AGENT_GOAL_QUIET`
-or config `goal_quiet`, default 30m) or a parked session is woken with a status nudge. At most one chase per goal per quiet period; after 3 chases the goal is
-"stuck" and the user gets one question. No chase while the plan limit is near. Every chase reaches the front desk as a one-line `CHASED:` digest.
-A thread's first message is stored as its request at `thread new` (undelivered until its session receives it). A request that never started
-(never delivered, or no run, report or other activity after it) for `LEAN_AGENT_GOAL_START` or config `goal_start_minutes` (default 10) is chased at once,
-without the model check: an undelivered one is redelivered, else the thread is told "you have an unstarted request rN: start it". `now` marks such threads
-"not started (Nm)" in Needs.
-
-A thread's consolidated final report (Ref, Head sha, Review, Checks, Left, Proposed action) becomes exactly one waiting item of kind `push` per goal with the
-options Push / Push and post / Post only / Hold; a newer report of the same PR replaces it instead of adding a second question.
-
-## Handovers
-
-`lean-agent handover "<title>"` turns a request (or, with `--as-is`, ready text) into a plain Markdown file under
-`<LEAN_AGENT_HOME>/<project>/handovers/` and prints its path; open that file, or copy it wherever it is needed.
-Nothing is uploaded. `handover --list` shows what exists. Details are in the command table above.
-
-## Large front-end work: map, check, count, parity, codemod, slices
-
-For a refactor or migration of a JS/TS front end (many files, many PRs), lean-agent has tools that do the bulk
-reading and running themselves and hand the model a few lines. None of them calls a model; they're generic (any
-framework) and keep their data under `~/.lean-agent/`. Workers are told about the ones set up for the project.
-
-| Command | What it does |
-|---|---|
-| `lean-agent map <project> [--who-uses X] [--deps PATH] [--route [/x]] [--unused] [--find Name] [--dir DIR]` | An import graph of the code (ES imports, `require`, dynamic `import()`, CSS `@import`/`@use`; `tsconfig`/`jsconfig` path aliases), cached and rebuilt when a file changes. Without a question: files and lines per folder, packages, the most used modules, the biggest files no test imports. `--who-uses` takes a file, folder, file name or exported name and lists the importers with the names they use; `--deps` lists what a file or folder imports; `--route` finds routes (React Router / Vue Router style `path:` declarations, Next/Nuxt `pages/`, Next `app/`, SvelteKit `routes/`) and the size of each with its imports; `--unused` lists files nothing imports. A worker asks this instead of grepping and reading files. |
-| `lean-agent count <project> add NAME "REGEX" [--glob "*.ts,*.tsx"] [--path src]`, `count <project> [NAME] [--files] [--by-folder]` | Named counters for what a refactor removes (an old API, an old state library, inline styles). Each run shows the total, per folder, and the change since the first run ("legacy-api: 404 in 120 files (was 812 on 10-21, -50%)"); the history is kept for the project's checkout. |
-| `lean-agent check <project> add NAME "COMMAND"`, `check <project> baseline`, `check <project> [NAME...] [--dir DIR]` | Type-check, lint and test commands compared against a baseline of what was broken before: only new errors are shown (tsc, eslint stylish and unix formats, `file:line:col` compilers, jest/vitest/pytest failures; line numbers are left out of the comparison, so moved code doesn't count as new). An unrecognised failure shows the end of its output. Exit 1 on new errors; `--update` lowers the baseline when errors were fixed. |
-| `lean-agent parity <project> set --url URL --routes "/,/settings" [--routes-from-map] [--start "npm run dev"] [--mask SELECTORS] [--storage FILE]`, `parity <project> baseline`, `parity <project> [--route /x] [--dir DIR]` | Per route: a screenshot, the page text and console errors, with Playwright from the project (or `LEAN_AGENT_PLAYWRIGHT_DIR`), against the baseline: "38/40 routes unchanged; /settings: 2.1% of pixels differ, rows 0-12% (top); text: 1 lines gone, 1 new: -Save \| +Save changes; 1 new console error: ...". Animations are switched off and masked selectors hidden; it starts the dev server with `--start` when nothing answers; `--storage` takes a signed-in Playwright session. Screenshots stay on disk. |
-| `lean-agent codemod <project> "COMMAND" [--apply] [--dir DIR]` | Runs a codemod command (jscodeshift, ts-morph, a script) on a throwaway git worktree of the checkout as it is (uncommitted and new files included, `node_modules` linked) and summarises the change: files and lines per folder, and a sample diff from three folders. `--apply` runs it on the checkout itself and reports the same way. |
-| `lean-agent slices <project> [--by route\|folder] [--depth N] [--src DIR] [--create --epic NAME]` | A plan from the map: units are routes (or folders), files more than one unit uses are shared parts grouped by folder and come first, then the slices, smallest first, each with the shared parts it needs. `--create` adds them to the work queue as an epic, each slice waiting for its shared parts. |
-| `lean-agent todo add ... --epic NAME --after N,N`, `todo next --epic NAME`, `todo epic [NAME] [--count COUNTER]` | Epics in the work queue: an item can wait for others (`--after`), `next --epic` picks one that's ready, `todo epic` shows done / ready / waiting. |
-
-A slice then runs cheap: the worker gets its context from `map`, makes mechanical changes with a codemod, and is
-done when `check` shows no new errors, `count` went down and `parity` is unchanged; then `review --goal` and a PR.
-The orchestrator's guide has the full sequence.
-
-## Private projects
-
-`lean-agent config private <project> on|off` (or `lean-agent learn <repo> --name N --private`) makes a project local only: its work never reaches a public repo. It shows in `lean-agent projects`, in `doctor` and as "private" on the run start line.
-
-- **Blocked** for that project's repo and all its worktrees, for workers, thread sessions and the front desk alike: `git push` in any form, `git remote add|set-url`, `gh pr|repo|release create`, `az repos create`, `az repos pr create`, `worktree push`, and `review --comment|--post`. The command itself refuses, and so do the PreToolUse hooks and the git wrapper, so the session gets the reason first: "project <p> is private (local only): pushing/publishing is disabled; the user can turn it off with lean-agent config private <p> off".
-- **No per-push override**: `--allow-send` and `--override-guard` do not lift it; only `config private <p> off` does. Read-only remote commands (fetch, pull, ls-remote, gh/az view and list) still work.
-- **`doctor`** checks each remote's visibility (GitHub through `gh api`, Azure DevOps through `az devops project show`; other hosts are unknown) and warns when one is public or unknown.
-- **Hide them all**: `lean-agent private off` (`private on` undoes it, `private status` shows it; default on; front desk: reply `private off`) hides every private project and its items from `projects`, `now`, status tables, `thread sessions` / `thread show`, `goals`, `waiting`, `q`, `runs`, `reviews`, `worktrees`, digests, nudges, suggest/advise and routing (a message that names a private project gets "private projects are hidden: lean-agent private on"). It checkpoints and stops the live private thread sessions (recorded as "stopped by private off", left out of the restore snapshot) and refuses `run <private project>` and `thread send|open`. Reports and questions from private threads are held, not dropped; running workers keep running. `private on` shows everything again, restarts exactly the sessions off stopped (if the threads are still open) and delivers the held reports. Nothing is deleted. `doctor`, `config private` and the status table header say when it is off.
-- **Nothing leaks through lean-agent**: `feedback add|list|export` and crash records replace a private project's name with `<private project>` and its paths, branch names, PR/work-item numbers, URLs and commands with `<redacted>`; the export header says "N items redacted (private projects)".
-
-## Attribution (asked once)
-
-Whether commits and PRs credit Claude is your call, asked once: by `lean-agent up` in a terminal, or by the
-orchestrator before the first commit or PR (`lean-agent attribution` says "not set"). Save it with
-`lean-agent attribution on|off`. When it's off:
-
-- workers start with Claude Code's own `attribution` setting emptied (no Co-Authored-By line, no "Generated with
-  Claude Code", no session link), and so does the orchestrator;
-- workers and the orchestrator are told not to mention Claude or AI in commits, PR titles and descriptions, or
-  comments;
-- `lean-agent worktree push` refuses your own commits that still credit Claude. Only your commits are checked: those
-  whose author or committer email is your git `user.email` (worktree or global) or one set with
-  `lean-agent config attribution-emails <email>...`. Credited commits by anyone else (e.g. a merged-in base branch)
-  only print a warning and the push goes ahead.
-
-## Branch names
-
-New branches follow the project's branch rules, by default `feature/{task-id}-{name}`, `bugfix/{task-id}-{name}` and
-`release/release-{version}`. `{name}` is a lowercase ascii slug of the title (up to ~40 characters); `{task-id}` is the
-linked tracker item id of the todo, else the todo number, else left out together with its `-`. Change them per project:
-
-```
-lean-agent config branch-rules --project P feature=<pattern> bugfix=<pattern> release=<pattern>
-lean-agent config branch-rules --project P default      # back to the defaults
-lean-agent branch-name --project P [--type feature|bugfix|release] [--task ID] [--version X] "Fix login timeout"
-lean-agent run P --worktree auto [--branch-type bugfix] --todo 12 -- "Fix login timeout"   # branch: bugfix/12-fix-login-timeout
-```
-
-The type is inferred when not given: bugfix when the title has fix/bug/hotfix/regression/defect as a word, release when
-it starts with "release" plus a version (x.y or x.y.z, optional v) or names a release/ branch (a release needs a version: `--version X`, or "Release 1.2" in the title), else feature.
-Existing names get `-2`, `-3`; every name passes `git check-ref-format --branch`. Explicit branch names
-(`--worktree my-branch`) and old `lean/*` branches keep working. `release/*` is guarded by default: creating it
-locally is fine, pushing it stays blocked unless you allow it (`lean-agent guard`). `doctor` shows the rules.
-
-`--worktree auto` is for workers that write: a read-only worker gets no new branch. The name is chosen and the branch
-created under a lock, so parallel runs never pick the same name. `auto` is a reserved value: a branch literally named
-auto is given as `refs/heads/auto` or `heads/auto`.
-
-## Shared worktrees
-
-`lean-agent run <project> --worktree <branch> ...` runs the worker in a git worktree of that branch at
-`~/.lean-agent/worktrees/<project>/<branch>`. Use it to run a reviewer's checks, such as tests, on a PR branch
-without touching your checkout.
-
-- **Shared to save tokens and time:** the next worker for the same branch reuses the worktree, so dependencies it
-  installed (`node_modules`, virtualenvs) and build output are still there. Workers are told it's shared and to
-  install only what's missing.
-- **Kept current:** a clean reused worktree is moved to the branch's newest commit. Uncommitted work is left as it is,
-  with a warning.
-- **Commits:** a local branch that isn't checked out elsewhere is checked out in the worktree, so a worker's commits
-  land on it (workers never push). A remote PR branch (`--worktree origin/feature-x`) gets a local `feature-x`
-  that tracks it, so fixes can go back to the PR. A branch you have checked out yourself gets a detached worktree.
-- **Setup once per worktree:** `lean-agent worktree setup <project> --run "npm ci && npm run build"` saves a
-  command that runs in every new worktree before the first worker starts (output in a log next to it). Add the
-  branch name to run it in an existing worktree too, and `--off` to remove it.
-- **Pushing fixes:** `lean-agent worktree push <project> <branch>` pushes the worktree's branch to origin, but only
-  when its tip has an approving review (`review --head <branch>`), there are no uncommitted changes, and nobody
-  else pushed in between (it never force-pushes). Without `--allow-send "<what the user approved>"` it only shows
-  the commits it would push, because pushing is an outward action. It pushes to the remote branch recorded when
-  the worktree was made from `origin/<x>` (`worktree create --from origin/<x>`, `run --worktree-base origin/<x>`,
-  a PR worktree, an adopted worktree with an upstream), else to the same name. When the PR's source branch has
-  another name than the local branch, say so: `--remote-branch <name>` (alias `--to`) pushes `HEAD` to
-  `refs/heads/<name>`; the push guard, review gate and base-merge check apply to that remote name. A remote branch
-  that doesn't exist yet is refused unless `--new-branch` is given. The result line reads
-  `pushed <local> -> origin/<remote>`.
-- **Parallel workers:** read-only workers share a worktree at the same time. Workers that change files take turns.
-- **Housekeeping:** `lean-agent worktrees [project]` lists them, and `lean-agent worktree rm <project> <branch>
-  [--force]` removes one.
-
-## The reviewer: a quality gate before every PR
-
-Low token use shouldn't mean low quality. `lean-agent review <project>` runs a **reviewer / tech lead** on
-everything since the branch point (merge base with `origin`'s default branch, or `--base`). That includes
-uncommitted changes and new untracked files.
-
-- **Sonnet at high effort, with adaptive thinking.** It's the one place where lean-agent spends tokens on purpose,
-  and it isn't downgraded when a budget runs low (`LEAN_AGENT_REVIEW_MODEL` / `LEAN_AGENT_REVIEW_EFFORT` change it).
-- **Read-only, enforced:** Read, Glob, Grep and read-only `git -C <repo> diff/show/log/blame...`. It can't edit, run
-  tests or build. What needs running goes back to the orchestrator as `checks`.
-- **Context:** cards are picked from the changed file paths, plus core cards for the `review` task type.
-- **Output:** a structured verdict (`approve`, `changes-requested`, `needs-checks`), findings with severity
-  (blocker/major/minor/nit), file:line, the issue, why it matters and a fix, plus the checks to delegate.
-  It exits 0 only on approve.
-- **Review a branch or PR without checking it out:** `review <project> --head <branch> [--base <branch>]` reviews
-  `merge-base..branch` straight from git. The reviewer reads files with `git show <commit>:<path>`, `origin/*` refs
-  are fetched first, and your working tree is never touched.
-- **Reuse before style:** lean-agent lists the change's new files and newly defined symbols itself (exports,
-  functions, classes, hooks, stores; test files left out) and gives them to the reviewer, whose first three
-  passes are mandatory and come before any correctness, test or style finding:
-  0. **Behaviour and regressions** (after correctness): for every changed path the reviewer reads the old code
-     (`git show <base>:<file>`) and writes what the user or caller saw BEFORE -> AFTER (UI text, flows, messages,
-     defaults, removed or renamed options/flags/commands/endpoints/events, settings and storage formats,
-     migrations and old data, older clients, permissions, hot-path performance), each marked intended (named in
-     the goal, PR description or work item) or unintended. The result has **User-facing changes (intended /
-     unintended)** and **Regression risks** (who, likelihood, impact, rollback possible, one concrete check; the
-     check joins `checks`). An unintended change is a major compatibility finding, so `approve` needs none unless
-     you decline it; earlier ones carry into re-reviews like other findings. lean-agent also gives the reviewer,
-     without a model call: for a PR review the PR title, description and linked work items (Azure DevOps and
-     GitHub, read-only, about 3k chars, used as the goal when `--goal` is absent), the top 20 call sites of
-     changed or removed symbols, and the tests that touch them. All optional; the review never fails without them.
-  1. **Reuse and duplication:** at least one search per new symbol (by name, key identifiers and behaviour
-     words like counter, subscribe, overlay, defer, retry) for existing code with the same job.
-  2. **Scope and generality:** does it fix one dialog/field/endpoint while siblings share the cause?
-  3. **Does the platform already handle it:** an existing hook or lifecycle that hides and restores, where
-     the change adds permanent state.
-  The review reports its `searches`, a `reuse` table (new symbol -> existing candidate -> reuse / extend /
-  justified-new) and the `siblings` it checked. lean-agent enforces it: a new symbol without a reuse entry means
-  "reuse not checked" and no approve; "justified-new" next to an existing candidate needs a concrete reason, and
-  can't overrule a second opinion that found existing code for it. Open items send the reviewer back once, in the
-  same session, to finish the reuse pass before you get the result; duplication, scope and platform findings are at least major, a reuse or
-  extend verdict without a matching finding gets one, and design findings are listed before test and style ones.
-- **Wrappers and decisions:** a thin wrapper or hook that calls existing code is `wraps-existing` (reuse done
-  right, not a duplicate). Findings are numbered; `lean-agent review decline <project> <n> --why "separate
-  ticket"` records a decision for that branch (`--all-branches` for the project), so later reviews and the second
-  opinion are told and a matching finding isn't raised again.
-- **Less noise, and a loop that ends:** `duplicate` (copies code outside the change) is a finding; `extends-existing`
-  and `wraps-existing` are reuse (no finding), and a "candidate" inside the lines the change edits is the change
-  itself (dropped). Symbols that already existed before the change (edits, signature changes) aren't new; a change
-  with none prints "no new symbols". Duplication is major only for copied logic (about 10+ lines, a multi-branch
-  algorithm) or a second copy of a mechanism; what the reviewer calls optional, follow-up or pre-existing is minor;
-  a finding it says it didn't verify becomes `unverified -> delegate a read-only check`. Declines are keyed on the
-  finding's kind and symbol, apply to every later review and `--resume` (whoever raised the finding), and never
-  flip the verdict. `--resume` re-checks only the open findings and the files changed since; when only minor or
-  declined findings are left it approves and lists what was declined. The REVIEW footer shows the review's cost
-  and the running total for the branch.
-- **Ordered passes, and what the diff shows by itself:** correctness with end-to-end flow tracing, reuse,
-  scope and platform, **tests**, **defaults and state**, then style. lean-agent finds in the diff, without a model,
-  the tests whose assertions the change edits (renamed, flipped, deleted, skipped), new parameters with
-  defaults, and new module-level state, and gives the reviewer those lists. The reviewer reports a `coverage`
-  table (edited test -> what it protected -> still-covered / lost / intentional), says whether each new test
-  would fail without the fix, checks that production callers pass a defaulted parameter, follows merged or
-  widened values to their consumers, and checks that specs reset new module state. An edited test without a
-  coverage entry means no approve, like a new symbol without a reuse entry. It also lists what it checked and
-  found fine and what it couldn't verify.
-- **Expensive runs ask first:** `run -m opus|fable` prints the expected cost (from earlier runs on that model) and
-  its share of your plan's session window; it needs `--yes` when that's 10% or more (`LEAN_AGENT_CONFIRM_PCT`) or
-  the window is already over 50%. `lean-agent budget` shows the plan line too.
-- **Several passes:** `review --runs 2` runs two independent passes and merges them (findings matched by category,
-  file and wording, marked `[2/2 passes]` when both found them). Reviewers vary between runs; for high-risk
-  changes two cheap passes are an alternative to one expensive one, and the high-risk hint offers both.
-- **Model and cost:** `--reviewer-model opus` (or `fable`) for one review; the expected cost is printed first
-  (from your earlier reviews on that model, else scaled from Sonnet's and corrected by how far such scaled
-  estimates were off before; every estimate is stored with its run, so they improve). `--independent` gives a
-  clean comparison run: no earlier findings, declined decisions, second opinion or decline filtering. For high-risk changes (below) the review runs on opus and prints why.
-- **Replay case:** `python3 tests/fixtures/review_case.py <dir>` builds a small repo whose change has a lost
-  test case, a hiding default, a merged value with a stale consumer, unreset module state, a logout bug and an
-  import cycle; `--fixed` adds the author's fixes, to replay `review --resume` until it approves.
-- **Second opinion:** for new abstractions or big diffs (`--second-opinion auto|on|off`), a cheap search-only
-  Haiku pass looks for reuse candidates and siblings first. The main reviewer has to confirm or reject each.
-- **Lessons from human reviews:** `lean-agent review learn <project> --text "Before adding overlay state, check
-  the shared surface counter"` or `--helper "name | where | what"` adds to two cards that every review of the
-  project gets: `review-checklist` and `shared-helpers` (the latter also for code changes). `review learn
-  <project> <PR> --mcp <tracker>` reads the PR's human review threads through the tracker's MCP server, compares
-  them with lean-agent's own review of that branch, and turns what was missed into checklist lines and helpers.
-  The worker has to open the code for every helper: one whose path isn't in the repository is left out. It gets
-  the cards' current text, so near-duplicates are skipped, a known helper's line is updated, and wrong lines are
-  corrected (`replace`). Threads that ended in a decision to leave something out become declined findings, not
-  lessons. Without the tracker's MCP (for example when a rule forbids it): `review learn <project> --pr <id>
-  --threads-file <file or ->` takes the PR's threads as JSON or plain text (from the tracker's CLI), or
-  `--threads-cmd "<cli> {pr}"` runs a command and is saved as the project's route; the automatic learning uses the
-  configured route and, when only a forbidden MCP exists, adds one todo instead. `review learn <project> --list`
-  numbers the learned lines, `--rm N|text` removes one, `--undo` undoes the last learn batch or removal.
-  `review learn <project> --verify [--head <branch>]` lists helper lines whose code can't be found, with
-  the reason; `--apply` removes them. It checks `--head`, HEAD, the default branch and every base branch your
-  reviews used, matches partial paths (relative to a package folder, in backticks, with `:line`), and keeps a
-  line whose symbol is found even when its path is wrong.
-- **`--cards` names:** `--cards a, b,` works (spaces, quotes and a trailing comma are ignored); a name is an exact id,
-  else a title/slug, else a unique partial. An unknown or ambiguous name refuses the run before it starts, naming it;
-  the start line prints `cards: a, b`.
-- **Runs:** `runs --last` is the newest run by start time (any status; a lost run never beats a newer one), the calling
-  thread's own runs first. `runs --show <id>` of a resumed run whose new turn is still going starts with
-  `turn N running since HH:MM (previous summary below)`. A `run --resume` detaches from its caller right after it is
-  registered, so a session restart does not kill it; a lost run's record carries the reason.
-- **Card size:** a card above ~1,500 tokens is cut to that when loaded into a worker (the cut is marked in the
-  text, ending `(cut: N more lines; full card: <absolute path>)`; table-shaped cards get twice that); `lean-agent cards <project>` flags such cards ("trimmed when loaded (1,500 of N tokens)") and `doctor` warns.
-  `review learn` keeps its cards at ~800 tokens by grouping lessons by topic into `review-checklist-<topic>` cards
-  (tests, docs, frontend, cache-sync, api, security, build-ci, other); a review loads the topic cards that match the
-  changed paths, and `suggest` lists them with sizes. Split an existing big card once with
-  `lean-agent cards <project> --split review-checklist` (dry run; `--apply` writes the cards and retires the old one).
-- **Cheaper reviews:** the reviewer prompt carries a fill-in template listing every new symbol (reuse) and edited or
-  removed test (coverage) with the answer format; entries still missing are filled by the cheap haiku reuse run (coverage
-  is recorded as "not checked") instead of resuming the main reviewer. The model is chosen by risk unless
-  `--reviewer-model` is given: re-reviews, docs/test-only and small ordinary diffs sonnet; first reviews that one shared risk classifier flags
-  opus, with the reason printed (`reviewer: opus (risk: migration, UI strings)`): security words (auth, token, crypto,
-  secret, password, permission, cert, sign, encrypt, sanitize, csp, cors), concurrency/sync words, UI files, strings
-  or locales, migrations/schema/storage, public API/route/protocol definitions, config formats, removed public
-  symbols, or large diffs (about 800 lines), fable never by default; `config approve-usd N|default` (cost per run approved without asking, default 5 USD; above it a question reaches the user), `config review-model
-  auto|<model>` fixes it. A gap declined earlier on the branch (matched by location and similar wording) is not shown
-  again, and a gap whose own text says it is documented, out of scope or already handled is declined with that reason
-  (one summary line). Review prompts carry at most 4 cards: rules whose globs match the changed files, or cards whose
-  keywords appear in the diff or goal. `review --costs [--project P] [--days 7]` prints totals per branch and model,
-  runs, second turns, re-review rounds, skips by reason and the average cost per review, from the ledger.
-- **Re-review:** `review <project> --resume` starts a fresh reviewer with a small context: the open findings and
-  checks of the last review, the declined decisions, and only the diff since then (with its own new symbols and
-  edited tests). That's cheaper than continuing a long session, and it converges: a new major about code that
-  didn't change since the last review is minor, earlier open findings keep their severity. `--same-session`
-  continues the earlier reviewer instead. It also runs the reuse, scope and platform passes again
-  on the files changed since the last review and asks it to reconsider the design, not only the earlier findings. Add `--head <branch>` to resume the review of that
-  branch; the review is recorded for the branch's new tip (also when the reviewer is resumed with `run --resume`).
-  A fresh review of a branch that was reviewed before gets the earlier findings, so it says which are resolved
-  instead of starting blind. `review <project> --status` exits 0 only if the
-  *current* code (HEAD plus uncommitted changes) has an approve (gaps and minors are noted, never blocking: `approve, 1 gap noted (path:line)`; an approval carries over a rebase whose branch diff is unchanged, with no run; after a rebase that changed the branch only the changed files are re-reviewed), 2 for changes requested, needs-checks or no review of this code, and 1 only for errors. `review` on a head that was reviewed already says `no new commits since <sha> — verdict <X> stands` and exits 0. With `--head <branch>` it checks that branch's
-  tip instead, whatever is checked out. The guide and repo block make that a hard rule
-  before any PR.
-
-Measured on a sample repo: a planted float-money change with no tests got 3 majors. These were the float rounding
-bug with a concrete failing input, missing tests (citing the project's memory about money tests) and a double-VAT
-risk (citing another memory). After a worker fixed them, the re-review confirmed the fixes and caught a new problem:
-the worker had committed `__pycache__/*.pyc`. Each review cost about $0.06 and 30 s.
-
-### The fix loop: one full review, then deltas
-
-Reviews follow the branch, not the commit. Once a branch has a review, `lean-agent review <project> --head
-<branch>` (or a commit on it) reviews only what changed since, plus whether the earlier findings are fixed: a fresh
-reviewer with a small context, on sonnet (`LEAN_AGENT_DELTA_REVIEW_MODEL`) unless the change since is high-risk, then
-on the earlier model. A commit counts as the same branch when it builds on the reviewed one, when the branch's reflog
-had the reviewed commit (an amend or rebase), or when it's on that branch; `--resume` uses the same lookup. Above
-`LEAN_AGENT_DELTA_MAX_LINES` (800) changed lines it's a full review again, unless `--delta-only`; `--full-review`
-always reviews the whole change (`--full` does the same on `review`). A delta needs the new head to descend from the reviewed one; after a rewrite it falls back to a full review and says so. A tiny low-risk delta (test-only, docs-only, comment-only, rename-only, under `review_light_max_lines` / `LEAN_AGENT_LIGHT_MAX_LINES`, 40 lines) is a "light re-review" on the cheap model. From the `review_warn_after` (`LEAN_AGENT_REVIEW_WARN_AFTER`, 3) review of a branch in a day the cost so far is printed; `week` and `review --costs` compare delta with full reviews. `review learn --pr` reads human-written threads only (`--all-authors` adds bots), in chunks of `LEAN_AGENT_LEARN_CHUNK_CHARS` (30000), and starts no run when every thread was learned already. What the user declined (`review decline ... --head <branch or commit>`) is kept
-for the branch, so it isn't asked again on later commits, until the code it points at changes (then the reviewer
-is told it was declined but may raise it again). `review --status` on a newer commit says how much changed since the
-last review and gives the command for a delta review. `--for-push` is the gate before a push: it refuses while
-fix workers still run on the branch, and says to batch fixes into one worker and review once after it.
-
-## A lean orchestrator
-
-The orchestrator's own fixed context is paid on every turn, so lean-agent writes `~/.lean-agent/home/.claude/settings.json`
-to cut it. It:
-- denies every tool except Bash, Read and the background-task tools. The built-in Agent and Workflow tools are gone,
-  so "delegate with `lean-agent run`" is enforced, not just requested.
-- disables bundled skills, synced claude.ai skills (`settings.local.json`) and claude.ai connectors
-- disables your other plugins and your user-level MCP servers in this folder only
-- excludes outside CLAUDE.md files (`~/.claude/CLAUDE.md`, `~/CLAUDE.md` and other parent folders), which also
-  removes conflicting subagent or workflow guidance. Bring personal preferences in as lean-agent memories instead
-  (`lean-agent memory import`, or `memory add --type user`).
-
-Measured with a typical setup (many skills, a plugin, 39 tools): **~35,700 → ~6,600 tokens of fixed context per
-orchestrator turn**, plus ~2,000 for the guide. Other keys in that file, such as `model`, are kept.
-`LEAN_AGENT_ORCHESTRATOR_TRIM=0 lean-agent home` removes the trimming. This applies only to the orchestrator
-home; your normal sessions in a repo are untouched.
-
-**Repo rules** (`CLAUDE.md`, `.claude/rules/**/*.md`): `learn` imports them as `rule` cards and keeps each rule's
-`paths:` globs and description. A rule card comes along when the task text, `run --files`, or the worktree's changed
-files match a glob; a rule without `paths:` and the root `CLAUDE.md`'s opening section are always candidates within the card budget.
-`lean-agent config project-rules on|off [-p project]` (default off) lets workers load them natively instead: they run
-in their worktree (or the project) with `--setting-sources project` rather than the default `--setting-sources ""`, rule cards are skipped,
-and the repo's `.claude/settings.json` (hooks, permissions, plugins, env) applies too; `doctor` shows the mode. Advisor,
-reviewer, composer and gap-decider runs stay isolated.
-
-**Strict mode** (`lean-agent config strict on|off`, default on; `doctor` shows it): the orchestrator only
-orchestrates. A hook refuses Bash commands that aren't `lean-agent` commands and Reads outside lean-agent's home and
-plugin, and the refusal names the worker to start instead (`lean-agent run <project> --cards auto ...`). Workers are
-never affected. The orchestrator also changes and keeps nothing itself: the hook refuses the `lean-agent` subcommands that change a
-repo, branch, remote or tracker, write memory, cards, rules, recipes, todos, notes, schedules, guards or counters, or list and run MCP
-servers (and the `mcp__*` tools), and the denial names the worker to start instead (`lean-agent remember` or `lean-agent run`; a run
-gets its queue item with `--todo new`). Workers keep all of it, including `--mcp`. The full list of what is allowed and denied, class by class, is in [docs/orchestrator-surface.md](docs/orchestrator-surface.md); known limit: Claude Code's own `/memory`, `/init` and `/config` commands in the hosted interactive session run locally, so the plugin can only refuse them when Claude Code passes them to its prompt hook (a `#` memory message is redirected to `lean-agent remember`). `lean-agent review <project> --decide-gaps [--head REF]` applies the same idea to decisions: a
-sonnet worker reads the cards and the code around each open known gap of the branch's latest review, records the
-declines it can justify (`review decline`), returns one-line fix tasks, and leaves only product or preference
-choices to the user as questions with 2-4 options. It prints "N declined, M fix tasks, K need you" and exits 2 when
-something needs the user.
-
-## Rules in every repo, and `doctor`
-
-The orchestrator's instructions come from one generated guide, `lean-agent guide`. It holds the hard rules, the
-precedence rule, worked examples and a CLI reference generated from the CLI itself, and the test suite executes
-every example in it, so it can't drift from the CLI. The orchestrator home's `CLAUDE.md` is that guide.
-
-Sessions often start inside a project repo instead of the home, so `learn` also writes a compact, marked
-**lean-agent block** into the repo's `CLAUDE.local.md`:
-
-- **Personal:** `CLAUDE.local.md` is Claude Code's file for personal, uncommitted project instructions, and lean-agent
-  adds it to `.git/info/exclude`.
-- **AGENTS.md repos:** if the repo relies on `AGENTS.md`, the block goes into `.claude/rules/lean-agent.md`
-  instead, because a `CLAUDE.local.md` would stop Claude reading `AGENTS.md`.
-- **What it says:** delegate with `lean-agent run`, never the built-in Agent or Workflow tools for project work,
-  at most 4 workers at a time, and these rules take precedence over `~/CLAUDE.md`.
-- **Updating:** re-running replaces only the text between the markers, so your own notes in the file stay. `install`,
-  `up` and `learn` refresh it. `lean-agent rules <project> [--off]` turns it on or off.
-
-`lean-agent doctor [path]` checks:
-- that the CLI is on PATH
-- the guide and trust in the orchestrator home
-- that the folder belongs to a learned project
-- which instruction files load there, and whether the lean-agent rules are among them
-- whether a file outside the repo (like `~/CLAUDE.md`) contradicts them
-- the AGENTS.md trap
-
-It exits 1 on problems. `doctor --fix` refreshes the guide and block, and adds a one-line marked precedence note to
-contradicting files outside the repo. It never edits files tracked in your repo.
-
-## Browser tasks (Claude in Chrome)
-
-Workers can use your real, signed-in Chrome through the
-[Claude in Chrome](https://code.claude.com/docs/en/chrome) extension, for example to draft a reply in Teams, Gmail or
-a ticket system that has no MCP server:
-
-```sh
-lean-agent chrome check        # once: starts a tiny Haiku session with --chrome and records tools and token cost
-lean-agent run proj -m sonnet --why "reply in Teams" --chrome --cards mem-recipe-teams-message \
-    -- "Draft a reply to Alex's last message in Teams: 'Thanks, I'll look at it today.'"
-```
-
-- **How it's isolated:** a `--chrome` run adds `--chrome` to `--setting-sources "" --strict-mcp-config` (`--chrome=loose` drops the strict flag).
-  You keep the same isolation, and the only extra tools are the browser's. `--chrome=navigate,find` narrows it
-  further, removing the other browser tools from context. `chrome check` tests whether the strict setup exposes the
-  browser on your machine. If it doesn't, check falls back to a setup without `--strict-mcp-config` that blocks your
-  configured MCP servers instead.
-- **Site permissions:** these come from the Claude extension's settings. A headless worker can't answer a site prompt,
-  so allow the sites it should use (e.g. Teams) in the extension first.
-- **Built-in recipe:** the `mem-recipe-teams-message` memory explains the Teams steps: new tab, search, verify the
-  header, Shift+Enter for line breaks because Enter sends, then stop before sending.
-
-### Draft first, send only on approval
-
-Workers are told never to do outward actions that can't be undone (send or post a message, submit, publish, merge,
-deploy, delete remote data) on their own. Instead they stop with status **`awaiting-confirmation`** and say exactly
-what they would do. After the user approves, the orchestrator resumes the same worker with
-`--allow-send "<what was approved>"`. If a target is ambiguous (two people called Alex, no matching chat), the worker
-returns **`needs-input`** with the candidates instead of guessing. This is enforced by instruction, not
-technically: lean-agent can't block a click on a web page's Send button, so the browser recipe and the playbook repeat
-it. Review what workers do in your browser.
-
-## Shared memory
-
-lean-agent replaces Claude Code's auto memory (including a shared `autoMemoryDirectory` setup) as the one place
-agents remember things:
-
-```sh
-lean-agent memory where            # lean-agent's store + the Claude auto-memory folders it found
-lean-agent memory import           # copy them in (reads autoMemoryDirectory from settings.json, or --from DIR)
-lean-agent memory list [-p shop]
-lean-agent memory add "Never merge on Fridays" --type feedback        # global
-lean-agent memory add "Staging DB resets nightly" -p shop             # project-only
-lean-agent memory rm <name>
-lean-agent memory dedupe [-p shop] [--apply]   # list (or merge) near-identical memories
-lean-agent memory dedupe --topics [--apply]    # group memories on one subject, consolidate each (originals archived); `memory restore <name>` brings one back
-```
-
-- **Same format as auto memory:** one topic file per memory with `type` (user, feedback, project, reference) and
-  `scope` (`global` or a project) frontmatter, plus a `MEMORY.md` index. Default location is `~/.lean-agent/memory/`.
-  Set `LEAN_AGENT_MEMORY_DIR` to a git repo to share it across machines or with a team.
-- **Nothing is loaded on every turn.** Auto memory loads up to 25 KB of `MEMORY.md` into *every* session. lean-agent
-  turns auto memory off for the orchestrator and workers (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). Memories become
-  `mem-*` cards, so a worker only gets the ones its task needs. User and feedback memories are always candidates
-  in `suggest`, and `optimize` archives the ones that are never used.
-- **Agents write memory too:** the orchestrator saves anything you ask it to remember, and workers can add durable
-  facts to the `remember` field of their feedback line. User and feedback memories become global; project and
-  reference memories stay with that project. Duplicate text is skipped; a near-identical memory (same type, title
-  and similar text) is appended to the existing entry under a dated line (entries are capped at about 2000
-  characters, newest kept), and `memory dedupe --apply` merges old copies without losing their text. Each memory
-  records `created` and `modified` timestamps.
-- **Rules:** a feedback memory, or any memory or note that forbids something ("never use X", "use Y instead of
-  X"), is a rule. Rules are sent with every worker, advise and brief within their own budget of about 400 tokens
-  (newest and most specific first), never archived or demoted by `optimize`, and not counted against the card
-  budget. See them with `lean-agent doctor` (prints the project's rules) or `lean-agent memory list` (the `mem-*` cards). A run
-  with `--mcp X` is refused when a rule forbids X and names the alternative; `--force-mcp` runs it anyway with a warning.
-- **Migration:** `import` copies and never changes your files. Once you're happy, set `"autoMemoryEnabled": false`
-  in `~/.claude/settings.json` and remove `autoMemoryDirectory`, so normal sessions stop loading `MEMORY.md`.
-
-Tested end to end: three imported memories, then *"Remember: prices shown to customers are VAT-inclusive. Then add a
-function that splits a total in cents across N people, with tests"*. The orchestrator saved the new memory scoped to
-the project. The worker received the imported *"money tests use integer cents and cover rounding"* memory and wrote
-exact-cent tests with 1-cent remainder cases.
-
-## How learning works
-
-1. `learn` splits each `CLAUDE.md` (root, any `dir/.claude/CLAUDE.md`, nested up to 5 levels), `CLAUDE.local.md`,
-   `AGENTS.md` (only where a folder has no `CLAUDE.md`, as Claude Code does by default), `.claude/rules/*.md`
-   and each `.claude/skills/*/SKILL.md` into **cards** at `#`/`##` headings. Shared memories are added as `mem-*` cards. Card ids are prefixed with the folder
-   (`mobile-app-rules`, `admin-portal-app-rules`). Git worktrees (including Claude's `.claude/worktrees/`) and
-   submodules are skipped, so agent checkouts don't duplicate cards.
-2. Every worker ends with a `LEAN-FEEDBACK {...}` line: status, cards `used`, cards `unneeded`, and context
-   that was `missing`. lean-agent strips that line and records it.
-3. `optimize` works **per task type**. A card used in at least 80% of 5 or more runs of one type, and never marked
-   unneeded, becomes **core for that type**: it's sent automatically to that type only. Core cards used in under 40%
-   are demoted. Cards used in at most 20% and marked unneeded are **archived**, and big, often-used cards are flagged
-   for rewriting shorter. Workers report a card as used only if it changed what they did.
-   **New cards from what workers did:** one successful run with a distinctive MCP pattern (2+ tools, 4+ calls or
-   6+ turns) is enough for `optimize` to draft a recipe card: the task, the tools in the order they worked, the
-   `--mcp` spec, what a good answer looked like, and what it cost without the card. Runs with the same server and a
-   similar tool set, or similar wording, are grouped into one draft. A **preset** is drafted (named from the tool
-   names, e.g. `datadog:metrics`) when a run was given far more tools than it used, or a pattern recurs. Drafts
-   already covered by a card are skipped. A preset draft is skipped when an existing preset already covers its
-   tools closely, becomes an "extend <preset>" draft when an existing one has fewer, and two drafts never share a
-   tool set. Context gaps a card or tracker note already covers are hidden; `optimize --ack <run-id>` hides others. Drafts are generalised (PR and ticket numbers, ids, hashes, local
-   paths and "Goal:"-style labels removed), read-only and changing runs never share a draft, a read-only preset
-   never contains a write tool (a separate `<name>-write` draft says which write tools it adds), and two drafts
-   never get the same preset name. `optimize <project> --accept <id>` writes them (`card add`, `mcp
-   preset`), `--reject <id>` stops proposing one (`--unreject <id>` brings it back). The 5-run threshold only gates trim/core/archive.
-   Relevance in `suggest` and `--cards auto`: words are weighted by how rare they are across your cards. A card
-   needs a distinctive title word, or (if it's small) three distinctive body words; cards over 800 tokens need a
-   title match, and ranking divides by card size. Only cards scoring at least 40% of the best match are kept, at
-   most 4 (`--max-cards`) within ~2,000 tokens (`--max-context`). The reviewer's card pick is more lenient.
-4. Recurring `missing` notes are turned into **note cards** by the orchestrator (`card add`). Notes survive
-   re-learning.
-
-Your project files are never modified by learning. Everything lives in `~/.lean-agent/`:
-
-```
-~/.lean-agent/
-  home/                 orchestrator folder (CLAUDE.md playbook, .claude/settings.json)
-  library/<project>/    cards.json, missing.jsonl
-  work/<run-id>/        worker cwd, append.md (exact context sent), result.json
-  ledger.jsonl          one line per run: model, why, cards, tokens, cost, status
-  projects.json
-```
-
-### Which model runs the orchestrator
-
-`claude remote-control` silently drops a `--model` flag, so remote sessions would start on your default model,
-which may be the most expensive one. `up` therefore writes the model into `~/.lean-agent/home/.claude/settings.json`,
-which those sessions do read. Token counts are similar across models, but price per token is not: Fable 5.2 costs
-4× Sonnet 5.5 for input and output (Fable 5.1: 5×). The orchestrator only plans, picks cards and models, and reads short summaries,
-and Sonnet handled that well in every test. Use `up --model default` to run it on your own default model instead.
-You can also switch the model of a running session in the app.
+| `worker-haiku` | small mechanical edits, renames, formatting, simple lookups. Use first for anything routine |
+| `worker-sonnet` | ordinary implementation, tests, bug fixes (default) |
+| `worker-opus` | hard design or debugging, only after a cheaper worker failed |
+| `reader-haiku`, `reader-sonnet` | read-only lookup and analysis |
+| `reviewer` | read-only review of a diff |
+| `explorer` | explores one area for the `learn` skill |
+
+A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
+for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
+and every error kept; the full text is saved under `~/.lean-agent/output/`) and each role sees only the tools it needs.
+
+## Learned rules
+
+`learn` explores each area of a repository with `explorer` subagents and writes at most 25 lines per area to
+`~/.lean-agent/<project>/rules/<area>.md` with `paths:` frontmatter. The `lean_rules` tool copies them as real files
+into `<repo>/.claude/rules/lean-agent/` (symlinked rule folders do not load) and keeps them out of git through
+`.git/info/exclude`: nothing shows in `git status` and nothing is committed. Worktrees get their own copy through the
+`worktree` skill. Recipes become `lean-agent-<name>` skills the same way.
+
+An area is stale after a commit touches many of its files, its manifest changes or workers report gaps for it; the
+desk then says "rules for X are stale: re-learn when you touch it". `stats` lists rules that never loaded.
+
+## Reviews and the push gate
+
+`review` runs the read-only `reviewer` on the diff, one full pass and then deltas, and writes
+`~/.lean-agent/<project>/reviews/<sha>.json`. A green record unlocks `git push` and PR publishing for that commit
+only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into rules: it learns from every
+author except the lean-agent owner's own comments.
 
 ## Budgets
 
-### Plan windows (Claude Pro / Max)
+Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:
 
-Subscription plans limit usage per **session** (5 hours) and per **week**, and some models have their own weekly
-limit. lean-agent reads the plan's **real** usage: every `claude -p` call in `stream-json` mode reports the
-plan's utilization and reset times (the same numbers `/usage` shows), and workers run that way, so each worker
-run updates them. `lean-agent limits --refresh` asks for them right away with one tiny Haiku call.
-
-```sh
-lean-agent limits                                  # Plan (from Claude, 3 min ago): session 37% (resets 13:30) · week 12% ...
-lean-agent limits --refresh                        # the same, fetched now
-lean-agent limits --session-pct 60 --week-pct 70   # agents stop at this share of your plan (real numbers when fresh)
-lean-agent limits --5h 2000000 --week 15000000     # or: a fixed sonnet-eq budget for lean-agent's own usage
-lean-agent limits --off                            # remove the budgets
+```json
+{ "dailyCapUsd": { "desk": 5, "thread": 20 }, "workerCapUsd": 2, "workerCaps": { "worker-opus": 4 } }
 ```
 
-Claude's numbers are used while they're under 30 minutes old, and they include claude.ai and other machines.
-Between reports lean-agent estimates from local session logs; `limits plan` (reset times) and `limits calibrate
-session=N week=N` (percentages from `/usage`) make that estimate closer, and are only needed if you rarely run workers.
+Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
+step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
 
-- **What's counted:** usage comes from Claude Code's session logs on this machine, read incrementally and
-  timestamped, in 10-minute buckets. That includes the orchestrator, every worker and their subagents, and your
-  other Claude Code sessions (shown as "all Claude Code here").
-- **Windows:** after `limits plan`, the session window ends at your reset time; the next one starts with the
-  first message after it and lasts 5 hours. The week runs from the weekly reset. Without a plan the windows roll
-  (the last 5 hours, the last 7 days), which is a bit stricter.
-- **Units:** **Sonnet-equivalent tokens**, which are weighted tokens scaled by the model's price relative to
-  Sonnet 5.5. Haiku 5.5 counts 0.05×, Opus 5.5 2×, Fable 5.2 4× and Fable 5.1 5×. The weekly line also splits usage by model
-  family, because a model with its own weekly bar fills that bar separately.
-- **Calibration:** `calibrate` divides the usage seen in each window by the percentage you give, so `limits`
-  can show "plan ≈ N%". A model family (`fable=8`) calibrates that family's own weekly limit. After three or more
-  session calibrations at different moments, lean-agent also fits how much cache reads and output count (least
-  squares; it keeps the defaults if the fit is implausible). Claude.ai chats and other machines aren't visible,
-  so calibrate again now and then; the latest point wins.
-- **Enforcement:** when a budget is used up (`--session-pct`/`--week-pct` of your calibrated plan, or the fixed
-  `--5h`/`--week` budgets for lean-agent's own usage), `run` refuses new workers and says when the window resets.
-  The orchestrator's hook blocks its own tool calls the same way, but `lean-agent limits` and `stats` stay allowed
-  so you can raise the budget from your phone. Your normal sessions are never blocked.
-- Everything is saved in `~/.lean-agent/limits.json`. The env vars `LEAN_AGENT_5H_BUDGET` and
-  `LEAN_AGENT_WEEKLY_BUDGET` override the fixed budgets.
+## Guards
 
-### Other limits
+All fail closed (a guard that throws denies):
 
-The session budget is in **weighted tokens**, input-token equivalents using the usual API price ratios:
-`input + 1.25×cache_write + 0.1×cache_read + 5×output`.
+- **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds.
+- **Push gate**: see above.
+- **Private projects**: never pushed or published, review or not.
+- **Workers**: readers are read-only; an edit grant is explicit (`allow-edit`).
 
-| Variable | Default | |
-|---|---|---|
-| `LEAN_AGENT_BUDGET` | off | Optional self-set **spend** cap per orchestrator session in sonnet-eq tokens: billed tokens summed over every turn, so it's not your plan and not the context window (a session at 11% context can have billed far more). Enforced by a PreToolUse hook: at `LEAN_AGENT_WARN_PCT` (default 80%) a one-time note to spend less, with the current context size, suggesting a hand-off only if the context itself is over `LEAN_AGENT_HANDOFF_CONTEXT` (150,000); at 100% tool calls are blocked. `LEAN_AGENT_BUDGET_COUNT=new` counts only new tokens (no cache re-reads). `lean-agent budget --cap N\|off [--count new\|billed]` changes it for running orchestrator sessions from their next tool call, no restart (and wins over the env var); `lean-agent budget/limits/stats/runs/logs/doctor` always run, even when capped. The 1,000,000 default that `up` set before v0.5 is ignored. A session keeps the plugin version it started with; sessions from before v0.3 call their hook scripts in that old cached copy directly, so `sync` (and `doctor --fix`) replaces those scripts with a stub that runs the clone's current code. `lean-agent budget` shows a percentage only when a cap is set. |
-| `LEAN_AGENT_RUN_MAX_USD` | `3.0` | Default `--max-usd` per worker (`claude --max-budget-usd`). |
-| `LEAN_AGENT_REVIEW_LEARN_AUTO` | `1` | `0` turns off learning from PR review comments at the two break points (a todo with a PR ref marked done or a thread with a PR closed: `review learn` starts once in the background; before a new `review` of a PR's branch: new comments are learned first). `lean-agent config review-learn-auto on\|off` sets it; per PR `<home>/<project>/review-learned.json` keeps what was learned; without a tracker a todo is added once. |
-| `LEAN_AGENT_THREAD_REPORTS` | `on` | A thread session's finished turn that ran `lean-agent run/review/handover/push`, hit an error or asks the user something is queued as one line (`[t3 done] ...`, `blocked`, `needs-you`) and typed into the main session at its turn end, batched within ~60 s (`LEAN_AGENT_REPORT_BATCH`), never mid-turn or during a permission prompt. `lean-agent now` shows each thread's latest report. `questions-only` sends only needs-you, `off` nothing; `lean-agent config thread-reports on\|questions-only\|off\|default` sets it (the env var wins). The main session sees one short line per batch (`lean-agent: 2 thread reports (t18 done, t21 question)`); the full text is hidden context, and `lean-agent thread reports` prints it. Front-desk replies are short and in tables, and anything waiting on the user is asked with AskUserQuestion (a Stop hook sends a prose question back once). |
-| `LEAN_AGENT_THREAD_FRESH_AFTER` | `idle=30m,context=120k\|50%` | `thread send` to an open thread session idle at least this long whose context has reached the limit (`context=` takes tokens such as `120k`, a share of the compaction point such as `50%`, or both as `120k\|50%`, the lower one applying: 120k on a 1M window, 100k on a 200k one; `lean-agent doctor` shows the effective threshold) checkpoints it and continues in a new session started from a short brief (`thread send tN --resume-old` keeps the old transcript). `off` disables it; `lean-agent config thread-fresh-after idle=30m,context=120k\|50%\|off\|default` sets it (the env var wins). On by default. |
-| `LEAN_AGENT_MAX_TURNS` | `40` | Default `--max-turns` per worker. |
-| `LEAN_AGENT_WORKER_PERMISSION_MODE` | `acceptEdits` | Worker permission mode. |
-| `LEAN_AGENT_WORKER_BASH_OUTPUT` | `8000` | `BASH_MAX_OUTPUT_LENGTH` for workers (not the orchestrator's larger value). |
-| `LEAN_AGENT_ANSWER_LINES` | `0` (`25` in the orchestrator) | Lines a worker's answer may use; the rest goes to a details file. |
-| `LEAN_AGENT_BRIEF` | unset (`1` in the orchestrator) | One line per item from lean-agent's report commands. |
-| `LEAN_AGENT_RUN_MAX_READS` | `6000000` | Context tokens a worker may re-read over its calls before it is stopped. |
-| `LEAN_AGENT_CTX_NUDGE` | 80% of the compaction point (`100000` if unknown) | Orchestrator context size at which the hook asks for the context check before compaction (again every 50,000 more; 0 = off). |
-| `LEAN_AGENT_READ_GUARD` / `LEAN_AGENT_READ_LINES` | on / `40` | In the orchestrator, refuse `cat`/`less`/long `tail` of a lean-agent run file longer than this. |
-| `LEAN_AGENT_RESULT_CHARS` | `12000` | Max worker reply printed back to the orchestrator (workers lead with a summary; the full result is saved). |
-| `LEAN_AGENT_HOME` | `~/.lean-agent` | Where everything lives. |
-| `LEAN_AGENT_SESSION_SOCKET_WAIT` / `_READY_WAIT` / `_STOP_WAIT` / `_RESTART_DELAY` | `15` / `40` / `20` / `2` | Seconds the `up` service session waits for the old socket, for a new session's input box, for a stopping session, and before restarting one; test/advanced knobs. |
+## State files
 
-## The plugin
+Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved from `$HOME`):
 
-Installing the plugin also gives any Claude Code session (not just the orchestrator):
+| File | Content |
+|---|---|
+| `threads/tN/thread.json`, `brief.md`, `inbox.jsonl` | a thread, its brief and queued messages |
+| `desk/inbox.jsonl`, `goals.json`, `questions.jsonl` | what threads reported, goals, open questions |
+| `<project>/rules`, `skills`, `gaps.jsonl`, `reviews/`, `learn.json` | per-project learning and reviews |
+| `memory/`, `todo.json`, `worktrees.json`, `handovers/` | shared notes and lists |
+| `config.json`, `ledger.jsonl` | caps and spend |
+| `bin/open-desk.sh`, `logs/opener.log`, `migrated-1.0.json`, `legacy-0.45/` | opener, its log, migration marker and archive |
 
-- **Output squeezer:** a PostToolUse hook for noisy Bash output over 6,000 chars. A lean-agent run summary in
-  the output (the worker's answer) is never cut, however it got there. Noise goes first: progress
-  bars, downloads, build steps, passing tests, deprecation notices and warnings that only differ in numbers or
-  paths (one copy is kept, with a count). Then the room goes, in order, to the first error with its whole stack
-  trace, the closing summary, the other distinct errors (the last one before the middle ones; repeats are
-  counted, not repeated), the start, and one line per kind of warning. A long run of warnings can no longer
-  push the real error out, and nothing is cut through the middle of an error. The full output and an
-  errors-and-warnings-only copy (with line numbers) are saved, and both paths are in the first line. Reads
-  (`cat`, `sed -n`, `head`, `grep`/`rg`, `git show/grep/diff/log/blame`) are never squeezed. Opt out per command
-  with `LEAN_RAW=1`, or entirely with `LEAN_AGENT_SQUEEZE=0`.
-- **`lean-sq <command>`:** the same filter as a wrapper, for places hooks don't run. Workers run in safe mode, so
-  they're told to run builds, tests, installs and linters through it instead of `| tail`. It keeps the exit code.
-- **Local logs, split by level** in `~/.lean-agent/logs/`: `error.log` (failed workers, CLI and hook errors,
-  errors found in command output, each with the path of the full output), `debug.log` (every run, squeeze and
-  decision), and `verbose/` (full outputs and their errors-only copies, kept 2 days). `lean-agent logs [error|debug|verbose] [-n N] [--run ID]`
-  shows the newest entries first (10 by default), only those mentioning one run with `--run`. Nothing is sent to Claude unless it reads a file.
-- **Budget guard:** the session budget above.
-- Skills `/lean-agent:budget` (token breakdown for the session) and `/lean-agent:lean-mode` (frugal working rules).
-- `lean-agent` on the Bash PATH.
+Writes are atomic (temp file then rename); appends are single `O_APPEND` writes; a damaged file reads as empty.
 
-## Troubleshooting Remote Control
+## Troubleshooting
 
-`CCR v2 worker registration failed ... 404` on every start: when you stop `claude remote-control`, it keeps a
-pointer so the next start can bring back the same session. If that session was archived or expired in the meantime,
-the server answers "Session not found" and the worker registration fails, again on every start (deleting the
-session in the app does the same). `lean-agent up` sees that error, makes the pointer forget the old session (keeping its
-environment, which Remote Control leaves registered; a start without it is refused with "This folder is already
-served ...") and starts again with a new session by itself; `lean-agent up --fresh` does it up front. "This folder is already served by a terminal
-`claude remote-control`" means another Claude Code serves the home already, often the Claude desktop app: close it
-and run `lean-agent up` again (`up` says so when it sees that error). The server itself keeps working either way.
-For other errors: `claude update`, then `claude auth logout && claude auth login`, then
-`lean-agent up -- --debug --debug-file /tmp/rc.log` and look at the log. See also the [Remote Control troubleshooting docs](https://code.claude.com/docs/en/remote-control#troubleshooting).
-
-## Caveats
-
-- **Workers can run Bash without asking** (`--allowedTools` includes Bash, permission mode `acceptEdits`) in
-  your project. Use a git repo, review diffs, use `--read-only` for investigation, or set
-  `LEAN_AGENT_WORKER_PERMISSION_MODE` / `--tools` to restrict.
-- Workers in safe mode get no MCP servers, hooks or plugins. If a task needs one, the orchestrator should
-  do that step itself or you run it in a normal session.
-- Your user-level `~/.claude/CLAUDE.md` and plugins still load in the **orchestrator** (Remote Control
-  doesn't accept `--settings`/`--setting-sources`). Keep them small, or run the orchestrator under a
-  separate `CLAUDE_CONFIG_DIR`.
-- The session budget guard and `lean-agent budget` read Claude Code's transcript files, whose format is
-  internal. Worker accounting uses the documented `--output-format json` result instead.
-- Card selection is keyword-based plus learned hit rates. The orchestrator model makes the final call.
+- **The desk did not open at login**: `doctor check` shows the last opener line. The opener only acts while the Claude
+  app is running (it waits ten minutes and never launches it). `doctor fix` reinstalls it.
+- **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `doctor fix`
+  repeats it; if `~/.claude.json` does not parse, lean-agent leaves it alone: accept the trust dialog once.
+- **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
+- **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
+- **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.
 
 ## Development
 
 ```sh
-python3 tests/test_hooks.py           # squeeze + budget hooks
-python3 tests/test_orchestrator.py    # CLI with a fake `claude` binary
-claude plugin validate . && claude plugin validate plugins/lean-agent
+claude plugin validate plugins/lean-agent
+sh plugins/lean-agent/opener/open-desk.test.sh   # opener, with a fake pgrep and claude
+sh plugins/lean-agent/hooks/rules-loaded.test.sh
+claude plugin test plugins/lean-agent            # mod specs (*.test.ts, *.test.tsx); no sign-in needed
 ```
+
+Design notes: [docs/design-1.0.md](docs/design-1.0.md). The designer brief for the pane:
+[docs/live-map-design-brief.md](docs/live-map-design-brief.md).
 
 ## License
 
