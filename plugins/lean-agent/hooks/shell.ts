@@ -312,9 +312,9 @@ export function analyze(c: string): Verdict {
 
 // A pipeline of plain simple commands as word lists (quotes resolved), or null for anything the scanner cannot PROVE plain.
 // The general lexer above drops redirections and flattens ; & | ( ), so it cannot prove "no redirect"; this scanner is strict
-// instead: outside quotes only letters, digits and `_ . / : = @ % + , - ^ #`-free words and the pipe `|` are accepted (no ; & < > ( )
-// backtick $ { } ~ * ? [ \ ! newline, no `||`, no empty segment); inside single quotes everything is data; inside double quotes
-// `$`, backtick and a backslash other than before `"` or `\` are refused. Globs, braces and tildes must be quoted (then they
+// instead: outside quotes words and the pipe `|` are accepted (no ; & < > ( ) backtick $ * ? [ \ ! # newline, no `||`, no
+// empty segment, no word-initial ~, no `{a,b}` / `{1..3}` brace expansion; `HEAD~1` and `@{u}` are plain); inside single quotes everything is data; inside double quotes
+// `$` and backtick are refused. Globs, braces and tildes must be quoted (then they
 // are data for the program) or not used.
 export function plainPipeline(c: string): string[][] | null {
   const segs: string[][] = []
@@ -333,7 +333,7 @@ export function plainPipeline(c: string): string[][] | null {
       for (; j < n && c[j] !== '"'; j++) {
         const d = c[j]!
         if (d === '$' || d === '`') return null
-        if (d === '\\') { const e = c[j + 1]; if (e === '"' || e === '\\') { cur += e; j++; continue } return null }
+        if (d === '\\') { const e = c[j + 1] ?? ''; if (e === '"' || e === '\\') cur += e; else cur += '\\' + e; j++; continue } // bash keeps other backslashes literally ("a\|b")
         cur += d
       }
       if (j >= n) return null
@@ -342,7 +342,16 @@ export function plainPipeline(c: string): string[][] | null {
     }
     if (ch === ' ' || ch === '\t') { endWord(); continue }
     if (ch === '|') { if (c[i + 1] === '|' || !endSeg()) return null; continue }
-    if (/[;&<>()`${}~*?[\]\\!\n\r#]/.test(ch)) return null
+    if (ch === '{') { // `@{u}` is literal; `{a,b}` / `{1..3}` would be expanded by the shell
+      const j = c.indexOf('}', i)
+      const inner = j < 0 ? ',' : c.slice(i + 1, j)
+      if (j < 0 || /,|\.\.|[\s;&<>|`$'"]/.test(inner)) return null
+      cur += c.slice(i, j + 1); has = true; i = j
+      continue
+    }
+    if (ch === '~' && !has) return null // tilde expansion only at the start of a word (`HEAD~1` is plain)
+    if (ch === '~') { cur += ch; continue }
+    if (/[;&<>()`$}*?[\]\\!\n\r#]/.test(ch)) return null
     cur += ch
     has = true
   }

@@ -165,7 +165,13 @@ async function load(h: Host, home: string, id: string): Promise<Thread | null> {
   const t = await readJson<Thread | null>(h, `${tpath(home, id)}/thread.json`, null)
   return t && t.id === id ? t : null
 }
-const save = (h: Host, home: string, t: Thread) => writeJson(h, `${tpath(home, t.id)}/thread.json`, t)
+// the session's own mod appends to `sids` from another process: a save keeps whatever ids are on disk
+async function save(h: Host, home: string, t: Thread): Promise<void> {
+  const file = `${tpath(home, t.id)}/thread.json`
+  const disk = await readJson<{ sids?: unknown } | null>(h, file, null)
+  const ids = [...(Array.isArray(disk?.sids) ? disk!.sids : []), ...(t.sids ?? [])].filter((x): x is string => typeof x === 'string')
+  await writeJson(h, file, ids.length ? { ...t, sids: [...new Set(ids)].slice(-20) } : t)
+}
 
 async function nextId(h: Host, home: string): Promise<string> {
   let max = 0
@@ -371,6 +377,8 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           // the user said yes in the desk chat; only the desk's lean_thread reaches this. One sha, one push, two hours.
           const sha = (i.sha ?? '').trim().toLowerCase()
           if (!t.project) return err(`${id} has no project, so there is nothing to approve a push for`)
+          const pj = (await readJson<Record<string, { private?: boolean }>>(h, `${leanDir(home)}/projects.json`, {}))?.[t.project]
+          if (pj?.private === true) return err(`${t.project} is a private project: it is never pushed, an approval would never be used. Give the user the manual push command instead`)
           try {
             await writeApproval(h, { project: t.project, sha, thread: id, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
           } catch (e) {

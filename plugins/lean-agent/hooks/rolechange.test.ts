@@ -255,9 +255,10 @@ test('a session first resolved as a thread records its id in thread.json sids (s
 })
 
 test('a sid another thread already holds is never recorded for a second thread', async ($, on) => {
-  const s = await start($, on, '/h/.lean-agent/threads/t1')
-  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', title: 'y', project: '', state: 'open', sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 }))
-  await s.move('/h/.lean-agent/threads/t2')
+  const s = await start($, on, '/h/code/proj')
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: '', state: 'open', sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 }))
+  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', title: 'y', project: '', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  await s.move('/h/.lean-agent/threads/t2') // a plain session that holds t1's id walks into t2's folder: it IS t1 (by id), t2 gets nothing
   expect(JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t2/thread.json'))).sids).toBeUndefined()
 })
 
@@ -267,4 +268,14 @@ test('a refusal names the tool, the role, where the session started and what its
   expect(t).toContain('lean-agent: lean_report needs a thread session; this session is plain (started in /h/code/proj, session id not in any thread.json)')
   const d = JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))
   expect(d).toContain('lean_thread needs a desk session; this session is plain')
+})
+
+test('the refusal text tells ambiguous and closed session ids apart', async ($, on) => {
+  const s = await start($, on, '/h/code/proj')
+  const rec = (id: string, state: string) => JSON.stringify({ id, title: 'x', project: '', state, sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 })
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'closed'))
+  expect(JSON.stringify(await callReport($))).toContain('belongs to thread t1, which is closed')
+  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', rec('t2', 'open'))
+  s.h.files.set('/h/.lean-agent/threads/t3/thread.json', rec('t3', 'open'))
+  expect(JSON.stringify(await callReport($))).toContain('is in several thread.json files (t1, t2, t3)')
 })

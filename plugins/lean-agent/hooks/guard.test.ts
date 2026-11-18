@@ -347,7 +347,8 @@ test('built-in read-only git: the explorer runs ls-files / log without a grant; 
     expect(await bash('git diff --stat main...HEAD', t)).toBeNull()
     expect(await bash('git status --short', t)).toBeNull()
     expect(await bash('git rev-parse HEAD', t)).toBeNull()
-    expect(await bash('git -C /r/sub log -2', t)).toBeNull()
+    expect(await bash('git -C /h/.lean-agent/worktrees/app/t1 log -2', t)).toBeNull()
+    expect(await bash('git -C /r/sub log -2', t)).toContain('granted') // the session cwd alone is no root
   }
   expect(await bash('git diff --ext-diff', 'lean-agent:reader-haiku')).toContain('granted')
   for (const c of ['git log --{output=/tmp/x,}', 'git log {--output=/tmp/x,}', 'git diff {--ext-diff,}', 'git -C ~ log', 'git -C sub/../.. log', 'git -C a -C b log', 'git diff --ext x', 'git log --exec=x', 'git diff --no-index a b', 'git log --help', 'git log -h', 'git log --$"output=x"', 'git ls-files *'])
@@ -428,11 +429,19 @@ test('approve-push: the desk approves one sha once, for 2 h; forged, wrong-sha a
   expect(String(h.files.get('/h/.lean-agent/threads/t1/history.jsonl'))).toContain('approve-push')
   expect(await run(h, thread, push)).toBeNull() // accepted like a green review
   expect(await run(h, thread, push)).toContain('no green review') // single use
+  // a thread restoring the consumed record (it may edit ~/.lean-agent) gains nothing: consumption lives in the mod's store
+  const rec = JSON.parse(String(h.files.get(`/h/.lean-agent/app/approvals/${SHA}.json`)))
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ ...rec, used: false }))
+  expect(await run(h, thread, push)).toContain('no green review')
   await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   h.clock.t += APPROVAL_TTL_MS + 1
   expect(await run(h, thread, push)).toContain('no green review') // expired
-  await writeApproval(h.host, { project: 'other', sha: SHA, thread: 't1' })
-  expect(await run(h, thread, push)).toContain('no green review') // another project's record
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't2' })
+  expect(await run(h, thread, push)).toContain('no green review') // approved for t2: t1 cannot use it
+  const t2 = { kind: 'thread', id: 't2' } as const
+  const recT = JSON.parse(String(h.files.get(`/h/.lean-agent/app/approvals/${SHA}.json`)))
+  h.files.set(`/h/.lean-agent/app/approvals/${SHA}.json`, JSON.stringify({ ...recT, project: 'other' }))
+  expect(await run(h, t2, push)).toContain('no green review') // an edited record fails its signature
 })
 
 test('a private project is never pushed, approval or not', async () => {
@@ -475,7 +484,8 @@ test('an Agent call with allow-cmd / allow-edit lines is refused up front unless
   expect(await call({ kind: 'thread', id: 't1' }, 'x1')).toContain('a subagent')
   expect(await call({ kind: 'thread', id: 't1' })).toBeNull()
   expect(await run(h, { kind: 'plain' } as any, { tool: 'Agent', prompt: 'Look around' })).toBeNull() // no grant lines: not refused
-  expect(await run(h, { kind: 'plain' } as any, { tool: 'Task', prompt: 'allow-edit: /x' })).toContain('allow-edit')
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Task', prompt: 'allow-edit: /x\nallow-cmd: ls', subagent_type: 'lean-agent:worker-haiku' })).toContain('allow-cmd and allow-edit')
+  expect(await run(h, { kind: 'plain' } as any, { tool: 'Agent', prompt: 'allow-cmd: x', subagent_type: 'general-purpose' })).toBeNull() // not one of ours: grants mean nothing, not refused
 })
 
 test('the desk may run read-only search under ~/.lean-agent only', async () => {
@@ -489,4 +499,40 @@ test('the desk may run read-only search under ~/.lean-agent only', async () => {
   expect(await bash('rg foo')).toContain('route this to a thread') // the desk folder is outside the root
   expect(await bash('cat /h/.lean-agent/x > /tmp/y')).toContain('route this to a thread')
   expect(await bash('find /h/.lean-agent -delete')).toContain('route this to a thread')
+})
+
+test('approve-push: a push naming one sha twice, or two shas where one lacks approval, burns nothing; private projects cannot be approved', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature feature:other' })).toBeNull() // one sha, two refspecs
+  await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: (a.join(' ').includes('other') ? 'f'.repeat(40) : SHA) + '\n' } : { exitCode: 1, stdout: '' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature other:x' })).toContain('no green review') // the second sha has none
+  h.git.handler = a => (a.includes('rev-parse') ? { exitCode: 0, stdout: SHA + '\n' } : { exitCode: 1, stdout: '' })
+  expect(await run(h, thread, { tool: 'Bash', command: 'git push origin feature' })).toBeNull() // the first approval was not spent
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', private: true } }))
+  const r = await leanThread(h.host, '/p', { action: 'approve-push', tN: 't1', sha: SHA })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('private project')
+})
+
+test('search: attached and clustered -e/-f, symlink-following flags, recursion without a path, tail abbreviations, a cwd outside every root', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reader-haiku', 'x1')
+  const lean = at('/h/.lean-agent/worktrees/app/t1')
+  for (const c of ['grep -rf /etc/passwd src', 'rg -nf/etc/shadow x', 'rg -nfpats x src', 'grep -ePAT src', 'rg -L secret src', 'rg --follow secret src', 'grep -R x src', 'grep --dereference-recursive x src', 'find -L . -name x', 'find -H . -name x', 'find . -follow', "find . -exec ls '{}' ';'", "find . -execdir ls '{}' ';'", "find . -ok ls '{}' ';'", "find . -okdir ls '{}' ';'", 'tail --fo x', 'tail --ret x', 'tail --follow=name x'])
+    expect(await lean(c), c).toContain('granted')
+  for (const c of ["grep -rn -e '/api' src", "rg -e 'a..b' src", "grep -rn 'foo\\|bar' src", 'grep -rn "\\bword\\b" src', 'git log HEAD~1', 'git diff @{u}', 'git log -3 --format="%h %s"', "rg 'x|y' src | head -3"])
+    expect(await lean(c), c).toBeNull()
+  for (const c of ['git log {a,b}', 'git log {1..3}', 'git log ~x', 'cat ~/x'])
+    expect(await lean(c), c).toContain('granted')
+  for (const cwd of ['/h', '/tmp', '/h/.ssh', '/']) {
+    expect(await at(cwd)('cat id_rsa'), cwd + ' cat').toContain('granted')
+    expect(await at(cwd)('rg -r x .'), cwd + ' rg').toContain('granted')
+    expect(await at(cwd)('grep -rn password'), cwd + ' grep').toContain('granted')
+  }
+  expect(await at('/h/code/app/src')('rg foo')).toBeNull() // inside a registered project
 })

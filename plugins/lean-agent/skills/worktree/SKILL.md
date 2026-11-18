@@ -16,8 +16,8 @@ Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch 
 - **dependencies** (after `new`, and after `adopt` when `node_modules` is missing): when the worktree has a lockfile, a
   `lean-agent:worker-haiku` runs the install in the worktree and the result is reported (command, exit code, last lines):
   `yarn.lock` -> `yarn install --frozen-lockfile` for yarn 1 (`yarn --version` starts with 1) or `yarn install --immutable` for
-  yarn 2+; `package-lock.json` -> `npm ci`; `pnpm-lock.yaml` -> `pnpm install --frozen-lockfile`. Give that worker
-  `allow-cmd:` for exactly that command and `allow-edit:` for the worktree path. **Never symlink `node_modules` from another
+  yarn 2+; `package-lock.json` -> `npm ci`; `pnpm-lock.yaml` -> `pnpm install --frozen-lockfile`. Tell that worker to run
+  exactly that command (nothing else) and give it `allow-edit:` for the worktree path. **Never symlink `node_modules` from another
   worktree by default**: `link:` / `file:` dependencies can point at per-branch generated code. Only when the install is
   impossible (offline, registry down) may it BORROW from a donor worktree of the same project, and only if the donor's lockfile
   AND every `link:` / `file:` target named in `package.json` / the lockfile are byte-identical to this worktree's (`cmp`,
