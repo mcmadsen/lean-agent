@@ -26,7 +26,7 @@ One major release: lean-agent is now pure Claude Code.
 - The old service is unloaded and the old `lean-agent` command shim is removed.
 - Kept from 0.45: plain pushes to `main`, `master`, `develop` and `release/*` (or a project's own `guards.push-deny` in
   `projects.json`) are refused at the shell level and in the pre-push hook; overrides: `LEAN_AGENT_PUSH_GUARD_OVERRIDE=1`, and
-  pushes to a local path / `file://` URL are not checked. Residual risk (documented): a push hidden in `python -c` or `ssh`
+  pushes to a local path / `file://` URL are not checked. Residual risk (documented): a push hidden in `python -c`
   is not parsed by the shell guard; the pre-push hook is the backstop.
 
 See `docs/design-1.0.md`.

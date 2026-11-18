@@ -43,7 +43,8 @@ export async function record(h: Host, ctx: { role: string; tN?: string; agentId?
   return row
 }
 
-// Daily sums per role, kept in the mod's store with the ledger byte offset they cover. Writers (other threads' sessions)
+// Daily sums per role, kept in the mod's store with the ledger byte offset they cover (record and spentToday both call
+// syncCache; the file size comes from fs.stat, wc only where stat has no size). Writers (other threads' sessions)
 // only append, so a cache whose offset is behind the file size is topped up from the ledger tail: no row is lost to a
 // concurrent read-modify-write, and the whole ledger is read again only when the day changes or the file shrank.
 const enc = new TextEncoder()
@@ -54,7 +55,9 @@ async function cache(h: Host): Promise<Cache | null> {
   return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
 }
 async function ledgerSize(h: Host, home: string): Promise<number | null> {
-  const r = await h.process.run(['wc', '-c', ledgerFile(home)]).catch(() => null)
+  const st = await h.fs.stat(ledgerFile(home)).catch(() => null)
+  if (typeof st?.size === 'number') return st.size
+  const r = await h.process.run(['wc', '-c', ledgerFile(home)]).catch(() => null) // engines whose stat has no size
   const n = r && r.exitCode === 0 ? parseInt(r.stdout.trim(), 10) : NaN
   return Number.isFinite(n) ? n : null
 }

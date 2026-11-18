@@ -5,7 +5,9 @@
 // $(...) / `...` / bash -c / eval / sh heredocs are scanned recursively. Detected: git push, git remote add|set-url,
 // lean-agent outward commands, a gh/az WRITE (read-only subcommands are an allow-list matched by position), and a
 // variable / substitution used as a program name. A command that cannot be lexed is judged by token only.
-export type Verdict = { push: boolean; write: boolean; unsure: boolean }
+// pushes: the words after `push` of every git push found; known=false when the subcommand could not be determined (fail closed)
+export type Push = { args: string[]; known: boolean }
+export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[] }
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
@@ -34,6 +36,8 @@ const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o
 const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
 const KW = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'time'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
+// programs that run a command given among their own arguments (the git word is looked for anywhere after them)
+const SCAN_ANY = new Set(['ssh', 'flock', 'parallel', 'chroot', 'strace', 'su', 'runuser', 'script', 'sg', 'newgrp', 'systemd-run', 'nsenter', 'unshare', 'proot'])
 const PLAIN_WRAP = new Set(['exec', 'nohup', 'builtin', 'nice', 'ionice', 'stdbuf', 'setsid', 'unbuffer', 'chronic', 'watch'])
 
 class Bad extends Error {}
@@ -271,8 +275,16 @@ function segEval(seg: Seg, depth: number, v: Verdict) {
     if (b === 'git') {
       let j = i + 1
       while (j < w.length && w[j]!.startsWith('-')) j += /^(-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)$/.test(w[j]!) ? 2 : 1
-      if (w[j] === 'push') v.push = true
+      if (w[j] === 'push') { v.push = true; v.pushes.push({ args: w.slice(j + 1), known: true }) }
+      else if (w[j]?.includes(EXP)) { v.push = true; v.pushes.push({ args: w.slice(j + 1), known: false }) }
       if (w[j] === 'remote') { const k = w.slice(j + 1).find(a => !a.startsWith('-')); if (k === 'add' || k === 'set-url') v.write = true }
+      return
+    }
+    if (SCAN_ANY.has(b)) {
+      for (let k = i + 1; k < w.length; k++) {
+        if (base(w[k]!) === 'git') { segEval({ words: w.slice(k), docs: [] }, depth, v); return }
+        if (/\s/.test(w[k]!)) scan(w[k]!, depth + 1, v)
+      }
     }
     return
   }
@@ -284,7 +296,7 @@ function scan(c: string, depth: number, v: Verdict) {
 }
 
 export function analyze(c: string): Verdict {
-  const v: Verdict = { push: false, write: false, unsure: false }
+  const v: Verdict = { push: false, write: false, unsure: false, pushes: [] }
   try {
     scan(c, 0, v)
   } catch (e) {
@@ -293,7 +305,7 @@ export function analyze(c: string): Verdict {
   }
   if (v.unsure) {
     if (GHAZ.test(c) || DYNAMIC.test(c) || LEAN_OUT.test(c)) v.write = true
-    if (PUSH_TEXT.test(c)) v.push = true
+    if (PUSH_TEXT.test(c)) { v.push = true; v.pushes.push({ args: [], known: false }) }
   }
   return v
 }

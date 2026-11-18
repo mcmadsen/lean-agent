@@ -8,7 +8,7 @@ export type Host = {
     write: (p: string, t: string) => Promise<void>
     exists: (p: string) => Promise<boolean>
     list: (p?: string) => Promise<{ name: string; kind: string }[]>
-    stat: (p: string, o?: { resolve?: boolean }) => Promise<{ kind: string; realPath?: string }>
+    stat: (p: string, o?: { resolve?: boolean }) => Promise<{ kind: string; realPath?: string; size?: number }>
   }
   process: { run: (argv: readonly string[], init?: any) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
   env: { get: (n: string) => Promise<string | undefined> }

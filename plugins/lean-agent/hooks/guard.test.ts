@@ -93,6 +93,23 @@ test('push parsing is per git push segment: chained commands are neither over- n
   expect(await r('echo push; git push origin main')).toContain('never pushes')
   expect(await r('echo x; git push origin main')).toContain('never pushes')
   expect(await r('git status && git push --force origin main')).toContain('protected')
+  // redirections are not words; wrapper prefixes do not hide the push
+  expect(await r('git push origin HEAD 2>&1')).toBeNull()
+  expect(await r('git push origin feature 2>/dev/null >/tmp/o &')).toBeNull()
+  expect(await r('git push 2>&1')).toBeNull()
+  expect(await r('git push origin main 2>&1')).toContain('never pushes')
+  expect(await r('timeout 5 git push -f origin main')).toContain('protected')
+  expect(await r('xargs git push origin main')).toContain('never pushes')
+  expect(await r('ssh h git push origin main')).toContain('never pushes')
+  expect(await r('if true; then git push origin main; fi')).toContain('never pushes')
+  expect(await r('while true; do git push origin main; done')).toContain('never pushes')
+  expect(await r('! git push origin main')).toContain('never pushes')
+  expect(await r('nice -n 5 /usr/bin/git push origin main')).toContain('never pushes')
+  expect(await r('git push origin feature && echo main')).toBeNull()
+  // a ref that does not resolve cannot be unlocked by any review
+  h.git.handler = a => (a.includes('rev-parse') && a.includes('--verify') ? { exitCode: 1, stdout: '' } : a.includes('get-url') ? { exitCode: 0, stdout: 'git@github.com:o/r.git\n' } : a.includes('symbolic-ref') ? { exitCode: 0, stdout: 'feature\n' } : { exitCode: 1, stdout: '' })
+  expect(await r('git push origin nosuch')).toContain('cannot resolve nosuch')
+  expect(await r('git push origin nosuch 2>&1')).toContain('cannot resolve nosuch')
 })
 
 test('review records are HMAC-signed with a key only in the mod store: forged, copied or legacy-keyed records fail', async () => {
@@ -228,8 +245,10 @@ test('private projects never push or publish, review or not', async () => {
     'echo "unbalanced', 'echo it\'s', 'for f in gh az; do echo $f; done', 'echo $(date)', 'FOO=1 ls', 'sudo ls', '$HOME/bin/tool x', 'bash script.sh', 'eval "echo hi"', 'cat file | grep gh', 'ls src/az', 'gh pr view 3 --json title | jq .title',
     // quoted data / heredoc bodies / non-command positions are not commands
     'echo gh pr create', 'echo "gh pr create"', 'git commit -m "docs: gh pr create and git push"', "git commit -m 'run gh pr merge later'", "cat <<EOF\nit's fine, gh pr create\nEOF", "cat <<'EOF' > \"$f\"\ndon't gh pr merge\nEOF", 'grep -r "gh pr create" .',
-    "git commit -m 'add push notifications'", 'git log --grep=push', 'ls src/gh && git merge main', 'git log --grep push --oneline', 'git diff main | grep merge', 'python3 -c "import os; os.system(\'git push\')"', 'ssh h "git push origin x"'])
+    "git commit -m 'add push notifications'", 'git log --grep=push', 'ls src/gh && git merge main', 'git log --grep push --oneline', 'git diff main | grep merge', 'python3 -c "import os; os.system(\'git push\')"'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
+  for (const command of ['ssh h "git push origin x"', 'ssh h git push', 'timeout 60 git push', 'xargs git push', 'if true; then git push; fi', 'git push origin x 2>&1'])
+    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
   // non-private: no publishing denial
   for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, null])

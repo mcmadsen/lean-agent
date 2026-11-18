@@ -29,7 +29,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     stat: (path: string) => {
       const p = res(path)
       if (!files.has(p) && !dirs().has(p) && !links.has(path)) throw new Error('ENOENT ' + path)
-      return { kind: files.has(p) ? 'file' : 'dir', size: 0, mtimeMs: 0, isLink: links.has(path), realPath: p }
+      return { kind: files.has(p) ? 'file' : 'dir', size: files.has(p) ? new TextEncoder().encode(files.get(p)!).length : 0, mtimeMs: 0, isLink: links.has(path), realPath: p }
     },
     list: (path: string) => {
       const base = res(path).replace(/\/$/, '') + '/'
