@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { readJsonl } from './state'
-import { DIRECT_MAX, RELAY_GAP_MS, consumeWake, directLine, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { ASK_MAX, DIRECT_MAX, RELAY_GAP_MS, consumeWake, directLine, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -211,7 +211,7 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   expect(lines).toHaveLength(1)
   expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
   const ts = /lean:r=(\d+):t1:report/.exec(lines[0])![1]!
-  expect(lines[0]).toContain(`(cut: the full text is in ~/.lean-agent/desk/reports/${ts}-t1.md: Read it; the pane's Answers list has it too)`)
+  expect(lines[0]).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1.md: Read it; the pane's Answers list has it too)`)
   expect(lines[0].length).toBeLessThan(DIRECT_MAX + 400)
   // the file the pointer names holds the whole report as plain lines the desk can Read
   expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
@@ -249,6 +249,44 @@ test('a long question is never cut and keeps its options; a cut never splits a s
   expect(nofile.line).not.toContain('lean:r=')
   expect(nofile.line).toContain('(cut: the full report is in the desk inbox / pane)')
   expect(directLine({ ...rec, text: 'short' }).keyed).toBe(true)
+})
+
+test('one decision to cut: comment markers cannot make the line longer than the text that was measured; a huge question or option list goes to the file; a name that is not a thread id gets no file and stays unread', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const lines: string[] = []
+  const ok = async (_s: string, t: string) => void lines.push(t)
+  // 1400 characters plus 30 comment markers: more than DIRECT_MAX once the markers are masked, so it is cut AND filed (never cut without a file)
+  const marked = `${'x'.repeat(1400)}${' -->'.repeat(30)}`
+  const r = await threadTool(h.host, 't1', 'lean_report', { text: marked, state: 'done' }, ok)
+  expect(r.text).toContain('not handed over again')
+  expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/)
+  expect(lines[0]).toContain('/h/.lean-agent/desk/reports/')
+  expect((await unreadReports(h.host)).recs).toHaveLength(0)
+  // a huge question and 500 long options: the line is bounded, the file has everything
+  h.clock.t += 10
+  const opts = Array.from({ length: 500 }, (_, n) => `option ${n} ${'o'.repeat(1000)}`)
+  await threadTool(h.host, 't2', 'lean_ask', { question: `${'q'.repeat(9000)} really?`, options: opts }, ok)
+  expect(lines[1]!.length).toBeLessThan(ASK_MAX + 2000)
+  const ts = /lean:r=(\d+):t2:ask/.exec(lines[1]!)![1]!
+  const file = h.files.get(`/h/.lean-agent/desk/reports/${ts}-t2.md`)!
+  expect(file).toContain('really?')
+  expect(file).toContain('- option 499 ')
+  // options alone over the clamp: the question is whole, the options are clamped, the file has them all
+  h.clock.t += 10
+  await threadTool(h.host, 't3', 'lean_ask', { question: 'which?', options: opts }, ok)
+  expect(lines[2]).toContain('which? (cut: the full text is in ')
+  expect(lines[2]).toContain('[options: option 0 ')
+  expect(lines[2]!.length).toBeLessThan(1600)
+  expect(lines[2]).toContain('/h/.lean-agent/desk/reports/')
+  expect(h.files.get(`/h/.lean-agent/desk/reports/${/lean:r=(\d+):t3:ask/.exec(lines[2]!)![1]}-t3.md`)).toContain('- option 499 ')
+  // a "from" that is not a thread id is not written into a file name: no file, no key, the row stays unread
+  h.clock.t += 10
+  await threadTool(h.host, 'odd name', 'lean_report', { text: 'z'.repeat(2000), state: 'done' }, ok)
+  expect(lines[3]).not.toContain('lean:r=')
+  expect(lines[3]).toContain('(cut: the full report is in the desk inbox / pane)')
+  expect([...h.files.keys()].some(k => k.includes('reports/') && k.includes('odd'))).toBe(false)
+  expect((await unreadReports(h.host)).recs.map(x => x.from)).toContain('odd name')
 })
 
 test('direct send: a forged key in text cannot hide another row; a failed send unmarks; a refused relay rewinds to the real pointer', async () => {

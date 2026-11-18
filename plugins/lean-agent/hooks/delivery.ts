@@ -123,8 +123,11 @@ const oneLine = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length 
 // desk can Read; the inbox is one JSON line per row), and the cut line names that file and carries the row key too: the row counts as
 // delivered and the full report is NOT handed over a second time at the next prompt (a long done report used to arrive twice). The
 // pane's Answers list still shows it. When the file cannot be written the cut line has no key and the row stays unread (nothing is lost).
-// A question is never cut: the real question may be its last sentence.
+// A question is cut only far past that (ASK_MAX, the real question may be its last sentence), by the same file and pointer; its options
+// are clamped to OPTIONS_MAX characters in the line (the file has them all).
 export const DIRECT_MAX = 1500
+export const ASK_MAX = 8000
+const OPTIONS_MAX = 1000
 export const reportFile = (home: string, r: { ts: number; from: string }) => `${deskState(home)}/reports/${r.ts}-${r.from}.md`
 
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
@@ -139,12 +142,15 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
 // file; none = it could not be written).
 export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }, file?: string): { line: string; cut: boolean; keyed: boolean } {
   const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
-  const cut = r.kind === 'report' && flat.length > DIRECT_MAX
+  const max = r.kind === 'ask' ? ASK_MAX : DIRECT_MAX
+  const opts = r.options?.length ? r.options.join(' | ') : ''
+  const textCut = flat.length > max
+  const cut = textCut || opts.length > OPTIONS_MAX // (the ONE place that decides: tellDesk asks directLine, then writes the file)
   const keyed = !cut || !!file
   const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
-  const tail = `${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
+  const tail = `${opts ? ` [options: ${opts.length > OPTIONS_MAX ? `${opts.slice(0, OPTIONS_MAX - 1).replace(/[\ud800-\udbff]$/, '')}…` : opts}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
   const pointer = file ? `(cut: the full text is in ${file}: Read it; the pane's Answers list has it too)` : '(cut: the full report is in the desk inbox / pane)'
-  const body = cut ? `${flat.slice(0, DIRECT_MAX - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : flat
+  const body = textCut ? `${flat.slice(0, max - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : cut ? `${flat} ${pointer}` : flat
   return { line: `${head}${body}${tail}${keyed ? ` <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->` : ''}`, cut, keyed }
 }
 
@@ -165,13 +171,16 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!worth) return ''
   const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
-  // a long report: its full text goes to its own file first (the cut line points at it)
+  // a long text: its full text goes to its own file first (the cut line points at it, by absolute path). `from` must be a thread id: it
+  // is part of the file name. No file (bad name, write failed): the cut line is unkeyed and the row stays unread.
+  const first = directLine(rec)
   let file: string | undefined
-  if (rec.kind === 'report' && rec.text.replace(/\s+/g, ' ').trim().length > DIRECT_MAX) {
+  if (first.cut && /^t\d+$/.test(rec.from)) {
     const path = reportFile(home, rec)
-    file = await atomicWrite(h, path, `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`).then(() => `~/.lean-agent/desk/reports/${rec.ts}-${rec.from}.md`, () => undefined)
+    const body = rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
+    file = await atomicWrite(h, path, body).then(() => path, () => undefined)
   }
-  const { line, cut, keyed } = directLine(rec, file)
+  const { line, cut, keyed } = file ? directLine(rec, file) : first
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
     if (keyed) await setKey(h, home, key, true)

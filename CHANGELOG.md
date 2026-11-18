@@ -17,7 +17,8 @@
   in full at the next prompt. The full text is now written to `~/.lean-agent/desk/reports/<ts>-<tN>.md` (plain lines the desk can
   Read), the cut line names that file and carries its row key too, so the row counts as delivered and nothing hands it over again
   (the pane's Answers list still has it). When the file cannot be written, or the send is refused, the row stays unread for the next
-  prompt as before. A question is never cut. The generated thread guide leaves the `model:` line out when it is built without a
+  prompt as before. The pointer is an absolute path, and the file is only written for a real thread id. A question is cut only past
+  8,000 characters (its options are clamped to 1,000 in the line); the file has all of it. The generated thread guide leaves the `model:` line out when it is built without a
   choice (compare's throw-away folder), and `close` also removes the session when the listing prints the real path of a linked home.
 
 ### Fixed (desk, feedback export)
