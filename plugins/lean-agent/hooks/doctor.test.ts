@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { check, fix, migrate, plist } from './doctor'
+import { autoMigrate, check, fix, migrate, plist, MIGRATE_NOTICE } from './doctor'
+import { readNotices } from './notices'
 
 const L = '/h/.lean-agent'
 function legacy() {
@@ -129,4 +130,45 @@ test('migrate on Linux disables and archives the 0.45 systemd unit; check says 1
   expect(h.files.has('/h/.config/systemd/user/lean-agent.service')).toBe(false)
   expect(r.lines.join('\n')).toContain('lean-agent.service')
   expect((await check(h.host, '/plug')).join('\n')).toContain('lean-agent 1.0 needs Claude Desktop (macOS)')
+})
+
+test('autoMigrate: leftover 0.45 service is unloaded FIRST (fake launchctl, tolerant), then migrate runs once; clean homes are untouched', async () => {
+  const h = legacy()
+  const order: string[] = []
+  const run = h.host.process.run
+  h.host.process.run = async (argv: readonly string[], init?: any) => {
+    if (argv[0] === 'launchctl') { order.push('launchctl ' + argv[1]); return argv[1] === 'bootout' ? { exitCode: 3, stdout: '', stderr: 'not loaded' } : { exitCode: 0, stdout: '', stderr: '' } }
+    if (argv[0] === 'mv' || argv[0] === 'rm') order.push(argv[0])
+    return run(argv, init)
+  }
+  const r = await autoMigrate(h.host, '/plug')
+  expect(r.found).toEqual(expect.arrayContaining(['launch agent', 'up.json', 'command shim']))
+  expect(order[0]).toBe('launchctl bootout') // before anything is moved or removed
+  expect(h.files.has(`${L}/migrated-1.0.json`)).toBe(true) // bootout failing did not stop the migration
+  expect(await readNotices(h.host)).toEqual([])
+  const log = h.files.get(`${L}/logs/migrate.jsonl`)!
+  expect(JSON.parse(log.trim().split('\n')[0]!).found).toContain('launch agent')
+  // second session: nothing left, nothing runs
+  order.length = 0
+  const again = await autoMigrate(h.host, '/plug')
+  expect(again).toEqual({ found: [], lines: [] })
+  expect(order).toEqual([])
+  const clean = fakeHost(null)
+  expect(await autoMigrate(clean.host, '/plug')).toEqual({ found: [], lines: [] })
+  expect(clean.calls.length).toBe(0)
+})
+
+test('autoMigrate: a systemd unit is disabled; a failing migrate leaves the "run migrate in the desk" notice', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.config/systemd/user/lean-agent.service', '[Service]')
+  const run = h.host.process.run
+  const seen: string[] = []
+  h.host.process.run = async (argv: readonly string[], init?: any) => {
+    seen.push(argv.join(' '))
+    if (argv[0] === 'mv' && argv[argv.length - 1]!.endsWith('migrated-1.0.json')) return { exitCode: 1, stdout: '', stderr: 'disk full' }
+    return run(argv, init)
+  }
+  await autoMigrate(h.host, '/plug')
+  expect(seen).toContain('systemctl --user disable --now lean-agent.service')
+  expect(await readNotices(h.host)).toContain(MIGRATE_NOTICE)
 })

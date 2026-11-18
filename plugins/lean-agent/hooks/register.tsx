@@ -14,7 +14,7 @@ import { applyFeedback, parseFeedback } from './feedback'
 import { checkStale, syncRules } from './rules'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
-import { check, fix, migrate } from './doctor'
+import { autoMigrate, check, fix, migrate } from './doctor'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
@@ -85,6 +85,7 @@ export const register: Register = on => {
     if (role.kind === 'thread') {
       for (const t of THREAD_TOOLS) await $.tool.register({ ...t, isDeferred: false } as any)
     }
+    await autoMigrate(host, $.plugin.root).catch(() => undefined) // leftover 0.45 service: unloaded at once, then the idempotent migrate
     if (role.kind === 'desk' || role.kind === 'thread') await ensureGitHooks(host).catch(() => undefined)
     if (role.kind === 'desk') {
       await $.tool.register({

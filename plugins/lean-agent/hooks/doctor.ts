@@ -3,6 +3,7 @@
 import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { trustFolder } from './threads'
+import { setNotice } from './notices'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -228,4 +229,52 @@ export async function migrate(h: Host, root: string): Promise<Migrated> {
   lines.push(...f.lines)
   await writeJson(h, flag, { at: now, date: ISO(now), threadsClosed: ts.length, learn })
   return { done: true, lines }
+}
+
+// ---- automatic cleanup of leftover 0.45 state (first session.start of the 1.0 mod, any local session) --------------
+// `claude plugin update` removes the 0.45 files, but the KeepAlive launch agent / Restart=always unit stays registered and would
+// crash-loop against the removed shim. So the old service is unloaded FIRST (tolerant), then the idempotent migrate runs;
+// if that fails the user gets a notice (pane + status line). Everything is logged to ~/.lean-agent/logs/migrate.jsonl.
+export const MIGRATE_NOTICE = 'lean-agent 1.0: run migrate in the desk'
+export async function leftover45(h: Host): Promise<string[]> {
+  const home = await homeDir(h)
+  const found: string[] = []
+  if (await h.fs.exists(`${home}/Library/LaunchAgents/${OLD_LABEL}.plist`)) found.push('launch agent')
+  if (await h.fs.exists(`${home}/.config/systemd/user/lean-agent.service`)) found.push('systemd unit')
+  if (await h.fs.exists(`${leanDir(home)}/up.json`)) found.push('up.json')
+  for (const p of [`${home}/.local/bin/lean-agent`, '/opt/homebrew/bin/lean-agent', '/usr/local/bin/lean-agent'])
+    if (await h.fs.exists(p)) {
+      const body = (await text(h, p)) || ''
+      if (/lean_agent|lean-agent/.test(body) || /\/lean-agent\//.test(await realPath(h, p))) found.push('command shim')
+    }
+  return found
+}
+
+export async function autoMigrate(h: Host, root: string): Promise<{ found: string[]; lines: string[] }> {
+  const home = await homeDir(h)
+  const lean = leanDir(home)
+  const found = await leftover45(h)
+  const migrated = await h.fs.exists(`${lean}/migrated-1.0.json`)
+  if (!found.length && (migrated || !(await legacyPresent(h, home)))) return { found, lines: [] }
+  const lines: string[] = []
+  if (found.includes('launch agent')) {
+    const uid = (await run(h, ['id', '-u'])).out
+    const r = uid ? await run(h, ['launchctl', 'bootout', `gui/${uid}/${OLD_LABEL}`]) : { ok: false }
+    lines.push(r.ok ? 'old launch agent unloaded' : 'old launch agent: launchctl bootout failed or it was not loaded')
+  }
+  if (found.includes('systemd unit')) {
+    const r = await run(h, ['systemctl', '--user', 'disable', '--now', 'lean-agent.service'])
+    lines.push(r.ok ? 'old systemd unit disabled' : 'old systemd unit: systemctl --user disable --now failed')
+  }
+  let error = ''
+  try {
+    const m = await migrate(h, root)
+    lines.push(...m.lines)
+    await setNotice(h, 'migrate', null)
+  } catch (e) {
+    error = String((e as Error)?.message ?? e).slice(0, 200)
+    await setNotice(h, 'migrate', MIGRATE_NOTICE)
+  }
+  await appendJsonl(h, `${lean}/logs/migrate.jsonl`, { ts: await h.clock.now(), found, lines, error }).catch(() => undefined)
+  return { found, lines }
 }

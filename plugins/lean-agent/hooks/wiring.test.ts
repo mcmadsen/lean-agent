@@ -77,3 +77,18 @@ test('session.compact writes the thread\'s notes first', async ($, on) => {
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'remember this', toolUses: [] }] } as any)
   expect(h.files.get('/h/.lean-agent/threads/t1/notes.md')).toContain('remember this')
 })
+
+test('the first session.start of any local session unloads a leftover 0.45 launch agent, then migrates', async ($, on) => {
+  const h = fakeHost(on)
+  resetLocks()
+  h.files.set('/h/Library/LaunchAgents/com.lean-agent.up.plist', '<plist/>')
+  h.files.set('/h/.lean-agent/up.json', '{}')
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/somewhere/else', surface: 'cli', isInteractive: true } as any)
+  const cmds = h.calls.map(c => c.argv.join(' '))
+  expect(cmds.findIndex(c => c.startsWith('launchctl bootout gui/501/com.lean-agent.up'))).toBeGreaterThanOrEqual(0)
+  expect(h.files.has('/h/.lean-agent/migrated-1.0.json')).toBe(true)
+  expect(h.files.has('/h/Library/LaunchAgents/com.lean-agent.up.plist')).toBe(false)
+})
