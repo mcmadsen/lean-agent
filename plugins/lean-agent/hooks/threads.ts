@@ -8,6 +8,7 @@ import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
+import { GAP_MS as CHECKPOINT_GAP_MS, TRY_GAP_MS, kTokens, readRequest, staleRequest, writeRequest } from './checkpoint'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -26,6 +27,8 @@ export type Thread = {
   effort?: string // low | medium | high
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
   version?: string // the lean-agent version installed when the session was last started or resumed (a session runs the code it started with)
+  checkpoints?: number // how many times the thread continued in a fresh session because its context grew large (checkpoint.ts)
+  lastCheckpoint?: number // ms of the last one (at most one per 20 minutes)
 }
 export type Inbox = { ts: number; text: string; from?: string }
 
@@ -323,6 +326,11 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
     t.delivered = u.upTo
     await save(h, home, t)
   }
+  if (fresh(r)) {
+    // whatever the old session asked or reported for a checkpoint is settled by the new one (a stale "ready" would stop it again)
+    const rq = await readRequest(h, home, t.id)
+    if (rq && rq.phase !== 'done' && rq.phase !== 'failed') await writeRequest(h, home, t.id, { phase: 'done', ts: await h.clock.now() })
+  }
   return r
 }
 
@@ -349,6 +357,8 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string; limit?: boolean } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
+  // a checkpoint is waiting for the desk's tick: the fresh session takes the queued messages in its handover, the old one is not woken
+  if (!opts.force && !opts.limit && (await readRequest(h, home, t.id))?.phase === 'ready') return { ok: true, text: `${t.id} is about to continue in a fresh session (checkpoint): message queued for it`, data: { resumed: false } }
   const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
   const msgs = u.msgs
   if (!msgs.length && !opts.force) return { ok: true, text: `${t.id}: nothing queued` }
@@ -449,6 +459,44 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.lastWake >= rec.resumedAt) return { ok: true, text: `${id} was already resumed for this usage limit`, data: { resumed: false } }
           return await wake(h, home, t, { force: true, lead: LIMIT_PROMPT, limit: true })
         }
+        case 'checkpoint': {
+          // only the desk's tick calls this (not in the tool's schema): the thread's own mod wrote a ready request (checkpoint.json, see
+          // checkpoint.ts) because its context grew large. A NEW session starts like a reopen's (same model and effort, handover from the
+          // brief, goal, notes, reports incl. the checkpoint report, remembered items, queued messages) and the old one is stopped first.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: no checkpoint`)
+          const rq = await readRequest(h, home, id)
+          if (rq?.phase !== 'ready') return err(`${id}: no checkpoint is waiting`)
+          const now = await h.clock.now()
+          // (checked again inside the lock: a tick that waited here may find the request stale, or just tried)
+          if (staleRequest(rq, t)) {
+            await writeRequest(h, home, id, { ...rq, phase: 'done' })
+            return { ok: true, text: `${id}: the session worked on after its checkpoint report: no new session` }
+          }
+          if (rq.lastTry && now - rq.lastTry < TRY_GAP_MS) return { ok: true, text: `${id}: the last try to start a checkpoint was less than a minute ago` }
+          if (t.lastCheckpoint && now - t.lastCheckpoint < CHECKPOINT_GAP_MS) {
+            await writeRequest(h, home, id, { ...rq, phase: 'done' }) // at most one per 20 minutes: the request is dropped, the session goes on as it is
+            return { ok: true, text: `${id}: the last checkpoint is less than 20 minutes old, no new session` }
+          }
+          const n = (t.checkpoints ?? 0) + 1
+          const was = { checkpoints: t.checkpoints, lastCheckpoint: t.lastCheckpoint }
+          t.checkpoints = n
+          t.lastCheckpoint = now
+          const why = `Its context had grown to ${kTokens(rq.tokens ?? 0)} tokens, so it wrote a checkpoint report (checkpoint ${n}) and continues here, in a fresh session, from it${rq.source === 'fallback' ? ' (it did not report in time: the reports it had already written are all there is)' : ''}. Do not repeat finished work.`
+          const r = await freshSession(h, root, home, t, installed, why, {}) // given {}: the thread's recorded model and effort
+          if (!fresh(r)) {
+            t.checkpoints = was.checkpoints
+            t.lastCheckpoint = was.lastCheckpoint
+            // an error counts as a try (checkpoint.ts retries after a minute, gives up after five); "still running" does not
+            // (re-read: the session may have worked on meanwhile and withdrawn the request, which a failure must not bring back)
+            if (!r.ok) {
+              const cur = await readRequest(h, home, id)
+              if (cur?.phase === 'ready') await writeRequest(h, home, id, { ...cur, tries: (cur.tries ?? 0) + 1, lastTry: now })
+            }
+            return r
+          }
+          await writeRequest(h, home, id, { phase: 'done', ts: now, n })
+          return { ...r, text: `${id} checkpoint ${n}: continues as a new session (old conversation kept read-only). ${r.text}` }
+        }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
           const live = t.sid ? await agents(h) : []
@@ -513,10 +561,13 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           await appendJsonl(h, `${tpath(home, id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'approve-push', sha, project: t.project, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
           return { ok: true, text: `approved: one push of ${sha.slice(0, 8)} for ${t.project} by ${id}, valid 2 h, single use` }
         }
-        case 'park':
+        case 'park': {
           t.state = 'parked'
           await save(h, home, t)
+          const rq = await readRequest(h, home, id)
+          if (rq?.phase === 'ready') await writeRequest(h, home, id, { ...rq, phase: 'done' }) // a parked thread is never checkpointed, nor later when reopened
           return { ok: true, text: `${id} parked` }
+        }
         case 'reopen': {
           if (t.state === 'closing') return err(`${id} is closing, not closed: stop its session from the Claude app, close ${id} again, then reopen`)
           if (t.state !== 'closed') {

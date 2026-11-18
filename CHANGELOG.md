@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Checkpoints are back (threads and the desk).** A session has a 1M-token window, so the engine's own auto-compact comes very late and
+  every request pays for the whole context in cache reads. The mod now keeps each session's context size (input + cache read + cache
+  write of the main loop's latest request) and acts at `checkpoint.threadTokens` / `checkpoint.deskTokens` (config.json, both default
+  100000; `checkpoint.enabled` default true).
+  - **Threads.** Over the threshold, at the next tool boundary of the main loop (never while a subagent or a `git push` runs, never
+    for a parked or closed thread, at most one checkpoint per 20 minutes), the mod adds ONE instruction to a tool result (or the next
+    wake prompt): finish the current step, then `lean_report` with the new state `checkpoint` (branch, worktree, last commit, pushed?,
+    done, open items, next step) and stop. At that turn's end the mod marks the thread ready (`threads/tN/checkpoint.json`); the desk's
+    10 s tick then starts a NEW background session for the same tN through the reopen-as-fresh path (handover from the brief, goal,
+    notes, report history including the checkpoint, remembered items and queued messages; the thread's own model and effort; the new
+    session id is appended to `sids`; `thread.json` counts `checkpoints`) and stops the old session. A thread that does not report gets
+    one reminder turn, then is checkpointed anyway from the reports it already wrote. A start that fails is retried after a minute and
+    given up after five tries with a notice.
+  - **Desk.** When the desk is idle and over its threshold the mod calls `$.session.compact` with fixed instructions (keep goals, the
+    open threads table, unanswered thread questions, the user's preferences and decisions, pending approvals; drop tool outputs and old
+    report texts); a hook veto is retried after ten minutes. When compaction is not possible it writes `~/.lean-agent/desk/handover.md`
+    and shows "desk context Nk: start a new desk session (it reads the handover)" in the status line and the pane; the desk's CLAUDE.md
+    tells a new desk session to read that file. The handoff notes of the `session.compact` hook keep working (the engine skips a
+    plugin's own hook for its own compaction, so the mod writes the notes itself before calling it).
+  - **Pane and stats.** Thread rows show "checkpoint N" after a checkpoint, the pane footer shows the desk's context size, and
+    `lean_doctor stats` counts checkpoints per thread.
+  - `lean_report` `state` accepts `checkpoint` (it never wakes the desk: it is recorded like a progress report).
+
 ## 1.0.5
 
 One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the

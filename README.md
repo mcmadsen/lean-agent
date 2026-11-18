@@ -189,6 +189,24 @@ Desk reports: while the desk is idle, a thread's question or `done` / `blocked` 
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
 step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
 
+## Context size: checkpoints
+
+Every request pays for the whole context in cache reads, and a 1M window lets that grow very large. The mod follows each session's
+context size and, past a threshold, shrinks it:
+
+```json
+{ "checkpoint": { "enabled": true, "threadTokens": 100000, "deskTokens": 100000 } }
+```
+
+- `enabled` is off only for the JSON value `false`; a threshold below 10000 (or not a number) is ignored and the default 100000 used.
+- A **thread** over `threadTokens` is told once, at a tool boundary, to finish its step and report with `lean_report` state
+  `checkpoint` (branch, worktree, last commit, pushed, done, open items, next step). The desk then starts a new background session for
+  the same tN with a handover built from that report and the rest of what lean-agent keeps, and stops the old one. At most one
+  checkpoint per thread every 20 minutes; never while a subagent or a push runs. The pane shows "checkpoint N" on the row.
+- The **desk**, when idle and over `deskTokens`, compacts itself with fixed instructions (goals, open threads, questions, your
+  decisions and approvals kept; tool output dropped). If that is refused or unavailable, `~/.lean-agent/desk/handover.md` is written
+  and the status line asks you to start a new desk session, which reads it.
+
 ## Guards
 
 All fail closed (a guard that throws denies):
