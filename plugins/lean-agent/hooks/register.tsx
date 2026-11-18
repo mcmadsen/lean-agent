@@ -12,10 +12,11 @@ import { decide } from './guard'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
-import { checkStale, logRuleLoad } from './rules'
+import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
+import { markNative, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
-import { autoMigrate, check, migrate } from './doctor'
+import { autoMigrate, check, guardParents, migrate } from './doctor'
 import { bounded, setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -26,7 +27,8 @@ import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './e
 import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
 import { compare } from './compare'
-import { rotateLedger } from './ledger'
+import { announceRotation, rotateLedger } from './ledger'
+import { takeNotice } from './notices'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
@@ -64,6 +66,9 @@ export const resetModState = () => {
   cwd = ''
   loaded = null
   started = {}
+  projectOfThread = undefined
+  rulesSection = null
+  resetRuleLoader()
   resetPaneState()
   resetSkillStat()
   resetSkew()
@@ -73,6 +78,13 @@ export const resetModState = () => {
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
+let rulesSection: string | null = null // the thread's `_project.md`, a session section of prompt.compose (set at the role's setup)
+let projectOfThread: string | undefined // the thread's project (thread.json), read once per session; '' = none
+async function threadProject(host: Host): Promise<string> {
+  if (role.kind !== 'thread') return '' // not cached: the role may still be settling
+  if (projectOfThread === undefined) projectOfThread = str((await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${role.id}/thread.json`, {})).project)
+  return projectOfThread
+}
 let skew: string | null = null // the version-skew sentence of this session, or null
 let role: Role = { kind: 'plain' }
 let tries = 0
@@ -370,16 +382,34 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   if (newRole.kind === 'thread') {
     // learned rules: copied into the project's checkout (registered in projects.json), and told when they went stale;
     // a thread's own worktree gets its copy from the worktree skill (lean_rules sync)
+    let th: { project?: string } = {}
     try {
-      const th = await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${newRole.id}/thread.json`, {})
+      th = await readJson<{ project?: string }>(host, `${threadsDir(await homeDir(host))}/${newRole.id}/thread.json`, {})
+      // the engine loads a project's rules only beneath the session's root, which is the thread folder: the mod hands over `_project.md`
+      // now (a prompt section, not the session.start event: that one has no `context` and the engine ignores what is put on it) and the
+      // path rules on the first read of a matching file (ruleload.ts). It reads the store, so it needs neither the sync nor a git call.
+      if (th.project) {
+        const proj = await projectRule(host, { session: lastSid, agent: '', thread: newRole.id }, th.project, 'session.start')
+        if (proj) rulesSection = proj
+      }
+    } catch {
+      /* rules are optional */
+    }
+    try {
       const projs = await readJson<Record<string, { path?: string }>>(host, `${leanDir(await homeDir(host))}/projects.json`, {})
       const repo = th.project ? projs?.[th.project]?.path : undefined
       if (th.project && typeof repo === 'string' && repo.startsWith('/')) {
-        await syncWithScripts(host, th.project, repo) // the learned rules, the adopted scripts' rule lines and recipe skills
+        // the learned rules, the adopted scripts' rule lines and recipe skills, into the checkout AND every worktree of the project (a plain
+        // `git worktree add` one too); what the caps touched is told, not dropped silently
+        const synced = await syncWithScripts(host, th.project, repo, true)
+        const notes: string[] = []
+        const cap = capLine(synced)
+        if (cap) notes.push(cap)
         const stale = await checkStale(host, th.project, repo)
-        if (stale.length && !noticed.has(newRole.id)) {
+        notes.push(...stale)
+        if (notes.length && !noticed.has(newRole.id)) {
           noticed.add(newRole.id)
-          ctx.push(`[lean-agent] ${stale.join('; ')}`)
+          ctx.push(`[lean-agent] ${notes.join('; ')}`)
         }
       }
     } catch {
@@ -462,12 +492,27 @@ export const register: Register = on => {
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     await showSkew($)
     // the ledger grows with every model request: a past month (or a file that starts with a 0.45 row) is renamed away, never rewritten
-    await soft($, 'ledger rotation', () => rotateLedger(host))
+    let rotated: string[] = []
+    await soft($, 'ledger rotation', async () => { rotated = await rotateLedger(host) })
+    if (rotated.length) await announceRotation(host, rotated) // any session may rotate: the notice is what the desk reads
+    if (role.kind === 'desk') {
+      // the desk's next prompt says so once, whichever session did it (the pane lists the notice until then)
+      const said = await takeNotice(host, 'ledger-rotation')
+      if (said) pending.push(`[lean-agent] ${said}`)
+    }
+    // once per plugin version (desk): learned rules past a size cap, and the 0.45 `rules: off` key nothing reads
+    if (role.kind === 'desk') {
+      await soft($, 'rules check', async () => {
+        const said = await rulesUpdateCheck(host, VERSION)
+        if (said.length) pending.push(`[lean-agent] ${said.join('; ')}`)
+      })
+    }
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path (never posts); optional notes as the argument' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
-    if (ctx.length) return next({ ...e, context: [...((e as any).context ?? []), ...ctx] } as any)
+    // what the role setup has to say (stale or over-cap rules): `session.start` carries no context, so it goes with the first prompt
+    if (ctx.length) pending.push(...ctx)
     return next(e)
   })
 
@@ -480,6 +525,7 @@ export const register: Register = on => {
   // rulesStats counts a load seen by both once)
   on('classic.InstructionsLoaded', async ($, e: any, next) => {
     await logRuleLoad(hostOf($), e).catch(() => false)
+    if (typeof e?.file_path === 'string') await markNative(hostOf($), e.file_path).catch(() => undefined) // the engine did it: the mod loader will not repeat it
     return next(e)
   })
   // fallback when the hook is not delivered: a cheap compare of the session's directory
@@ -590,6 +636,8 @@ export const register: Register = on => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: e.tool.replace('mcp__lean-agent__', ''), need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
+    // a session reads its parent folders' CLAUDE.md BEFORE the mod runs: a stale guide above the threads is cleared before a start
+    if (['new', 'start', 'reopen', 'resume', 'wake', 'send'].includes(String(e.action))) await guardParents(host).catch(() => [])
     const out = await leanThread(host, $.plugin.root, e)
     await ensureGitHooks(host).catch(() => undefined)
     if (out.ok && e.action === 'send' && typeof e.tN === 'string' && typeof e.text === 'string') await recordAnswer(host, e.tN, e.text).catch(() => undefined)
@@ -713,6 +761,17 @@ export const register: Register = on => {
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
     // call counts for the thread. This is what a project profile is learned from.
     if (role.kind === 'thread' && r?.deny === undefined) await noteToolUse(host, role.id, String(e.tool ?? ''), e).catch(() => false)
+    // learned rules for a thread and its subagents: the engine loads them only beneath the session root, so the mod appends the rules
+    // whose `paths:` match the files this call touches, once per context (ruleload.ts)
+    if (role.kind === 'thread' && r?.deny === undefined) {
+      try {
+        const text = await ruleContext(host, { session: lastSid, agent: typeof e.agentId === 'string' ? e.agentId : '', thread: role.id }, String(e.tool ?? ''), e, { threadProject: await threadProject(host), engineRoot: seenRoot })
+        if (text) r = { ...r, context: [...(r?.context ?? []), text] }
+      } catch {
+        /* rules are optional: the tool result goes through unchanged */
+      }
+    }
+    // (below, for the main loop only: the desk's batch, then the checkpoint instruction: one order, each at most once per call)
     if (e.agentId || r?.deny !== undefined) return r
     const lines: string[] = []
     try {
@@ -736,7 +795,7 @@ export const register: Register = on => {
     const r: any = await next(e)
     try {
       const text = await memorySection(hostOf($), role)
-      const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
+      const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(role.kind === 'thread' && rulesSection ? [{ id: 'lean-agent:rules', text: rulesSection, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
       if (sections.length && r?.sections) return { ...r, sections: [...r.sections, ...sections] }
     } catch {
       /* the prompt goes out without it */
@@ -753,6 +812,9 @@ export const register: Register = on => {
     }
     const res: any = await next(e)
     if (!e.agentId && res && res.skip === undefined) forgetContext() // compacted: the context size is read again at the next request
+    // the rule text a thread was given is summarised away: it may be given again (its `_project.md` is a prompt section and stays);
+    // only when the compaction really went ahead (a skipped one keeps the text in context: giving it again would be a duplicate)
+    if (role.kind === 'thread' && !(res && res.skip !== undefined)) await resetContext(hostOf($), typeof e.agentId === 'string' ? e.agentId : '', await threadProject(hostOf($)).catch(() => '')).catch(() => undefined)
     return res
   })
 

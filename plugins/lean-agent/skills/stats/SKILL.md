@@ -16,12 +16,14 @@ Show the tables as they are, then one or two sentences on where the money went (
 thread that dominates).
 Desk: `lean_doctor` `check` also names live sessions on an unexpected model.
 
-Thread: has no `lean_doctor`; for rules call `lean_rules` `stats` (loads per rule, rules that never loaded); for spend say so
-and the desk answers.
+Thread: has no `lean_doctor`; for rules call `lean_rules` `stats` (loads per rule, whether loading was ever observed).
+Thread: for spend, ask the desk with `lean_ask` ("spend for the last N days?"); the desk answers from its own stats.
+Never read `ledger.jsonl` yourself: after a rotation it holds only the newest rows. Every stats output states its period and the
+ledger files it read, and warns when `ledger.jsonl` starts inside the window.
 
 The budget is cost-only: a daily cap per role (`dailyCapUsd`) and an optional per-worker cap (`workerCapUsd`, `workerCaps`) in
 `~/.lean-agent/config.json`; no plan-window percentage exists. Files, one place each: the ledger is `~/.lean-agent/ledger.jsonl`
-(past months `ledger-YYYY-MM.jsonl`, 0.45 history `ledger-legacy.jsonl`; stats reads all of them, both row formats);
+(past months `ledger-YYYY-MM.jsonl`, 0.45 history `ledger-legacy.jsonl`: only the 0.45 rows, today's 1.0 rows stay in `ledger.jsonl`; stats reads all of them, both row formats);
 worker LEAN-FEEDBACK status is `~/.lean-agent/feedback.jsonl`, refused commands `refusals.jsonl`; gaps are
 `~/.lean-agent/<project>/gaps.jsonl` (`~/.lean-agent/gaps.jsonl` when the project is unknown). `feedback/` and `work/*/gaps.json` are
 0.45 leftovers (notes about lean-agent itself, per-run gaps): a different thing, not counted.

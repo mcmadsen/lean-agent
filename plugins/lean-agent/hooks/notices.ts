@@ -19,6 +19,19 @@ export async function setNotice(h: Host, key: string, text: string | null): Prom
   }
 }
 
+// The text of one notice, and the notice is removed (what the desk is told once: another session may have written it)
+export async function takeNotice(h: Host, key: string): Promise<string | null> {
+  try {
+    const f = `${dirOf(await homeDir(h))}/${key.replace(/[^\w.-]/g, '_')}.txt`
+    const t = await h.fs.read(f).catch(() => '')
+    if (typeof t !== 'string' || !t.trim()) return null
+    await h.process.run(['rm', '-f', f])
+    return t.trim()
+  } catch {
+    return null
+  }
+}
+
 export async function readNotices(h: Host): Promise<string[]> {
   try {
     const d = dirOf(await homeDir(h))

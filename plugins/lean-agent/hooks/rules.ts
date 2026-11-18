@@ -6,6 +6,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, writeJ
 import type { Host } from './state'
 import { SAFE_FILE, shippable } from './recipe'
 import { withFolderLock } from './folderlock'
+import { setNotice } from './notices'
 
 export const MAX_RULE_FILES = 40
 export const MAX_RULE_LINES = 25
@@ -67,14 +68,17 @@ export function ruleMetrics(t: string): Metrics {
   return { lines: ls.length, chars: ls.join('\n').length, widest: ls.reduce((m, l) => Math.max(m, l.length), 0) }
 }
 export const capsOf = (file: string) => (file === '_project.md' ? { lines: MAX_PROJECT_LINES, chars: MAX_PROJECT_CHARS } : { lines: MAX_RULE_LINES, chars: MAX_RULE_CHARS })
-// what makes sync skip a rule (empty = within every cap)
-export function ruleProblems(file: string, t: string): string[] {
+// what is over a cap (empty = within every cap). A rule over a cap is GRANDFATHERED by sync up to HARD_FACTOR times the cap: copied
+// anyway and reported (rules written by an older version were under looser caps and must not vanish); beyond that sync skips it, and a
+// skipped rule never deletes the copy that is already in a checkout (it stays until the rule is shortened).
+export const HARD_FACTOR = 3
+export function ruleProblems(file: string, t: string, factor = 1): string[] {
   const m = ruleMetrics(t)
   const cap = capsOf(file)
   const out: string[] = []
-  if (m.lines > cap.lines) out.push(`more than ${cap.lines} lines (${m.lines})`)
-  if (m.chars > cap.chars) out.push(`more than ${cap.chars} characters (${m.chars})`)
-  if (m.widest > MAX_LINE_WIDTH) out.push(`a line is ${m.widest} characters wide (max ${MAX_LINE_WIDTH})`)
+  if (m.lines > cap.lines * factor) out.push(`more than ${cap.lines * factor} lines (${m.lines})`)
+  if (m.chars > cap.chars * factor) out.push(`more than ${cap.chars * factor} characters (${m.chars})`)
+  if (m.widest > MAX_LINE_WIDTH * factor) out.push(`a line is ${m.widest} characters wide (max ${MAX_LINE_WIDTH * factor})`)
   return out
 }
 // `paths:` globs of a rule's frontmatter (a YAML list, or a single value); [] = none
@@ -112,7 +116,8 @@ export function withRelies(t: string, relies: string[], sha: string, date: strin
 // non-empty body lines of a rule: what the line cap counts (the scripts block's lines too; frontmatter and comments are free)
 export const bodyLines = (t: string): number => ruleMetrics(t).lines
 
-export type SyncOut = { copied: string[]; removed: string[]; skipped: string[]; excluded: boolean; exclude?: 'ok' | 'failed' | 'n/a' }
+// over: rules past a cap that were copied anyway (grandfathered, warned); skipped: not copied at all (kept as they are in the checkout)
+export type SyncOut = { copied: string[]; removed: string[]; skipped: string[]; over?: string[]; excluded: boolean; exclude?: 'ok' | 'failed' | 'n/a' }
 
 async function exclude(h: Host, repo: string): Promise<boolean> {
   const r = await h.process.run(['git', 'rev-parse', '--git-common-dir'], { cwd: repo })
@@ -144,15 +149,20 @@ const SKILL_MARK = '.lean-agent-managed'
 // Copy the project's rules and recipe skills into `repo` (the checkout or one of its worktrees); remove stale copies.
 export async function syncRules(h: Host, project: string, repo: string): Promise<SyncOut> {
   const home = await homeDir(h)
-  const out: SyncOut = { copied: [], removed: [], skipped: [], excluded: false }
+  const out: SyncOut = { copied: [], removed: [], skipped: [], over: [], excluded: false }
   const pdir = projectDir(home, project)
   const rules = new Map<string, string>()
+  const protect = new Set<string>() // skipped rules: the copy a checkout already has stays (a cap that tightened never deletes a rule)
   const names = (await h.fs.list(`${pdir}/rules`).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => f.name).sort()
   for (const n of names) {
-    if (rules.size >= MAX_RULE_FILES) { out.skipped.push(`${n}: more than ${MAX_RULE_FILES} rule files`); continue }
+    if (rules.size >= MAX_RULE_FILES) { out.skipped.push(`${n}: more than ${MAX_RULE_FILES} rule files`); protect.add(n); continue }
     const t = String(await h.fs.read(`${pdir}/rules/${n}`))
     const bad = ruleProblems(n, t)
-    if (bad.length) { out.skipped.push(`${n}: ${bad.join(', ')}`); continue }
+    if (bad.length) {
+      const hard = ruleProblems(n, t, HARD_FACTOR)
+      if (hard.length) { out.skipped.push(`${n}: ${hard.join(', ')}`); protect.add(n); continue }
+      out.over!.push(`${n}: ${bad.join(', ')}`) // grandfathered: copied anyway
+    }
     rules.set(n, t)
   }
   const recipes: { name: string; text: string }[] = []
@@ -175,7 +185,7 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
   }
   // git-exclude first: nothing we copy is ever visible to git, not even for a moment
   if (rules.size || recipes.length) out.excluded = await exclude(h, repo)
-  await mirror(h, rules, `${repo}/.claude/rules/lean-agent`, n => n.endsWith('.md'), out)
+  await mirror(h, rules, `${repo}/.claude/rules/lean-agent`, n => n.endsWith('.md') && !protect.has(n), out)
   const mine = new Set(recipes.map(r => r.name))
   for (const r of recipes) {
     await mirror(h, new Map([['SKILL.md', r.text]]), `${repo}/.claude/skills/${r.name}`, () => false, out)
@@ -195,7 +205,7 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
 
 // ONE line per checkout: counts, never the paths (those only with verbose)
 export const syncSummary = (path: string, o: SyncOut) =>
-  `${path}: copied ${o.copied.length}, removed ${o.removed.length}, skipped ${o.skipped.length}, exclude ${o.exclude ?? (o.excluded ? 'ok' : 'n/a')}`
+  `${path}: copied ${o.copied.length}, removed ${o.removed.length}, skipped ${o.skipped.length}${o.over?.length ? `, over cap ${o.over.length}` : ''}, exclude ${o.exclude ?? (o.excluded ? 'ok' : 'n/a')}`
 
 // Every checkout of the project: `git worktree list --porcelain` of `repo` (any checkout of the repository lists them all),
 // plus the worktrees lean-agent made (~/.lean-agent/worktrees.json, keys `<project>/<branch>`). `repo` itself first.
@@ -208,7 +218,7 @@ export async function checkoutsOf(h: Host, project: string, repo: string): Promi
     if (!out.includes(q)) out.push(q)
   }
   try {
-    const r = await h.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: repo })
+    const r = await h.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: repo, timeoutMs: 5_000 }) // (a hung git never stalls a tool call)
     if (r.exitCode === 0) {
       let path = ''
       let skip = false
@@ -225,13 +235,14 @@ export async function checkoutsOf(h: Host, project: string, repo: string): Promi
   return out
 }
 
-export type SyncAll = { lines: string[]; detail: { path: string; out: SyncOut | null; error?: string }[] }
+export type SyncAll = { lines: string[]; detail: { path: string; out: SyncOut | null; error?: string }[]; over: string[]; skipped: string[] }
 // sync one checkout, or with `all` every checkout of the project; `lines` is what the tool answers
 export async function syncAll(h: Host, project: string, repo: string, all: boolean): Promise<SyncAll> {
   const paths = all ? await checkoutsOf(h, project, repo) : [repo]
   const detail: SyncAll['detail'] = []
   const lines: string[] = []
   const skipped = new Set<string>()
+  const over = new Set<string>()
   for (const p of paths) {
     if (p !== repo && !(await h.fs.exists(p).catch(() => false))) { detail.push({ path: p, out: null, error: 'missing' }); lines.push(`${p}: missing, skipped`); continue }
     try {
@@ -239,14 +250,23 @@ export async function syncAll(h: Host, project: string, repo: string, all: boole
       detail.push({ path: p, out: o })
       lines.push(syncSummary(p, o))
       for (const s of o.skipped) skipped.add(s)
+      for (const s of o.over ?? []) over.add(s)
     } catch (e) {
       const error = String((e as Error)?.message ?? e).slice(0, 120)
       detail.push({ path: p, out: null, error })
       lines.push(`${p}: failed: ${error}`)
     }
   }
-  if (skipped.size) lines.push(`not synced (shorten these): ${[...skipped].join('; ')}`)
-  return { lines, detail }
+  if (over.size) lines.push(`over the size cap but copied anyway (shorten them: learn --trim): ${[...over].join('; ')}`)
+  if (skipped.size) lines.push(`not synced, an earlier copy stays (shorten these): ${[...skipped].join('; ')}`)
+  return { lines, detail, over: [...over], skipped: [...skipped] }
+}
+
+// The thread's first-context line about rules the caps touch (empty = nothing to say): what `learn --trim` / `lean_rules check` fix
+export function capLine(s: { over: string[]; skipped: string[] }): string | null {
+  if (!s.over.length && !s.skipped.length) return null
+  const names = (l: string[]) => l.map(x => x.split(':')[0]).join(', ')
+  return `rules: ${s.skipped.length} skipped (over cap${s.skipped.length ? `: ${names(s.skipped)}` : ''})${s.over.length ? `, ${s.over.length} over the cap but loaded anyway (${names(s.over)})` : ''}; run learn --trim or lean_rules check`
 }
 
 // ---- record ------------------------------------------------------------------------------------------------------
@@ -286,7 +306,7 @@ async function recordRuleLocked(h: Host, project: string, area: string, a: Recor
       chars = m.chars
       if (a.lines !== undefined && a.lines !== m.lines) notes.push(`lines: caller said ${a.lines}, the file has ${m.lines} (the file wins)`)
       const bad = ruleProblems(ruleFile(area), t)
-      if (bad.length) notes.push(`WARNING over the cap, sync will skip it: ${bad.join(', ')}`)
+      if (bad.length) notes.push(ruleProblems(ruleFile(area), t, HARD_FACTOR).length ? `WARNING over the cap, sync will skip it (an earlier copy stays): ${bad.join(', ')}` : `WARNING over the cap, sync still copies it but warns: ${bad.join(', ')}`)
       if (a.relies) {
         const date = new Date(await h.clock.now()).toISOString().slice(0, 10)
         const next = withRelies(t, relies, a.sha, date)
@@ -419,8 +439,39 @@ export async function checkRules(h: Host, project: string, maxExplorers = MAX_EX
     if (v.coveredBy) lines.push(`${a}: covered by ${v.coveredBy} (no rule)`)
     else if (!names.includes(ruleFile(a))) lines.push(`${a}: recorded but rules/${ruleFile(a)} is missing`)
   }
-  lines.unshift(`limits: rule <= ${MAX_RULE_LINES} lines / ${MAX_RULE_CHARS} chars, _project <= ${MAX_PROJECT_LINES} lines / ${MAX_PROJECT_CHARS} chars, line <= ${MAX_LINE_WIDTH} chars, <= ${MAX_RULE_FILES} files, <= ${maxExplorers} explorers; ${names.length} rule(s), ${over} over the cap (sync would skip them)`)
+  lines.unshift(`limits: rule <= ${MAX_RULE_LINES} lines / ${MAX_RULE_CHARS} chars, _project <= ${MAX_PROJECT_LINES} lines / ${MAX_PROJECT_CHARS} chars, line <= ${MAX_LINE_WIDTH} chars, <= ${MAX_RULE_FILES} files, <= ${maxExplorers} explorers; ${names.length} rule(s), ${over} over the cap (copied anyway up to ${HARD_FACTOR}x the cap, skipped beyond; shorten them)`)
   return { lines, over }
+}
+
+// Once per plugin version (the desk's first session after an update): `lean_rules check` for every registered project, so rules a
+// tightened cap touches are told to the desk instead of silently dropped, and the 0.45 `"rules": "off"` key of projects.json (nothing in 1.0
+// ever read it, and a project with learned rules wants them loaded) is removed. Returns what to tell the desk; also a pane notice.
+export async function rulesUpdateCheck(h: Host, version: string): Promise<string[]> {
+  if ((await h.store.get('rules-check.v').catch(() => undefined)) === version) return []
+  const home = await homeDir(h)
+  const file = `${leanDir(home)}/projects.json`
+  const projs = await readJson<Record<string, any>>(h, file, {})
+  const lines: string[] = []
+  const drop: string[] = []
+  for (const [name, p] of Object.entries(projs && typeof projs === 'object' ? projs : {})) {
+    if (!slugOk(name)) continue
+    if (p && typeof p === 'object' && (p.rules === 'off' || p.rules === false)) {
+      drop.push(name)
+      lines.push(`${name}: the 0.45 "rules": "off" in projects.json was removed (1.0 never read it; the learned rules load)`)
+    }
+    const c = await checkRules(h, name).catch(() => null)
+    if (c?.over) lines.push(`rules ${name}: ${c.over} over the size cap, still loaded; learn ${name} --trim or lean_rules check`)
+  }
+  if (drop.length) {
+    // read again right before the write: a project added or removed meanwhile (a thread's tool) is not lost
+    const fresh = await readJson<Record<string, any>>(h, file, {})
+    let cut = 0
+    for (const n of drop) if (fresh?.[n] && typeof fresh[n] === 'object' && (fresh[n].rules === 'off' || fresh[n].rules === false)) { delete fresh[n].rules; cut++ }
+    if (cut && Object.keys(fresh).length) await writeJson(h, file, fresh) // (an unreadable file reads as {}: never written back over the projects)
+  }
+  await setNotice(h, 'rules-cap', lines.length ? lines.join(' | ') : null)
+  await h.store.set('rules-check.v', version)
+  return lines
 }
 
 // ---- verify: do the names a rule mentions still exist ----------------------------------------------------------------
@@ -542,17 +593,34 @@ export async function logRuleLoad(h: Host, e: any): Promise<boolean> {
 const MECHANICAL = /\b(?:count(?:ing)?|how many|number of|list(?:ing)? (?:all|every|the)|find(?:ing)? all|every (?:file|place|usage|caller)|all (?:the )?(?:files|usages|occurrences|callers)|sum(?:ming)?|total(?:s|ling)?|which files|aggregat\w*|tally|enumerat\w*)\b/i
 export const looksMechanical = (text: string) => MECHANICAL.test(text)
 
-export async function rulesStats(h: Host, project: string): Promise<{ loaded: Record<string, number>; never: string[]; scriptCandidates: string[] }> {
+// What `stats` and `compare` may say about rule loading (rulesStats): `events` = loads recorded for this project; with none, loading is
+// UNVERIFIED (the log is absent or empty) and "never loaded" proves nothing; `never` lists the rules with no load, `neverConfirmed` only
+// those a recorded load came after (the log has an event from after the rule was written): the only ones `learn --trim` may be told about.
+export type RulesStats = { loaded: Record<string, number>; never: string[]; neverConfirmed: string[]; events: number; verified: boolean; logRows: number; scriptCandidates: string[]; overCap: string[] }
+export const unverifiedLine = (project: string, s: Pick<RulesStats, 'logRows'>) => `no rule load has ever been recorded${s.logRows ? ` for ${project}` : ' (log absent)'}: loading unverified`
+
+export async function rulesStats(h: Host, project: string): Promise<RulesStats> {
   const home = await homeDir(h)
-  const log = await readJsonl<{ ts?: number; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }>(h, RULES_LOG(home))
+  type Row = { ts?: number; rule?: string; project?: string; sha?: string; session?: string; agent?: string; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }
+  const log = await readJsonl<Row>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
   const seen = new Set<string>()
+  let lastEvent = 0
   // Only this project's loads: a rule loaded from one of its checkouts (the registered folder and its worktrees). Two projects often
   // have a rule of the same name (`api.md`): counted by name alone, one would hide the other's never-loaded one. A project without
   // a registered folder cannot be told apart, so every load counts, as before.
   const repo = (await readJson<Record<string, { path?: string }>>(h, `${leanDir(home)}/projects.json`, {}))?.[project]?.path
   const roots = typeof repo === 'string' && repo.startsWith('/') ? (await checkoutsOf(h, project, repo)).map(p => `${p}/.claude/rules/lean-agent/`) : null
   for (const r of log) {
+    if (typeof r.rule === 'string' && typeof r.project === 'string') { // the mod's own loader (ruleload.ts): counted per project, no path to match
+      if (r.project !== project) continue
+      const key = `${r.rule}\0${r.sha ?? ''}\0${r.session ?? ''}\0${r.agent ?? ''}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      loaded[r.rule] = (loaded[r.rule] ?? 0) + 1
+      lastEvent = Math.max(lastEvent, (r.ts ?? 0) * 1000)
+      continue
+    }
     const f = r.e?.file_path ?? ''
     const i = f.indexOf('/rules/lean-agent/')
     if (i < 0) continue
@@ -561,8 +629,16 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
     if (seen.has(key)) continue
     seen.add(key)
     loaded[f.slice(i + 18)] = (loaded[f.slice(i + 18)] ?? 0) + 1
+    lastEvent = Math.max(lastEvent, (r.ts ?? 0) * 1000)
   }
   const have = (await h.fs.list(`${projectDir(home, project)}/rules`).catch(() => [])).map(f => f.name).filter(n => n.endsWith('.md')) // _project.md included: it is listed when it never loaded
+  const learn = await readJson<Learn>(h, learnFile(home, project), { sha: '', areas: {} })
+  const overCap: string[] = []
+  for (const n of have) {
+    const t = await h.fs.read(`${projectDir(home, project)}/rules/${n}`).then(String).catch(() => '')
+    const bad = ruleProblems(n, t)
+    if (bad.length) overCap.push(`${n}: ${bad.join(', ')}`)
+  }
   // gaps whose text looks mechanical are candidates for a script (lean_script propose); one line each, repeats counted once
   const seenGap = new Set<string>()
   const scriptCandidates: string[] = []
@@ -574,5 +650,9 @@ export async function rulesStats(h: Host, project: string): Promise<{ loaded: Re
       scriptCandidates.push(`${g.path ? `${g.path}: ` : ''}${t.slice(0, 160)}`)
     }
   }
-  return { loaded, never: have.filter(n => !loaded[n]), scriptCandidates }
+  const never = have.filter(n => !loaded[n])
+  const events = Object.values(loaded).reduce((s, c) => s + c, 0)
+  // a rule is only "never loaded" when a load was recorded after it was written (a rule learned later than the last event had no chance)
+  const neverConfirmed = never.filter(n => !lastEvent ? false : (learn.areas?.[n.replace(/\.md$/, '')]?.at ?? 0) <= lastEvent)
+  return { loaded, never, neverConfirmed, events, verified: events > 0, logRows: log.length, scriptCandidates, overCap }
 }

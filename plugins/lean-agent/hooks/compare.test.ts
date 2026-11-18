@@ -170,7 +170,9 @@ test('suggestions come from the numbers, each with the concrete step', async () 
   expect(s).not.toContain('MCP server lean-agent') // lean-agent's own server is never a candidate
   expect(s).not.toContain('clean: ') // the clean column is no thread: no advice about what a thread should drop
   expect(s).not.toContain('desk: MCP')
-  expect(s).toContain('2 learned rule(s) never loaded (a.md, b.md): learn proj --trim')
+  // 1.0.6c: an absent load log is "unverified", never "never loaded"
+  expect(s).toContain('2 learned rule(s): no rule load has ever been recorded (log absent): loading unverified (not a reason to trim)')
+  expect(s).not.toContain('never loaded')
   expect(s).toContain('1 gap(s) look like mechanical work: learn proj --trim lists them as script candidates')
   // the report labels the sizes too
   expect(r.text).toContain('MCP servers in thread (definition size, an estimate: mostly deferred, not first-turn cost): db 1.6k (2)')

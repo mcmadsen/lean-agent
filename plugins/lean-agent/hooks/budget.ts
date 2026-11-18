@@ -84,7 +84,11 @@ async function syncCache(h: Host, home: string, now: number, own?: { role: strin
       c.byRole[own.role] = (c.byRole[own.role] ?? 0) + (own.usd || 0) // only our row is new
       c.offset = size
     } else {
-      c.offset += addRows(c, await readFrom(h, ledgerFile(home), c.offset))
+      try {
+        c.offset += addRows(c, await readFrom(h, ledgerFile(home), c.offset))
+      } catch {
+        return c // unreadable now: the offset stays, the new rows are added at the next call
+      }
     }
   } else {
     const ro = await syncRollup(h, now)

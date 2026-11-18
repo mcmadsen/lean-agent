@@ -257,9 +257,15 @@ review and commit. Private projects default to C as well.
 - Stats: an `InstructionsLoaded` command hook in `hooks.json` (one line: `cat >> ~/.lean-agent/logs/rules-loaded.jsonl`)
   logs which lean-agent rules load and for which file; `stats` and `--trim` read it.
 
-**How threads and subagents get them.** Nothing to do: a thread or worker that reads `services/billing/x.ts` in the
-checkout or a linked worktree gets `billing.md` from Claude Code itself (R10, R11 verify subagents, bg sessions and
-worktrees). The thread CLAUDE.md says only: "project rules load when you read files; do not paste them into briefs".
+**How threads and subagents get them.** A session rooted IN the checkout gets `billing.md` from Claude Code itself (R10, R11).
+A thread is not: its root is `~/.lean-agent/threads/tN` and it reads the project by absolute path, and the engine loads
+`.claude/rules` only beneath the session root (measured with 2.1.327: a session rooted elsewhere reading `<repo>/src/a.ts` loaded
+nothing and fired no `InstructionsLoaded`, with or without `--add-dir <repo>` or `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`).
+So the MOD is the loader for threads (`hooks/ruleload.ts`): on a thread's or its subagent's Read/Edit/Write/Grep/Glob of a path in
+a registered project or worktree, and on a read-only `cat`/`head`/`rg` naming one, each matching rule of the store is appended once
+per context to the tool result (`_project.md` is a prompt section from the start, and a subagent's first result carries it); each
+injection is a row in `logs/rules-loaded.jsonl` (`src: loader`), which `stats` counts. A load the engine did itself marks the rule
+given, so nothing is injected twice. The thread CLAUDE.md says only: "project rules load when you read files; do not paste them into briefs".
 `lean_remember` with a path appends to that area's rule (or `gaps.jsonl` if the rule is at its cap) instead of global
 memory; memory without a path stays in `memory/`.
 
