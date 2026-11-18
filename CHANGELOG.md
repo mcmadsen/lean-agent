@@ -151,6 +151,17 @@ copies deleted, a stale 0.45 guide still loaded, today's rows moved out of `ledg
   4 MiB (`fs.read` rejects it: the text now comes from `tail`). A thread asks the desk for spend with `lean_ask` (the stats skill says
   so; no new thread tool, so no new tool definition in every thread) and never reads `ledger.jsonl` itself.
 
+### Fixed (release review of the combined 1.0.6)
+- **A checkpoint instruction never rides on the result of `lean_report` or `lean_ask`**, and a `lean_report` with state `checkpoint` from a
+  thread that was never asked is only a progress report: a thread that had just reported `done` could be told to checkpoint in the same
+  result and be restarted as a fresh session; the instruction comes with the next call instead.
+- **The desk sees a checkpoint report cut to its first 300 characters** (the fresh thread session reads the whole report from its
+  handover; the pane's Answers list has it), so checkpoints no longer put a long handover into the desk's own context.
+- **The ledger split sends 1.0 rows of a past month to their own `ledger-YYYY-MM.jsonl`** instead of appending them to `ledger.jsonl`
+  (which would then start in a past month and be rotated away whole at the next start, today's rows with it).
+- **Rule stats read a load log over 4 MiB from its tail** (the newest 3 MB) instead of calling it "log absent: loading unverified".
+- `session.compact` forgets the context size and re-arms the rule loader on the same condition (the compaction went ahead).
+
 ## 1.0.5
 
 One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the

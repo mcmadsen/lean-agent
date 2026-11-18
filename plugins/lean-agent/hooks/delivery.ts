@@ -313,9 +313,12 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
   await writeJson(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: upTo })
 }
 
-// a done report carries the hint that closing is the desk's job (a thread cannot close itself)
+// a done report carries the hint that closing is the desk's job (a thread cannot close itself); a checkpoint report is the thread's own
+// handover for its fresh session (that session reads it in full): the desk only sees its first lines, so checkpoints do not fill its context
+export const CHECKPOINT_VIEW = 300
+const reportText = (r: DeskRec) => (r.kind === 'report' && r.state === 'checkpoint' && r.text.length > CHECKPOINT_VIEW ? `${oneLine(r.text, CHECKPOINT_VIEW)} (cut: the thread continues in a fresh session from the full text; the pane's Answers list has it)` : r.text)
 export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${reportText(r)}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a

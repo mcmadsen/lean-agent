@@ -127,6 +127,8 @@ export async function takeAsk(h: Host, id: string, idle?: () => Promise<boolean>
 
 // The thread called lean_report with state checkpoint. Returns the sentence for the tool result.
 export async function noteReported(h: Host, id: string): Promise<string> {
+  // a thread that was never asked (nothing in this process said the context is large) cannot start its own restart by reporting the state
+  if (!w.asked) return 'recorded as a progress report (no checkpoint was asked for); carry on'
   const why = await blocked(h, id)
   if (why) return `recorded as a progress report (no fresh session: ${why}); carry on`
   w.reported = true

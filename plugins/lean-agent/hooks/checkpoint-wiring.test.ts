@@ -48,6 +48,17 @@ test('over the threshold the next tool result of the main loop carries ONE instr
   expect(JSON.parse(h.files.get(`${T1}/checkpoint.json`)!).phase).toBe('asked')
 })
 
+test('the instruction never rides on the result of lean_report or lean_ask (a thread that just reported done is not restarted); the next call carries it', async ($, on) => {
+  const h = await thread($, on, 150_000)
+  await step($)
+  const done: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_report', state: 'done', text: 'finished' } as any)
+  expect(context(done)).not.toContain('Context is over')
+  const ask: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_ask', question: 'q?' } as any)
+  expect(context(ask)).not.toContain('Context is over')
+  expect(h.files.has(`${T1}/checkpoint.json`)).toBe(false) // nothing asked yet
+  expect(context(await $.tool.call({ tool: 'Bash', command: 'ls' } as any))).toContain('Context is over 100k')
+})
+
 test('a subagent\'s big request is no main-loop context', async ($, on) => {
   const h = await thread($, on, 150_000)
   await step($, 0, 'agent-1')

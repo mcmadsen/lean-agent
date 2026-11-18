@@ -782,7 +782,9 @@ export const register: Register = on => {
     }
     try {
       // the context is over config checkpoint.threadTokens: ONE instruction, at this tool boundary
-      const ask = role.kind === 'thread' ? await takeAsk(host, role.id, agentsIdle($)) : null
+      // (not on the result of lean_report / lean_ask: a thread that just reported done or blocked, or asked the desk, is not told to
+      // checkpoint in the same breath: it would restart a finished thread; the next boundary carries it)
+      const ask = role.kind === 'thread' && !/lean_(report|ask)$/.test(String(e.tool ?? '')) ? await takeAsk(host, role.id, agentsIdle($)) : null
       if (ask) lines.push(ask)
     } catch {
       /* asked again at the next call */
@@ -811,10 +813,11 @@ export const register: Register = on => {
       /* compaction goes on without notes */
     }
     const res: any = await next(e)
-    if (!e.agentId && res && res.skip === undefined) forgetContext() // compacted: the context size is read again at the next request
+    const went = !(res && res.skip !== undefined) // the compaction went ahead (a veto or skip says so on the result)
+    if (!e.agentId && went) forgetContext() // compacted: the context size is read again at the next request
     // the rule text a thread was given is summarised away: it may be given again (its `_project.md` is a prompt section and stays);
     // only when the compaction really went ahead (a skipped one keeps the text in context: giving it again would be a duplicate)
-    if (role.kind === 'thread' && !(res && res.skip !== undefined)) await resetContext(hostOf($), typeof e.agentId === 'string' ? e.agentId : '', await threadProject(hostOf($)).catch(() => '')).catch(() => undefined)
+    if (role.kind === 'thread' && went) await resetContext(hostOf($), typeof e.agentId === 'string' ? e.agentId : '', await threadProject(hostOf($)).catch(() => '')).catch(() => undefined)
     return res
   })
 

@@ -209,14 +209,15 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   expect(r.text).toContain('cut short')
   expect(r.text).toContain('not handed over again')
   expect(lines).toHaveLength(1)
-  expect(lines[0]).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
-  const ts = /lean:r=(\d+):t1:report/.exec(lines[0])![1]!
-  expect(lines[0]).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1-report.md: Read it; the pane's Answers list has it too)`)
-  expect(lines[0].length).toBeLessThan(DIRECT_MAX + 400)
+  const line = lines[0]!
+  expect(line).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
+  const ts = /lean:r=(\d+):t1:report/.exec(line)![1]!
+  expect(line).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1-report.md: Read it; the pane's Answers list has it too)`)
+  expect(line.length).toBeLessThan(DIRECT_MAX + 400)
   // the file the pointer names holds the whole report as plain lines the desk can Read
   expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1-report.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
   // the desk hook marks it delivered; no prompt and no relay hands the full report over a second time
-  expect(await markDelivered(h.host, lines[0])).toBe(true)
+  expect(await markDelivered(h.host, line)).toBe(true)
   expect((await unreadReports(h.host)).recs).toHaveLength(0)
   expect(await takeReports(h.host)).toBeNull()
   expect(await relayReports(h.host, { busy: false, last: 0, submit: async () => undefined })).toBe(false)
@@ -324,4 +325,14 @@ test('lean_report superseded: true is kept, shown to the desk text and the pane 
   expect(recs[0].superseded).toBe(true)
   expect(recs[1].superseded).toBeUndefined()
   expect(renderReports(recs)).toContain('[brief superseded by a later user message]: user changed')
+})
+
+test('a checkpoint report reaches the desk cut (the fresh thread session reads it whole); a done report of the same size is not cut', () => {
+  const long = 'handover '.repeat(300)
+  const t = renderReports([{ ts: 1, from: 't1', kind: 'report', state: 'checkpoint', text: long }, { ts: 2, from: 't2', kind: 'report', state: 'done', text: long }])
+  const [ck, done] = t.split('\n') as [string, string]
+  expect(ck.length).toBeLessThan(600)
+  expect(ck).toContain('(cut: the thread continues in a fresh session')
+  expect(done.length).toBeGreaterThan(2500)
+  expect(renderReports([{ ts: 3, from: 't1', kind: 'report', state: 'checkpoint', text: 'short handover' }])).toContain('short handover')
 })

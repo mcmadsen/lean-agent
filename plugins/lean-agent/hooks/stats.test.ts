@@ -137,6 +137,43 @@ test('repair: a legacy file that already holds 1.0 rows (what 1.0.5 produced) gi
   expect(await g.store.get('ledger-repair.v')).toBe(1)
 })
 
+test('a split sends the 1.0 rows of a past month to their own file: ledger.jsonl never starts in a past month, so the next start does not rotate it away again', async () => {
+  const h = setup()
+  const sep = Date.UTC(2026, 8, 20)
+  h.files.set(`${L}/ledger.jsonl`, old('2026-09-01T08:00:00') + row(sep, { usd: 4 }) + row(NOON))
+  expect((await rotateLedger(h.host)).length).toBeGreaterThan(0)
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON))
+  expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }))
+  expect(h.files.get(`${L}/ledger-legacy.jsonl`)).toBe(old('2026-09-01T08:00:00'))
+  expect(await rotateLedger(h.host)).toEqual([]) // the next start has nothing to do: today's rows stay where they are
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON))
+  const ro = await syncRollup(h.host)
+  expect(ro.rows).toBe(3)
+  expect(ro.days['2026-09-20']!.t[0]).toBe(4)
+  // the same split run again after a crash (rows already in both targets) writes nothing twice
+  h.files.set(`${L}/ledger-legacy.jsonl`, old('2026-09-01T08:00:00') + row(sep, { usd: 4 }))
+  await h.store.set('ledger-repair.v', undefined)
+  await rotateLedger(h.host)
+  expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }))
+})
+
+test('a rule-load log over 4 MiB is read from its tail, not reported as absent', async () => {
+  const h = setup()
+  const filler = JSON.stringify({ ts: 1_700_000_000, rule: 'x.md', project: 'other', session: 's'.repeat(40), agent: '' }) + '\n'
+  const mine = JSON.stringify({ ts: 1_700_000_001, rule: 'api.md', project: 'p', session: 's1', agent: '' }) + '\n'
+  h.files.set(`${L}/logs/rules-loaded.jsonl`, filler.repeat(40_000) + mine) // about 4.4 MB
+  h.files.set(`${L}/p/rules/api.md`, '# api\n')
+  const read = h.host.fs.read
+  h.host.fs.read = async (path: string) => { if (path.endsWith('rules-loaded.jsonl')) throw new Error('too large'); return read(path) }
+  const s = await rulesStats(h.host, 'p')
+  expect(s.loaded['api.md']).toBe(1) // the newest rows come from the tail
+  expect(s.verified).toBe(true)
+  // a log that really is absent is still "unverified"
+  const g = setup()
+  g.files.set(`${L}/p/rules/api.md`, '# api\n')
+  expect((await rulesStats(g.host, 'p')).events).toBe(0)
+})
+
 test('an interrupted split is retried without a duplicate: rows already in ledger.jsonl are not appended twice', async () => {
   const h = setup()
   // a crash after the 1.0 row was appended to ledger.jsonl and before the legacy file was rewritten

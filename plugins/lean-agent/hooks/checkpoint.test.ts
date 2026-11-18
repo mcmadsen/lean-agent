@@ -190,6 +190,9 @@ test('a checkpoint is a progress report when checkpoints are off or one was just
   expect(await turnEnded(a.h.host, 't1', { reason: 'answer', sid: SID })).toBeNull()
   expect(await readRequest(a.h.host, '/h', 't1')).toBeNull()
   const b = setup({ lastCheckpoint: 10_000_000 - 60_000 })
+  expect(await noteReported(b.h.host, 't1')).toContain('no checkpoint was asked for') // a thread that was never asked cannot restart itself by reporting the state
+  expect(watch().reported).toBe(false)
+  watch().asked = true
   expect(await noteReported(b.h.host, 't1')).toContain('less than 20 minutes')
   const c = setup()
   expect(await turnEnded(c.h.host, 't1', { reason: 'answer', sid: SID })).toBeNull() // never asked

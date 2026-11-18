@@ -6,6 +6,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, writeJ
 import type { Host } from './state'
 import { SAFE_FILE, shippable } from './recipe'
 import { withFolderLock } from './folderlock'
+import { fileSize } from './ledger'
 import { setNotice } from './notices'
 
 export const MAX_RULE_FILES = 40
@@ -599,10 +600,33 @@ export const looksMechanical = (text: string) => MECHANICAL.test(text)
 export type RulesStats = { loaded: Record<string, number>; never: string[]; neverConfirmed: string[]; events: number; verified: boolean; logRows: number; scriptCandidates: string[]; overCap: string[] }
 export const unverifiedLine = (project: string, s: Pick<RulesStats, 'logRows'>) => `no rule load has ever been recorded${s.logRows ? ` for ${project}` : ' (log absent)'}: loading unverified`
 
+// The load log: `fs.read` rejects a file over 4 MiB (readJsonl then gives nothing, which would read as "log absent"): the newest 3 MB come
+// from `tail` instead (its first line is cut and dropped); a log that is really absent still gives nothing.
+const LOG_TAIL_BYTES = 3_000_000
+async function readLoadLog<T>(h: Host, path: string): Promise<T[]> {
+  const rows = await readJsonl<T>(h, path)
+  if (rows.length) return rows
+  const size = await fileSize(h, path)
+  if (!size) return []
+  const from = Math.max(1, size - LOG_TAIL_BYTES + 1)
+  const r = await h.process.run(['tail', '-c', `+${from}`, path]).catch(() => null)
+  if (!r || r.exitCode !== 0 || !r.stdout.trim()) return []
+  const out: T[] = []
+  for (const line of r.stdout.split('\n').slice(from > 1 ? 1 : 0)) { // (a cut first line is dropped; a whole file keeps it)
+    if (!line.trim()) continue
+    try {
+      out.push(JSON.parse(line) as T)
+    } catch {
+      /* a torn or damaged line is skipped */
+    }
+  }
+  return out
+}
+
 export async function rulesStats(h: Host, project: string): Promise<RulesStats> {
   const home = await homeDir(h)
   type Row = { ts?: number; rule?: string; project?: string; sha?: string; session?: string; agent?: string; e?: { file_path?: string; load_reason?: string; trigger_file_path?: string } }
-  const log = await readJsonl<Row>(h, RULES_LOG(home))
+  const log = await readLoadLog<Row>(h, RULES_LOG(home))
   const loaded: Record<string, number> = {}
   const seen = new Set<string>()
   let lastEvent = 0

@@ -299,6 +299,17 @@ async function append(h: Host, path: string, text: string): Promise<boolean> {
   return true
 }
 
+// Append the rows that `path` does not hold yet (a retry after a crash never writes one twice); false = the file could not be read whole
+// or the append failed: nothing more is done.
+async function appendNew(h: Host, path: string, rows: string[]): Promise<boolean> {
+  const size = await fileSize(h, path)
+  const have = size ? await readFrom(h, path, 0) : ''
+  if (size && enc.encode(have).length !== size) return false
+  const there = new Set(have.split('\n'))
+  const fresh = rows.filter(l => !there.has(l))
+  return !fresh.length || (await append(h, path, fresh.join('\n') + '\n'))
+}
+
 // Returns {kept, moved, done}: the 1.0 rows appended to ledger.jsonl and the file rewritten with the 0.45 (and unreadable) rows only;
 // kept 0 = nothing to do; done false = the rows were copied but the rewrite failed (a retry does not append them twice: rows already in
 // ledger.jsonl are skipped). null = it was not safe (the file could not be read whole, or changed meanwhile): nothing was touched.
@@ -321,12 +332,16 @@ async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept:
   await h.fs.write(tmp, oldText)
   if (((await fileSize(h, tmp)) ?? 0) !== enc.encode(oldText).length) { await drop(); return null }
   if ((await fileSize(h, path)) !== size0) { await drop(); return null } // another process appended to it meanwhile: the next start tries again
-  const curSize = await fileSize(h, cur)
-  const have = curSize ? await readFrom(h, cur, 0) : ''
-  if (curSize && enc.encode(have).length !== curSize) { await drop(); return null }
-  const there = new Set(have.split('\n'))
-  const fresh = keep.filter(l => !there.has(l))
-  if (fresh.length && !(await append(h, cur, fresh.join('\n') + '\n'))) { await drop(); return null }
+  // a 1.0 row of THIS month goes to ledger.jsonl; an older one to its own ledger-YYYY-MM.jsonl: ledger.jsonl must not start in a past
+  // month, or the next start would rotate the whole file (today's rows with it) away again
+  const month = dayOf(await h.clock.now()).slice(0, 7)
+  const targets = new Map<string, string[]>()
+  for (const l of keep) {
+    const m = dayOf(normalizeRow(JSON.parse(l))!.ts).slice(0, 7)
+    const file = m < month ? `ledger-${m}.jsonl` : LEDGER
+    targets.set(file, [...(targets.get(file) ?? []), l])
+  }
+  for (const [file, rows] of targets) if (!(await appendNew(h, file === LEDGER ? cur : `${leanDir(home)}/${file}`, rows))) { await drop(); return null }
   const r = await h.process.run(['mv', '-f', tmp, path])
   return { kept: keep.length, moved: old.length, done: r.exitCode === 0 }
 }
