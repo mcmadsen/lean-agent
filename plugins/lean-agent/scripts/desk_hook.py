@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Hook of the external front desk (desk external: a local Claude session, not one `lean-agent up` hosts).
-Arguments: `start` (SessionStart), `prompt` (UserPromptSubmit), `stop` (Stop).
+Arguments: `start` (SessionStart), `prompt` (UserPromptSubmit), `stop` (Stop), `end` (SessionEnd: a /clear of the desk session leaves a 60 s handover token).
 start: the session started in the desk folder attaches as the front desk when none is
 attached (a second one is told so); the desk gets its pending reports as additionalContext.
 prompt: heartbeat + pending reports as additionalContext. stop: heartbeat; with reports pending a block decision hands them to the
@@ -18,37 +18,32 @@ def out(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}), flush=True)
 
 
-CTX_ASK = ("lean-agent: your context is high. " + "Write your checkpoint notes now: {cp} "
-           "Then tell the user in one line: \"context is high: type /clear when convenient - the desk keeps its notes\". "
-           "Never type /clear yourself.")
+CTX_ASK = ("lean-agent: your context is high. {cp}. Do not reply 'checkpointed'; instead tell the user, in one line: "
+           "\"context is high: type /clear when convenient - the desk keeps its notes\". Never type /clear yourself.")
 
 
 def context_ask(rec, event, service_session, now):
-    """Once per crossing of desk-clear-at: block the stop so the app desk writes its checkpoint and tells the user to /clear.
-    Re-armed when the context drops below the threshold. True when it asked."""
+    """Once per crossing of the desk's clear point (clear-at, else desk-clear-at, as for the hosted desk): block the stop so
+    the app desk writes its checkpoint and tells the user to /clear. Re-armed when the context drops below it."""
+    import lean_desk
     try:
-        limit = service_session.desk_clear_at()
+        limit = service_session.clear_at() or (0 if service_session.clear_explicit() else service_session.desk_clear_at())
         tp = event.get("transcript_path") or rec.get("transcript")
         ctx = service_session.transcript_state(tp)["ctx"] if limit and tp and os.path.exists(tp) else 0
+        sid = rec.get("session_id")
         if not limit or ctx <= limit:
             if rec.get("ctx_asked"):
-                rec.pop("ctx_asked", None)
-                lean_desk_write(rec)
+                lean_desk.update_record(sid, ctx_asked=None)
             return False
         if rec.get("ctx_asked"):
             return False
-        rec["ctx_asked"] = now
-        rec["stop_block_ts"] = now
-        lean_desk_write(rec)
-        print(json.dumps({"decision": "block", "reason": CTX_ASK.format(cp=service_session.checkpoint_prompt())}), flush=True)
+        cp = service_session.checkpoint_prompt().replace(", then reply 'checkpointed'", "")
+        if not lean_desk.update_record(sid, ctx_asked=now, stop_block_ts=now):
+            return False
+        print(json.dumps({"decision": "block", "reason": CTX_ASK.format(cp=cp)}), flush=True)
         return True
     except Exception:  # noqa: BLE001
         return False
-
-
-def lean_desk_write(rec):
-    import lean_desk
-    lean_desk._write(lean_desk.path(), rec)
 
 
 def main(argv=None, now=None):
@@ -68,13 +63,17 @@ def main(argv=None, now=None):
         return 0
     sid = event["session_id"]
     now = time.time() if now is None else now
+    if mode == "end":  # SessionEnd of the desk session itself (clear/compact): the next start in the desk folder may continue it
+        if event.get("reason") in ("clear", "compact"):
+            lean_desk.handover_out(sid, now)
+        return 0
     if mode == "start":
         cwd = event.get("cwd") or os.getcwd()
         in_desk_dir = os.path.realpath(cwd) in [os.path.realpath(d) for d in lean_desk.desk_dirs()]
         if not in_desk_dir:
             return 0
         src = event.get("source")
-        take = lean_desk.takeover_ok(src, event.get("transcript_path"), now)
+        take = lean_desk.takeover_ok(src, event.get("transcript_path"), sid, now)
         ok, msg = lean_desk.attach(sid, event.get("transcript_path"), cwd, now, takeover=take)
         if not ok:
             out("SessionStart", "lean-agent: this session is NOT the front desk. " + msg + ".")
@@ -86,7 +85,7 @@ def main(argv=None, now=None):
         text = "lean-agent: this session is the front desk (external mode); thread reports reach it as hidden context."
         import service_session
         service_session.dialog_set("main", False, now)  # a new session has no dialog open
-        if src in ("clear", "compact"):
+        if src == "clear":  # a new empty session (compact carries Claude Code's own summary)
             try:
                 import compact_hook
                 text = compact_hook.brief(6000) + "\n" + text
@@ -118,8 +117,7 @@ def main(argv=None, now=None):
             return 0
         text = service_session.inject_main(now)
         if text:
-            rec["stop_block_ts"] = now
-            lean_desk._write(lean_desk.path(), rec)
+            lean_desk.update_record(sid, stop_block_ts=now)
             print(json.dumps({"decision": "block", "reason": text}), flush=True)
     return 0
 

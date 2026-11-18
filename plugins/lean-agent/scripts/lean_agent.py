@@ -19985,7 +19985,7 @@ def build_parser():
     s.set_defaults(fn=cmd_week)
 
     s = sub.add_parser("desk", help="the front desk as a local Claude app session (config desk external): "
-                       "setup | attach | detach | status")
+                       "setup | attach | detach | status | open")
     s.add_argument("action", choices=["setup", "attach", "detach", "status", "open"])
     s.add_argument("--model", help="setup: pin the desk's model in the desk folder's settings")
     s.add_argument("--permission-mode", help="setup: the desk's default permission mode, e.g. acceptEdits")

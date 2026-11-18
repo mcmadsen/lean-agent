@@ -30,6 +30,9 @@ class Base(unittest.TestCase):
         p = mock.patch.dict(os.environ, env, clear=True)
         p.start()
         self.addCleanup(p.stop)
+        q = mock.patch.object(lean_desk, "claude_bin", return_value=None)  # no test ever reaches a real claude
+        q.start()
+        self.addCleanup(q.stop)
         self.now = time.time()
         lean_desk.set_mode("auto")  # these tests exercise the app desk; hosted is the shipped default (Mode tests it)
 
@@ -1027,47 +1030,81 @@ class PendingClock(Base):
         self.assertLess(lean_desk.pending_age(later + 5), 10)
 
 
-class Handover(Base):
+class ClearHandover(Base):
     def setUp(self):
         super().setUp()
         self.external()
         self.hook("start", "s1", transcript_path="/x/s1.jsonl")
 
-    def test_clear_compact_resume_keep_the_desk_with_the_new_id(self):
-        for i, (src, extra) in enumerate([("clear", {}), ("compact", {}), ("resume", {"transcript_path": "/x/s%d.jsonl" % 2})]):
-            old = lean_desk.record()
-            sid = "n%d" % i
-            if src == "resume":
-                lean_desk.heartbeat(old["session_id"], "/x/s2.jsonl", self.now)
-            ctx, _ = self.hook("start", sid, source=src, **({"transcript_path": "/x/%s.jsonl" % sid} if src != "resume" else extra))
-            rec = lean_desk.record()
-            self.assertIn("this session is the front desk", ctx)
-            self.assertEqual(rec["session_id"], sid)
-            self.assertEqual(rec["attached_ts"], old["attached_ts"])
-            self.assertEqual(rec["pending"], old["pending"])
-            self.assertTrue(lean_desk.is_desk(sid, self.now))
-            self.assertFalse(lean_desk.is_desk(old["session_id"], self.now))
-            if src == "resume":
-                continue
+    def end(self, sid="s1", reason="clear", dt=0):
+        self.hook("end", sid, now=self.now + dt, reason=reason)
+
+    def test_clear_after_the_desks_own_session_end_keeps_the_desk(self):
+        old = lean_desk.record()
+        self.end(reason="clear")
+        ctx, _ = self.hook("start", "n1", source="clear", now=self.now + 1, transcript_path="/x/n1.jsonl")
+        rec = lean_desk.record()
+        self.assertIn("this session is the front desk", ctx)
+        self.assertEqual((rec["session_id"], rec["attached_ts"], rec["pending"]), ("n1", old["attached_ts"], old["pending"]))
+        self.assertNotIn("handover_from", rec)  # consumed
+        self.assertTrue(lean_desk.is_desk("n1", self.now + 1))
+        self.assertFalse(lean_desk.is_desk("s1", self.now + 1))
+        ctx, _ = self.hook("start", "n2", source="clear", now=self.now + 2)  # the token is single use
+        self.assertIn("NOT the front desk", ctx)
+
+    def test_compact_with_a_new_id_after_session_end_and_same_id_compact(self):
+        self.end(reason="compact")
+        ctx, _ = self.hook("start", "n1", source="compact", now=self.now + 1)
+        self.assertEqual(lean_desk.record()["session_id"], "n1")
+        self.assertIn("front desk", ctx)
+        self.assertNotIn("checkpoint", ctx.lower())  # no lean-agent brief for compact
+        ctx, _ = self.hook("start", "n1", source="compact", now=self.now + 2)  # same id: nothing to hand over
+        self.assertEqual(lean_desk.record()["session_id"], "n1")
+
+    def test_resume_of_the_same_transcript(self):
+        ctx, _ = self.hook("start", "n1", source="resume", transcript_path="/x/s1.jsonl")
+        self.assertEqual(lean_desk.record()["session_id"], "n1")
+        ctx, _ = self.hook("start", "n2", source="resume", transcript_path="/other.jsonl")
+        self.assertIn("NOT the front desk", ctx)
+
+    def test_other_sessions_clear_or_compact_is_refused(self):
+        for src in ("clear", "compact", "startup"):
+            ctx, _ = self.hook("start", "other", source=src)
+            self.assertIn("NOT the front desk", ctx)
+            self.assertEqual(lean_desk.record()["session_id"], "s1")
+        self.end("other", "clear")  # a non-desk session's end leaves no token
+        self.assertNotIn("handover_from", lean_desk.record())
+        ctx, _ = self.hook("start", "other2", source="clear")
+        self.assertIn("NOT the front desk", ctx)
+
+    def test_token_expires_and_other_reasons_leave_none(self):
+        self.end(reason="logout")
+        self.assertNotIn("handover_from", lean_desk.record())
+        self.end(reason="clear")
+        ctx, _ = self.hook("start", "n1", source="clear", now=self.now + lean_desk.HANDOVER_SECS + 5)
+        self.assertIn("NOT the front desk", ctx)
 
     def test_pending_stays_pending(self):
         lean_desk.set_pending(True)
-        ctx, _ = self.hook("start", "n1", source="clear")
+        self.end()
+        ctx, _ = self.hook("start", "n1", source="clear", now=self.now + 1)
         self.assertIn("will become the front desk", ctx)
         rec = lean_desk.record()
         self.assertEqual((rec["session_id"], rec["pending"]), ("n1", True))
 
-    def test_startup_of_a_different_session_is_still_refused(self):
-        ctx, _ = self.hook("start", "s2", source="startup")
-        self.assertIn("NOT the front desk", ctx)
-        ctx, _ = self.hook("start", "s3", source="resume", transcript_path="/other.jsonl")
-        self.assertIn("NOT the front desk", ctx)
-        self.assertEqual(lean_desk.record()["session_id"], "s1")
-
-    def test_pending_reports_reach_the_new_id(self):
+    def test_pending_reports_and_brief_reach_the_new_id(self):
         self.report()
-        ctx, _ = self.hook("start", "n1", source="clear")
+        self.end()
+        with mock.patch("compact_hook.brief", return_value="BRIEF-TEXT"):
+            ctx, _ = self.hook("start", "n1", source="clear", now=self.now + 1)
+        self.assertIn("BRIEF-TEXT", ctx)
         self.assertIn("t5 finished", ctx)
+
+    def test_handover_resets_the_context_ask(self):
+        lean_desk.update_record("s1", ctx_asked=self.now)
+        self.end()
+        self.hook("start", "n1", source="clear", now=self.now + 1)
+        self.assertNotIn("ctx_asked", lean_desk.record())
 
 
 class ContextAsk(Base):
@@ -1104,6 +1141,22 @@ class ContextAsk(Base):
         self.ctx(2000)
         self.assertIn("/clear when convenient", self.stop(300))
 
+    def test_off_and_explicit_clear_at_are_respected(self):
+        self.ctx(5000)
+        os.environ["LEAN_AGENT_DESK_CLEAR_AT"] = "off"
+        self.assertIsNone(self.stop(20))
+        os.environ["LEAN_AGENT_DESK_CLEAR_AT"] = "1000"
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "off"  # an explicit general setting overrides the desk's own
+        self.assertIsNone(self.stop(40))
+        os.environ["LEAN_AGENT_CLEAR_AT"] = "3000"
+        self.assertIn("/clear when convenient", self.stop(60))
+
+    def test_reply_instruction_does_not_conflict(self):
+        self.ctx(5000)
+        reason = self.stop(20)
+        self.assertNotIn("then reply 'checkpointed'", reason)
+        self.assertIn("lean-agent checkpoint", reason)
+
     def test_status_shows_context_and_clear_point(self):
         self.ctx(2000)
         line = lean_desk.status_line(self.now)
@@ -1111,30 +1164,37 @@ class ContextAsk(Base):
 
 
 class Open(Base):
-    def fake_open(self, **env):
+    def fake_open(self, binary="/fake/claude", **env):
         calls = []
-        popen = lambda argv, **kw: calls.append((argv, kw))  # noqa: E731
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST_DESKTOP": "1", **env}):
-            res = lean_desk.open_desk(self.now, popen=popen, which=lambda n: "/bin/" + n)
+
+        def popen(argv, **kw):
+            calls.append((argv, kw))
+            return mock.Mock(wait=mock.Mock())
+        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST_DESKTOP": "1", **env}), \
+                mock.patch.object(lean_desk, "claude_bin", return_value=binary):
+            res = lean_desk.open_desk(self.now, popen=popen)
         return res, calls
 
-    def test_resume_id_or_continue_detached(self):
+    def test_resume_id_or_continue_detached_with_a_clean_env(self):
+        os.environ["LEAN_AGENT_SECRET_X"] = "1"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "svc"
         res, calls = self.fake_open()
         self.assertTrue(res[0])
-        self.assertEqual(calls[0][0], ["claude", "--desktop", "--continue"])
+        self.assertEqual(calls[0][0], ["/fake/claude", "--desktop", "--continue"])
         kw = calls[0][1]
         self.assertTrue(kw["start_new_session"])
         self.assertEqual(kw["cwd"], lean_desk.desk_dir())
         self.assertEqual(kw["stdin"], __import__("subprocess").DEVNULL)
+        self.assertFalse([k for k in kw["env"] if k.startswith(("LEAN_AGENT", "CLAUDE_CODE"))])
+        self.assertTrue(kw["stdout"].closed)  # the parent's log fd is closed
         lean_desk.attach("abc-123", None, None, self.now)
         lean_desk.detach()
         res, calls = self.fake_open()
-        self.assertEqual(calls[0][0], ["claude", "--desktop", "--resume", "abc-123"])
+        self.assertEqual(calls[0][0], ["/fake/claude", "--desktop", "--resume", "abc-123"])
         self.assertIn("last desk open attempt", lean_desk.open_line(self.now))
 
     def test_missing_claude_and_linux(self):
-        with mock.patch.dict(os.environ, {"LEAN_AGENT_TEST_DESKTOP": "1"}):
-            ok, msg = lean_desk.open_desk(self.now, popen=mock.Mock(), which=lambda n: None)
+        ok, msg = self.fake_open(binary=None)[0]
         self.assertFalse(ok)
         self.assertIn("not on PATH", msg)
         popen = mock.Mock()
@@ -1153,6 +1213,14 @@ class Open(Base):
         cfg["desk_open_at_start"] = "off"
         lean_desk._write(lean_desk.lean_home("config.json"), cfg)
         self.assertFalse(lean_desk.open_at_start())
+
+    def test_state_keeps_last_sid_and_open_across_switches(self):
+        lean_desk.attach("abc-123", None, None, self.now)
+        self.fake_open()
+        lean_desk.set_active("hosted", "x", self.now)
+        st = lean_desk.state()
+        self.assertEqual(st["last_sid"], "abc-123")
+        self.assertIn("open", st)
 
 
 class BootOpen(Boot):
@@ -1177,12 +1245,28 @@ class BootOpen(Boot):
     def test_config_off_disables(self):
         self.assertEqual(self.run_it("app", desk_open_at_start="off")[0].call_count, 0)
 
+    def test_no_open_when_a_desk_is_already_attached(self):
+        lean_desk.attach("s1", None, None, self.now)
+        lean_desk.set_active("app", "x", self.now)
+        c = lean_desk.config()
+        c["desk_boot_wait_s"] = 180
+        lean_desk._write(lean_desk.lean_home("config.json"), c)
+        sh = ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.now)
+        sh.stopping.set()
+        with mock.patch.object(lean_desk, "open_desk") as op, mock.patch.object(ss.SwitchHost, "watch", lambda self: None):
+            sh.boot_wait()
+        op.assert_not_called()
+
     def test_no_reopen_on_heartbeat_loss(self):
         lean_desk.attach("s1", None, None, self.now)
         lean_desk.set_active("app", "x", self.now)
-        with mock.patch.object(lean_desk, "open_desk") as op:
-            lean_desk.attached(self.now + 3 * 3600)
-            ss.SwitchHost(lambda: mock.Mock(), now=lambda: self.now + 3 * 3600).wanted()
+        later = self.now + 3 * 3600
+        hosts = []
+        sh = ss.SwitchHost(lambda: hosts.append(1) or mock.Mock(last_input=0, last_user_input=0), now=lambda: later)
+        sh.cur = mock.Mock(last_input=0, last_user_input=0)
+        with mock.patch.object(lean_desk, "open_desk") as op, mock.patch.object(ss, "mid_turn", return_value=False):
+            for _ in range(3):
+                sh.tick(later)
         op.assert_not_called()
 
 

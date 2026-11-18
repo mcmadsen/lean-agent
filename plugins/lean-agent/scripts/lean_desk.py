@@ -100,6 +100,29 @@ def state():
     return _read(state_path())
 
 
+def update_state(fn):
+    """Locked read-modify-write of desk-mode.json (the hooks and the service both write it); fn(dict) edits it in place."""
+    with lean_common.file_lock(state_path()):
+        st = state()
+        fn(st)
+        _write(state_path(), st)
+
+
+def update_record(session_id, **changes):
+    """Locked update of desk.json when it is still `session_id`'s record (a None value removes the key). True when written."""
+    with lean_common.file_lock(path()):
+        rec = record()
+        if rec.get("session_id") != session_id:
+            return False
+        for k, v in changes.items():
+            if v is None:
+                rec.pop(k, None)
+            else:
+                rec[k] = v
+        _write(path(), rec)
+    return True
+
+
 def active(now=None):
     """Who is the desk right now: "app" (an attached local session) or "hosted" (the service's Remote Control main)."""
     m = mode()
@@ -123,32 +146,49 @@ def open_at_start():
     return mode() == "auto"
 
 
-def open_argv():
+def claude_bin():
+    """The claude binary (LEAN_AGENT_CLAUDE_BIN, else PATH), or None. Tests point this at a fake."""
+    import shutil
+    return os.environ.get("LEAN_AGENT_CLAUDE_BIN") or shutil.which("claude")
+
+
+def open_argv(binary="claude"):
     """The claude command that reopens the app desk session: --resume <last id>, else --continue."""
     sid = record().get("session_id") or state().get("last_sid")
-    return ["claude", "--desktop"] + (["--resume", sid] if sid else ["--continue"])
+    return [binary, "--desktop"] + (["--resume", sid] if sid else ["--continue"])
 
 
-def open_desk(now=None, popen=subprocess.Popen, which=None):
+OPEN_ENV_KEEP = ("HOME", "USER", "LOGNAME", "SHELL", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM", "DISPLAY",
+                 "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")
+
+
+def open_env():
+    """What a user-started session would have: no LEAN_AGENT_*/CLAUDE_CODE_* of the service."""
+    return {k: v for k, v in os.environ.items() if k in OPEN_ENV_KEEP}
+
+
+def open_desk(now=None, popen=subprocess.Popen):
     """Reopen the app desk in the Claude Desktop app, detached; never blocks. (ok, message); the attempt is recorded in the state
     file for doctor. Linux has no Desktop app: said so, not an error."""
-    import shutil
+    import threading
     now = time.time() if now is None else now
-    argv = open_argv()
+    binary = claude_bin()
+    argv = open_argv(binary or "claude")
     if sys.platform not in ("darwin", "win32") and not os.environ.get("LEAN_AGENT_TEST_DESKTOP"):
         ok, msg = True, "no Claude Desktop app on this platform: open the desk session by hand"
-    elif not (which or shutil.which)("claude"):
+    elif not binary:
         ok, msg = False, "claude is not on PATH: cannot reopen the app desk"
     else:
         try:
-            logf = open(os.path.join(lean_home(), "desk-open.log"), "ab")
-            popen(argv, cwd=desk_dir(), stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+            with open(os.path.join(lean_home(), "desk-open.log"), "ab") as logf:
+                proc = popen(argv, cwd=desk_dir(), env=open_env(), stdin=subprocess.DEVNULL, stdout=logf,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+            if hasattr(proc, "wait"):
+                threading.Thread(target=proc.wait, daemon=True).start()  # reaped when it exits
             ok, msg = True, "opened: " + " ".join(argv)
         except OSError as exc:
             ok, msg = False, f"could not run claude: {exc}"
-    st = state()
-    st["open"] = {"ts": now, "ok": ok, "msg": msg}
-    _write(state_path(), st)
+    update_state(lambda st: st.__setitem__("open", {"ts": now, "ok": ok, "msg": msg}))
     return ok, msg
 
 
@@ -162,14 +202,13 @@ def open_line(now=None):
 def set_active(which, why, now=None):
     """Record a switch of the active desk (the service does it): state file with the last switches, for status/doctor/map."""
     now = time.time() if now is None else now
-    st = state()
-    log = list(st.get("log") or [])[-19:]
-    log.append({"ts": now, "to": which, "why": why})
-    new = {"active": which, "since": now, "why": why, "log": log}
-    for k in ("open", "last_sid"):
-        if st.get(k):
-            new[k] = st[k]
-    _write(state_path(), new)
+    def edit(st):
+        log = list(st.get("log") or [])[-19:]
+        log.append({"ts": now, "to": which, "why": why})
+        keep = {k: st[k] for k in ("open", "last_sid") if st.get(k)}
+        st.clear()
+        st.update({"active": which, "since": now, "why": why, "log": log}, **keep)
+    update_state(edit)
     set_pending(which != "app")  # the app session owns the desk only while the service hosts no main
 
 
@@ -212,22 +251,39 @@ def attached(now=None):
     return rec
 
 
-def takeover_ok(source, transcript, now=None):
-    """True when a SessionStart of `source` in the desk folder is the attached desk session continuing under a new id
-    (clear, compact; resume of the same transcript)."""
+HANDOVER_SECS = 60
+
+
+def handover_valid(rec, now):
+    """The record carries a live handover token of its own session (its SessionEnd said clear/compact moments ago)."""
+    return bool(rec.get("handover_from") and rec.get("handover_from") == rec.get("session_id")
+                and now <= (rec.get("handover_until") or 0))
+
+
+def handover_out(session_id, now=None):
+    """SessionEnd(clear|compact) of the current desk session: a short token lets the session that starts next in the desk
+    folder continue as the desk. Compact keeps the id: then there is nothing to hand over."""
+    now = time.time() if now is None else now
+    return update_record(session_id, handover_from=session_id, handover_until=now + HANDOVER_SECS)
+
+
+def takeover_ok(source, transcript, session_id=None, now=None):
+    """How a SessionStart of `source` in the desk folder may take the desk record from the attached session: "token"
+    (clear/compact right after the desk session's own SessionEnd), "resume" (the same transcript), else None. A same-id
+    start (compact keeps the id) needs no takeover."""
+    now = time.time() if now is None else now
     cur = record()
-    if not cur.get("session_id"):
-        return False
+    if not cur.get("session_id") or cur.get("session_id") == session_id:
+        return None
     if source in ("clear", "compact"):
-        return True
-    return source == "resume" and bool(transcript) and transcript == cur.get("transcript")
+        return "token" if handover_valid(cur, now) else None
+    if source == "resume" and transcript and transcript == cur.get("transcript"):
+        return "resume"
+    return None
 
 
 def _remember_sid(session_id):
-    st = state()
-    if st.get("last_sid") != session_id:
-        st["last_sid"] = session_id
-        _write(state_path(), st)
+    update_state(lambda st: st.__setitem__("last_sid", session_id))
 
 
 def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
@@ -236,20 +292,18 @@ def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
     now = time.time() if now is None else now
     with lean_common.file_lock(path()):
         cur = attached(now)
+        if takeover == "token" and cur and cur.get("session_id") != session_id and not handover_valid(cur, now):
+            takeover = False
         if takeover and cur and cur.get("session_id") != session_id:
             # the same app session continues under a new id: it keeps the desk record (never a second owner)
             old = cur["session_id"]
             rec = dict(cur, session_id=session_id, transcript=transcript or "", heartbeat=now)
-            rec.pop("ctx_asked", None)
+            for k in ("ctx_asked", "handover_from", "handover_until"):
+                rec.pop(k, None)  # the token is consumed; the new id is asked about context afresh
             _write(path(), rec)
             _remember_sid(session_id)
-            try:
-                st = state()
-                st["log"] = (list(st.get("log") or [])[-19:] +
-                             [{"ts": now, "to": st.get("active"), "why": f"desk session {old[:8]} continues as {session_id[:8]}"}])
-                _write(state_path(), st)
-            except Exception:  # noqa: BLE001
-                pass
+            update_state(lambda st: st.__setitem__("log", (list(st.get("log") or [])[-19:] + [
+                {"ts": now, "to": st.get("active"), "why": f"desk session {old[:8]} continues as {session_id[:8]}"}])))
             return True, "pending" if rec.get("pending") else "attached"
         if cur and cur.get("session_id") != session_id:
             return False, (f"another session is already the front desk (attached {age(cur.get('attached_ts'), now)} ago); "
