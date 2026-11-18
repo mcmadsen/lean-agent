@@ -62,7 +62,7 @@ test('send to an idle thread resumes exactly once with the batch', async () => {
   await call({ action: 'send', tN: 't1', text: 'one' })
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   expect(resumes.length).toBe(1)
-  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '-n', 't1 · a', 'one'])
+  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '-n', 't1 · a', 'one\n\n<!-- lean:n=1 -->'])
 })
 
 test('two sends within 30 s make one wake; the second waits queued', async () => {

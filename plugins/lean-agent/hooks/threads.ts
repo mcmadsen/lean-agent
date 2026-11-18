@@ -1,5 +1,6 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
+import { unconsumed, wakeMark } from './delivery'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -193,7 +194,7 @@ async function create(h: Host, root: string, home: string, i: Input): Promise<Ou
 }
 
 async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
-  return (await readJsonl<Inbox>(h, `${tpath(home, t.id)}/inbox.jsonl`)).slice(t.delivered)
+  return (await unconsumed(h, home, t.id)).msgs
 }
 
 // Resume the thread's session with the queued batch, unless it is running (never resume a running session)
@@ -207,11 +208,12 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (isRunning(row)) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself` }
   const now = await h.clock.now()
   if (t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
-  const prompt = [opts.lead, batchPrompt(msgs)].filter(Boolean).join('\n\n') || 'Continue.'
+  const upTo = (await unconsumed(h, home, t.id)).upTo
+  const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
   const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '-n', label(t), prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   t.lastWake = now
-  t.delivered += msgs.length
+  t.delivered = upTo
   await save(h, home, t)
   return { ok: true, text: `${t.id} woken with ${msgs.length} message(s)` }
 }
@@ -263,7 +265,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const msgs = await pending(h, home, t)
           const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'))
           if (r.ok && msgs.length) {
-            t.delivered += msgs.length
+            t.delivered = (await unconsumed(h, home, id)).upTo
             await save(h, home, t)
           }
           return r
