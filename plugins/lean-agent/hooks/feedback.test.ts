@@ -42,3 +42,9 @@ test('without a known project the gap goes to the global gaps.jsonl', async () =
   await applyFeedback(h.host, { thread: 't2' }, parseFeedback(line({ status: 'done', missing: 'no docs for src/x/y.ts' }))!)
   expect(h.files.get('/h/.lean-agent/gaps.jsonl')).toContain('src/x/y.ts')
 })
+
+test('the feedback log names an agent without the plugin prefix', async () => {
+  const h = fakeHost(null)
+  await applyFeedback(h.host, { thread: 't1', project: 'proj', agent: 'lean-agent:worker-haiku' }, { status: 'done', missing: '', remember: [] } as any)
+  expect(h.files.get('/h/.lean-agent/feedback.jsonl')).toContain('"agent":"worker-haiku"')
+})

@@ -25,7 +25,8 @@
   grant. Only a type with exactly a leading `lean-agent:` is ours now (`lean-agent:worker-*` = worker; a bare `worker-x`
   from a user/project agent and another plugin's `x:worker-y` are readers). Grants bind with either spelling, `workerCaps`
   keys may be `worker-opus` or `lean-agent:worker-opus`, stats and feedback merge both spellings, and the templates, skills
-  and README name the agents with the prefix.
+  and README name the agents with the prefix. The spawned type is read from `AgentInfo.type` (what `$.agent.list()` names it);
+  the code read `subagentType`, which that row does not carry, so every subagent counted as an unknown reader.
 - **Open desk** no longer says "The Claude app is not running" inside the Claude app: a pane drawn on the desktop surface
   skips the check. Elsewhere the check calls `/usr/bin/pgrep` (`-x Claude`, then `-f` on the app binary path), and if the
   check itself errors `claude --desktop` is tried anyway and its real error is shown. The login opener uses the same two checks.

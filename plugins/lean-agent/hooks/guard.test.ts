@@ -332,9 +332,11 @@ test('the explorer (prefixed) may run only git log / ls-files; a bare explorer n
   expect(await bash('git log -3', 'explorer')).toContain('granted')
 })
 
-test('a grant that names the agent bare still binds to the prefixed type', async () => {
+test('a grant that names the agent bare binds to the prefixed type, and the other way round', async () => {
   const h = fakeHost(null)
   const thread = { kind: 'thread', id: 't1' } as any
-  await recordGrant(h.host, thread, 'c1', 'lean-agent:reviewer', { cmds: ['git log'] })
+  await recordGrant(h.host, thread, 'c1', 'reviewer', { cmds: ['git log'] })
   expect(await run(h, thread, { tool: 'Bash', command: 'git log -2' }, '/r', 'lean-agent:reviewer', 'r1')).toBeNull()
+  await recordGrant(h.host, thread, 'c2', 'lean-agent:reader-haiku', { cmds: ['ls'] })
+  expect(await run(h, thread, { tool: 'Bash', command: 'ls' }, '/r', 'reader-haiku', 'r2')).toBeNull()
 })

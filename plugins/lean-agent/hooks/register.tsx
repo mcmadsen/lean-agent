@@ -92,11 +92,16 @@ const SCHEMA = {
 
 
 let cwd = ''
+// AgentInfo (`$.agent.list()`) names the spawned type `type` (`lean-agent:worker-sonnet`); `subagentType` is the spawn input's spelling, tolerated
+export const typeOfAgent = (list: any[], id: string): string => {
+  const a = list.find(x => x?.id === id)
+  return String(a?.type ?? a?.subagentType ?? 'unknown')
+}
 async function agentType($: any, id?: string): Promise<string | undefined> {
   if (!id) return undefined
   try {
     const l = await $.agent.list()
-    return (l as any[]).find(a => a.id === id)?.subagentType ?? 'unknown'
+    return typeOfAgent(l as any[], id)
   } catch {
     return 'unknown' // a subagent of unknown type gets no special grant
   }

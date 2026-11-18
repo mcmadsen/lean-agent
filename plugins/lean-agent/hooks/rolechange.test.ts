@@ -4,6 +4,7 @@ import { resetLocks } from './threads'
 import { poolFor } from './register'
 import { DESK_TOOLS } from './guard'
 import { leanSkillsOnly, trimTools } from './squeeze'
+import { typeOfAgent } from './register'
 
 // A session the app pre-started in a spare folder, then moved into the user's folder.
 async function start($: any, on: any, first: string) {
@@ -155,4 +156,11 @@ test('a second session.start in the same process registers by name again, never 
   // the engine replaces a tool registered under the same name: two registrations of a name are one tool
   expect(new Set(s.reg).size).toBe(2)
   expect(s.reg.length).toBe(4)
+})
+
+test('the spawned agent type is read from AgentInfo.type (prefixed), not only subagentType', () => {
+  const list = [{ id: 'a1', type: 'lean-agent:worker-sonnet' }, { id: 'a2', subagentType: 'general-purpose' }]
+  expect(typeOfAgent(list, 'a1')).toBe('lean-agent:worker-sonnet')
+  expect(typeOfAgent(list, 'a2')).toBe('general-purpose')
+  expect(typeOfAgent(list, 'zz')).toBe('unknown')
 })
