@@ -70,7 +70,9 @@ function setup(opts: { installed?: boolean; flags?: string; costs?: number; mcp?
     const skillsOff = a.includes('--disable-slash-commands')
     const kind = call.cwd === '/repo' ? 'clean' : call.cwd?.includes('/threads/t9') ? 'thread' : call.cwd === '/h/lean-agent-desk' ? 'desk' : 'other'
     if (prompt === '/context') {
-      const md = kind === 'clean' ? (opts.mcp ? CLEAN_CTX.replace('| Skills |', '| MCP tools | 9.0k | 0.9% |\n| Skills |') + '\n### MCP tools\n\n| Tool | Server | Tokens |\n|------|--------|--------|\n| mcp__db__query | db | ~900 |\n| mcp__db__list | db | ~700 |\n' : CLEAN_CTX) : THREAD_CTX
+      const mcpTools = '\n### MCP tools\n\n| Tool | Server | Tokens |\n|------|--------|--------|\n| mcp__db__query | db | ~900 |\n| mcp__db__list | db | ~700 |\n| mcp__audit__scan | audit | ~600 |\n| mcp__lean-agent__lean_report | lean-agent | ~900 |\n'
+      const withMcp = (c: string) => c.replace('| Skills |', '| MCP tools | 9.0k | 0.9% |\n| Skills |') + mcpTools
+      const md = kind === 'clean' ? (opts.mcp ? withMcp(CLEAN_CTX) : CLEAN_CTX) : kind === 'thread' && opts.mcp ? withMcp(THREAD_CTX).replace('datadog:ddsetup | Plugin (datadog) | ~230', 'datadog:ddsetup | Plugin (datadog) | ~530') : THREAD_CTX
       return { exitCode: 0, stdout: ctxJson(md) }
     }
     const input = kind === 'clean' ? 38724 - (mcpOff ? 9000 : 0) - (skillsOff ? 6300 : 0) : kind === 'thread' ? 40906 : kind === 'desk' ? 40726 : 100
@@ -159,11 +161,73 @@ test('suggestions come from the numbers, each with the concrete step', async () 
   const s = r.text.slice(r.text.indexOf('Suggestions:'))
   expect(s).toContain('a thread session starts at 40.9k tokens vs 38.7k clean; most of the difference: skills +1.3k, memory files +937')
   expect(s).toContain('a desk session starts at 40.7k tokens vs 38.7k clean')
-  expect(s).toContain('MCP server db adds ~1.6k tokens (2 tools): add "mcp__db__*" to tools.thread.drop in ~/.lean-agent/config.json')
+  // the estimate is labelled as a definition size (mostly deferred, not first-turn cost); the lever is the project profile, never the global drop list
+  expect(s).toContain('MCP server db: definition size ~1.6k (2 tools; mostly deferred, not first-turn cost) (no usage recorded yet): leave it out of the project profile (lean_thread profile, project proj, mcp: [...]): it is then deferred, its tools stay findable by ToolSearch')
+  expect(s).toContain('plugin datadog: lists 1 skills (~530 tokens, definition size, an estimate) (no usage recorded yet): leave it out of the project profile (lean_thread profile, project proj, plugins: [...])')
+  expect(s).not.toContain('tools.thread.drop')
+  expect(s).not.toContain('tools.desk.drop')
+  expect(s).not.toContain('to every session')
+  expect(s).not.toContain('MCP server lean-agent') // lean-agent's own server is never a candidate
+  expect(s).not.toContain('clean: ') // the clean column is no thread: no advice about what a thread should drop
+  expect(s).not.toContain('desk: MCP')
   expect(s).toContain('2 learned rule(s) never loaded (a.md, b.md): learn proj --trim')
   expect(s).toContain('1 gap(s) look like mechanical work: learn proj --trim lists them as script candidates')
-  expect(s).toContain('adds ~310 tokens (2 skills) to every session')
-  expect(s).toContain('enabledPlugins')
+  // the report labels the sizes too
+  expect(r.text).toContain('MCP servers in thread (definition size, an estimate: mostly deferred, not first-turn cost): db 1.6k (2)')
+})
+
+test('a server or plugin with recorded use is "keep" with its numbers; an unused one is named as never called', async () => {
+  const { h } = setup({ mcp: true })
+  for (const [id, n] of [['t1', 20], ['t2', 15], ['t3', 6]] as const) {
+    h.files.set(`${L}/threads/${id}/thread.json`, JSON.stringify({ id, project: 'proj' }))
+    h.files.set(`${L}/threads/${id}/usage.json`, JSON.stringify({ mcp: { db: n }, skills: { 'datadog:ddsetup': 1 } }))
+  }
+  const r = await overhead(h.host, ROOT, 'proj')
+  const s = r.text.slice(r.text.indexOf('Suggestions:'))
+  expect(s).toContain('MCP server db: used 41 times in 3 threads: keep')
+  expect(s).toContain('plugin datadog: its skills or servers used 3 times in 3 threads: keep')
+  expect(s).toContain('MCP server audit: definition size ~600 (1 tools; mostly deferred, not first-turn cost), never called by this project\'s threads: leave it out of the project profile')
+  expect(s).not.toContain('MCP server db: definition size')
+})
+
+test('a thread running compare is told to ask the desk (it cannot set a profile); a server already outside the profile is not suggested again', async () => {
+  const { h } = setup({ mcp: true })
+  h.files.set(`${L}/proj/profile.json`, JSON.stringify({ mcp: ['db'], plugins: [] }))
+  const r = await compare(h.host, ROOT, { project: 'proj' }, 'thread')
+  const s = r.text.slice(r.text.indexOf('Suggestions:'))
+  expect(s).toContain('MCP server db: definition size ~1.6k')
+  expect(s).toContain('ask the desk (lean_ask) to run lean_thread profile, project proj, mcp: [...]')
+  expect(s).not.toContain('MCP server audit') // not in the profile: already deferred in this column
+  const desk = await compare(h.host, ROOT, { project: 'proj' }, 'desk')
+  expect(desk.text).toContain('(lean_thread profile, project proj, mcp: [...])')
+  expect(desk.text).not.toContain('ask the desk')
+})
+
+test('the thread column starts like a thread of the project: its profile is applied and shown, the clean and desk columns are not', async () => {
+  const { h, seen } = setup({ installed: true, mcp: true })
+  h.files.set('/h/.claude/plugins/installed_plugins.json', JSON.stringify({ version: 2, plugins: { 'lean-agent@mk': [{ installPath: '/c/la' }], 'other@mk': [{ installPath: '/c/other' }] } }))
+  h.files.set('/c/other/.claude-plugin/plugin.json', '{"name":"other"}')
+  h.files.set('/c/other/skills/x/SKILL.md', '# x') // skills and nothing else: the one kind of plugin the profile switches off
+  h.files.set(`${L}/proj/profile.json`, JSON.stringify({ mcp: ['db'], plugins: [] }))
+  const settingsAtRun: string[] = []
+  const handler = h.claude.handler
+  h.claude.handler = (a: string[], call: any) => {
+    if (call.cwd?.includes('/threads/t9') && a.includes('Reply with OK.')) settingsAtRun.push(h.files.get(`${call.cwd}/.claude/settings.json`) ?? '', h.files.get(`${call.cwd}/loaded.json`) ?? '')
+    return handler(a, call)
+  }
+  const r = await overhead(h.host, ROOT, 'proj')
+  expect(JSON.parse(settingsAtRun[0]!).enabledPlugins).toEqual({ 'other@mk': false })
+  expect(JSON.parse(settingsAtRun[1]!)).toEqual({ mcp: ['db'], plugins: [], needs: [] })
+  expect(r.text).toContain('Loaded in thread (project profile; MCP servers outside it are deferred, still found by ToolSearch): mcp: db · plugins: none')
+  expect(r.text).not.toContain('Loaded in clean')
+  expect(r.text).not.toContain('Loaded in desk')
+  expect(seen.some(s => s.cwd === '/h/lean-agent-desk')).toBe(true)
+})
+
+test('a project without a profile shows no loaded line; the thread folder still gets loaded.json (everything loads)', async () => {
+  const { h } = setup({ installed: true })
+  const r = await overhead(h.host, ROOT, 'proj')
+  expect(r.text).not.toContain('Loaded in')
 })
 
 // ---- task mode -----------------------------------------------------------------------------------------------------
