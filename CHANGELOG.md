@@ -3,6 +3,11 @@
 ## 1.0.2
 
 ### Added
+- The desk can answer "what projects do we have?": `lean_thread` gets `projects` (path, private, guards, learned rules with
+  areas / last learned / stale, open threads; private projects hidden by the 0.45 private switch only with `all: true`),
+  `project-add` (existing folder, real path), `project-remove` (unregisters only, refused while a thread uses it) and
+  `project-private`. The desk pane has a compact Projects section, and the desk's CLAUDE.md says the desk may Read files
+  under `~/.lean-agent`. A damaged `projects.json` is never overwritten.
 - The desk records what happened to its skill listing ("trimmed 5 -> 2", "format not recognised", "no skill_listing
   attachment seen"; names and counts only, never text) and shows it in the pane footer and in `lean_doctor check`, with the
   attachment and section names seen this session, so a report needs no debug log.

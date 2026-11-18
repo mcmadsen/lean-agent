@@ -1,6 +1,7 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { unconsumed, wakeMark } from './delivery'
+import { projectsAction } from './projects'
 import { ensureGitHooks, gitEnv } from './githooks'
 
 export const WAKE_GAP_MS = 30_000
@@ -132,7 +133,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; path?: string; on?: boolean; all?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -272,6 +273,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
     if (i.action === 'list') return await list(h, home)
+    if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
+      const r = await projectsAction(h, i)
+      if (i.action !== 'projects') await ensureGitHooks(h).catch(() => undefined) // projects.json changed: the private list follows
+      return r
+    }
     if (i.action === 'new') return await create(h, root, home, i)
     const id = i.tN ?? ''
     if (!ID.test(id)) return err(`${i.action} needs tN (like t3)`)

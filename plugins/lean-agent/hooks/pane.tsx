@@ -208,6 +208,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Box>
         ))}
         {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
+        <Text bold>Projects</Text>
+        {v && !v.projects.length && <Text dimColor>No projects registered.</Text>}
+        {v?.projects.map(p => (
+          <Text key={`p-${p.name}`}>
+            {p.name} · {p.private ? 'private' : 'open'} · {p.threads} thread(s)
+            {p.stale > 0 ? <Text color="yellow"> · {p.stale} rule area(s) stale</Text> : null}
+          </Text>
+        ))}
         <Text bold>Threads</Text>
         {v && !v.threads.length && <Text dimColor>No open threads.</Text>}
         {v?.threads.map(t => (

@@ -13,7 +13,7 @@ export const STALE_GAPS = 3
 export const EXCLUDES = ['.claude/rules/lean-agent/', '.claude/skills/lean-agent-*/']
 const MANIFESTS = new Set(['package.json', 'go.mod', 'go.work', 'Cargo.toml', 'pyproject.toml', 'pnpm-workspace.yaml', 'pom.xml', 'build.gradle'])
 
-export type Area = { globs: string[]; sha: string; lines: number; stale?: string; gaps?: number }
+export type Area = { globs: string[]; sha: string; lines: number; stale?: string; gaps?: number; at?: number }
 export type Learn = { sha: string; areas: Record<string, Area> }
 
 export const projectDir = (home: string, project: string) => `${leanDir(home)}/${project}`
@@ -110,7 +110,7 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
 export async function recordLearn(h: Host, project: string, area: string, a: { globs: string[]; sha: string; lines: number }): Promise<void> {
   const home = await homeDir(h)
   const l = await readJson<Learn>(h, learnFile(home, project), { sha: '', areas: {} })
-  l.areas[area] = { globs: a.globs, sha: a.sha, lines: a.lines }
+  l.areas[area] = { globs: a.globs, sha: a.sha, lines: a.lines, at: await h.clock.now() }
   l.sha = a.sha
   await writeJson(h, learnFile(home, project), l)
 }

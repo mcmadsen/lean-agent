@@ -13,7 +13,9 @@ export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
 export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 export type ThreadRow = { id: string; title: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean }
-export type View = { goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
+import { listProjects } from './projects'
+import type { ProjectRow } from './projects'
+export type View = { projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; budget: string; errors: string[] }
 
 import { STALE_MS } from './chaser'
 export { STALE_MS }
@@ -50,7 +52,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
+  const v: View = { projects: [], goals: [], answers: [], openQuestions: [], unread: 0, total: 0, threads: [], budget: 'n/a', errors: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -63,6 +65,9 @@ export async function loadView(h: Host): Promise<View> {
     home = await homeDir(h)
   })
   if (!home) return v
+  await guard('projects', async () => {
+    v.projects = (await listProjects(h)).rows
+  })
   const now = await h.clock.now().catch(() => Date.now())
   const recs: DeskRec[] = []
   let read = 0

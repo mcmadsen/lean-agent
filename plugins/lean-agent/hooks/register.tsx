@@ -75,11 +75,14 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new and list)' },
     text: { type: 'string', description: 'new: the brief; send: the message' },
     title: { type: 'string', description: 'new: short title' },
-    project: { type: 'string', description: 'new: project name' },
+    project: { type: 'string', description: 'new / project-*: project name' },
+    path: { type: 'string', description: 'project-add: folder (must exist)' },
+    on: { type: 'boolean', description: 'project-private: true or false' },
+    all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },
   },
   required: ['action'],
 }
@@ -186,7 +189,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start; and projects: projects (list), project-add, project-remove (unregister only), project-private. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)

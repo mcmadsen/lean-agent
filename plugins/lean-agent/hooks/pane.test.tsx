@@ -129,3 +129,17 @@ test('view and pane: an open question shows until an answer row closes it', asyn
   expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
   await ui.unmount()
 })
+
+test('pane Projects section: name, private, open threads, stale rules; hidden private ones left out', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ p: { path: '/w/p' }, secret: { path: '/w/s', private: true } }))
+  h.files.set('/h/.lean-agent/p/learn.json', JSON.stringify({ sha: 'a', areas: { ui: { globs: ['ui/**'], sha: 'a', lines: 5, stale: 'x' } } }))
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ private: 'off' }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /Projects/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /p · open · 2 thread\(s\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /1 rule area\(s\) stale/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /secret/ })).toBeFalsy()
+  await ui.unmount()
+})
