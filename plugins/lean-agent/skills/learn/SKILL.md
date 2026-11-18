@@ -57,6 +57,12 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
      to check, and the gaps from `~/.lean-agent/<project>/gaps.jsonl` and the memory notes for that path. It returns at most
      25 lines per area, each bullet naming the file it was checked in. Its `LEAN-FEEDBACK` line carries `refused`,
      `unverified` and `unreached`; the mod files them (`refusals.jsonl`, `feedback.jsonl`).
+   - *Script knowledge* (the brief asks for it per area, as two extra sections after the 25 lines): (a) `SCRIPTS`: the repo's
+     own scripts for the area (`package.json` scripts, Makefile/justfile targets, `tools/` or `scripts/` folders, CI steps that
+     can run locally), each as `<command>: what question it answers`; (b) `MECHANICAL`: tasks where a thread would otherwise
+     spend model time on mechanical work (counting, listing, diffing generated files, finding the worktrees or packages that
+     match something) and the script or one-liner that already does it, or "none: candidate for a script". Each entry names
+     the file it was found in.
 3. **Write** `rules/<area>.md` (see Budget):
 
    ```markdown
@@ -73,6 +79,13 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
    plus one always-loaded `rules/_project.md` (no `paths:`: how to build and test the whole repo).
    Rules say what the code and the repo docs do not; no file listings, no secrets, no hashes/dates/counts.
    - A bullet may point at a doc (`see <path>`), never restate it. A bullet that an explorer sourced from a doc is dropped.
+   - **Scripts, not descriptions.** Where a script answers a question, the rule says "for X run `<script>`" (the command as it
+     is run from the repo root) instead of describing how to find X by hand; `SCRIPTS` entries that a thread will need go in,
+     the rest stay out. `MECHANICAL` entries with no script are not rules: they go to the report as script candidates.
+   - **Keep the scripts block.** A rule may hold `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (a later release
+     writes adopted scripts there). When you rewrite a rule, copy that block through byte for byte, in place; never merge it
+     into the bullets, shorten it or drop it. The footer is the OTHER comment (`<!-- lean-agent: learned ... -->`, with a space
+     after the colon); the block counts toward the caps like any other body lines.
    - Keep a `CONFLICT` as one line only if the user should know; otherwise it belongs in your report.
    - **Wiring between areas.** `paths:` takes a list: one rule with the globs of both sides (`- "services/api/client/**"`,
      `- "apps/web/src/api/**"`; braces like `src/**/*.{ts,tsx}` work) loads when either side is read. Put such contracts
@@ -95,10 +108,13 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
    for what it cannot judge (behaviour, numbers' meaning, commands that still work), re-check by bullet group and decide
    KEEP / FIX / DROP; `record` again (new `sha`), `check`, `sync`.
 6. **`--trim`**: call `lean_rules` `stats`. Rewrite rules that loaded often but have gaps in `gaps.jsonl`; delete rules in
-   `never` after 30 days; `check`, `sync` again.
+   `never` after 30 days; `check`, `sync` again. A rule's scripts block is never deleted or shortened by trim (not even when
+   the rest of the rule goes: say so in the report and keep the block's lines in a rule that stays). Read the gaps too: a gap
+   that describes mechanical work (counting, listing, diffing, "find the ...") is not a missing fact but a script candidate; list
+   those in the report under `SCRIPT CANDIDATES` with the question each would answer.
 
 **Final report** (`lean_report`): areas learned / covered by docs / skipped, rules and total lines, `CONFLICT`s (doc vs code),
-the `UNVERIFIED` list, the folders explorers did not reach, commands that were refused (command and text), and how many
+the `UNVERIFIED` list, `SCRIPT CANDIDATES` (mechanical tasks without a script), the folders explorers did not reach, commands that were refused (command and text), and how many
 explorers ran against inline work.
 
 Freshness: `lean_rules` `stale` (run at thread start automatically) names areas whose relied-on files changed or vanished,

@@ -86,9 +86,14 @@ export function pathsOf(t: string): string[] {
   if (inline) items.push(...inline.split(/,(?![^{]*\})/).map(unq)) // a comma inside braces is part of the glob
   return items.filter(Boolean)
 }
+// The footer is the comment `<!-- lean-agent: learned ... -->` (a space after the colon). The marker comments of an adopted-
+// scripts block, `<!-- lean-agent:scripts -->` ... `<!-- /lean-agent:scripts -->` (written by a later release; learn keeps the
+// block intact and trim never deletes it), are not the footer and are never touched here.
+const FOOTER = /<!--\s*lean-agent:(?=\s)([\s\S]*?)-->/
+export const SCRIPTS_BLOCK = /<!--\s*lean-agent:scripts\s*-->[\s\S]*?<!--\s*\/lean-agent:scripts\s*-->/
 // the footer's `relies-on:` list (symbols and files; the last field of the footer comment)
 export function parseRelies(t: string): string[] {
-  const f = /<!--\s*lean-agent:([\s\S]*?)-->/.exec(t)?.[1] ?? ''
+  const f = FOOTER.exec(t)?.[1] ?? ''
   const m = /relies-on:\s*([\s\S]*)$/.exec(f)
   return m ? m[1]!.split(',').map(x => x.trim()).filter(Boolean) : []
 }
@@ -96,7 +101,7 @@ const looksLikePath = (s: string) => !/\s/.test(s) && !/[<>$]/.test(s) && !s.spl
 // the footer gets `relies-on:` last (an existing one is replaced); no footer: one is made
 export function withRelies(t: string, relies: string[], sha: string, date: string): string {
   const list = relies.join(', ')
-  const re = /<!--\s*lean-agent:([\s\S]*?)-->/
+  const re = FOOTER
   const m = re.exec(t)
   if (!m) return t.replace(/\n*$/, '\n') + `<!-- lean-agent: learned ${sha.slice(0, 8)} ${date}${list ? ` relies-on: ${list}` : ''} -->\n`
   const inner = m[1]!.replace(/\s*relies-on:[\s\S]*$/, '').trimEnd()

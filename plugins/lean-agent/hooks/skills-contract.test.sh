@@ -57,6 +57,10 @@ need learn 'Preflight, ONE explorer'
 need learn 'lean-agent:reader-sonnet'
 need learn 'capped file list'
 need learn 'relies'
+need learn '<!-- lean-agent:scripts -->'
+need learn 'SCRIPT CANDIDATES'
+need learn 'MECHANICAL'
+grep -q 'MECHANICAL' "$root/agents/explorer.md" || fail "explorer.md does not ask for script knowledge"
 for a in explorer reader-haiku reader-sonnet; do
   for k in refused unverified unreached; do grep -q "\"$k\"" "$root/agents/$a.md" || fail "$a.md: LEAN-FEEDBACK lacks $k"; done
 done
