@@ -1027,5 +1027,88 @@ class PendingClock(Base):
         self.assertLess(lean_desk.pending_age(later + 5), 10)
 
 
+class Handover(Base):
+    def setUp(self):
+        super().setUp()
+        self.external()
+        self.hook("start", "s1", transcript_path="/x/s1.jsonl")
+
+    def test_clear_compact_resume_keep_the_desk_with_the_new_id(self):
+        for i, (src, extra) in enumerate([("clear", {}), ("compact", {}), ("resume", {"transcript_path": "/x/s%d.jsonl" % 2})]):
+            old = lean_desk.record()
+            sid = "n%d" % i
+            if src == "resume":
+                lean_desk.heartbeat(old["session_id"], "/x/s2.jsonl", self.now)
+            ctx, _ = self.hook("start", sid, source=src, **({"transcript_path": "/x/%s.jsonl" % sid} if src != "resume" else extra))
+            rec = lean_desk.record()
+            self.assertIn("this session is the front desk", ctx)
+            self.assertEqual(rec["session_id"], sid)
+            self.assertEqual(rec["attached_ts"], old["attached_ts"])
+            self.assertEqual(rec["pending"], old["pending"])
+            self.assertTrue(lean_desk.is_desk(sid, self.now))
+            self.assertFalse(lean_desk.is_desk(old["session_id"], self.now))
+            if src == "resume":
+                continue
+
+    def test_pending_stays_pending(self):
+        lean_desk.set_pending(True)
+        ctx, _ = self.hook("start", "n1", source="clear")
+        self.assertIn("will become the front desk", ctx)
+        rec = lean_desk.record()
+        self.assertEqual((rec["session_id"], rec["pending"]), ("n1", True))
+
+    def test_startup_of_a_different_session_is_still_refused(self):
+        ctx, _ = self.hook("start", "s2", source="startup")
+        self.assertIn("NOT the front desk", ctx)
+        ctx, _ = self.hook("start", "s3", source="resume", transcript_path="/other.jsonl")
+        self.assertIn("NOT the front desk", ctx)
+        self.assertEqual(lean_desk.record()["session_id"], "s1")
+
+    def test_pending_reports_reach_the_new_id(self):
+        self.report()
+        ctx, _ = self.hook("start", "n1", source="clear")
+        self.assertIn("t5 finished", ctx)
+
+
+class ContextAsk(Base):
+    def setUp(self):
+        super().setUp()
+        self.external()
+        self.tp = os.path.join(self.tmp, "t.jsonl")
+        open(self.tp, "w").close()
+        self.hook("start", "s1", transcript_path=self.tp)
+        os.environ["LEAN_AGENT_DESK_CLEAR_AT"] = "1000"
+
+    def ctx(self, n):
+        with open(self.tp, "a") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": n}, "content": [{"type": "text", "text": "ok"}]}}) + "\n")
+
+    def stop(self, dt):
+        return self.hook("stop", "s1", now=self.now + dt, transcript_path=self.tp)[1]
+
+    def test_asks_once_per_crossing_never_with_a_dialog(self):
+        self.ctx(500)
+        self.assertIsNone(self.stop(20))
+        self.ctx(2000)
+        ss.dialog_set("main", True, now=self.now + 40)
+        self.assertIsNone(self.stop(40))
+        ss.dialog_set("main", False)
+        reason = self.stop(60)
+        self.assertIn("/clear when convenient", reason)
+        self.assertIn("Never type /clear", reason)
+        self.assertIsNone(self.stop(120))
+        self.ctx(3000)
+        self.assertIsNone(self.stop(180))
+        self.ctx(100)
+        self.assertIsNone(self.stop(240))
+        self.ctx(2000)
+        self.assertIn("/clear when convenient", self.stop(300))
+
+    def test_status_shows_context_and_clear_point(self):
+        self.ctx(2000)
+        line = lean_desk.status_line(self.now)
+        self.assertIn("context 2,000 tokens (clear point 1,000)", line)
+
+
 if __name__ == "__main__":
     unittest.main()

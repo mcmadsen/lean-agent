@@ -164,12 +164,37 @@ def attached(now=None):
     return rec
 
 
-def attach(session_id, transcript=None, cwd=None, now=None):
+def takeover_ok(source, transcript, now=None):
+    """True when a SessionStart of `source` in the desk folder is the attached desk session continuing under a new id
+    (clear, compact; resume of the same transcript)."""
+    cur = record()
+    if not cur.get("session_id"):
+        return False
+    if source in ("clear", "compact"):
+        return True
+    return source == "resume" and bool(transcript) and transcript == cur.get("transcript")
+
+
+def attach(session_id, transcript=None, cwd=None, now=None, takeover=False):
     """(True, message) when this session is now the desk record; (False, why) when another live desk holds it. In mode auto the
     desk is *pending* until the service has stopped hosting its own main (SwitchHost.confirm): only then is it the desk."""
     now = time.time() if now is None else now
     with lean_common.file_lock(path()):
         cur = attached(now)
+        if takeover and cur and cur.get("session_id") != session_id:
+            # the same app session continues under a new id: it keeps the desk record (never a second owner)
+            old = cur["session_id"]
+            rec = dict(cur, session_id=session_id, transcript=transcript or "", heartbeat=now)
+            rec.pop("ctx_asked", None)
+            _write(path(), rec)
+            try:
+                st = state()
+                st["log"] = (list(st.get("log") or [])[-19:] +
+                             [{"ts": now, "to": st.get("active"), "why": f"desk session {old[:8]} continues as {session_id[:8]}"}])
+                _write(state_path(), st)
+            except Exception:  # noqa: BLE001
+                pass
+            return True, "pending" if rec.get("pending") else "attached"
         if cur and cur.get("session_id") != session_id:
             return False, (f"another session is already the front desk (attached {age(cur.get('attached_ts'), now)} ago); "
                            "run `lean-agent desk detach` there or here first")
@@ -308,6 +333,14 @@ def summary(now=None):
         out["age"] = age(rec.get("attached_ts"), now)
         out["heartbeat_age"] = age(rec.get("heartbeat"), now)
         out["stale"] = cur is None
+        if cur and not cur.get("pending"):
+            try:
+                import service_session
+                tp = rec.get("transcript")
+                out["ctx"] = service_session.transcript_state(tp)["ctx"] if tp and os.path.exists(tp) else 0
+                out["clear_at"] = service_session.desk_clear_at()
+            except Exception:  # noqa: BLE001
+                pass
     return out
 
 
@@ -321,7 +354,10 @@ def status_line(now=None):
         why = wait_reason(now)
         return act + f", app session {s['session_id'][:8]} waits for the hosted main to stop (pending)" + (f": {why}" if why else "")
     if s["attached"]:
-        return act + f", app session attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]})"
+        ctx = ""
+        if s.get("ctx"):
+            ctx = f", context {s['ctx']:,} tokens" + (f" (clear point {s['clear_at']:,})" if s.get("clear_at") else " (no clear point)")
+        return act + f", app session attached {s['age']} ago, last seen {s['heartbeat_age']} ago (session {s['session_id'][:8]}){ctx}"
     if s.get("session_id"):
         return act + f", app session detached (last seen {s['heartbeat_age']} ago)"
     return act + f", no app session attached; open a local session in {lean_home()}"
