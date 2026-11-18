@@ -97,6 +97,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   if ((await run(h, ['uname', '-s'])).out === 'Darwin') row(await h.fs.exists(`${home}/Library/LaunchAgents/${DESK_LABEL}.plist`), 'launch agent installed')
+  if ((await run(h, ['uname', '-s'])).out !== 'Darwin') out.push('FIX  lean-agent 1.0 needs Claude Desktop (macOS)')
   const log = ((await text(h, `${leanDir(home)}/logs/opener.log`)) || '').trim().split('\n').pop()
   out.push(`last opener run: ${log || 'never'}`)
   row(await h.fs.exists(`${leanDir(home)}/migrated-1.0.json`) || !(await legacyPresent(h, home)), 'state is 1.0 (no 0.45 leftovers)')
@@ -203,6 +204,13 @@ export async function migrate(h: Host, root: string): Promise<Migrated> {
     if (uid) await run(h, ['launchctl', 'bootout', `gui/${uid}/${OLD_LABEL}`])
     await move(plistOld, `${OLD_LABEL}.plist`)
     lines.push('old com.lean-agent.up service unloaded and its plist archived')
+  }
+  // Linux: the 0.45 systemd user unit is switched off and archived (1.0 is macOS-only); tolerant when systemctl is absent
+  const unit = `${home}/.config/systemd/user/lean-agent.service`
+  if (await h.fs.exists(unit)) {
+    const off = await run(h, ['systemctl', '--user', 'disable', '--now', 'lean-agent.service'])
+    await move(unit, 'lean-agent.service')
+    lines.push(off.ok ? 'old lean-agent.service (systemd user unit) disabled and archived' : 'old lean-agent.service archived; systemctl --user disable --now failed or is missing: stop it by hand if it still runs')
   }
   for (const p of [`${home}/.local/bin/lean-agent`, '/opt/homebrew/bin/lean-agent', '/usr/local/bin/lean-agent']) {
     if (!(await h.fs.exists(p))) continue

@@ -68,6 +68,8 @@ async function mirror(h: Host, src: Map<string, string>, destDir: string, keep: 
   }
 }
 
+const SKILL_MARK = '.lean-agent-managed'
+
 // Copy the project's rules and recipe skills into `repo` (the checkout or one of its worktrees); remove stale copies.
 export async function syncRules(h: Host, project: string, repo: string): Promise<SyncOut> {
   const home = await homeDir(h)
@@ -82,16 +84,26 @@ export async function syncRules(h: Host, project: string, repo: string): Promise
     if (bodyLines(t) > cap) { out.skipped.push(`${n}: more than ${cap} lines`); continue }
     rules.set(n, t)
   }
-  await mirror(h, rules, `${repo}/.claude/rules/lean-agent`, n => n.endsWith('.md'), out)
-  const skills = new Map<string, string>()
+  const recipes: { name: string; text: string }[] = []
   for (const d of (await h.fs.list(`${pdir}/skills`).catch(() => [])).filter(f => f.kind === 'dir')) {
     const t = await h.fs.read(`${pdir}/skills/${d.name}/SKILL.md`).catch(() => null)
-    if (t !== null && slugOk(d.name)) skills.set(`lean-agent-${d.name}`, '')
-    if (t !== null && slugOk(d.name)) await mirror(h, new Map([['SKILL.md', String(t)]]), `${repo}/.claude/skills/lean-agent-${d.name}`, () => false, out)
+    if (t !== null && slugOk(d.name)) recipes.push({ name: `lean-agent-${d.name}`, text: String(t) })
   }
-  for (const d of (await h.fs.list(`${repo}/.claude/skills`).catch(() => [])))
-    if (d.name.startsWith('lean-agent-') && !skills.has(d.name)) { await h.process.run(['rm', '-rf', `${repo}/.claude/skills/${d.name}`]); out.removed.push(`${repo}/.claude/skills/${d.name}`) }
-  if (rules.size || skills.size || out.removed.length) out.excluded = await exclude(h, repo)
+  // git-exclude first: nothing we copy is ever visible to git, not even for a moment
+  if (rules.size || recipes.length) out.excluded = await exclude(h, repo)
+  await mirror(h, rules, `${repo}/.claude/rules/lean-agent`, n => n.endsWith('.md'), out)
+  const mine = new Set(recipes.map(r => r.name))
+  for (const r of recipes) {
+    await mirror(h, new Map([['SKILL.md', r.text]]), `${repo}/.claude/skills/${r.name}`, () => false, out)
+    await mirror(h, new Map([[SKILL_MARK, 'managed by lean-agent\n']]), `${repo}/.claude/skills/${r.name}`, () => false, { copied: [], removed: [], skipped: [], excluded: false })
+  }
+  // only folders lean-agent made (they carry the marker) are removed; a user's own lean-agent-* skill is left alone
+  for (const d of await h.fs.list(`${repo}/.claude/skills`).catch(() => []))
+    if (d.name.startsWith('lean-agent-') && !mine.has(d.name) && (await h.fs.exists(`${repo}/.claude/skills/${d.name}/${SKILL_MARK}`).catch(() => false))) {
+      await h.process.run(['rm', '-rf', `${repo}/.claude/skills/${d.name}`])
+      out.removed.push(`${repo}/.claude/skills/${d.name}`)
+    }
+  if (!out.excluded && out.removed.length) out.excluded = await exclude(h, repo)
   return out
 }
 

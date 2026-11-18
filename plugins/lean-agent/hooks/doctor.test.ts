@@ -117,3 +117,15 @@ test('check reports what to fix and the last opener line', async () => {
   expect(out).not.toContain('FIX')
   expect(out).toContain('last opener run: 2026-11-18 desk opened (exit 0)')
 })
+
+test('migrate on Linux disables and archives the 0.45 systemd unit; check says 1.0 needs macOS', async () => {
+  const h = legacy()
+  h.files.set('/h/.config/systemd/user/lean-agent.service', '[Unit]\n')
+  const real = h.host.process.run
+  h.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'uname' ? { exitCode: 0, stdout: 'Linux\n', stderr: '' } : real(argv, init))
+  const r = await migrate(h.host, '/plug')
+  expect(h.calls.some(c => c.argv.join(' ') === 'systemctl --user disable --now lean-agent.service')).toBe(true)
+  expect(h.files.has('/h/.config/systemd/user/lean-agent.service')).toBe(false)
+  expect(r.lines.join('\n')).toContain('lean-agent.service')
+  expect((await check(h.host, '/plug')).join('\n')).toContain('lean-agent 1.0 needs Claude Desktop (macOS)')
+})
