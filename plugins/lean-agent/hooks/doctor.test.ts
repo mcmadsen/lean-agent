@@ -31,6 +31,7 @@ test('migrate converts open goals and questions, closes every old thread, archiv
   const q = h.files.get(`${L}/questions.jsonl`)!.trim().split('\n').map(x => JSON.parse(x))
   expect(q.map(x => x.question)).toEqual(['which db?'])
   expect(q[0].ts).toBe(1700000000000)
+  expect(JSON.parse(h.files.get(`${L}/answers.jsonl`)!.trim()).q).toBe(1) // migrated 'main' questions are closed
   expect(h.files.has(`${L}/threads.json`)).toBe(false)
   expect(h.files.get(`${L}/legacy-0.45/closed-threads.md`)).toContain('t1 Login work')
   expect([...h.files.keys()].some(k => k.startsWith(`${L}/threads/`))).toBe(false)

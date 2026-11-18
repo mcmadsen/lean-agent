@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
+import { memorySection, openQuestions, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { threadTool } from './delivery'
 
 const L = '/h/.lean-agent'
@@ -39,6 +39,7 @@ test('answers are recorded against open question ids, oldest first, once', async
   expect(await recordAnswer(h.host, 't1', 'no')).toBe(3)
   expect(await recordAnswer(h.host, 't1', 'more')).toBeNull()
   expect(await recordAnswer(h.host, 't9', 'x')).toBeNull()
+  expect((await openQuestions(h.host)).map(q => q.q)).toEqual([2])
 })
 
 test('schedule: a due line is sent once, a future one waits', async () => {

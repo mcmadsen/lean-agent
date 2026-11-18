@@ -4,7 +4,7 @@ import { unconsumed, wakeMark } from './delivery'
 
 export const WAKE_GAP_MS = 30_000
 
-export type ThreadState = 'open' | 'parked' | 'closed'
+export type ThreadState = 'open' | 'parked' | 'closing' | 'closed'
 export type Thread = {
   id: string
   title: string
@@ -277,7 +277,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         case 'resume':
           return await wake(h, home, t, { force: true, lead: 'Continue where you left off.' })
         case 'start': {
-          if (t.state === 'closed') return err(`${id} is closed; reopen it first`)
+          if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
           if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running` }
@@ -292,9 +292,17 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           return r
         }
         case 'close': {
+          // never "closed" while the session may still run: list twice, and if the listing keeps failing stay "closing"
+          let live: AgentRow[] | null = null
+          if (t.sid) live = (await agents(h)) ?? (await agents(h))
+          if (t.sid && !live) {
+            t.state = 'closing'
+            await save(h, home, t)
+            return { ok: false, text: `${id} is closing, not closed: claude agents failed twice, so it may still run. Stop it from the Claude app, then close ${id} again.` }
+          }
           t.state = 'closed'
           await save(h, home, t)
-          if (t.sid && isRunning(((await agents(h)) ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'agents', 'stop', t.sid])
+          if (t.sid && isRunning((live ?? []).find(a => a.sid === t.sid))) await h.process.run(['claude', 'agents', 'stop', t.sid])
           return { ok: true, text: `${id} closed` }
         }
         case 'park':

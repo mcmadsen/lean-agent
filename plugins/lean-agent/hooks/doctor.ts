@@ -151,10 +151,13 @@ export async function migrate(h: Host, root: string): Promise<Migrated> {
     for (const q of q0.items as any[]) {
       if (!q || q.status !== 'open' || q.target !== 'main' || !String(q.text || '').trim() || have.includes(String(q.text))) continue
       await appendJsonl(h, `${lean}/questions.jsonl`, { ts: Math.round(Number(q.ts) * (Number(q.ts) < 1e12 ? 1000 : 1)) || now, from: 'main', question: String(q.text), options: [], answered: false })
+      // 0.45 questions to 'main' have no thread to answer them: they are closed here, in answers.jsonl, at migration
+      const id = (await readJsonl(h, `${lean}/questions.jsonl`)).length
+      await appendJsonl(h, `${lean}/answers.jsonl`, { ts: now, q: id, thread: 'main', text: 'closed at migration from 0.45' })
       n++
     }
     await move(`${lean}/my-questions.json`, 'my-questions.json')
-    lines.push(`questions: ${n} open kept`)
+    lines.push(`questions: ${n} migrated (closed: no thread to answer)`)
   }
   await move(`${lean}/waiting.json`, 'waiting.json')
 

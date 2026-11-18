@@ -96,6 +96,22 @@ test('park and close only queue; close stops a running session', async () => {
   expect((await call({ action: 'list' })).text).toContain('closed')
 })
 
+test('close with a failing agents listing retries once, then stays closing and says how to stop it', async () => {
+  const { h, state, call } = setup()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  let n = 0
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? (++n === 1 ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: JSON.stringify([{ sessionId: SID, name: 'x', cwd: 'x', status: 'busy', startedAt: 1 }]) }) : { exitCode: 0, stdout: '' })
+  expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed')
+  expect(h.claudeCalls()).toContainEqual(['agents', 'stop', SID])
+  await call({ action: 'reopen', tN: 't1' })
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: '' })
+  const r = await call({ action: 'close', tN: 't1' })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('Stop it from the Claude app')
+  expect((await call({ action: 'list' })).text).toContain('closing')
+  void state
+})
+
 test('trust writer keeps every other key and survives a damaged file', async () => {
   const { h } = setup()
   h.files.set('/h/.claude.json', JSON.stringify({ theme: 'dark', projects: { '/other': { allowedTools: ['x'], hasTrustDialogAccepted: false }, '/h/f': { mcp: 1 } } }))

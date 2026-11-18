@@ -40,11 +40,19 @@ export async function writeCompactNotes(h: Host, role: Role, messages: readonly 
 // ---- answers against open questions --------------------------------------------------------------------------
 // A question's id is its 1-based line in questions.jsonl; a message the desk sends to its thread answers the
 // oldest open one, recorded in answers.jsonl.
+// answers.jsonl is read here (and by openQuestions): a question with a row there is closed. The text itself reaches
+// the thread through lean_thread send (its inbox); this only closes the question.
+export async function openQuestions(h: Host): Promise<{ q: number; from?: string; question?: string }[]> {
+  const home = await homeDir(h)
+  const qs = await readJsonl<{ from?: string; question?: string }>(h, `${leanDir(home)}/questions.jsonl`)
+  const done = new Set((await readJsonl<{ q: number }>(h, `${leanDir(home)}/answers.jsonl`)).map(a => a.q))
+  return qs.flatMap((q, n) => (q && !done.has(n + 1) ? [{ q: n + 1, from: q.from, question: q.question }] : []))
+}
+
 export async function recordAnswer(h: Host, thread: string, text: string): Promise<number | null> {
   const home = await homeDir(h)
-  const qs = await readJsonl<{ from?: string }>(h, `${leanDir(home)}/questions.jsonl`)
-  const done = new Set((await readJsonl<{ q: number }>(h, `${leanDir(home)}/answers.jsonl`)).map(a => a.q))
-  const i = qs.findIndex((q, n) => q?.from === thread && !done.has(n + 1))
+  const qs = await openQuestions(h)
+  const i = qs.findIndex(q => q.from === thread) === -1 ? -1 : qs.find(q => q.from === thread)!.q - 1
   if (i < 0) return null
   await appendJsonl(h, `${leanDir(home)}/answers.jsonl`, { ts: await h.clock.now(), q: i + 1, thread, text })
   return i + 1
