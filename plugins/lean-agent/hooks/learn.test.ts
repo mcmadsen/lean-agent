@@ -172,10 +172,10 @@ test('areas covered by repo docs are never stale, not even by gaps', async () =>
 // ---- verify --------------------------------------------------------------------------------------------------------
 test('tokensOf: backticked paths, numbers and symbols; commands only by their path words; flags, placeholders, URLs, fences never', () => {
   const body = ['- Test: `pnpm --filter billing test -- <file>`, run `scripts/run.sh --fast` from `services/billing/`',
-    '- Retries: `3000` ms in `RETRY_MS`, class `LedgerRow`, call `Ledger.load()` and `package.json`; ignore `-x`, `$HOME`, `https://a.b/c`, `7`, `git`',
+    '- Retries: `30000` ms in `RETRY_MS`, class `LedgerRow`, call `Ledger.load()` and `package.json`; ignore `-x`, `$HOME`, `https://a.b/c`, `7`, `git`',
     '```\n`inside fence`\n```'].join('\n')
   expect(tokensOf(body).map(t => `${t.kind}:${t.text}`)).toEqual([
-    'path:scripts/run.sh', 'path:services/billing/', 'number:3000', 'symbol:RETRY_MS', 'symbol:LedgerRow', 'path:Ledger.load', 'path:package.json',
+    'path:scripts/run.sh', 'path:services/billing/', 'number:30000', 'symbol:RETRY_MS', 'symbol:LedgerRow', 'path:Ledger.load', 'path:package.json',
   ])
 })
 
@@ -199,7 +199,7 @@ test('verify reports names that no longer exist, per rule; relies-on counts; rea
   const v = await verifyRules(h.host, 'proj', '/repo')
   const t = v.lines.join('\n')
   expect(v.missing).toBe(3)
-  expect(t).toContain('billing.md: 6 checked, missing: `GoneThing`, `services/billing/old/`, `RelyGone`; relied-on file gone: services/billing/db.ts')
+  expect(t).toContain('billing.md: 6 checked, missing: `RelyGone`, `GoneThing`, `services/billing/old/`; relied-on file gone: services/billing/db.ts')
   expect(t).toContain('api.md: 1 checked, all found')
   expect(h.calls.filter(c => c.argv[0] === 'git').every(c => ['grep', 'ls-files', 'diff'].includes(c.argv[1]!))).toBe(true)
   expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[1] === 'grep' && c.argv.includes('-F') && c.argv.includes('-w') && c.argv.includes('-q') && c.argv.includes(':(exclude).claude/rules/lean-agent'))).toBe(true) // whole words, never the synced copies
@@ -281,4 +281,19 @@ test('inline paths with braces, single-alternative braces; verify says NOT CHECK
   const t = (await verifyRules(h.host, 'proj', '/repo')).lines.join('\n')
   expect(t).toContain('r3.md: 30 checked') // 150 names in all
   expect(t).not.toContain('NOT CHECKED (limit reached), all found')
+  h.files.set(`${SRC}/rules/r4.md`, rule(Array.from({ length: 5 }, (_, j) => `- \`M${j}x\``).join('\n')))
+  h.files.set(`${SRC}/rules/r5.md`, rule('- prose only'))
+  const u = (await verifyRules(h.host, 'proj', '/repo')).lines.join('\n')
+  expect(u).toContain('r4.md: NOT CHECKED (limit reached); 5 not checked (limit)')
+  expect(u).toContain('r5.md: nothing to check')
+})
+
+test('paths: zero-indent and flow lists parse; relies folders without a slash, and globs, match changes; relies are verified first', async () => {
+  expect(pathsOf('---\npaths:\n- "a/**"\n- b/**\n---\n')).toEqual(['a/**', 'b/**'])
+  expect(pathsOf('---\npaths: ["a/**", "b/**"]\n---\n')).toEqual(['a/**', 'b/**'])
+  const h = setup()
+  await recordRule(h.host, 'proj', 'a', { globs: ['a/**'], sha: 'abc', relies: ['a/core'] })
+  await recordRule(h.host, 'proj', 'b', { globs: ['b/**'], sha: 'abc', relies: ['b/*.cfg'] })
+  h.git.handler = x => (x[0] === 'diff' ? ST({ 'a/core/m.ts': 'M', 'b/x.cfg': 'M' }) : { exitCode: 1, stdout: '' })
+  expect(await checkStale(h.host, 'proj', '/repo')).toHaveLength(2)
 })

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { autoMigrate, check, fix, legacyIndex, migrate, plist, tidyLegacy, MIGRATE_NOTICE } from './doctor'
-import { setRunning } from './skew'
+import { running, setRunning } from './skew'
 import { readNotices, setNotice } from './notices'
 
 const L = '/h/.lean-agent'
@@ -219,6 +219,7 @@ test('tidy (also for users already on 1.0.x): 0.45 guide files and current-threa
 test('check reports version skew as a FIX row, and "ok" when the code is the installed version', async () => {
   const h = fakeHost(null)
   h.files.set('/plug/.claude-plugin/plugin.json', JSON.stringify({ version: '1.0.4' }))
+  const before = running.version
   setRunning('1.0.3')
   try {
     expect((await check(h.host, '/plug')).filter(l => /lean-agent code/.test(l))).toEqual(['FIX  lean-agent code 1.0.3 is running but 1.0.4 is installed: start a new session (threads: close and Start)'])
@@ -227,7 +228,7 @@ test('check reports version skew as a FIX row, and "ok" when the code is the ins
     setRunning('')
     expect((await check(h.host, '/plug')).some(l => /lean-agent code/.test(l))).toBe(false)
   } finally {
-    setRunning('')
+    setRunning(before)
   }
 })
 
@@ -243,6 +244,9 @@ test('legacy index: one line per card (title, size, area guess); migrate and the
   expect(idx).toContain('- web.json | Web build |')
   expect(idx).toContain('area? apps')
   expect(idx).toContain('- c1.md | card |')
+  h.files.set(`${L}/legacy-0.45/cards-a/huge.md`, '# Huge\n' + 'x'.repeat(70_000))
+  await legacyIndex(h.host)
+  expect(h.files.get(`${L}/legacy-0.45/index.md`)).toMatch(/- huge\.md \| huge \| 70\d{3} bytes/) // listed by name, not read
   const n = h.calls.length
   await legacyIndex(h.host)
   expect(h.calls.length).toBe(n)

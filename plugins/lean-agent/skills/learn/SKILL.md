@@ -89,7 +89,7 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
      `.claude/rules/lean-agent/` and `.claude/skills/lean-agent-*/` to the shared `.git/info/exclude`, and answers ONE line
      per checkout (`<path>: copied N, removed M, skipped K, exclude ok`) plus what it skipped; `verbose: true` lists paths.
 5. **`--verify`** (rules that exist): `lean_rules` `verify` with `repo` (optionally `area`): it takes every backticked path,
-   symbol and number (two digits or more) of each rule, as whole words, at most 150 names per call (later rules
+   symbol and number (three digits or more) of each rule, as whole words, at most 150 names per call (later rules
    print NOT CHECKED: run again with `area`), and the `relies-on` list, searches the repo for it (fixed strings, read-only) and lists
    the names that no longer exist per rule, and relied-on files that changed or vanished since the recorded sha. Then, only
    for what it cannot judge (behaviour, numbers' meaning, commands that still work), re-check by bullet group and decide

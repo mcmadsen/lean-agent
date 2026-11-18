@@ -78,11 +78,12 @@ export function ruleProblems(file: string, t: string): string[] {
 // `paths:` globs of a rule's frontmatter (a YAML list, or a single value); [] = none
 export function pathsOf(t: string): string[] {
   const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(t)?.[1] ?? ''
-  const m = /^paths:[ \t]*(.*)\r?\n?((?:[ \t]+-[^\n]*\n?)*)/m.exec(fm)
+  const m = /^paths:[ \t]*(.*)\r?\n?((?:[ \t]*-[^\n]*\n?)*)/m.exec(fm)
   if (!m) return []
   const unq = (x: string) => x.trim().replace(/^["']|["']$/g, '')
   const items = m[2]!.split('\n').map(l => /^\s*-\s*(.*)$/.exec(l)?.[1]).filter((x): x is string => x !== undefined).map(unq)
-  if (m[1]!.trim()) items.push(...m[1]!.split(/,(?![^{]*\})/).map(unq)) // a comma inside braces is part of the glob
+  const inline = m[1]!.trim().replace(/^\[|\]$/g, '') // a flow list: paths: ["a", "b"]
+  if (inline) items.push(...inline.split(/,(?![^{]*\})/).map(unq)) // a comma inside braces is part of the glob
   return items.filter(Boolean)
 }
 // the footer's `relies-on:` list (symbols and files; the last field of the footer comment)
@@ -301,8 +302,8 @@ function reliesHit(a: Area, changed: Map<string, string>): string | null {
   for (const r0 of a.relies ?? []) {
     const r = r0.replace(/^\.\//, '')
     if (!looksLikePath(r)) continue
-    if (r.endsWith('/')) { // a folder: any change under it
-      const hit = [...changed].find(([p]) => p.startsWith(r))
+    if (/[*?[]/.test(r) || r.endsWith('/') || ![...changed.keys()].includes(r) && [...changed.keys()].some(p => p.startsWith(`${r}/`))) { // a glob or a folder: any change under it
+      const hit = [...changed].find(([p]) => (/[*?[]/.test(r) ? matches([r], p) : p.startsWith(r.endsWith('/') ? r : `${r}/`)))
       if (hit) return `relied-on ${hit[1] === 'D' ? 'file gone' : 'file changed'}: ${hit[0]}`
       continue
     }
@@ -420,7 +421,7 @@ export function tokensOf(body: string): Token[] {
     }
     const w = trimEnd(span)
     if (!w || w.startsWith('-') || /[<>${}|&;"'=\s]/.test(w) || /^[~/]/.test(w)) continue
-    if (/^\d+$/.test(w)) { if (w.length >= 2) add('number', w); continue }
+    if (/^\d+$/.test(w)) { if (w.length >= 3) add('number', w); continue } // short numbers are in every repo: no signal
     if (looksLikePath(w)) add('path', w.replace(/^\.\//, ''))
     else if (/^[A-Za-z_][\w.:#-]{2,}$/.test(w) && !COMMAND_WORDS.has(w)) add('symbol', w)
   }
@@ -471,8 +472,8 @@ export async function verifyRules(h: Host, project: string, repo: string, only?:
     const t = String(await h.fs.read(`${pdir}/rules/${n}`).catch(() => ''))
     const area = n.replace(/\.md$/, '')
     const a = l.areas[area]
-    const toks = tokensOf(bodyOf(t))
-    for (const r of a?.relies ?? parseRelies(t)) for (const x of tokensOf(`\`${r}\``)) if (!toks.some(y => y.text === x.text)) toks.push(x)
+    const toks = [...(a?.relies ?? parseRelies(t))].flatMap(r => tokensOf(`\`${r}\``)) // relies-on first: they are what `stale` stands on
+    for (const x of tokensOf(bodyOf(t))) if (!toks.some(y => y.text === x.text)) toks.push(x)
     const take = toks.slice(0, Math.min(VERIFY_PER_RULE, Math.max(0, budget)))
     budget -= take.length
     const gone: string[] = []
@@ -492,7 +493,8 @@ export async function verifyRules(h: Host, project: string, repo: string, only?:
       const hit = c ? reliesHit(a, c) : null
       if (hit) notes.push(hit)
     }
-    lines.push(`${n}: ${take.length ? `${take.length} checked, ` : 'NOT CHECKED (limit reached), '}${gone.length ? `missing: ${gone.map(x => `\`${x}\``).join(', ')}` : 'all found'}${notes.length ? `; ${notes.join('; ')}` : ''}`)
+    const head = !toks.length ? 'nothing to check' : !take.length ? 'NOT CHECKED (limit reached)' : `${take.length} checked, ${gone.length ? `missing: ${gone.map(x => `\`${x}\``).join(', ')}` : 'all found'}`
+    lines.push(`${n}: ${head}${notes.length ? `; ${notes.join('; ')}` : ''}`)
   }
   lines.unshift(`verify: ${missing} name(s) missing in ${names.length} rule(s); a missing name is a candidate, judge it before dropping the bullet`)
   return { lines, missing }

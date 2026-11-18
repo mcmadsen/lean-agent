@@ -339,7 +339,7 @@ export async function poolFor<T extends { name: string }>(host: Host, tools: T[]
 // it), one prompt line in prompt.compose. A failed look changes nothing.
 async function showSkew($: any): Promise<void> {
   try {
-    skew = await skewNote(hostOf($), String($.plugin.root))
+    skew = await skewNote(hostOf($), String($.plugin.root), VERSION)
     if (skew) $.ui.status(skew)
   } catch {
     /* no status line, or the manifest could not be read */
