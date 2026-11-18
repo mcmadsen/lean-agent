@@ -14,7 +14,7 @@ import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from '.
 import type { Role } from './role'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.4'
+export const VERSION = '1.0.5'
 const ANSWERS_SHOWN = 5 // Answers: the newest rows drawn until "show all"
 const GROUP_MIN = 8 // "show all" groups the rows by thread when there are more than this
 const GROUP_ROWS = 20 // rows drawn in one unfolded group

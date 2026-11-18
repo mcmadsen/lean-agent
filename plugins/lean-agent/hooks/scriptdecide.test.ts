@@ -180,7 +180,7 @@ test('what the mod cannot see waits for the desk: a program it starts, built cod
     h.files.set(SRC, text)
     await prop(h, run ? { run } : {})
     const out = await audit(h)
-    expect([what, out.includes("waits for the desk's decision")]).toEqual([what, true])
+    expect([what, String(out).includes("waits for the desk's decision")]).toEqual([what, true])
     expect([what, meta(h).status]).toEqual([what, 'audited'])
   }
   // a shell script that only prints, and python that only compares, are fine

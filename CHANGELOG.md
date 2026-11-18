@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.5
 
-One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the feedback export. The sections are grouped by area; the
-version lines in `plugin.json`, `marketplace.json` and `pane.tsx` are left to the desk.
+One combined release: the desk, thread and pane work, the learn flow, stats and compare work, and scripts over models with the
+feedback export. The sections are grouped by area.
 
 ### Fixed (learn flow, stats, mod)
 - **Version skew is visible.** A session keeps the hooks module it loaded at start, while skills, agents and templates are read from
