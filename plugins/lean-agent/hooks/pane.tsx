@@ -25,7 +25,7 @@ let lastError = ''
 let lastRefresh = ''
 let notice = ''
 // setup state: the last doctor check (kept 30 s; any press drops it), the lines of the last fix, a press in flight
-let chk: { at: number; problems: string[]; notes: string[]; failed?: boolean } | null = null
+let chk: { at: number; problems: string[]; notes: string[]; mcp?: string[]; failed?: boolean } | null = null
 let checking: Promise<void> | null = null // a check in flight (a second pane shares it)
 let lastSetup: string[] = []
 let busy = false
@@ -110,7 +110,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       checking ??= (async () => {
         try {
           const c = await bounded($, setupCheck(host, $.plugin.root), 'check', 20_000)
-          chk = { at: now, problems: c.problems, notes: c.notes }
+          chk = { at: now, problems: c.problems, notes: c.notes, mcp: c.mcp }
         } catch (err) {
           chk = { at: now, problems: [], notes: [`check failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`], failed: true }
         }
@@ -143,7 +143,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       resetViewCache()
       const o = await setupFix(host, $.plugin.root)
       lastSetup = o.fixed
-      chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes }
+      chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes, mcp: o.mcp }
     })
     const openIt = setupPress('open desk', () => openDesk(host, e.surface))
     const setupRows = lastSetup.map((l, i) => (
@@ -162,6 +162,21 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {m}
       </Text>
     ))
+    // an MCP server that needs a variable (a site, a domain): the pane has no text field, so it names what is missing and the desk asks
+    const mcp = chk?.mcp ?? []
+    const mcpBlock = mcp.length > 0 && (
+      <Box flexDirection="column">
+        <Text bold color="yellow">
+          MCP servers that need a value
+        </Text>
+        {mcp.map((m, i) => (
+          <Text key={`mcp-${i}`} color="yellow">
+            {short(m, 160)}
+          </Text>
+        ))}
+        <Text dimColor>Tell the desk: &quot;set NAME to ...&quot; (a site or domain, not a secret).</Text>
+      </Box>
+    )
     const problemRows = (
       <Box flexDirection="column">
         <Text bold color="yellow">
@@ -193,6 +208,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
               </Box>
             </Box>
           )}
+          {mcpBlock}
           {setupRows}
           {!!notice && <Text color="yellow">{notice}</Text>}
           {footer}
@@ -341,6 +357,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     return (
       <Box flexDirection="column">
         {problems.length > 0 ? problemRows : noteRows}
+        {mcpBlock}
         {section('goals', `Goals (${v?.goals.length ?? 0})`, (v?.goals.length ?? 0) > 0)}
         {isOpen(ui, 'goals', (v?.goals.length ?? 0) > 0) && (
           <Box flexDirection="column">

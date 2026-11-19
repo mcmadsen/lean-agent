@@ -17,6 +17,7 @@ import { markNative, projectRule, resetContext, resetRuleLoader, ruleContext } f
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, guardParents, migrate } from './doctor'
+import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -113,7 +114,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export'] }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -304,7 +305,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts), mcp-env (an MCP server needs a variable such as a site: with name + a NON-secret value it writes the env block of ~/.claude/settings.json so every session gets it; secret-looking names are refused; without them it lists the servers that need one).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -699,7 +700,17 @@ export const register: Register = on => {
         const o = await exportFeedback(host, $.plugin.root, { notes: typeof e.notes === 'string' ? e.notes : undefined, version: VERSION })
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
       }
-      return { result: 'doctor: action must be check, fix, migrate, stats, compare or export', isError: true } as any
+      if (e.action === 'mcp-env') {
+        const home = await homeDir(host)
+        if (e.name === undefined && e.value === undefined) {
+          const rows = await mcpRows(host, home)
+          return { result: rows.length ? rows.join('\n') : 'no MCP server config references an unset variable' } as any
+        }
+        const o = await setSettingsEnv(host, home, e.name, e.value, e.replace === true)
+        if (o.ok) dropSetupCheck()
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export or mcp-env', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }

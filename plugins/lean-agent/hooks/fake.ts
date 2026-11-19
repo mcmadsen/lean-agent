@@ -14,6 +14,8 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const app = { running: true, pgrep: null as null | ((a: string[]) => any) } // is the Claude app running (pgrep)
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string): string => { for (const [k, v] of links) if (p === k || p.startsWith(k + '/')) return v + p.slice(k.length); return p } // a symlink anywhere in the path, as the OS follows it
+  const perms = new Map<string, { uid: number; mode: number }>() // owner and mode per file (default: uid 501 = what `id -u` answers, mode 600); chmod changes it
+  const exec = { handler: null as null | ((argv: string[], c: Call) => { exitCode: number; stdout: string; stderr?: string }) } // any other command (a user's mcp-env command)
   const made = new Set<string>() // folders a `mkdir` made (a folder alone has no file in `files`)
   const dirs = () => {
     const d = new Set<string>(['/', ...made])
@@ -49,7 +51,15 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) for (const k of [...files.keys()]) if (k === x || k.startsWith(x + '/')) files.delete(k); return ok() }
       if (c === 'mkdir') { for (const x of a.filter(y => !y.startsWith('-'))) made.add(x); return ok() }
       if (c === 'sleep') return ok()
-      if (c === 'chmod' || c === 'systemctl' || c === 'launchctl') return ok()
+      if (c === 'chmod') { const m = parseInt(a[0], 8); for (const x of a.slice(1)) perms.set(x, { uid: perms.get(x)?.uid ?? 501, mode: Number.isNaN(m) ? 0o600 : m }); return ok() }
+      if (c === 'stat') { // GNU form only (a macOS `stat -f` is answered "illegal option", so the BSD try fails like it does on Linux)
+        const b = a[0] === '-L' ? a.slice(1) : a // -L follows a symlink: the fake's perms are per real file
+        if (b[0] !== '-c') return { exitCode: 1, stdout: '', stderr: 'illegal option' }
+        if (!files.has(res(b[2]))) return { exitCode: 1, stdout: '', stderr: 'no such file' }
+        const p = perms.get(res(b[2])) ?? perms.get(b[2]) ?? { uid: 501, mode: 0o600 }
+        return ok(`${p.uid} ${p.mode.toString(8)}\n`)
+      }
+      if (c === 'systemctl' || c === 'launchctl') return ok()
       if (c === 'shasum') { let x = 5381; for (const ch of call.stdin ?? '') x = ((x * 33) ^ ch.charCodeAt(0)) >>> 0; return ok(x.toString(16).padStart(8, '0').repeat(8) + '  -') }
       if (c === 'openssl') return ok('ab'.repeat(32))
       if (c === 'pgrep' || c === '/usr/bin/pgrep') { if (app.pgrep) return app.pgrep(a); return app.running ? ok('123') : { exitCode: 1, stdout: '', stderr: '' } }
@@ -62,6 +72,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
+      if (exec.handler) { const r = exec.handler([...argv], call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       return { exitCode: 127, stdout: '', stderr: 'unknown ' + c }
     },
   }
@@ -84,7 +95,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, perms, exec, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
 // An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the
