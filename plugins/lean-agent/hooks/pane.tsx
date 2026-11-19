@@ -12,7 +12,7 @@ import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
-import { contextSize, deskNote, kTokens } from './checkpoint'
+import { contextSize, deskNote, kTokens, recentUser, restartDesk } from './deskcompact'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.6'
@@ -57,6 +57,18 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
   on('command.run', { command: 'lean-agent' }, async ($: any) => {
     await openPane($)
     return { text: 'lean-agent pane opened.' }
+  })
+
+  // /lean-agent-restart-desk: the desk's handover is written now and a new desk session is opened; desk only
+  on('command.run', { command: 'lean-agent-restart-desk' }, async ($: any, e: any) => {
+    if (roleOf().kind !== 'desk') return { text: 'This is not the desk: run /lean-agent-restart-desk in the desk session.' }
+    try {
+      const host = hostOf($)
+      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), open: () => openDesk(host, e?.surface) }), 'restart desk', 45_000)
+      return { text: r.text }
+    } catch (err) {
+      return { text: `Restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
+    }
   })
 
   // /lean-agent-setup: check + fix with no model turn and no lean_doctor tool, in every session
@@ -254,6 +266,24 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       tell()
     }
     const closeOne = (id: string) => twoStep(`close:${id}`, () => closeIds([id]))
+    // Restart: the session is stopped (a working one too) and a NEW one starts with the handover (threads.ts action restart)
+    const restartOne = (id: string) =>
+      twoStep(`restart:${id}`, async () => {
+        resetViewCache()
+        const r = await leanThread(host, $.plugin.root, { action: 'restart', tN: id })
+        resetViewCache()
+        notice = short(r.text, 200)
+        if (!r.ok) lastError = notice
+        tell()
+      })
+    // Restart desk: the handover is written now, then a new desk session is opened; this one stays until the user closes it
+    const restartDeskPress = twoStep('restart:desk', async () => {
+      resetViewCache()
+      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), open: () => openDesk(host, e.surface) }), 'restart desk', 45_000).catch(err => ({ ok: false, text: `restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
+      notice = short(r.text, 200)
+      if (!r.ok) lastError = notice
+      tell()
+    })
     const closeDone = twoStep('close:done', () => closeIds('done'))
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
     // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
@@ -403,12 +433,19 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
               <Box key={`t-${t.id}`}>
                 <Text>
                   {t.id}{t.model ? ` · ${t.model}/${t.effort}` : ''} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
-                  {t.checkpoints ? <Text dimColor> checkpoint {t.checkpoints}</Text> : null}
+                  {t.finished ? <Text dimColor> finished: next message starts a new session</Text> : null}
                   {t.needsYou ? <Text color="yellow"> needs you: open it in the app</Text> : null}
                   {t.pausedUntil ? <Text color="yellow"> paused until {fmtUntil(t.pausedUntil, now2)}</Text> : null}
                 </Text>
                 {t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />}
                 {t.resumable && <Button key={`start-${t.id}`} label="Start" onPress={thread('start', t.id)} />}
+                {t.state === 'open' && (
+                  <Button
+                    key={`restart-${t.id}`}
+                    label={confirming(ui, `restart:${t.id}`, now2) ? (t.working ? `Confirm restart ${t.id} (it is working: the current step is lost)` : `Confirm restart ${t.id}`) : 'Restart'}
+                    onPress={restartOne(t.id)}
+                  />
+                )}
                 {t.working || t.needsYou ? (
                   <Text dimColor>{t.needsYou ? 'waiting for you' : 'busy'}</Text>
                 ) : (
@@ -437,7 +474,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             error: {m}
           </Text>
         ))}
-        <Button key="repair" label="Setup / repair" onPress={runSetup} />
+        <Box>
+          <Button key="repair" label="Setup / repair" onPress={runSetup} />
+          <Button key="restart-desk" label={confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'} onPress={restartDeskPress} />
+        </Box>
         {setupRows}
         {!!notice && !errors.includes(notice) && <Text color="yellow">{notice}</Text>}
         <Text dimColor>

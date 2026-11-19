@@ -10,6 +10,7 @@ import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, skewText } from './skew'
 import { modelMismatches } from './stats'
+import { kTokens, lastCompaction } from './deskcompact'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -119,6 +120,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
+  // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason
+  const cmp = await lastCompaction(h).catch(() => null)
+  if (cmp) row(cmp.result === 'compacted', `last desk compaction at ${new Date(cmp.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${cmp.result} (desk context ${kTokens(cmp.tokens)})${cmp.reason ? `: ${cmp.reason}` : ''}${cmp.result === 'compacted' ? '' : '; it is tried again when the desk turn ends (or type /compact, or start a new desk session)'}`)
   const odd = await modelMismatches(h).catch(() => [] as string[])
   for (const m of odd) row(false, m)
   if (!odd.length) out.push('ok   no session on an unexpected model today')

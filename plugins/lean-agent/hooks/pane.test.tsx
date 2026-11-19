@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { ackRows, loadView, resetViewCache, threadStatus } from './view'
-import { resetLocks } from './threads'
+import { deskClaudeMd, resetLocks } from './threads'
 import { hashText } from './recipe'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -343,4 +343,114 @@ test('Close all done: 2+ done threads, two-step, closes only done ones that are 
   expect(['t4', 't5', 't6', 't7', 't8', 't1', 't2'].map(st)).toEqual(['open', 'closed', 'closed', 'open', 'open', 'open', 'open'])
   expect(await ui.find({ type: 'Button', text: /Close all done/ })).toBeFalsy()
   await ui.unmount()
+})
+
+// ---- restart buttons -----------------------------------------------------------------------------------------------
+const NEW_SID = '99999999-8888-7777-6666-555555555555'
+const T1_DIR = '/h/.lean-agent/threads/t1'
+// rows with a process in the thread's own folder; `claude stop` ends it; `--bg` starts NEW_SID
+function restartable(h: any, rows: any[]) {
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === 'agents' && a[1] === '--json') return { exitCode: 0, stdout: JSON.stringify(rows) }
+    if (a[0] === '--bg') return { exitCode: 0, stdout: `started ${NEW_SID}\n` }
+    if (a[0] === 'stop') {
+      for (const r of rows) r.pid = 0
+      return { exitCode: 0, stdout: '' }
+    }
+    return { exitCode: 0, stdout: '' }
+  }
+}
+
+test('every open thread has Restart; it is two-step; the confirmed press stops the session and starts a NEW one with the handover', async ($, on) => {
+  const rows = [{ sessionId: SID, name: 'x', cwd: T1_DIR, status: 'idle', state: 'done', startedAt: 1, pid: 42, id: 'abcd1234' }]
+  const h = setup(on, rows)
+  restartable(h, rows)
+  thr(h, 't5', { state: 'parked' })
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'restart-t1' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-t2' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-t5' })).toBeFalsy() // parked: not open
+  await ui.press({ key: 'restart-t1' })
+  expect(await ui.find({ type: 'Button', text: /^Confirm restart t1$/ })).toBeTruthy() // an idle thread: no warning
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--bg' || a[0] === 'stop')).toBe(false) // armed only
+  await ui.press({ key: 'restart-t1' })
+  const calls = h.claudeCalls()
+  expect(calls.filter((a: string[]) => a[0] === 'stop').length).toBe(1)
+  const bg = calls.filter((a: string[]) => a[0] === '--bg')
+  expect(bg.length).toBe(1)
+  expect(calls.some((a: string[]) => a.includes('--resume'))).toBe(false)
+  expect(bg[0]![bg[0]!.length - 1]).toContain('Restarted from the pane.')
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid).toBe(NEW_SID)
+  expect(await ui.find({ type: 'Text', text: /t1 restarted as a new session/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('Restart of a working thread warns that the current step is lost, and still restarts it on the second press', async ($, on) => {
+  const rows = [{ sessionId: SID, name: 'x', cwd: T1_DIR, status: 'busy', state: 'working', startedAt: 1, pid: 42, id: 'abcd1234' }]
+  const h = setup(on, rows)
+  restartable(h, rows)
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // a working thread cannot be closed ...
+  await ui.press({ key: 'restart-t1' }) // ... but it can be restarted
+  expect(await ui.find({ type: 'Button', text: /^Confirm restart t1 \(it is working: the current step is lost\)$/ })).toBeTruthy()
+  expect(h.claudeCalls().some((a: string[]) => a[0] === 'stop')).toBe(false)
+  await ui.press({ key: 'restart-t1' })
+  expect(h.claudeCalls().filter((a: string[]) => a[0] === 'stop').length).toBe(1)
+  expect(h.claudeCalls().filter((a: string[]) => a[0] === '--bg').length).toBe(1)
+  await ui.unmount()
+})
+
+test('a finished thread row says the next message starts a new session', async ($, on) => {
+  const h = setup(on, [])
+  thr(h, 't6', { finished: 5 })
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /finished: next message starts a new session/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  const DESKPANE = { ...PANE, surface: 'desktop' } as const
+  const ui = await $.ui.mount(DESKPANE as any)
+  await ui.press({ key: 'restart-desk' })
+  expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy()
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
+  await ui.press({ key: 'restart-desk' })
+  const md = h.files.get('/h/.lean-agent/desk/handover.md')!
+  expect(md).toContain('# Desk handover')
+  expect(md).toContain('ship it') // the goals
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
+  // the open fails: the handover is there and the notice says where
+  const base = h.claude.handler!
+  h.claude.handler = (a: string[], c?: any) => (a[0] === '--desktop' ? { exitCode: 1, stdout: '', stderr: 'no app' } : (base as any)(a, c))
+  await ui.press({ key: 'restart-desk' })
+  await ui.press({ key: 'restart-desk' })
+  expect(await ui.find({ type: 'Text', text: /handover\.md/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('the /lean-agent-restart-desk command does the same in the desk, and refuses elsewhere', async ($, on) => {
+  const h = setup(on, [])
+  on('command.run', () => ({}))
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  const r: any = await $.command.run({ command: 'lean-agent-restart-desk', surface: 'desktop' } as any)
+  expect(JSON.stringify(r)).toContain('New desk opened with the handover: close this one')
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(true)
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(true)
+})
+
+test('the desk guide tells a new desk session to read desk/handover.md (the restart path relies on it)', async () => {
+  const h = fakeHost(null)
+  // the template's own line, as templates/front-desk.md has it
+  h.files.set('/p/templates/front-desk.md', 'At the start of a session read `{{lean}}/desk/handover.md` if it exists and is newer than your session')
+  const md = await deskClaudeMd(h.host, '/p')
+  expect(md).toContain('read `/h/.lean-agent/desk/handover.md` if it exists')
 })

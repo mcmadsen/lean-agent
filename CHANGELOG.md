@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+- **Thread checkpoints (1.0.6) are gone.** A thread is no longer asked mid-work to report its context size and restart: no
+  instruction at tool boundaries, no `lean_report` state `checkpoint` (the schema is `working | blocked | done`), no
+  `threads/tN/checkpoint.json`, no 10 s checkpoint sweep, no "checkpoint N" in the pane, no `checkpoints` line in `lean_doctor stats`,
+  no config `checkpoint.threadTokens` / `checkpoint.enabled`. A `checkpoint.json` left on disk by 1.0.6 is ignored; `checkpoints` /
+  `lastCheckpoint` in an old `thread.json` stay readable and nothing writes them; an old inbox row with state `checkpoint` shows as before.
+
+### Added
+- **Done = session over.** When a thread's last report is `done` and its turn has ended, the desk's 10 s tick stops its process
+  (the stop-before-replace helper; only a session in the thread's folder) and marks `thread.json` `finished`: "t3 finished: next
+  message starts a new session". A thread that reported done but is still on a final step is stopped only once it is idle. Any
+  later `send`, `wake`, `resume` or `start` starts a NEW session with the handover (brief, goal, notes, reports including the done
+  report, queued messages, branch/worktree) through the same path as a reopen, never a resume of the old conversation. Blocked, question
+  and progress reports never finish a session.
+- **Restart buttons in the pane.** Every open thread row has `Restart` (confirm on the second press; for a working thread the label
+  reads "Confirm restart t3 (it is working: the current step is lost)"): the session is stopped (only one in the thread's folder, waits
+  until it is gone) and a new session starts with the handover, same model and effort, reason "Restarted from the pane.". The same as
+  `lean_thread restart tN` (the desk, only when the user asks). `Restart desk` writes `desk/handover.md` now and opens a new desk
+  session (`openDesk`): "New desk opened with the handover: close this one"; also the command `/lean-agent-restart-desk`.
+- **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters (config `toolResultChars`,
+  `0` = off, below 2000 ignored) keeps head and tail; the full text is saved under `threads/tN/output/` and one line says where. Edit and
+  Write results, errors, a subagent's results, lean-agent's own tools and the desk are never touched. `lean_doctor stats` counts it
+  ("saved 140.0k chars in 12 results"). The thread rules say: big reads and searches go to reader subagents, which return conclusions.
+
+### Changed
+- **Desk compaction** (not a checkpoint, stays): the default limit is 200k (config `deskTokens`; the 1.0.6 `checkpoint.deskTokens` is still
+  read). The reason of every vetoed or failed compaction is recorded (`desk/compact.json`, a notice, a `lean_doctor check` row) and the
+  compaction is tried again when the desk's turn ends (before: ten minutes later). The status text reads "desk context Nk: type
+  /compact (or start a new desk session; it reads the handover)". The code moved from `checkpoint.ts` to `deskcompact.ts`.
+
 ## 1.0.6
 
 One combined release: checkpoints (threads and the desk), the 1.0.6b reply, delivery and feedback-export fixes, lazy loading per

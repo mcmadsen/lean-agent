@@ -8,7 +8,7 @@ import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
-import { GAP_MS as CHECKPOINT_GAP_MS, TRY_GAP_MS, kTokens, readRequest, staleRequest, writeRequest } from './checkpoint'
+import { doneSession, finishedText } from './finish'
 import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, profileText, readLoaded, readProfile, removeProfile, resolveLoaded, startUsage, writeLoaded, writeProfile } from './profile'
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
@@ -31,8 +31,9 @@ export type Thread = {
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
   version?: string // the lean-agent version installed when the session was last started or resumed (a session runs the code it started with)
-  checkpoints?: number // how many times the thread continued in a fresh session because its context grew large (checkpoint.ts)
-  lastCheckpoint?: number // ms of the last one (at most one per 20 minutes)
+  finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
+  checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
+  lastCheckpoint?: number // 1.0.6 only
 }
 export type Inbox = { ts: number; text: string; from?: string }
 
@@ -273,6 +274,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (t.sid && sid !== t.sid) t.sids = [...(t.sids ?? []), t.sid] // the old session id stays as history; its conversation is never resumed
   t.sid = sid
   t.lastWake = await h.clock.now()
+  delete t.finished // a new session is a new piece of work
   if (installed) t.version = installed
   await save(h, home, t)
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
@@ -329,11 +331,15 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
 // Stop a finished-but-alive session before anything takes its place (a resume, a fresh session). null = it is gone, go on; an Out =
 // stop here with that answer. Never stops live work: the listing is read again right before the stop. `limit`: a session blocked by
 // the usage limit (state blocked, nothing it waits for) is not live work and may be stopped.
-async function stopAlive(h: Host, t: Thread, queued: string, did: string, limit = false): Promise<Out | null> {
+// `own` (the thread's folder): only a session that lives there is stopped (a listing without that folder stops nothing). `force`: a
+// restart the user confirmed stops a working session too; the folder check is then always made.
+type StopOpts = { limit?: boolean; own?: string; force?: boolean }
+async function stopAlive(h: Host, t: Thread, queued: string, did: string, o: StopOpts = {}): Promise<Out | null> {
   const fresh = (await agents(h))?.find(a => a.sid === t.sid) // look again right before stopping: never stop live work
   const stays = queued ? 'messages stay queued' : 'nothing was started'
   if (!fresh) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not ${did}; ${stays}`)
-  if (isRunning(fresh) && !(limit && isLimitRow(fresh))) return { ok: true, text: `${t.id} is running again: ${queued || 'nothing'} queued, no stop, no ${did === 'resumed' ? 'resume' : 'new session'}` }
+  if (isRunning(fresh) && !o.force && !(o.limit && isLimitRow(fresh))) return { ok: true, text: `${t.id} is running again: ${queued || 'nothing'} queued, no stop, no ${did === 'resumed' ? 'resume' : 'new session'}` }
+  if (o.own && fresh.pid > 0 && !(await inFolder(h, fresh.cwd, o.own))) return err(`${t.id}: its session runs outside the thread folder (${fresh.cwd || 'unknown'}): not stopped, not ${did}, ${stays}`)
   const short = fresh.id || t.sid.slice(0, 8)
   if (fresh.pid > 0) {
     const st = await h.process.run(['claude', 'stop', short])
@@ -352,16 +358,23 @@ async function stopAlive(h: Host, t: Thread, queued: string, did: string, limit 
   return null
 }
 
+// is `cwd` the thread's own folder (the listing may print the real path of a linked home)?
+async function inFolder(h: Host, cwd: string, own: string): Promise<boolean> {
+  return cwd === own || (!!cwd && (await realPath(h, cwd)) === (await realPath(h, own)))
+}
+
 // A NEW session for an existing thread, with a handover built from what lean-agent kept (brief, goal, notes, reports, remembered
 // items, queued messages). The old conversation is never resumed; its id stays in `sids`. The thread's own CLAUDE.md is regenerated
 // from the current template when lean-agent wrote it, so the fresh session also gets today's rules.
-async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: { model?: string; effort?: string }): Promise<Out> {
+// `restart`: the user asked for it in the pane (or the desk on request), so a working session is stopped too (its current step is lost);
+// otherwise a working session is never touched.
+async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: { model?: string; effort?: string }, restart = false): Promise<Out> {
   const listed = t.sid ? await agents(h) : []
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so no new session is started`)
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
-  if (isWorking(row)) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
-  if (row && row.pid > 0) {
-    const stopped = await stopAlive(h, t, '', 'started fresh')
+  if (isWorking(row) && !restart) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
+  if (row && (row.pid > 0 || (restart && isWorking(row)))) {
+    const stopped = await stopAlive(h, t, '', 'started fresh', restart ? { force: true, own: tpath(home, t.id) } : {})
     if (stopped) return stopped
   }
   await refreshGuide(h, root, home, t, given)
@@ -371,11 +384,6 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo
     await save(h, home, t)
-  }
-  if (fresh(r)) {
-    // whatever the old session asked or reported for a checkpoint is settled by the new one (a stale "ready" would stop it again)
-    const rq = await readRequest(h, home, t.id)
-    if (rq && rq.phase !== 'done' && rq.phase !== 'failed') await writeRequest(h, home, t.id, { phase: 'done', ts: await h.clock.now() })
   }
   return r
 }
@@ -401,11 +409,10 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 // or was woken less than 30 s ago (the batch stays queued for the next wake).
 // `limit`: the resume after a usage limit (docs/usage-limit-resume.md): a session blocked by the limit counts as not running, is
 // stopped when its process lingers, and the 30 s gap does not apply (the desk's tick marks one resume per reset itself).
-async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string; limit?: boolean } = {}): Promise<Out> {
+// `root` and `current` (the installed plugin version) are only for the fresh session a finished thread gets instead of a resume.
+async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
-  // a checkpoint is waiting for the desk's tick: the fresh session takes the queued messages in its handover, the old one is not woken
-  if (!opts.force && !opts.limit && (await readRequest(h, home, t.id))?.phase === 'ready') return { ok: true, text: `${t.id} is about to continue in a fresh session (checkpoint): message queued for it`, data: { resumed: false } }
   const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
   const msgs = u.msgs
   if (!msgs.length && !opts.force) return { ok: true, text: `${t.id}: nothing queued` }
@@ -415,11 +422,17 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (isRunning(row) && !(opts.limit && isLimitRow(row))) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself`, data: { resumed: false } }
   const now = await h.clock.now()
   if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
+  // A session that reported done is over (finish.ts): its conversation is never resumed. Marked finished, or its last report is done
+  // and the session is idle (the desk's tick has not stopped it yet): a NEW session starts with the handover, queued messages included.
+  if (!opts.limit && (t.finished || (await doneSession(h, home, t)))) {
+    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', 'Its previous session reported done and was finished; this message starts a new session.', {})
+    return fresh(r) ? { ...r, text: `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
+  }
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
   if (row && row.pid > 0) {
     // (a working or unknown status was handled above: only a finished or dead session with a lingering process gets here)
-    const stopped = await stopAlive(h, t, `${msgs.length} message(s)`, 'resumed', !!opts.limit)
+    const stopped = await stopAlive(h, t, `${msgs.length} message(s)`, 'resumed', { limit: !!opts.limit })
     if (stopped) return stopped.ok ? { ...stopped, data: { resumed: false } } : stopped
   }
   const upTo = u.upTo
@@ -500,10 +513,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
           await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
-          return await wake(h, home, t) // (a message wake does not stamp the version: only start and an explicit resume do)
+          return await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
         }
         case 'wake':
-          return await wake(h, home, t)
+          return await wake(h, home, t, { root, current: installed })
         case 'resume': {
           // A session keeps the lean-agent code it started with. When this one ran an older version than the installed one, a resume
           // would continue old behaviour: start a fresh session with a handover instead and say why (an unrecorded version is unknown: resume).
@@ -512,7 +525,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             const r = await freshSession(h, root, home, t, installed, `The previous session ran lean-agent ${was}; ${installed} is installed now, so this is a fresh session instead of a resume.`, i)
             return fresh(r) ? { ...r, text: `${id} started as a new session instead of a resume: the old one ran lean-agent ${was}, ${installed} is installed (old conversation kept read-only). ${r.text}` } : r
           }
-          return await wake(h, home, t, { force: true, lead: 'Continue where you left off.', installed })
+          return await wake(h, home, t, { force: true, lead: 'Continue where you left off.', installed, root, current: installed })
         }
         case 'limit-resume': {
           // only the desk's tick calls this (not in the tool's schema): the session was seen blocked by the usage limit and its reset
@@ -526,43 +539,34 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.lastWake >= rec.resumedAt) return { ok: true, text: `${id} was already resumed for this usage limit`, data: { resumed: false } }
           return await wake(h, home, t, { force: true, lead: LIMIT_PROMPT, limit: true })
         }
-        case 'checkpoint': {
-          // only the desk's tick calls this (not in the tool's schema): the thread's own mod wrote a ready request (checkpoint.json, see
-          // checkpoint.ts) because its context grew large. A NEW session starts like a reopen's (same model and effort, handover from the
-          // brief, goal, notes, reports incl. the checkpoint report, remembered items, queued messages) and the old one is stopped first.
-          if (t.state !== 'open') return err(`${id} is ${t.state}: no checkpoint`)
-          const rq = await readRequest(h, home, id)
-          if (rq?.phase !== 'ready') return err(`${id}: no checkpoint is waiting`)
-          const now = await h.clock.now()
-          // (checked again inside the lock: a tick that waited here may find the request stale, or just tried)
-          if (staleRequest(rq, t)) {
-            await writeRequest(h, home, id, { ...rq, phase: 'done' })
-            return { ok: true, text: `${id}: the session worked on after its checkpoint report: no new session` }
+        case 'finish': {
+          // only the desk's tick calls this (not in the tool's schema; finish.ts picks the candidates): the thread's last report is done.
+          // Checked again here, inside the lock. A session that is still working (a final step after the report) is left alone and
+          // looked at again at the next tick; an idle one is stopped (never a session outside the thread folder) and marked finished:
+          // the next send, wake or resume starts a NEW session with the handover.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: not finished`)
+          if (t.finished) return { ok: true, text: `${id} is already finished`, data: { finished: false } }
+          if (!t.sid) return { ok: true, text: `${id} has no session`, data: { finished: false } }
+          if (!(await doneSession(h, home, t))) return { ok: true, text: `${id}: its last report is not done: nothing finished`, data: { finished: false } }
+          const listed = await agents(h)
+          if (!listed) return err(`${id}: cannot list sessions (claude agents failed), so it is not finished`)
+          const row = listed.find(a => a.sid === t.sid)
+          if (isWorking(row)) return { ok: true, text: `${id} reported done but is still working: finished once it is idle`, data: { finished: false } }
+          if (row && row.pid > 0) {
+            const stopped = await stopAlive(h, t, '', 'finished', { own: tpath(home, id) })
+            if (stopped) return { ...stopped, data: { finished: false } }
           }
-          if (rq.lastTry && now - rq.lastTry < TRY_GAP_MS) return { ok: true, text: `${id}: the last try to start a checkpoint was less than a minute ago` }
-          if (t.lastCheckpoint && now - t.lastCheckpoint < CHECKPOINT_GAP_MS) {
-            await writeRequest(h, home, id, { ...rq, phase: 'done' }) // at most one per 20 minutes: the request is dropped, the session goes on as it is
-            return { ok: true, text: `${id}: the last checkpoint is less than 20 minutes old, no new session` }
-          }
-          const n = (t.checkpoints ?? 0) + 1
-          const was = { checkpoints: t.checkpoints, lastCheckpoint: t.lastCheckpoint }
-          t.checkpoints = n
-          t.lastCheckpoint = now
-          const why = `Its context had grown to ${kTokens(rq.tokens ?? 0)} tokens, so it wrote a checkpoint report (checkpoint ${n}) and continues here, in a fresh session, from it${rq.source === 'fallback' ? ' (it did not report in time: the reports it had already written are all there is)' : ''}. Do not repeat finished work.`
-          const r = await freshSession(h, root, home, t, installed, why, {}) // given {}: the thread's recorded model and effort
-          if (!fresh(r)) {
-            t.checkpoints = was.checkpoints
-            t.lastCheckpoint = was.lastCheckpoint
-            // an error counts as a try (checkpoint.ts retries after a minute, gives up after five); "still running" does not
-            // (re-read: the session may have worked on meanwhile and withdrawn the request, which a failure must not bring back)
-            if (!r.ok) {
-              const cur = await readRequest(h, home, id)
-              if (cur?.phase === 'ready') await writeRequest(h, home, id, { ...cur, tries: (cur.tries ?? 0) + 1, lastTry: now })
-            }
-            return r
-          }
-          await writeRequest(h, home, id, { phase: 'done', ts: now, n })
-          return { ...r, text: `${id} checkpoint ${n}: continues as a new session (old conversation kept read-only). ${r.text}` }
+          t.finished = await h.clock.now()
+          await save(h, home, t)
+          return { ok: true, text: finishedText(id), data: { finished: true } }
+        }
+        case 'restart': {
+          // the pane's Restart button, or the desk on request: the session is stopped (a working one too: its current step is lost; only
+          // a session in the thread's own folder) and a NEW session starts with the handover (brief, goal, notes, reports, queued
+          // messages, branch and worktree from the reports; the thread's recorded model and effort)
+          if (t.state !== 'open') return err(`${id} is ${t.state}: reopen it first`)
+          const r = await freshSession(h, root, home, t, installed, 'Restarted from the pane.', {}, true)
+          return fresh(r) ? { ...r, text: `${id} restarted as a new session (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
@@ -571,6 +575,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
           if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
+          if (t.finished) {
+            // a finished thread never continues its old conversation: a new session with the handover
+            const r = await freshSession(h, root, home, t, installed, 'Its previous session reported done and was finished; it is started again.', i)
+            return fresh(r) ? { ...r, text: `${id} finished earlier: started as a new session with the handover (old conversation kept read-only). ${r.text}` } : r
+          }
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
@@ -644,8 +653,6 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         case 'park': {
           t.state = 'parked'
           await save(h, home, t)
-          const rq = await readRequest(h, home, id)
-          if (rq?.phase === 'ready') await writeRequest(h, home, id, { ...rq, phase: 'done' }) // a parked thread is never checkpointed, nor later when reopened
           return { ok: true, text: `${id} parked` }
         }
         case 'reopen': {

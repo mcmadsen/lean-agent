@@ -195,23 +195,29 @@ Desk reports: while the desk is idle, a thread's question or `done` / `blocked` 
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
 step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
 
-## Context size: checkpoints
+## Context size
 
-Every request pays for the whole context in cache reads, and a 1M window lets that grow very large. The mod follows each session's
-context size and, past a threshold, shrinks it:
+Every request pays for the whole context in cache reads, so lean-agent keeps contexts small without interrupting work:
 
-```json
-{ "checkpoint": { "enabled": true, "threadTokens": 100000, "deskTokens": 100000 } }
-```
-
-- `enabled` is off only for the JSON value `false`; a threshold below 10000 (or not a number) is ignored and the default 100000 used.
-- A **thread** over `threadTokens` is told once, at a tool boundary, to finish its step and report with `lean_report` state
-  `checkpoint` (branch, worktree, last commit, pushed, done, open items, next step). The desk then starts a new background session for
-  the same tN with a handover built from that report and the rest of what lean-agent keeps, and stops the old one. At most one
-  checkpoint per thread every 20 minutes; never while a subagent or a push runs. The pane shows "checkpoint N" on the row.
-- The **desk**, when idle and over `deskTokens`, compacts itself with fixed instructions (goals, open threads, questions, your
-  decisions and approvals kept; tool output dropped). If that is refused or unavailable, `~/.lean-agent/desk/handover.md` is written
-  and the status line asks you to start a new desk session, which reads it.
+- **A thread that reports `done` is finished as a session.** When its last report is `done` and its turn has ended, the desk's
+  10 s tick stops its process ("t3 finished: next message starts a new session"; the pane row says so). A thread that reported
+  done but is still on a final step is stopped only once it is idle. Any later `send`, `wake`, `resume` or `start` for it starts a
+  NEW session with a handover (brief, goal, notes, reports including the done report, queued messages, branch and worktree), never a
+  resume of the old conversation. Nothing checkpoints a thread mid-work.
+- **Restart buttons** (the pane, instead of any automatic restart): every open thread row has `Restart` (press twice: the second
+  press confirms; a working thread's label warns that the current step is lost). It stops the session (only one in the thread's own
+  folder) and starts a new one with the handover, same model and effort ("Restarted from the pane."). The desk can do the same with
+  `lean_thread restart tN` when you ask. `Restart desk` (or `/lean-agent-restart-desk`) writes `~/.lean-agent/desk/handover.md` and
+  opens a new desk session, which reads it; close the old one.
+- **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters keeps its head and tail;
+  the full text is saved under `threads/tN/output/` and one line says where. Edit and Write results, errors, subagents and the desk are
+  never touched. `lean_doctor stats` counts it ("saved 140.0k chars in 12 results"). Set `{ "toolResultChars": 30000 }` in
+  `config.json` to change the limit (a value below 2000 is ignored; `0` turns the cut off).
+- The **desk**, when idle and over `deskTokens` (config.json, default 200000), compacts itself with fixed instructions (goals, open
+  threads, questions, your decisions and approvals kept; tool output dropped). A compaction that was vetoed or failed is recorded with
+  its reason (a notice, and `lean_doctor check`) and tried again when the desk's turn ends. If it cannot compact, `desk/handover.md`
+  is written and the status line reads "desk context Nk: type /compact (or start a new desk session; it reads the handover)".
+  The 1.0.6 key `checkpoint.deskTokens` is still read; `checkpoint.threadTokens` and `checkpoint.enabled` do nothing.
 
 ## Guards
 

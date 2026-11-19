@@ -32,7 +32,9 @@ import { takeNotice } from './notices'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
-import { contextSize, deskTick, enter, forgetContext, hasUsage, isPush, noteReported, noteUsage, resetCheckpoints, sweepCheckpoints, takeAsk, turnEnded, turnStarted } from './checkpoint'
+import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact } from './deskcompact'
+import { finishedText, resetFinish, sweepFinished } from './finish'
+import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 
@@ -74,7 +76,9 @@ export const resetModState = () => {
   resetSkew()
   skew = null
   resetScripts()
-  resetCheckpoints()
+  resetDeskCompact()
+  resetFinish()
+  resetCap()
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
@@ -118,7 +122,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'restart'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
     text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line' },
     title: { type: 'string', description: 'new: short title' },
@@ -174,10 +178,25 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
 
 const spent = new Map<string, number>() // usd per subagent id, this session
 
-// is any subagent of this session still listed as pending or running (checkpoints never start over one)? An unreadable list counts as running.
-const agentsIdle = ($: any) => async (): Promise<boolean> => {
-  const l = await $.agent.list()
-  return !(Array.isArray(l) ? l : []).some((a: any) => a?.status === 'pending' || a?.status === 'running')
+// one desk compaction attempt (the 30 s timer, and the end of a desk turn after a veto or failure)
+async function compactDesk($: any, host2: Host): Promise<string> {
+  const now = await host2.clock.now()
+  const out = await deskTick(host2, {
+    // (the engine's own figure only before this session's first request: right after a compaction it may still be the old one)
+    tokens: async () => contextSize() || (hasUsage() ? 0 : Number((await $.session.usage())?.context?.tokens) || 0),
+    busy: () => busySince > 0 && now - busySince < BUSY_MAX_MS,
+    compact: async instructions => $.session.compact({ instructions }), // (an engine without it, or a turn that started, rejects: the handover file)
+    // (the engine runs every session.compact hook but the calling plugin's own, checked live: the notes are written here)
+    notes: async () => {
+      const m: any = await $.session.messages({ last: 6 })
+      await writeCompactNotes(host2, role, Array.isArray(m) ? m : [])
+    },
+    recent: () => recentUser($),
+    status: text => $.ui.status(text),
+    reset: forgetContext,
+  })
+  if (out !== 'quiet') $.ui.log(`lean-agent: desk context: ${out}`, { to: 'debug' })
+  return out
 }
 
 // a worker's reply ends with LEAN-FEEDBACK: gaps and memory go to the files, the thread's own turn is unchanged
@@ -298,7 +317,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN). A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN). A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -313,8 +332,9 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
     await step('desk timers', async () => {
       every($, 10_000, 'desk', async host2 => {
         await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
-        // a thread that checkpointed (context grew large) continues in a fresh session; before the wake sweep, which would resume the old one
-        await sweepCheckpoints(host2, id => leanThread(host2, $.plugin.root, { action: 'checkpoint', tN: id })).catch(() => undefined)
+        // a thread whose last report is done and whose turn has ended is finished as a session (its process stopped; the next message
+        // starts a new session with the handover); before the wake sweep, which would otherwise find it idle
+        for (const id of await sweepFinished(host2, id => leanThread(host2, $.plugin.root, { action: 'finish', tN: id })).catch(() => [] as string[])) $.ui.notify(finishedText(id), { key: `lean-finished-${id}` })
         await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
         const n = (await unreadReports(host2)).recs.length
         if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
@@ -341,30 +361,10 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         })
         for (const line of did) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
       })
-      // the desk's own context: idle and over config checkpoint.deskTokens it compacts itself (fixed instructions); when that is not
-      // possible it writes desk/handover.md and says so in the status line (checkpoint.ts)
-      every($, 30_000, 'desk', async host2 => {
-        const now = await host2.clock.now()
-        const user = async (): Promise<string[]> => {
-          const m: any = await $.session.messages({ last: 40 })
-          return (Array.isArray(m) ? m : []).filter((x: any) => x?.role === 'user' && typeof x.text === 'string' && x.text.trim() && !x.text.startsWith('[lean-agent]')).slice(-6).map((x: any) => x.text as string)
-        }
-        const out = await deskTick(host2, {
-          // (the engine's own figure only before this session's first request: right after a compaction it may still be the old one)
-          tokens: async () => contextSize() || (hasUsage() ? 0 : Number((await $.session.usage())?.context?.tokens) || 0),
-          busy: () => busySince > 0 && now - busySince < BUSY_MAX_MS,
-          compact: async instructions => $.session.compact({ instructions }), // (an engine without it, or a turn that started, rejects: the handover file)
-          // (the engine runs every session.compact hook but the calling plugin's own, checked live: the notes are written here)
-          notes: async () => {
-            const m: any = await $.session.messages({ last: 6 })
-            await writeCompactNotes(host2, role, Array.isArray(m) ? m : [])
-          },
-          recent: user,
-          status: text => $.ui.status(text),
-          reset: forgetContext,
-        })
-        if (out !== 'quiet') $.ui.log(`lean-agent: desk context: ${out}`, { to: 'debug' })
-      })
+      // the desk's own context: idle and over config deskTokens (default 200000) it compacts itself (fixed instructions); a veto or a
+      // failure is recorded with its reason and tried again when the turn ends; when it is not possible the mod writes desk/handover.md
+      // and says so in the status line (deskcompact.ts)
+      every($, 30_000, 'desk', async host2 => void (await compactDesk($, host2)))
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
       every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
     })
@@ -510,6 +510,7 @@ export const register: Register = on => {
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path (never posts); optional notes as the argument' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent-restart-desk', description: 'Desk only: write the desk handover and open a new desk session that reads it' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
     // what the role setup has to say (stale or over-cap rules): `session.start` carries no context, so it goes with the first prompt
     if (ctx.length) pending.push(...ctx)
@@ -532,7 +533,6 @@ export const register: Register = on => {
   on('turn.start', async ($, e: any, next) => {
     if (!e.agentId) busySince = (await $.clock.now()) || 1
     await redetect($)
-    if (role.kind === 'thread' && !e.agentId) await turnStarted(hostOf($), role.id).catch(() => undefined) // work after a ready checkpoint withdraws it
     await showSkew($)
     return next(e)
   })
@@ -540,11 +540,9 @@ export const register: Register = on => {
     if (!e.agentId) busySince = 0
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
-    // a thread that was told to checkpoint: the turn's end is the moment the desk may start its fresh session (or one reminder turn)
-    if (role.kind === 'thread' && !e.agentId) {
-      const id = role.id
-      await turnEnded(hostOf($), id, { reason: e.reason, sid: lastSid, submit: text => $.prompt.submit({ text }), idle: agentsIdle($) }).catch(() => undefined)
-    }
+    // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
+    // later (deskcompact.ts)
+    if (role.kind === 'desk' && !e.agentId) deskTurnEnded()
     return next(e)
   })
 
@@ -555,7 +553,7 @@ export const register: Register = on => {
     const why = await overBudget(host, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
     if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
     const r: any = yield* next(e)
-    if (!e.agentId) noteUsage(r?.usage) // the main loop's context size, for the checkpoints (checkpoint.ts)
+    if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
       const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}) }, r?.usage?.model ?? e.model, r?.usage)
       if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
@@ -637,7 +635,7 @@ export const register: Register = on => {
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: e.tool.replace('mcp__lean-agent__', ''), need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
     // a session reads its parent folders' CLAUDE.md BEFORE the mod runs: a stale guide above the threads is cleared before a start
-    if (['new', 'start', 'reopen', 'resume', 'wake', 'send'].includes(String(e.action))) await guardParents(host).catch(() => [])
+    if (['new', 'start', 'reopen', 'resume', 'wake', 'send', 'restart'].includes(String(e.action))) await guardParents(host).catch(() => [])
     const out = await leanThread(host, $.plugin.root, e)
     await ensureGitHooks(host).catch(() => undefined)
     if (out.ok && e.action === 'send' && typeof e.tN === 'string' && typeof e.text === 'string') await recordAnswer(host, e.tN, e.text).catch(() => undefined)
@@ -717,9 +715,7 @@ export const register: Register = on => {
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       // a thread that reports done is asked once per session whether a step could have been a script (never a worker's call)
       const ask = t.name === 'lean_report' && out.ok && e.state === 'done' && !e.agentId ? doneQuestion(role.id) : null
-      // a checkpoint report: the mod notes it (the turn's end makes it ready for the desk) and tells the thread to stop
-      const ck = t.name === 'lean_report' && out.ok && e.state === 'checkpoint' && !e.agentId ? await noteReported(hostOf($), role.id).catch(() => '') : ''
-      return { result: [out.text, ask, ck].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
+      return { result: [out.text, ask].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
 
@@ -743,16 +739,15 @@ export const register: Register = on => {
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
     if (gcall) await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
-    // a main-loop subagent or push in flight: no checkpoint instruction comes while it runs
-    const left = role.kind === 'thread' && !e.agentId ? ((e.tool === 'Agent' || e.tool === 'Task') ? enter('agent') : e.tool === 'Bash' && isPush(e.command) ? enter('push') : null) : null
     let r: any
     try {
       r = await next(e)
     } finally {
-      left?.()
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
     }
     await feedbackOf(host, e, r).catch(() => undefined)
+    // an oversized Bash or MCP result of a thread's main loop is cut before it enters the conversation (cap.ts); the full text is a file
+    if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && /^(lean-agent:)?auditor$/.test(String(e.subagent_type ?? ''))) {
       const said = await auditFromReply(host, role.id, texts(r?.result).join('\n'), String(e.prompt ?? '')).catch(() => null)
@@ -771,7 +766,7 @@ export const register: Register = on => {
         /* rules are optional: the tool result goes through unchanged */
       }
     }
-    // (below, for the main loop only: the desk's batch, then the checkpoint instruction: one order, each at most once per call)
+    // (below, for the main loop only: the queued messages / reports)
     if (e.agentId || r?.deny !== undefined) return r
     const lines: string[] = []
     try {
@@ -779,15 +774,6 @@ export const register: Register = on => {
       if (batch) lines.push(batch)
     } catch {
       /* delivery is retried at the next call */
-    }
-    try {
-      // the context is over config checkpoint.threadTokens: ONE instruction, at this tool boundary
-      // (not on the result of lean_report / lean_ask: a thread that just reported done or blocked, or asked the desk, is not told to
-      // checkpoint in the same breath: it would restart a finished thread; the next boundary carries it)
-      const ask = role.kind === 'thread' && !/lean_(report|ask)$/.test(String(e.tool ?? '')) ? await takeAsk(host, role.id, agentsIdle($)) : null
-      if (ask) lines.push(ask)
-    } catch {
-      /* asked again at the next call */
     }
     return lines.length ? { ...r, context: [...(r.context ?? []), ...lines] } : r
   }).catch(($, e: any, next) => (next.called ? next(e) : { deny: 'lean-agent guard failed' }))
@@ -832,8 +818,6 @@ export const register: Register = on => {
       if (more) extra = extra ? `${extra}\n${more}` : more
       const nudge = role.kind === 'thread' ? await takeNudges(host) : null
       if (nudge) extra = extra ? `${extra}\n${nudge}` : nudge
-      const ckAsk = role.kind === 'thread' ? await takeAsk(host, role.id, agentsIdle($)) : null // (a wake prompt over a large context is a boundary too)
-      if (ckAsk) extra = extra ? `${extra}\n${ckAsk}` : ckAsk
     } catch {
       /* the prompt goes through without it */
     }

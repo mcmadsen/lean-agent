@@ -86,7 +86,7 @@ export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter((
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done | checkpoint. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. checkpoint: the same handover, written when the mod told you the context is large; the desk then continues the thread in a fresh session from it, so stop after it.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done', 'checkpoint'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -226,9 +226,12 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     if (name === 'lean_report') {
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec)
-      const missing = str(i.state) === 'done' || str(i.state) === 'checkpoint' ? handoverGaps(str(i.text)) : []
+      const isDone = str(i.state) === 'done'
+      const missing = isDone ? handoverGaps(str(i.text)) : []
       const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text) }, i.important === true)
-      return { ok: true, text: (missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (a closed thread is reopened as a new session from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`) }
+      const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
+      const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
+      return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : base }
     }
     if (name === 'lean_ask') {
       if (!str(i.question)) return { ok: false, text: 'lean_ask needs a question' }
@@ -313,12 +316,9 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
   await writeJson(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: upTo })
 }
 
-// a done report carries the hint that closing is the desk's job (a thread cannot close itself); a checkpoint report is the thread's own
-// handover for its fresh session (that session reads it in full): the desk only sees its first lines, so checkpoints do not fill its context
-export const CHECKPOINT_VIEW = 300
-const reportText = (r: DeskRec) => (r.kind === 'report' && r.state === 'checkpoint' && r.text.length > CHECKPOINT_VIEW ? `${oneLine(r.text, CHECKPOINT_VIEW)} (cut to ${CHECKPOINT_VIEW} characters: the full text is in the pane's Answers list)` : r.text)
+// a done report carries the hint that closing is the desk's job (a thread cannot close itself)
 export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${reportText(r)}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a
