@@ -133,7 +133,7 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
 
 Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
-`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high;
+`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is opus / high (`config.json` `desk.model` / `desk.effort` override);
 `worker-sonnet`, `worker-opus` and `reviewer` run at effort high, `reader-sonnet` at medium, the haiku agents and the explorer at low.
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three

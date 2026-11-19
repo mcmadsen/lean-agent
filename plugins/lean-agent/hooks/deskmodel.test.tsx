@@ -28,7 +28,9 @@ function engine(rows: unknown, o: { deny?: string; throws?: boolean; models?: st
     },
   }
 }
-const world = () => { const h = fakeHost(null); h.clock.t = NOON; return h }
+// most specs here run a SONNET desk pin (config.json `desk`, which wins over the default); the default opus pin has its own specs below
+const SONNET_DESK = JSON.stringify({ desk: { model: 'sonnet', effort: 'high' } })
+const world = (conf: string | null = SONNET_DESK) => { const h = fakeHost(null); h.clock.t = NOON; if (conf) h.files.set(`${L}/config.json`, conf); return h }
 const notice = (h: any, k: string) => h.files.get(`${L}/notices/${k}.txt`)
 const stateFile = `${L}/desk/model.json`
 
@@ -58,6 +60,31 @@ test('a model the app chose is set through the Model and Effort rows once; the n
   const e4 = engine([modelRow({ options: ['opusplan', 'sonnet[1m]'] })], { models: ['claude-sonnet-5-5'] })
   await checkDeskModel(y.host, e4.engine, OPUS, true)
   expect(e4.sets[0]).toEqual({ key: 'model', value: 'sonnet[1m]' }) // no exact option: the family
+})
+
+test('the DEFAULT desk pin is opus / high: a sonnet session is set to Opus, or the row says to pick Opus; a desk already on Opus is left alone', async () => {
+  const SONNET = 'claude-sonnet-5-5'
+  const h = world(null) // no config.json: the default
+  const e = engine([modelRow({ value: 'sonnet' }), effortRow()], { models: [OPUS] })
+  const r = await checkDeskModel(h.host, e.engine, SONNET, true)
+  expect(r.kind).toBe('set')
+  expect(e.sets).toEqual([{ key: 'model', value: 'opus' }, { key: 'effort', value: 'high' }])
+  expect(r.text).toBe(`the desk was on ${SONNET} (the app chose it); lean-agent set opus / high through /config (the app may keep that as your default for new sessions)`)
+  const u = world(null)
+  const none = engine([effortRow()])
+  const r2 = await checkDeskModel(u.host, none.engine, SONNET, true)
+  expect(r2.kind).toBe('unsettable')
+  expect(r2.text).toBe("the desk runs claude-sonnet-5-5; pick Opus in the app's model menu (lean-agent pins opus / high)")
+  expect(notice(u, 'desk-model')).toContain('pick Opus in the app')
+  const ok = world(null)
+  const same = engine([modelRow(), effortRow({ value: 'high' })])
+  expect((await checkDeskModel(ok.host, same.engine, OPUS, true)).kind).toBe('match')
+  expect(same.sets).toEqual([])
+  // a config.json desk.model wins over the default: sonnet configured, a sonnet session is on the pin
+  const c = world(JSON.stringify({ desk: { model: 'sonnet' } }))
+  const cs = engine([modelRow({ value: 'sonnet' }), effortRow({ value: 'high' })])
+  expect((await checkDeskModel(c.host, cs.engine, SONNET, true)).kind).toBe('match')
+  expect(cs.sets).toEqual([])
 })
 
 test('already on the pin: nothing is written; only an effort that differs is set', async () => {
@@ -126,6 +153,7 @@ test('after the one attempt a mismatch is only noted (nothing is written to the 
 
 test('the pane shows ONE top row for it, and the notice is not listed a second time', async ($, on) => {
   const h = fakeHost(on)
+  h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
   resetViewCache()
   h.files.set(stateFile, JSON.stringify({ running: OPUS, pin: PIN, at: NOON }))
@@ -149,6 +177,7 @@ test('the pane shows ONE top row for it, and the notice is not listed a second t
 // has no way to set it); a request on the pin clears it
 test('the desk\'s first request on another model writes the state when nothing can set it; a threads session never does', async ($, on) => {
   const h = fakeHost(on)
+  h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
   on('turn.step', async function* (_: any, e: any) {
     return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: e.model, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any
@@ -175,6 +204,7 @@ test('the desk\'s first request on another model writes the state when nothing c
 
 test('through the hooks: a desk session that starts on another model has the Model and Effort rows set once, and says so at its next prompt', async ($, on) => {
   const h = fakeHost(on)
+  h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
   const sets: any[] = []
   let model = OPUS
@@ -192,6 +222,7 @@ test('through the hooks: a desk session that starts on another model has the Mod
 
 test('a side request on a small model does not move the pin: the session\'s own model is judged, and what the mod set is a dim line, not an error', async ($, on) => {
   const h = fakeHost(on)
+  h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
   resetViewCache()
   const sets: any[] = []

@@ -84,12 +84,12 @@ test('a role-less 1.0 row is uncapped on both cache paths', async () => {
 test('a worker on another model is no mismatch; the session\'s own requests are compared', async () => {
   const h = setup()
   h.files.set(`${L}/ledger.jsonl`,
-    row(NOON, { role: 'desk', model: 'claude-sonnet-5-5', usd: 1 }) +
+    row(NOON, { role: 'desk', model: 'claude-opus-5-5', usd: 1 }) + // the desk pin is opus by default
     row(NOON, { role: 'desk', model: 'claude-haiku-5-5', agent: 'lean-agent:worker-haiku', usd: 0.4 }) +
     row(NOON, { role: 'thread', model: 'claude-opus-5-5', agent: 'lean-agent:worker-opus', usd: 3 }))
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   expect(await modelMismatches(h.host)).toEqual([])
-  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON, { role: 'desk', model: 'claude-opus-5-5', usd: 5 }))
+  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON, { role: 'desk', model: 'claude-sonnet-5-5', usd: 5 }))
   expect((await modelMismatches(h.host)).length).toBe(1)
   expect(dayOf(NOON)).toBe('2026-11-18')
 })

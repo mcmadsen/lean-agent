@@ -1,4 +1,4 @@
-// Which model and effort a session runs on. The desk is pinned (sonnet, high); a thread gets sonnet/high unless the
+// Which model and effort a session runs on. The desk is pinned (opus, high: the user's decision; config.json `desk` wins); a thread gets sonnet/high unless the
 // brief asks for more or less. config.json: `desk: { model, effort }`, `threads: { model, effort }` override the defaults.
 import { atomicWrite, dirOf, leanDir, mkdirp, readJson } from './state'
 import type { Host } from './state'
@@ -6,7 +6,7 @@ import type { Host } from './state'
 export const MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const EFFORTS = ['low', 'medium', 'high'] as const
 export type Choice = { model: string; effort: string }
-export const DESK_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
+export const DESK_DEFAULT: Choice = { model: 'opus', effort: 'high' } // the alias `opus` is the latest Opus; config.json `desk` overrides
 export const THREAD_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
 
 // `claude-sonnet-5-5` and `sonnet` are the same family; a name of no known family is returned as it is
@@ -19,6 +19,11 @@ async function cfg(h: Host, home: string, key: 'desk' | 'threads'): Promise<Part
   const c = await readJson<Record<string, any>>(h, `${leanDir(home)}/config.json`, {})
   const v = c?.[key]
   return v && typeof v === 'object' ? v : {}
+}
+
+// does config.json set the desk's model (then that wins over the default, and a pin that differs from the default is the user's own)?
+export async function deskModelConfigured(h: Host, home: string): Promise<boolean> {
+  return okModel((await cfg(h, home, 'desk')).model)
 }
 
 export async function deskChoice(h: Host, home: string): Promise<Choice> {

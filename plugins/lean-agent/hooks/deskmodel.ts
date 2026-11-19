@@ -1,4 +1,4 @@
-// The desk's model and effort pin (sonnet / high; config.json `desk`) against what the session really runs on.
+// The desk's model and effort pin (opus / high, the user's decision; config.json `desk` overrides) against what the session really runs on.
 //
 // The pin is written to the desk folder's settings.json, but a session the Claude app starts (by hand, or through the
 // claude://code/new deep link) may take the app's own model menu instead. What the engine gives a plugin (types: EventCalls):
@@ -10,7 +10,7 @@
 // So, once per desk session (at session.start when the model is known then, else at the first request): when the model (or the effort
 // row) differs from the pin, the Model / Effort rows are set through `$.config.set`. When that is not possible (no such row, no option
 // of that family, locked, denied, throws) nothing is forced: the state is written to ~/.lean-agent/desk/model.json for the pane's top row
-// ("the desk runs <model>; pick Sonnet in the app's model menu ...") and a notice. The file is removed when a later request runs on the pin.
+// ("the desk runs <model>; pick Opus in the app's model menu ...") and a notice. The file is removed when a later request runs on the pin.
 // Never in a thread: a thread is started with `--model` / `--effort` on the command line.
 import { atomicWrite, homeDir, leanDir, mkdirp, readJson } from './state'
 import type { Host } from './state'

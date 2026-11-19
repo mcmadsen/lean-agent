@@ -5,15 +5,41 @@ import { mergeModelSettings, readModelSettings, threadChoice } from './models'
 
 const DESK = '/h/lean-agent-desk/.claude/settings.json'
 
-test('setup pins the desk to sonnet / high and keeps every other key of an existing settings file', async () => {
+test('setup pins the desk to opus / high (the user\'s decision) and keeps every other key of an existing settings file', async () => {
   const h = fakeHost(null)
   h.files.set('/p/opener/open-desk.sh', '#!/bin/sh\n')
-  h.files.set(DESK, JSON.stringify({ model: 'opus', theme: 'dark', permissions: { allow: ['Read'] } }))
+  h.files.set(DESK, JSON.stringify({ theme: 'dark', permissions: { allow: ['Read'] } }))
   const f = await fix(h.host, '/p')
-  expect(f.lines.join('\n')).toContain('desk pinned to sonnet / effort high')
-  expect(JSON.parse(h.files.get(DESK)!)).toEqual({ model: 'sonnet', effortLevel: 'high', theme: 'dark', permissions: { allow: ['Read'], additionalDirectories: ['/h/.lean-agent'] } })
+  expect(f.lines).toContain('desk pinned to opus / effort high') // nothing was pinned before: no "was"
+  expect(JSON.parse(h.files.get(DESK)!)).toEqual({ model: 'opus', effortLevel: 'high', theme: 'dark', permissions: { allow: ['Read'], additionalDirectories: ['/h/.lean-agent'] } })
   const ok = (await check(h.host, '/p')).find(l => l.includes('desk model'))!
   expect(ok.startsWith('ok')).toBe(true)
+})
+
+test('a sonnet pin from an older setup is updated to opus / high by fix and the row says so; the check says fix does it; a desk.model in config.json wins', async () => {
+  const h = fakeHost(null)
+  h.files.set('/p/opener/open-desk.sh', '#!/bin/sh\n')
+  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', theme: 'dark' }))
+  const l = (await check(h.host, '/p')).find(x => x.includes('desk model'))!
+  expect(l).toContain('FIX')
+  expect(l).toContain('desk model is sonnet / effort high, want opus / high (the desk default is now opus / high; an older setup pinned another model: doctor fix updates it)')
+  const f = await fix(h.host, '/p')
+  expect(f.lines).toContain('desk pinned to opus / effort high (was sonnet / high: updated, the desk default is now opus / high)')
+  expect(await readModelSettings(h.host, DESK)).toEqual({ model: 'opus', effort: 'high' })
+  expect(JSON.parse(h.files.get(DESK)!).theme).toBe('dark')
+  expect((await check(h.host, '/p')).find(x => x.includes('desk model'))!.startsWith('ok')).toBe(true)
+  // the user's own desk.model in config.json wins: a sonnet file stays sonnet, an opus file follows it
+  const c = fakeHost(null)
+  c.files.set('/p/opener/open-desk.sh', '#!/bin/sh\n')
+  c.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { model: 'sonnet' } }))
+  c.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high' }))
+  expect((await check(c.host, '/p')).find(x => x.includes('desk model'))!.startsWith('ok')).toBe(true)
+  const fc = await fix(c.host, '/p')
+  expect(fc.lines).toContain('desk pinned to sonnet / effort high')
+  expect(await readModelSettings(c.host, DESK)).toEqual({ model: 'sonnet', effort: 'high' })
+  c.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high' }))
+  expect((await check(c.host, '/p')).find(x => x.includes('desk model'))).toContain('want sonnet / high (config.json desk)')
+  expect((await fix(c.host, '/p')).lines).toContain('desk pinned to sonnet / effort high (was opus / high: updated, config.json desk.model)')
 })
 
 test('setup lets the desk open files in ~/.lean-agent: the folder is merged into permissions.additionalDirectories, user keys and folders stay, a second run changes nothing', async () => {
@@ -27,21 +53,21 @@ test('setup lets the desk open files in ~/.lean-agent: the folder is merged into
   expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'] })
   expect((await check(h.host, '/p')).find(l => l.includes('open files in ~/.lean-agent'))!.startsWith('ok')).toBe(true)
   // the user's own folders, allow list and other keys are kept; the folder is added once
-  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared'] } }))
+  h.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared'] } }))
   expect((await check(h.host, '/p')).find(l => l.includes('open files in ~/.lean-agent'))!.startsWith('FIX')).toBe(true)
   await fix(h.host, '/p')
   const once = h.files.get(DESK)!
-  expect(JSON.parse(once)).toEqual({ model: 'sonnet', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared', '/h/.lean-agent'] } })
+  expect(JSON.parse(once)).toEqual({ model: 'opus', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared', '/h/.lean-agent'] } })
   await fix(h.host, '/p')
   expect(h.files.get(DESK)).toBe(once)
   // odd shapes: permissions that is not an object, a list that is not an array
-  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: { additionalDirectories: 'oops' } }))
+  h.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high', permissions: { additionalDirectories: 'oops' } }))
   await fix(h.host, '/p')
   expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual(['/h/.lean-agent'])
-  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: null }))
+  h.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high', permissions: null }))
   await fix(h.host, '/p')
   expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'] })
-  h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: { additionalDirectories: [1, null, '/x'] } }))
+  h.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high', permissions: { additionalDirectories: [1, null, '/x'] } }))
   await fix(h.host, '/p')
   expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual([1, null, '/x', '/h/.lean-agent']) // the user's entries are not judged
 })
@@ -59,10 +85,11 @@ test('a desk settings file that does not parse is left alone, and setup says so'
 test('doctor check reports a missing or different desk model', async () => {
   const h = fakeHost(null)
   expect((await check(h.host, '/p')).find(l => l.includes('desk model'))).toContain('FIX')
-  h.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high' }))
+  h.files.set(DESK, JSON.stringify({ model: 'haiku', effortLevel: 'high' }))
   const l = (await check(h.host, '/p')).find(x => x.includes('desk model'))!
   expect(l).toContain('FIX')
-  expect(l).toContain('opus')
+  expect(l).toContain('haiku')
+  expect(l).toContain('want opus / high')
 })
 
 test('config.json desk.model / desk.effort override the desk default; an invalid one is ignored', async () => {

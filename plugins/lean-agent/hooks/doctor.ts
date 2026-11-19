@@ -4,7 +4,7 @@ import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, 
 import type { Host } from './state'
 import { trustFolder } from './threads'
 import { withFolderLock } from './folderlock'
-import { deskChoice, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
+import { deskChoice, deskModelConfigured, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
@@ -87,7 +87,9 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
     await mkdirp(h, `${leanDir(home)}/desk`)
     await writeJson(h, `${leanDir(home)}/desk/pinned.json`, { at: await h.clock.now(), model: want.model, effort: want.effort })
   }
-  lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
+  // an older setup's pin (sonnet) is replaced by today's (opus / high, or the user's config.json `desk`): the row says so
+  const was = pinned && before?.model && before.model !== want.model ? ` (was ${before.model} / ${before.effort ?? 'no effort'}: updated${(await deskModelConfigured(h, home)) ? ', config.json desk.model' : ', the desk default is now opus / high'})` : ''
+  lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}${was}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   lines.push(opened ? 'desk can open files in ~/.lean-agent' : 'desk .claude/settings.json does not parse: ~/.lean-agent not added to the desk\'s folders, fix the file by hand')
   const trusted = await trustFolder(h, deskDir(home))
@@ -126,7 +128,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const have = await readModelSettings(h, `${deskDir(home)}/.claude/settings.json`)
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
-  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}`)
+  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${have?.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : ' (the desk default is now opus / high; an older setup pinned another model: doctor fix updates it)') : ''}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason

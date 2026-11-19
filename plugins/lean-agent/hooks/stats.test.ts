@@ -341,6 +341,7 @@ test('lean_doctor stats answers from the desk, in one call, without a model read
 
 test('an expensive session on a model lean-agent did not configure is named (ledger and live listing)', async () => {
   const h = setup()
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { model: 'sonnet' } })) // a sonnet desk pin (the default is opus; config.json wins)
   h.files.set(`${L}/ledger.jsonl`, row(NOON, { role: 'desk', model: 'claude-opus-5-5', usd: 7 }) + row(NOON, { role: 'desk', model: 'claude-sonnet-5-5', usd: 1 }) + row(NOON, { role: 'thread', model: 'claude-opus-5-5', usd: 4 }))
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', model: 'sonnet', sid: 'S1' }))
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify([{ sessionId: 'S1', status: 'busy', model: 'claude-opus-5-5', cwd: '/x' }, { sessionId: 'D', status: 'busy', model: 'claude-opus-5-5', cwd: '/h/lean-agent-desk' }]) } : { exitCode: 0, stdout: '' })
@@ -350,6 +351,7 @@ test('an expensive session on a model lean-agent did not configure is named (led
   expect(odd).toContain('live session t1 runs claude-opus-5-5, lean-agent started it on sonnet')
   expect(odd).toContain('the live desk session runs claude-opus-5-5, lean-agent pins sonnet')
   const ok = setup()
+  ok.files.set(`${L}/config.json`, JSON.stringify({ desk: { model: 'sonnet' } }))
   ok.files.set(`${L}/ledger.jsonl`, row(NOON, { role: 'desk', usd: 1 }))
   ok.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   expect(await modelMismatches(ok.host)).toEqual([])
