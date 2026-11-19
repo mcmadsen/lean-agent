@@ -230,6 +230,70 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   expect((await unreadReports(h.host)).recs.map(x => x.from)).toEqual(['t2'])
 })
 
+test('a refused send removes the full-text file that very call wrote (nothing points at it), a delivered one keeps it', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const long = 'handover '.repeat(300)
+  const dir = '/h/.lean-agent/desk/reports'
+  h.files.set(`${dir}/1-t9-report.md`, 'someone else\'s')
+  const kept = await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, async () => undefined)
+  const ts1 = h.clock.t
+  expect(kept.text).toContain('not handed over again')
+  expect(h.files.has(`${dir}/${ts1}-t1-report.md`)).toBe(true)
+  h.clock.t += 10
+  const refused = await threadTool(h.host, 't2', 'lean_report', { text: long, state: 'done' }, async () => ({ isDelivered: false, reason: 'busy' }))
+  expect(refused.text).toContain('refused')
+  expect(h.files.has(`${dir}/${h.clock.t}-t2-report.md`)).toBe(false) // the orphan is gone
+  expect((await unreadReports(h.host)).recs.map(x => x.from)).toEqual(['t2']) // and the row is handed over in full at the next prompt
+  expect(h.files.has(`${dir}/${ts1}-t1-report.md`)).toBe(true) // an earlier delivered file stays
+  expect(h.files.has(`${dir}/1-t9-report.md`)).toBe(true) // so does any other
+  // a send that threw may have reached the desk: its file stays for the pruning
+  h.clock.t += 10
+  const threw = await threadTool(h.host, 't3', 'lean_report', { text: long, state: 'done' }, async () => { throw new Error('boom') })
+  expect(threw.text).toContain('failed')
+  expect(h.files.has(`${dir}/${h.clock.t}-t3-report.md`)).toBe(true)
+})
+
+test('desk/reports/ is pruned when a file is written: over 30 days old, then past the newest 500; at most once an hour; only report files; never an error', async () => {
+  const { h } = setup()
+  await recordDeskSid(h.host, 'd')
+  const long = 'handover '.repeat(300)
+  const dir = '/h/.lean-agent/desk/reports'
+  const DAY = 86_400_000
+  h.clock.t = 100 * DAY
+  const send = async () => undefined
+  const put = (ts: number, from = 't1') => h.files.set(`${dir}/${ts}-${from}-report.md`, 'x')
+  const names = () => [...h.files.keys()].filter(k => k.startsWith(`${dir}/`)).map(k => k.slice(dir.length + 1))
+  put(h.clock.t - 31 * DAY)
+  put(h.clock.t - 29 * DAY)
+  h.files.set(`${dir}/notes.md`, 'mine')
+  h.files.set(`${dir}/${h.clock.t - 40 * DAY}-t1-report.txt`, 'not a report file')
+  await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, send)
+  expect(names().sort()).toEqual([`${h.clock.t - 40 * DAY}-t1-report.txt`, `${h.clock.t - 29 * DAY}-t1-report.md`, `${h.clock.t}-t1-report.md`, 'notes.md'].sort())
+  // within the hour: not looked at again
+  h.clock.t += 60_000
+  put(h.clock.t - 35 * DAY)
+  await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, send)
+  expect(names()).toContain(`${h.clock.t - 35 * DAY}-t1-report.md`)
+  // an hour later: the count cap, newest 500 stay (the one just written included)
+  h.clock.t += 3_600_000
+  for (let i = 0; i < 510; i++) put(h.clock.t - 1000 - i)
+  await threadTool(h.host, 't1', 'lean_report', { text: long, state: 'done' }, send)
+  const md = names().filter(n => /^\d+-t\d+-report\.md$/.test(n))
+  expect(md).toHaveLength(500)
+  expect(md).toContain(`${h.clock.t}-t1-report.md`)
+  expect(md).toContain(`${h.clock.t - 1000}-t1-report.md`) // the newest of the seeded
+  expect(md).not.toContain(`${h.clock.t - 1000 - 509}-t1-report.md`) // the oldest of them
+  expect(names()).toContain('notes.md')
+  // a prune that cannot even list the folder never fails the send
+  const { h: g } = setup()
+  await recordDeskSid(g.host, 'd')
+  const list = g.host.fs.list
+  g.host.fs.list = async (p: string) => { if (p.endsWith('/reports')) throw new Error('EACCES'); return list(p) }
+  const r = await threadTool(g.host, 't1', 'lean_report', { text: long, state: 'done' }, send)
+  expect(r.text).toContain('not handed over again')
+})
+
 test('a long question is never cut and keeps its options; a cut never splits a surrogate pair; a long report whose file cannot be written goes unkeyed (its row stays unread)', async () => {
   const { h } = setup()
   await recordDeskSid(h.host, 'd')

@@ -160,6 +160,28 @@ export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'
   return { line: `${head}${body}${tail}${keyed ? ` <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->` : ''}`, cut, keyed }
 }
 
+// desk/reports/ is pruned when a new full-text file is written, at most once an hour: files older than 30 days (by the time in the file
+// name), then everything past the newest 500. Only files this module names (`<ts>-t<N>-<report|ask>.md`); never the file just written;
+// never an error to the send.
+export const REPORT_DAYS = 30
+export const REPORT_KEEP = 500
+export const REPORT_PRUNE_MS = 3_600_000
+export async function pruneReports(h: Host, home: string, keep: string): Promise<number> {
+  try {
+    const now = await h.clock.now()
+    const last = await h.store.get('reports-prune.t')
+    if (typeof last === 'number' && now >= last && now - last < REPORT_PRUNE_MS) return 0
+    await h.store.set('reports-prune.t', now)
+    const dir = `${deskState(home)}/reports`
+    const files = (await h.fs.list(dir)).flatMap(f => (f.kind === 'file' && /^\d+-t\d+-(?:report|ask)\.md$/.test(f.name) ? [{ path: `${dir}/${f.name}`, ts: Number(f.name.slice(0, f.name.indexOf('-'))) }] : [])).sort((a, b) => b.ts - a.ts)
+    const drop = files.filter((f, i) => (i >= REPORT_KEEP || f.ts < now - REPORT_DAYS * 86_400_000) && f.path !== keep).map(f => f.path)
+    for (let i = 0; i < drop.length; i += 50) await h.process.run(['rm', '-f', ...drop.slice(i, i + 50)])
+    return drop.length
+  } catch {
+    return 0
+  }
+}
+
 async function setKey(h: Host, home: string, key: string, on: boolean): Promise<void> {
   await serial('reports', async () => {
     const cur = await readJson<{ keys?: string[] }>(h, DELIVERED(home), {})
@@ -185,6 +207,7 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
     const path = reportFile(home, rec)
     const body = rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
     file = await atomicWrite(h, path, body).then(() => path, () => undefined)
+    if (file) await pruneReports(h, home, file)
   }
   const { line, cut, keyed } = file ? directLine(rec, file) : first
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
@@ -193,6 +216,9 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
     const r = await send(sid, line)
     if (r && r.isDelivered === false) {
       if (keyed) await setKey(h, home, key, false)
+      // refused: nothing points at the file, and the unread row hands the full text over at the next prompt (a send that THREW may have
+      // reached the desk, so its file stays for the pruning)
+      if (file) await h.process.run(['rm', '-f', file]).catch(() => undefined)
       return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
     }
     return !cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)'
