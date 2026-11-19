@@ -62,12 +62,42 @@ async function findGh(h: Host): Promise<string | null> {
   return null
 }
 
+// host, owner and repository of a plain `host/owner/repo` remote URL (https, ssh:// or scp-like git@host:owner/repo); null for anything else
+// (a local path, a nested group, a URL with odd characters): the PR is then opened as before, from the branch name alone
+export function repoOf(url: string): { host: string; owner: string; repo: string } | null {
+  const part = '([A-Za-z0-9][A-Za-z0-9._-]*)'
+  const u = url.trim()
+  const m = new RegExp(`^[a-z][a-z+.-]*://(?:[^@/\\s]+@)?([A-Za-z0-9.-]+)(?::\\d+)?/${part}/${part}/?$`).exec(u) ?? new RegExp(`^[^@/\\s:]+@([A-Za-z0-9.-]+):${part}/${part}/?$`).exec(u)
+  const name = m?.[3]?.replace(/\.git$/, '')
+  return m && name ? { host: m[1]!.toLowerCase(), owner: m[2]!, repo: name } : null
+}
+
+// A branch pushed to a remote that is not the base repository (a fork: the push remote's repository differs from `upstream`, else from
+// `origin`) is opened as `--head owner:branch` against `--repo` of the base; gh would otherwise look for the branch in the base repository.
+async function headOf(h: Host, dir: string, branch: string, pushUrl: string): Promise<{ head: string; repo?: string; fork: boolean }> {
+  const plain = { head: branch, fork: false }
+  const pushed = repoOf(pushUrl)
+  if (!pushed) return plain
+  for (const name of ['upstream', 'origin']) {
+    const u = await git(h, dir, 'remote', 'get-url', name)
+    if (!u.ok) continue
+    const base = repoOf(u.out)
+    if (!base || base.host !== pushed.host) return plain
+    if (base.owner.toLowerCase() === pushed.owner.toLowerCase() && base.repo.toLowerCase() === pushed.repo.toLowerCase()) return plain
+    return { head: `${pushed.owner}:${branch}`, repo: `${base.host === 'github.com' ? '' : `${base.host}/`}${base.owner}/${base.repo}`, fork: true }
+  }
+  return plain
+}
+
 type Wt = { path?: unknown; branch?: unknown; thread?: unknown }
 
 export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: string; pr?: PrInput | null }): Promise<Out> {
   const id = t.id
   const sha = (i.sha ?? '').trim().toLowerCase()
   const short = sha.slice(0, 8)
+  // a closed thread is over (its worktree may be gone, its approval and review belonged to work it no longer owns): reopen it first.
+  // A parked one is only paused: its approved, reviewed commit may still go out.
+  if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}: reopen ${id} first, then push`)
   if (!FULL.test(sha)) return err('push needs the full commit sha the user approved (git rev-parse <ref>)')
   // the PR, validated up front: a bad title must not cost the approval
   let pr: { title: string; body: string; base: string; draft: boolean } | null = null
@@ -123,7 +153,8 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   const bc = async (k: string) => (await git(h, dir, 'config', `branch.${branch}.${k}`)).out
   const remote = (await bc('pushRemote')) || (await bc('remote')) || 'origin'
   if (!nameOk(remote)) return err(`not pushed: the remote of ${branch} is ${JSON.stringify(remote)}, a name was expected (a URL or path is never pushed to)`)
-  if (!(await git(h, dir, 'remote', 'get-url', '--push', remote)).ok) return err(`not pushed: ${dir} has no remote ${remote}`)
+  const pushTo = await git(h, dir, 'remote', 'get-url', '--push', remote)
+  if (!pushTo.ok) return err(`not pushed: ${dir} has no remote ${remote}`)
   // the remote's default branch: the local remote HEAD, else asked of the remote (read-only); unknown = refused, never assumed
   const rh = await git(h, dir, 'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`)
   let deflt = rh.ok && rh.out.startsWith(`${remote}/`) ? rh.out.slice(remote.length + 1) : ''
@@ -142,7 +173,6 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (!(await takeApproval(h, t.project, sha, id))) return err(`not pushed: the approval for ${short} was just used by another push`)
 
   const where = `${remote}/${branch}`
-  const base = (pr?.base || deflt) as string
   // from here on the approval is used: every outcome is recorded and the thread is told
   const finish = async (res: Out, kind: string, extra: Record<string, unknown>, tell: string): Promise<Out> => {
     const notes: string[] = []
@@ -183,10 +213,13 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const text = `${done}; gh was not found (PATH, ${GH_PLACES.join(', ')}), so no PR was created: ${compare ? `open it from ${compare}` : 'the push output had no compare URL, open the PR by hand'}`
     return await finish({ ok: true, text, data }, 'push', { compare, pr: null }, `the desk pushed ${sha} to ${where}; PR not created (no gh), ${compare ? `compare URL ${compare}` : 'no compare URL'}`)
   }
+  // (the default branch above is the push remote's; for a fork the base repository's own default is left to gh)
+  const route = await headOf(h, dir, branch, pushTo.out)
+  const base = pr.base || (route.fork ? '' : deflt)
   let created: { stdout: string; stderr: string; exitCode: number }
   try {
     // the body goes in on stdin: no file at a path the thread could have planted a link at
-    created = await h.process.run([gh, 'pr', 'create', '--head', branch, ...(base ? ['--base', base] : []), `--title=${pr.title}`, '--body-file=-', ...(pr.draft ? ['--draft'] : [])], { cwd: dir, stdin: pr.body, timeoutMs: NET_MS, env: NO_PROMPT })
+    created = await h.process.run([gh, 'pr', 'create', '--head', route.head, ...(route.repo ? ['--repo', route.repo] : []), ...(base ? ['--base', base] : []), `--title=${pr.title}`, '--body-file=-', ...(pr.draft ? ['--draft'] : [])], { cwd: dir, stdin: pr.body, timeoutMs: NET_MS, env: NO_PROMPT })
   } catch (e) {
     created = { exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }
   }

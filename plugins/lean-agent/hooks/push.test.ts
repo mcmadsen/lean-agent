@@ -2,13 +2,13 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
-import { compareUrl, firstError } from './push'
+import { compareUrl, firstError, repoOf } from './push'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -24,7 +24,11 @@ async function setup(o: Opts = {}) {
     if (s.includes('refs/remotes/origin/HEAD')) return o.defaultBranch === '' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: `origin/${o.defaultBranch ?? 'main'}\n` }
     if (s.includes('symbolic-ref')) return branch ? { exitCode: 0, stdout: branch + '\n' } : { exitCode: 1, stdout: '' }
     if (s.includes('config branch.')) return o.remoteCfg && s.endsWith('.remote') ? { exitCode: 0, stdout: o.remoteCfg + '\n' } : { exitCode: 1, stdout: '' }
-    if (s.includes('remote get-url')) return { exitCode: 0, stdout: 'git@example.com:o/r.git\n' }
+    if (s.includes('remote get-url')) {
+      const name = a[a.length - 1]!
+      if (o.urls) return o.urls[name] ? { exitCode: 0, stdout: o.urls[name] + '\n' } : { exitCode: 2, stdout: '', stderr: `error: No such remote '${name}'` }
+      return { exitCode: 0, stdout: 'git@example.com:o/r.git\n' }
+    }
     if (a.includes('push')) return { exitCode: 0, stderr: PUSH_OUT, stdout: '', ...(o.pushResult ?? {}) }
     return { exitCode: 1, stdout: '' }
   }
@@ -35,7 +39,7 @@ async function setup(o: Opts = {}) {
     return o.ghFailure ? { exitCode: 1, stdout: '', stderr: o.ghFailure } : { exitCode: 0, stdout: (o.ghUrl ?? 'https://github.com/o/r/pull/7') + '\n' }
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
-  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: o.state ?? 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
   if (o.review !== false) await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
@@ -201,6 +205,67 @@ test('a failing gh keeps the pushed state visible; an already open PR is reporte
   const t = await setup({ ghFailure: 'a pull request for branch "feat" into branch "main" already exists:\nhttps://github.com/o/r/pull/5' })
   const u = await t.push({ pr: { title: 'T' } })
   expect(u).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; PR already open: https://github.com/o/r/pull/5` })
+})
+
+test('a branch pushed to a fork is opened as owner:branch against the base repository', async () => {
+  // origin is the fork the branch went to, upstream the base repository
+  const a = await setup({ urls: { origin: 'git@github.com:me/r.git', upstream: 'https://github.com/o/r.git' } })
+  const r = await a.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(a.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'me:feat', '--repo', 'o/r', '--title=T', '--body-file=-']) // no --base: the base repository's own default
+  // an explicit base is kept
+  const b = await setup({ urls: { origin: 'git@github.com:me/r.git', upstream: 'https://github.com/o/r.git' } })
+  await b.push({ pr: { title: 'T', base: 'develop' } })
+  expect(b.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'me:feat', '--repo', 'o/r', '--base', 'develop', '--title=T', '--body-file=-'])
+  // a remote named fork, no upstream: origin is the base
+  const c = await setup({ remoteCfg: 'fork', urls: { fork: 'ssh://git@github.com/me/r', origin: 'https://github.com/o/r' } })
+  await c.push({ pr: { title: 'T' } })
+  expect(c.ghCalls[0]!.argv.slice(0, 6)).toEqual(['gh', 'pr', 'create', '--head', 'me:feat', '--repo'])
+  expect(c.ghCalls[0]!.argv[6]).toBe('o/r')
+  // another host than github.com is named in --repo
+  const d = await setup({ urls: { origin: 'git@ghe.example.com:me/r.git', upstream: 'git@ghe.example.com:o/r.git' } })
+  await d.push({ pr: { title: 'T' } })
+  expect(d.ghCalls[0]!.argv).toContain('ghe.example.com/o/r')
+  // the push remote IS the base repository (origin only, or upstream with the same url): the branch name alone, as before
+  const e = await setup({ urls: { origin: 'git@github.com:o/r.git' } })
+  await e.push({ pr: { title: 'T' } })
+  expect(e.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'feat', '--base', 'main', '--title=T', '--body-file=-'])
+  const f = await setup({ urls: { origin: 'https://github.com/O/R', upstream: 'git@github.com:o/r.git' } })
+  await f.push({ pr: { title: 'T' } })
+  expect(f.ghCalls[0]!.argv).toContain('feat')
+  expect(f.ghCalls[0]!.argv).not.toContain('--repo')
+  // urls that are not plain host/owner/repo (a local path) are never guessed at
+  const g = await setup({ urls: { origin: '/srv/git/r.git', upstream: 'https://github.com/o/r.git' } })
+  await g.push({ pr: { title: 'T' } })
+  expect(g.ghCalls[0]!.argv).toContain('feat')
+  expect(g.ghCalls[0]!.argv).not.toContain('--repo')
+  // no PR asked: the fork logic is not consulted at all
+  const n = await setup({ urls: { origin: 'git@github.com:me/r.git', upstream: 'https://github.com/o/r.git' } })
+  await n.push()
+  expect(n.log.filter(x => x.includes('get-url') && !x.includes('--push'))).toEqual([])
+})
+
+test('repoOf reads host, owner and repo of plain remote urls only', () => {
+  expect(repoOf('git@github.com:o/r.git')).toEqual({ host: 'github.com', owner: 'o', repo: 'r' })
+  expect(repoOf('https://github.com/o/r')).toEqual({ host: 'github.com', owner: 'o', repo: 'r' })
+  expect(repoOf('https://user@github.com/o/r.git/')).toEqual({ host: 'github.com', owner: 'o', repo: 'r' })
+  expect(repoOf('ssh://git@ghe.example.com:2222/o/r.git')).toEqual({ host: 'ghe.example.com', owner: 'o', repo: 'r' })
+  for (const bad of ['/srv/git/r.git', 'a/b/c.git', 'https://h/g/sub/r.git', 'https://h/-x/r', 'git@h:o', '', 'git@h:o/r name']) expect([bad, repoOf(bad)]).toEqual([bad, null])
+})
+
+test('a closed thread cannot push (reopen first); a parked one only paused, so it can', async () => {
+  for (const state of ['closed', 'closing']) {
+    const s = await setup({ state })
+    const r = await s.push({ pr: { title: 'T' } })
+    expect(r).toMatchObject({ ok: false, text: `t1 is ${state}: reopen t1 first, then push` })
+    expect(s.pushes()).toEqual([])
+    expect(s.ghCalls).toEqual([])
+    expect(s.history()).toBe('') // nothing consumed: the approval is still there for after the reopen
+    expect(await (async () => { s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 })); return (await s.push()).ok })()).toBe(true)
+  }
+  const p = await setup({ state: 'parked' })
+  expect((await p.push()).ok).toBe(true)
+  expect(p.pushes()).toHaveLength(1)
 })
 
 test('compare URLs and first error lines are read from the output', () => {
