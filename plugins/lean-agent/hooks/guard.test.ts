@@ -495,12 +495,56 @@ test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside t
     'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
   for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat src/*', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
-    'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'sed -n 1p x', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
+    'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
   for (const c of bad) expect(await as('lean-agent:reader-sonnet')(c), c).toContain('granted')
   for (const c of ['rg foo > out', 'cat /etc/passwd', 'python3 x.py', 'git show HEAD:f']) expect(await as('lean-agent:auditor')(c), `auditor: ${c}`).toContain('granted') // read-only, never runs the script
   // foreign, bare and worker types get no search built in (a worker is not restricted by it either)
   for (const t of ['other:explorer', 'explorer', 'reader-haiku', 'other:auditor', 'auditor']) expect(await as(t)('rg foo src'), t).toContain('granted')
   expect(await as('lean-agent:worker-sonnet')('rg foo src')).toBeNull()
+})
+
+test('readers and the reviewer also run sed -n, stat, file, diff, jq, tree; every write / exec / outside-root form is refused', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
+  const ok = ["sed -n 1,20p src/a.ts", "sed -n '5p' src/a.ts", "sed -n '/foo/,/bar/p' src/a.ts", "sed -n '$p' src/a.ts", "sed -n -e '1p' -e '3p' src/a.ts", "sed -nE 's/a(b)/\\1/p' src/a.ts", "sed -n 's|a|b|gp' src/a.ts", "sed -n '2,+3p;10q' src/a.ts", "sed -n '/x/!p' src/a.ts", "sed -n '/[0-9]/p' src/a.ts", "sed -n 's/[[:alpha:]]/x/p' src/a.ts", "rg foo src | sed -n 1,5p", "sed --quiet 3p src/a.ts",
+    'stat src/a.ts', 'stat -c %s src/a.ts', 'file src/a.ts', 'file -b --mime-type src/a.ts', 'diff src/a.ts src/b.ts', 'diff -u src/a.ts /h/code/app/b.ts', 'diff -U 5 src/a.ts src/b.ts', 'diff -q -w src/a.ts src/b.ts',
+    'jq . src/a.json', "jq -r '.a.b[] | select(.x > 1)' src/a.json", "jq -c '.[0]' src/a.json src/b.json", 'cat src/a.json | jq .', "jq -n '1+1'", 'tree', 'tree src', 'tree -L 2 -I node_modules src', 'tree -a -d /h/code/app', 'ls src | head -3 | wc -l', 'find src -name "*.ts" | wc -l']
+  for (const t of ['lean-agent:reader-haiku', 'lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  const bad = ['find . -delete', 'find src -exec rm {} ;', 'find src -fprint out', 'sed -i s/a/b/ src/a.ts', "sed -i -n 1p src/a.ts", "sed -n 'w out' src/a.ts", "sed -n '1w out' src/a.ts", "sed -n 's/a/b/w out' src/a.ts", "sed -n 's/a/b/e' src/a.ts", "sed -n '1e ls' src/a.ts", "sed -n 'r /etc/passwd' src/a.ts", "sed -n 'R x' src/a.ts", "sed -n '1p;w out' src/a.ts", "sed -n '/x/{p;w out}' src/a.ts", "sed -n 'a hello' src/a.ts", "sed -n '1p' -f script.sed src/a.ts", "sed -n 's/[/]/x/p' src/a.ts", "sed -n 's/[[:alpha:]/]/;s/w /x/' src/a.ts", "sed -n '\\,x,p' src/a.ts", "sed 1p src/a.ts", "sed -n 1p /etc/passwd", "sed -n 1p ../../x", "sed -n s/a/b/ src/a.ts > out", 'sed -n 1p --in-place src/a.ts', 'sed -n -s -z 1p src/a.ts', "sed -n ''", 'sed -n',
+    'stat /etc/passwd', 'stat -L src/a.ts', 'stat', 'file /etc/passwd', 'file -L src/a.ts', 'file -f list.txt', 'file', 'diff src/a.ts /etc/passwd', 'diff -r src /etc', 'diff src/a.ts', 'diff -X pats a b', 'diff --from-file=a b c', 'diff -l a b', 'diff -r a b',
+    'jq -f prog.jq src/a.json', 'jq --rawfile x /etc/passwd . src/a.json', 'jq --slurpfile x /etc/passwd . src/a.json', 'jq --arg a b . src/a.json', 'jq -n env', "jq -n '$ENV'", "jq -n 'env.HOME'", "jq 'import \"a\" as a; .' src/a.json", "jq -L /etc . x", 'jq . /etc/passwd', 'jq', 'jq -n --args . a b',
+    'tree /etc', 'tree -o out', 'tree -l', 'tree --fromfile x', 'tree ../../..', 'tree > out',
+    'ls src | tee out', 'cat src/a.ts | npm test', 'rg foo src | sed -n 1p > out', 'sed -n 1p src/a.ts | sh', 'npm test', 'cat src/a.ts && ls', 'ls || ls', 'ls ; ls', 'ls &', 'cat <<EOF', 'cat src/a.ts `id`', 'cat $(id)', 'ls $HOME']
+  for (const t of ['lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')
+  // not for the explorer, the auditor, a bare or foreign type: those get no sed / stat / file / diff / jq / tree
+  for (const t of ['lean-agent:explorer', 'lean-agent:auditor', 'reader-haiku', 'other:reader-haiku']) for (const c of ['sed -n 1p src/a.ts', 'stat src/a.ts', 'jq . src/a.json', 'diff a b', 'tree', 'file a']) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')
+  expect(await as('lean-agent:worker-sonnet')('sed -n 1p src/a.ts')).toBeNull() // workers are not restricted by it
+  // a path outside the roots: refused whatever the command
+  const lean = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/other', 'lean-agent:reviewer', 'x1')
+  for (const c of ['stat a', 'sed -n 1p a', 'tree', 'jq . a']) expect(await lean(c), c).toContain('granted')
+})
+
+test('a refusal names the refused program (first word only, no arguments), so the export shows what was asked for', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const thread = { kind: 'thread', id: 't1' } as any
+  const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1') as Promise<string>
+  const r = as('lean-agent:reviewer')
+  expect(await r('npm test --secret=abc123')).toContain('refused: npm (not a built-in read-only command)')
+  expect(await r('npm test --secret=abc123')).not.toContain('abc123')
+  expect(await r('cat src/a.ts | npm test')).toContain('refused: npm (not a built-in read-only command)') // the stage that failed
+  expect(await r('find src -delete')).toContain('refused: find (a flag that writes or runs a program, or a path outside the allowed folders)')
+  expect(await r('cat /etc/passwd')).toContain('refused: cat (a flag that writes')
+  expect(await r('ls > out')).toContain('refused: ls (redirect, ;')
+  expect(await r('FOO=secret1 ls')).toContain('refused: FOO ')
+  expect(await r('FOO=secret1 ls')).not.toContain('secret1')
+  expect(await r('$(id) x')).toContain('refused: ? ')
+  expect(await r('git push origin x')).toContain('refused: git (a flag that writes')
+  expect(await as('other:reader-haiku')('ls')).toContain('refused: ls (not a built-in read-only command)') // a foreign type has nothing built in
+  expect(await r('npm test')).toContain('may run only its built-in read-only commands (git, rg, grep, find, ls, wc, head, tail, cat, sed -n, stat, file, diff, jq, tree)')
+  expect(await as('lean-agent:explorer')('npm test')).toContain('(git, rg, grep, find, ls, wc, head, tail, cat)')
 })
 
 test('search commands refuse a relative path when the session cwd is unknown or root', async () => {

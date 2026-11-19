@@ -399,6 +399,13 @@ async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
 // (shell.ts plainPipeline) proves plain and that are each allowed here. Relative words resolve against the session cwd, which must
 // itself be inside the roots when a command names no path.
 const SEARCH_CMDS = new Set(['rg', 'grep', 'find', 'ls', 'wc', 'head', 'tail', 'cat'])
+// more plain read-only file commands, only for the readers and the reviewer (not the explorer, the auditor or the desk):
+// sed -n, stat, file, diff, jq, tree. Same rules: listed flags only, paths inside the roots, no redirect.
+const MORE_CMDS = new Set(['sed', 'stat', 'file', 'diff', 'jq', 'tree'])
+export const builtinMore = (t?: string): boolean => {
+  const n = ownName(t) ?? ''
+  return /^reader-/.test(n) || n === 'reviewer'
+}
 // Every flag a built-in search command may carry is listed here; ANY other flag (or abbreviation, or cluster letter) refuses the
 // command, so no option can shift which word is a pattern, read a file, run a program, write, or follow a symlink out of the roots.
 // no: letters without a value; val: letters whose value is attached or the next word; lnone / lval: long names without / with a value
@@ -416,6 +423,134 @@ const SPECS: Record<string, Spec> = {
   head: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] },
   tail: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] }, // no -f / -F / --follow / --retry
   wc: { no: 'lwcmL', val: '', lnone: ['lines', 'words', 'bytes', 'chars', 'max-line-length'], lval: [] },
+  // no -L / --dereference (follows a link out of the roots), no -f of file / -z / -X / -r of diff / -o / -l / --fromfile of tree
+  stat: { no: 'tx', val: 'cf', lnone: ['terse'], lval: ['format', 'printf'] },
+  file: { no: 'bIi', val: '', lnone: ['brief', 'mime', 'mime-type', 'mime-encoding'], lval: [] },
+  diff: { no: 'uqsbBwiyEZaNpTtc', val: 'UC', digits: true, lnone: ['unified', 'context', 'brief', 'report-identical-files', 'ignore-all-space', 'ignore-space-change', 'ignore-blank-lines', 'ignore-case', 'ignore-trailing-space', 'new-file', 'text', 'side-by-side', 'expand-tabs', 'initial-tab', 'minimal', 'show-c-function'], lval: ['unified', 'context'] },
+  tree: { no: 'adfiFqhpusgDtrCNJx', val: 'LIP', lnone: ['noreport', 'dirsfirst', 'prune', 'du', 'si', 'inodes', 'device'], lval: ['filelimit'] },
+}
+// ---- sed -n: a script of print / delete / quit / hold-space commands and s / y, nothing that writes, reads or runs ----------------
+// Refused: w W e r R a i c b t T : v F z, the s flags w and e, a custom regex delimiter (\cREc), a raw newline inside a part. A
+// bracket expression that holds the delimiter is refused too: GNU sed and BSD sed (macOS) split `s/[/]/x/` differently, so a script
+// both would read the same way is the only one accepted.
+function sedScriptOk(s: string): boolean {
+  const n = s.length
+  let i = 0
+  const ws = () => { while (i < n && (s[i] === ' ' || s[i] === '\t')) i++ }
+  const part = (d: string): boolean => {
+    for (; i < n; i++) {
+      const c = s[i]!
+      if (c === '\n') return false
+      if (c === '\\') { i++; if (i >= n || s[i] === '\n') return false; continue }
+      if (c === d) { i++; return true }
+      if (c === '[') {
+        let j = i + 1
+        if (s[j] === '^') j++
+        if (s[j] === ']') j++
+        for (; j < n; j++) {
+          if (s[j] === '[' && ':.='.includes(s[j + 1] ?? '#')) { const k = s.indexOf(`${s[j + 1]}]`, j + 2); if (k < 0) return false; j = k + 1; continue }
+          if (s[j] === ']') break
+        }
+        if (j >= n) return false
+        const b = s.slice(i, j + 1)
+        if (b.includes(d) || b.includes('\n')) return false
+        i = j
+      }
+    }
+    return false
+  }
+  const num = () => { const k = i; while (i < n && /\d/.test(s[i]!)) i++; return i > k }
+  const addr = (): boolean => {
+    if (s[i] === '$') { i++; return true }
+    if (num()) { if (s[i] === '~') { i++; return num() } return true }
+    if (s[i] === '/') { i++; if (!part('/')) return false; while (s[i] === 'I' || s[i] === 'M') i++; return true }
+    return false
+  }
+  if (!s.trim()) return false
+  while (i < n) {
+    while (i < n && /[\s;]/.test(s[i]!)) i++
+    if (i >= n) break
+    if (s[i] === '}') { i++; continue }
+    if (addr()) {
+      ws()
+      if (s[i] === ',') {
+        i++; ws()
+        if (s[i] === '+' || s[i] === '~') { i++; if (!num()) return false } else if (!addr()) return false
+      }
+    } else if (s[i] === '\\') return false
+    ws()
+    while (s[i] === '!') { i++; ws() }
+    const c = s[i++]
+    if (c === undefined) return false
+    if (c === '{') continue
+    if (c === 's') {
+      const d = s[i++]
+      if (!d || /[\s\\\w]/.test(d)) return false
+      if (!part(d) || !part(d)) return false
+      for (; i < n && !/[\s;}]/.test(s[i]!); i++) if (!/[gpiImM\d]/.test(s[i]!)) return false
+    } else if (c === 'y') {
+      const d = s[i++]
+      if (!d || /[\s\\\w]/.test(d)) return false
+      if (!part(d) || !part(d)) return false
+    } else if ('pPdD=nNhHgGxlQq'.includes(c)) {
+      if (c === 'q' || c === 'Q') num()
+    } else return false
+    ws()
+    if (i < n && !/[;\n}]/.test(s[i]!)) return false
+  }
+  return true
+}
+// sed [-n] [-E|-r] [-s] [-e script | script] [file ...]: -n is required (no automatic printing), no -i / --in-place / -f / -z / --posix
+function sedWordsOk(rest: string[]): { script: boolean; pos: string[] } | null {
+  let quiet = false
+  const scripts: string[] = []
+  const pos: string[] = []
+  let dashdash = false
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!
+    if (dashdash || x === '-' || !x.startsWith('-')) { pos.push(x); continue }
+    if (x === '--') { dashdash = true; continue }
+    if (x.startsWith('--')) {
+      if (x === '--quiet' || x === '--silent') quiet = true
+      else if (x === '--regexp-extended' || x === '--separate') continue
+      else if (x.startsWith('--expression=')) scripts.push(x.slice(13))
+      else if (x === '--expression') { if (i + 1 >= rest.length) return null; scripts.push(rest[++i]!) }
+      else return null
+      continue
+    }
+    for (let k = 1; k < x.length; k++) {
+      const c = x[k]!
+      if (c === 'n') quiet = true
+      else if (c === 'E' || c === 'r' || c === 's') continue
+      else if (c === 'e') {
+        if (k < x.length - 1) scripts.push(x.slice(k + 1))
+        else { if (i + 1 >= rest.length) return null; scripts.push(rest[++i]!) }
+        break
+      } else return null
+    }
+  }
+  if (!quiet) return null
+  if (!scripts.length) { if (!pos.length) return null; scripts.push(pos.shift()!) }
+  return scripts.every(sedScriptOk) ? { script: true, pos } : null
+}
+// jq: no -f / --from-file, --rawfile, --slurpfile, --argfile, -L, --args; a filter that reads the environment or loads a module is refused
+const JQ_FLAGS = new Set(['-n', '-r', '-c', '-s', '-e', '-S', '-M', '-C', '-a', '-j', '-R', '--null-input', '--raw-output', '--compact-output', '--slurp', '--exit-status', '--sort-keys', '--monochrome-output', '--color-output', '--ascii-output', '--join-output', '--raw-input', '--tab', '--seq', '--unbuffered', '--stream'])
+function jqWordsOk(rest: string[]): string[] | null {
+  const pos: string[] = []
+  let dashdash = false
+  for (let i = 0; i < rest.length; i++) {
+    const x = rest[i]!
+    if (dashdash || x === '-' || !x.startsWith('-')) { pos.push(x); continue }
+    if (x === '--') { dashdash = true; continue }
+    if (x === '--indent') { if (!/^[0-7]$/.test(rest[i + 1] ?? '')) return null; i++; continue }
+    if (JQ_FLAGS.has(x)) continue
+    if (/^-[nrcseSMCajR]+$/.test(x)) continue
+    return null
+  }
+  if (!pos.length) return null
+  const filter = pos[0]!
+  if (/(?<![A-Za-z0-9_])(?:env|ENV|import|include|modulemeta|get_search_list|input_filename|debug|stderr|halt_error)(?![A-Za-z0-9_])|\$ENV|\$__prog/.test(filter)) return null
+  return pos.slice(1)
 }
 // find: starting points are the words before the first predicate; only these predicates (argument count) exist for us
 const FIND_PRED: Record<string, number> = { '-name': 1, '-iname': 1, '-path': 1, '-ipath': 1, '-wholename': 1, '-regex': 1, '-type': 1, '-maxdepth': 1, '-mindepth': 1, '-size': 1, '-mtime': 1, '-atime': 1, '-ctime': 1, '-mmin': 1, '-user': 1, '-group': 1, '-perm': 1, '-newer': 1, '-empty': 0, '-print': 0, '-print0': 0, '-prune': 0, '-not': 0, '-a': 0, '-o': 0, '-true': 0, '-false': 0, '-readable': 0, '-writable': 0, '-executable': 0, '-depth': 0, '-xdev': 0, '-mount': 0 }
@@ -459,10 +594,16 @@ function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolea
   }
   return { pos, given, recursive, noPattern }
 }
-async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first = true): Promise<boolean> {
+async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first = true, more = false): Promise<boolean> {
   const cmd = w[0]!
-  if (!SEARCH_CMDS.has(cmd)) return false
+  if (!SEARCH_CMDS.has(cmd) && !(more && MORE_CMDS.has(cmd))) return false
   const rest = w.slice(1)
+  if (cmd === 'sed' || cmd === 'jq') { // the script / filter is data (checked above), the other words are files; none = stdin
+    const files = cmd === 'sed' ? sedWordsOk(rest)?.pos : jqWordsOk(rest)
+    if (!files) return false
+    for (const p of files) if (!(await pathOk($, ctx, roots, p))) return false
+    return true
+  }
   if (cmd === 'find') {
     let i = 0
     const starts: string[] = []
@@ -482,20 +623,36 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
   const paths = grepLike && !f.given && !f.noPattern ? f.pos.slice(1) : f.pos // the first positional of grep / rg is the pattern: data
   if (grepLike && !f.given && !f.noPattern && !f.pos.length) return false // no pattern
   for (const p of paths) if (!(await pathOk($, ctx, roots, p))) return false
-  // rg and ls always look at the cwd when no path is named; grep when it is first in its pipeline or recursive; the others read stdin
-  const needCwd = !paths.length && (cmd === 'rg' || cmd === 'ls' || f.recursive || (cmd === 'grep' && first))
+  if ((cmd === 'stat' || cmd === 'file') && !paths.length) return false
+  if (cmd === 'diff' && paths.length !== 2) return false
+  // rg, ls and tree always look at the cwd when no path is named; grep when it is first in its pipeline or recursive; the others read stdin
+  const needCwd = !paths.length && (cmd === 'rg' || cmd === 'ls' || cmd === 'tree' || f.recursive || (cmd === 'grep' && first))
   return !needCwd || (await pathOk($, ctx, roots, '.'))
 }
 // the whole command: every pipeline segment is a built-in git read or a search command
-async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
+// null = allowed, else the refusal: the program that was refused (its first word only, a plain name, never an argument) and why
+type Refusal = { prog: string; why: string }
+const WHY_CMD = 'not a built-in read-only command'
+const WHY_ARGS = 'a flag that writes or runs a program, or a path outside the allowed folders'
+const WHY_SHELL = 'redirect, ;, &&, ||, substitution, glob, & or another shell form is not allowed'
+// the first word as a name (`npm`, `/usr/bin/ls`): leading name characters only, so no argument, variable or substitution is echoed
+const progName = (word: string | undefined): string => (/^[A-Za-z0-9_.+/-]{1,40}/.exec(word ?? '')?.[0] ?? '?')
+async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<Refusal | null> {
   const git = builtinGit(ctx.agentType)
-  if (!git.length) return false
+  const more = builtinMore(ctx.agentType)
   const segs = plainPipeline(c)
-  if (!segs) return false
+  if (!git.length) return { prog: progName(segs?.[0]?.[0] ?? c.trim().split(/\s+/)[0]), why: WHY_CMD }
+  if (!segs) return { prog: progName(c.trim().split(/[\s|;&<>]/)[0]), why: WHY_SHELL }
   const roots = await cRoots($, ctx)
-  for (let i = 0; i < segs.length; i++) { const w = segs[i]!; if (!(w[0] === 'git' ? await gitOk($, ctx, w, git, roots) : await searchOk($, ctx, w, roots, i === 0))) return false }
-  return true
+  for (let i = 0; i < segs.length; i++) {
+    const w = segs[i]!
+    if (w[0] === 'git' ? await gitOk($, ctx, w, git, roots) : await searchOk($, ctx, w, roots, i === 0, more)) continue
+    const known = w[0] === 'git' || SEARCH_CMDS.has(w[0]!) || (more && MORE_CMDS.has(w[0]!))
+    return { prog: progName(w[0]), why: known ? WHY_ARGS : WHY_CMD }
+  }
+  return null
 }
+const builtinList = (t?: string) => [...builtinGit(t).length ? ['git'] : [], ...SEARCH_CMDS, ...(builtinMore(t) ? ['sed -n', 'stat', 'file', 'diff', 'jq', 'tree'] : [])].join(', ')
 async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: string[]): Promise<boolean> {
   let i = 1
   let seenC = false // one -C only (git chains them)
@@ -527,10 +684,12 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     if (e.tool === 'Bash') {
       const c = String(e.command ?? '').trim()
       if (t === 'unresolved') return 'lean-agent: agent type unresolved, so it is a reader with no grants; report this (feedback skill) with the debug log line "agent fields"'
-      if (await builtinReadOnly($, ctx, c)) return null
+      const refused = await builtinReadOnly($, ctx, c)
+      if (!refused) return null
       const g = await grantFor($, ctx)
       const ok = !hasMeta(c) && (g.cmds ?? []).some(x => c === x || c.startsWith(x + ' '))
-      return ok ? null : `lean-agent: ${t} may run only its built-in read-only git commands and the commands the thread granted (allow-cmd)`
+      // the refused program is named (first word only) so the feedback export shows WHAT readers ask for
+      return ok ? null : `lean-agent: refused: ${refused.prog} (${refused.why}); ${t} may run only its built-in read-only commands (${builtinList(t)}) and the commands the thread granted (allow-cmd)`
     }
     return null
   }
