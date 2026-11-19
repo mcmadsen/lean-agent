@@ -130,6 +130,9 @@ test('ids after work item, PR, thread, --id and in quoted commands are masked; c
   // a count followed by its unit, thread tN, a number outside a command and short numbers stay
   expect(m('ran `rg x` saved 12000 chars, 5000 tokens, 3000 ms, 1500 lines, 4000 rows, 2000 files, 1200 tests, 90 %, 4500ms, 7k')).toBe('ran `rg x` saved 12000 chars, 5000 tokens, 3000 ms, 1500 lines, 4000 rows, 2000 files, 1200 tests, 90 %, 4500ms, 7k')
   expect(m('"saved 12000 chars in 40404 results" and "cmd 123"')).toBe('"saved 12000 chars in <id> results" and "cmd 123"')
+  expect(m('--work-item-id 4821 --thread-id 9 --pull-request-id 12 PRs 12, 13 and issues 8 and 9, pull-request 7')).toBe('--work-item-id <id> --thread-id <id> --pull-request-id <id> PRs <id> and issues <id>, pull-request <id>')
+  expect(m('{"ID": 5, "pull_request_id": 5, "work_item_id":5} Id=5')).toBe('{"ID": <id>, "pull_request_id": <id>, "work_item_id":<id>} Id=<id>')
+  expect(m('valid: 5 and grid 12')).toBe('valid: 5 and grid 12')
   expect(m('t4 and t12 reported; waited 40404 seconds')).toBe('t4 and t12 reported; waited 40404 seconds')
   expect(m(m('work-item update --id 4821 `gh pr view 40404`'))).toBe('work-item update --id <id> `gh pr view <id>`') // twice: unchanged
   expect(a.missed('work item 4821')).toContain('work item, PR or thread id')

@@ -615,6 +615,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not opened`)
           const row = live.find(a => a.sid === t.sid)
           if (isWorking(row)) return err(`${id} is working: not opened (the button is for a thread that stopped and waits for your yes)`)
+          if (row?.waitingFor) return err(`${id} waits on a prompt of its own: not stopped (that would drop the prompt); open it from the session list in the Claude app`)
           if (row && row.pid > 0) {
             const stopped = await stopAlive(h, t, '', 'opened', { own: tpath(home, id) })
             if (stopped) return { ok: false, text: stopped.text }

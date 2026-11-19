@@ -73,7 +73,7 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 // thread's own session (the pane shows "tN needs your yes in its own session" with an Open tN button; the desk never performs it)
 export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string }
 export const APPROVAL_MAX = 300
-export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
+export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
 export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself]` : '')
 export type Tool = { name: string; description: string; inputSchema: unknown }
 
@@ -315,7 +315,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
       // A report is never lost: a failed write is tried once more with the user's home as the working folder (a session whose own folder
       // is gone makes every spawn fail); when that fails too the thread gets the text back with the exact error, to paste to the user
-      const approval = str(i.state) === 'blocked' ? str(i.approval).replace(/\s+/g, ' ').slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
+      const approval = str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
       const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}) } satisfies DeskRec
       const failed = await writeReport(h, home, rec)
       if (failed) {

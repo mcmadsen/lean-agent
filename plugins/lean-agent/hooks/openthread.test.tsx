@@ -56,12 +56,14 @@ test('lean_report: `approval` is kept only on a blocked report (trimmed, one lin
   const [a, b, c] = rows()
   expect(a.approval).toMatch(/^work-item update --id 4821 --state Done --note x+$/)
   expect(a.approval.length).toBe(300)
+  await threadTool(h.host, 't4', 'lean_report', { text: 'denied', state: 'blocked', approval: `run \u001b[31mthis\u0007 now` }, send)
+  expect(rows()[3].approval).toBe('run [31mthis now') // control characters never reach the pane or the desk prompt
   expect(b.approval).toBeUndefined() // a working report cannot wait for the user's yes
   expect(c.approval).toBeUndefined()
   expect(sent[0]).toContain("[needs the user's yes in t1's own session:")
   expect(sent[0]).toContain('press "Open t1" in the pane')
   expect(sent[0]).toContain('do not run it yourself')
-  expect(sent).toHaveLength(2) // t2 was a working report: not sent at once
+  expect(sent).toHaveLength(3) // t2 was a working report: not sent at once
   expect(sent[1]).not.toContain('needs the user')
   expect(approvalHint({ ts: 1, from: 't9', kind: 'report', state: 'done', text: 'x', approval: 'y' })).toBe('') // only blocked
 })
@@ -115,6 +117,11 @@ test('Open tN refuses, and stops and opens nothing: a working session, a session
     expect(r.text, name).toMatch(text)
     expect(w.order, name).toEqual([])
   }
+  const p = world([row({ waitingFor: 'a permission prompt' })]) // waiting on a prompt of its own: stopping it would drop the prompt
+  const pr = await p.open()
+  expect(pr.ok).toBe(false)
+  expect(pr.text).toContain('waits on a prompt of its own')
+  expect(p.order).toEqual([])
   const f = world([row()])
   f.state.stopExit = 1
   const r = await f.open()

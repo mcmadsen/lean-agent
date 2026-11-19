@@ -506,6 +506,8 @@ test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside t
 test('readers and the reviewer also run sed -n, stat, file, diff, jq, tree; every write / exec / outside-root form is refused', async () => {
   const h = fakeHost(null)
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  for (const f of ['src/a.ts', 'src/b.ts', 'other/a.ts']) h.files.set(`/h/.lean-agent/worktrees/app/t1/${f}`, 'x')
+  h.files.set('/h/code/app/b.ts', 'x')
   const thread = { kind: 'thread', id: 't1' } as any
   const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
   const ok = ["sed -n 1,20p src/a.ts", "sed -n '5p' src/a.ts", "sed -n '/foo/,/bar/p' src/a.ts", "sed -n '$p' src/a.ts", "sed -n -e '1p' -e '3p' src/a.ts", "sed -nE 's/a(b)/\\1/p' src/a.ts", "sed -n 's|a|b|gp' src/a.ts", "sed -n '2,+3p;10q' src/a.ts", "sed -n '/x/!p' src/a.ts", "sed -n '/[0-9]/p' src/a.ts", "sed -n 's/[[:alpha:]]/x/p' src/a.ts", "rg foo src | sed -n 1,5p", "sed --quiet 3p src/a.ts",
@@ -513,7 +515,7 @@ test('readers and the reviewer also run sed -n, stat, file, diff, jq, tree; ever
     'jq . src/a.json', "jq -r '.a.b[] | select(.x > 1)' src/a.json", "jq -c '.[0]' src/a.json src/b.json", 'cat src/a.json | jq .', "jq -n '1+1'", 'tree', 'tree src', 'tree -L 2 -I node_modules src', 'tree -a -d /h/code/app', 'ls src | head -3 | wc -l', 'find src -name "*.ts" | wc -l']
   for (const t of ['lean-agent:reader-haiku', 'lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['find . -delete', 'find src -exec rm {} ;', 'find src -fprint out', 'sed -i s/a/b/ src/a.ts', "sed -i -n 1p src/a.ts", "sed -n 'w out' src/a.ts", "sed -n '1w out' src/a.ts", "sed -n 's/a/b/w out' src/a.ts", "sed -n 's/a/b/e' src/a.ts", "sed -n '1e ls' src/a.ts", "sed -n 'r /etc/passwd' src/a.ts", "sed -n 'R x' src/a.ts", "sed -n '1p;w out' src/a.ts", "sed -n '/x/{p;w out}' src/a.ts", "sed -n 'a hello' src/a.ts", "sed -n '1p' -f script.sed src/a.ts", "sed -n 's/[/]/x/p' src/a.ts", "sed -n 's/[[:alpha:]/]/;s/w /x/' src/a.ts", "sed -n '\\,x,p' src/a.ts", "sed 1p src/a.ts", "sed -n 1p /etc/passwd", "sed -n 1p ../../x", "sed -n s/a/b/ src/a.ts > out", 'sed -n 1p --in-place src/a.ts', 'sed -n -s -z 1p src/a.ts', "sed -n ''", 'sed -n',
-    'stat /etc/passwd', 'stat -L src/a.ts', 'stat', 'file /etc/passwd', 'file -L src/a.ts', 'file -f list.txt', 'file', 'diff src/a.ts /etc/passwd', 'diff -r src /etc', 'diff src/a.ts', 'diff -X pats a b', 'diff --from-file=a b c', 'diff -l a b', 'diff -r a b',
+    'stat /etc/passwd', 'stat -L src/a.ts', 'stat', 'file /etc/passwd', 'file -L src/a.ts', 'file -f list.txt', 'file', 'diff src/a.ts /etc/passwd', 'diff -r src /etc', 'diff src/a.ts', 'diff -X pats a b', 'diff --from-file=a b c', 'diff -l a b', 'diff -r a b', 'diff -N -u src other', 'diff src src/a.ts', 'diff src/a.ts src/missing.ts', 'stat -f /etc/shadow src/a.ts',
     'jq -f prog.jq src/a.json', 'jq --rawfile x /etc/passwd . src/a.json', 'jq --slurpfile x /etc/passwd . src/a.json', 'jq --arg a b . src/a.json', 'jq -n env', "jq -n '$ENV'", "jq -n 'env.HOME'", "jq 'import \"a\" as a; .' src/a.json", "jq -L /etc . x", 'jq . /etc/passwd', 'jq', 'jq -n --args . a b',
     'tree /etc', 'tree -o out', 'tree -l', 'tree --fromfile x', 'tree ../../..', 'tree > out',
     'ls src | tee out', 'cat src/a.ts | npm test', 'rg foo src | sed -n 1p > out', 'sed -n 1p src/a.ts | sh', 'npm test', 'cat src/a.ts && ls', 'ls || ls', 'ls ; ls', 'ls &', 'cat <<EOF', 'cat src/a.ts `id`', 'cat $(id)', 'ls $HOME']
@@ -535,7 +537,7 @@ test('a refusal names the refused program (first word only, no arguments), so th
   expect(await r('npm test --secret=abc123')).toContain('refused: npm (not a built-in read-only command)')
   expect(await r('npm test --secret=abc123')).not.toContain('abc123')
   expect(await r('cat src/a.ts | npm test')).toContain('refused: npm (not a built-in read-only command)') // the stage that failed
-  expect(await r('find src -delete')).toContain('refused: find (a flag that writes or runs a program, or a path outside the allowed folders)')
+  expect(await r('find src -delete')).toContain('refused: find (a flag that writes or runs a program, a path outside the allowed folders, or a missing operand / -n)')
   expect(await r('cat /etc/passwd')).toContain('refused: cat (a flag that writes')
   expect(await r('ls > out')).toContain('refused: ls (redirect, ;')
   expect(await r('FOO=secret1 ls')).toContain('refused: FOO ')
@@ -543,6 +545,7 @@ test('a refusal names the refused program (first word only, no arguments), so th
   expect(await r('$(id) x')).toContain('refused: ? ')
   expect(await r('git push origin x')).toContain('refused: git (a flag that writes')
   expect(await as('other:reader-haiku')('ls')).toContain('refused: ls (not a built-in read-only command)') // a foreign type has nothing built in
+  expect(await as('other:reader-haiku')('ls')).toContain('built-in read-only commands (none)')
   expect(await r('npm test')).toContain('may run only its built-in read-only commands (git, rg, grep, find, ls, wc, head, tail, cat, sed -n, stat, file, diff, jq, tree)')
   expect(await as('lean-agent:explorer')('npm test')).toContain('(git, rg, grep, find, ls, wc, head, tail, cat)')
 })

@@ -424,7 +424,7 @@ const SPECS: Record<string, Spec> = {
   tail: { no: 'qv', val: 'nc', digits: true, lnone: ['quiet', 'silent', 'verbose'], lval: ['lines', 'bytes'] }, // no -f / -F / --follow / --retry
   wc: { no: 'lwcmL', val: '', lnone: ['lines', 'words', 'bytes', 'chars', 'max-line-length'], lval: [] },
   // no -L / --dereference (follows a link out of the roots), no -f of file / -z / -X / -r of diff / -o / -l / --fromfile of tree
-  stat: { no: 'tx', val: 'cf', lnone: ['terse'], lval: ['format', 'printf'] },
+  stat: { no: 'tx', val: 'c', lnone: ['terse'], lval: ['format', 'printf'] }, // (no -f: GNU takes no value, so a path after it would skip the check)
   file: { no: 'bIi', val: '', lnone: ['brief', 'mime', 'mime-type', 'mime-encoding'], lval: [] },
   diff: { no: 'uqsbBwiyEZaNpTtc', val: 'UC', digits: true, lnone: ['unified', 'context', 'brief', 'report-identical-files', 'ignore-all-space', 'ignore-space-change', 'ignore-blank-lines', 'ignore-case', 'ignore-trailing-space', 'new-file', 'text', 'side-by-side', 'expand-tabs', 'initial-tab', 'minimal', 'show-c-function'], lval: ['unified', 'context'] },
   tree: { no: 'adfiFqhpusgDtrCNJx', val: 'LIP', lnone: ['noreport', 'dirsfirst', 'prune', 'du', 'si', 'inodes', 'device'], lval: ['filelimit'] },
@@ -624,7 +624,14 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
   if (grepLike && !f.given && !f.noPattern && !f.pos.length) return false // no pattern
   for (const p of paths) if (!(await pathOk($, ctx, roots, p))) return false
   if ((cmd === 'stat' || cmd === 'file') && !paths.length) return false
-  if (cmd === 'diff' && paths.length !== 2) return false
+  if (cmd === 'diff') { // two plain files: on directories diff stat()s same-named entries, following a symlink out of the roots
+    if (paths.length !== 2) return false
+    for (const p of paths) {
+      if (p === '-') continue
+      const st = await $.fs.stat(await resolve($, p, ctx.cwd), { resolve: true }).catch(() => null)
+      if (!st || st.kind !== 'file') return false
+    }
+  }
   // rg, ls and tree always look at the cwd when no path is named; grep when it is first in its pipeline or recursive; the others read stdin
   const needCwd = !paths.length && (cmd === 'rg' || cmd === 'ls' || cmd === 'tree' || f.recursive || (cmd === 'grep' && first))
   return !needCwd || (await pathOk($, ctx, roots, '.'))
@@ -633,7 +640,7 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
 // null = allowed, else the refusal: the program that was refused (its first word only, a plain name, never an argument) and why
 type Refusal = { prog: string; why: string }
 const WHY_CMD = 'not a built-in read-only command'
-const WHY_ARGS = 'a flag that writes or runs a program, or a path outside the allowed folders'
+const WHY_ARGS = 'a flag that writes or runs a program, a path outside the allowed folders, or a missing operand / -n'
 const WHY_SHELL = 'redirect, ;, &&, ||, substitution, glob, & or another shell form is not allowed'
 // the first word as a name (`npm`, `/usr/bin/ls`): leading name characters only, so no argument, variable or substitution is echoed
 const progName = (word: string | undefined): string => (/^[A-Za-z0-9_.+/-]{1,40}/.exec(word ?? '')?.[0] ?? '?')
@@ -652,7 +659,7 @@ async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<Refusal | 
   }
   return null
 }
-const builtinList = (t?: string) => [...builtinGit(t).length ? ['git'] : [], ...SEARCH_CMDS, ...(builtinMore(t) ? ['sed -n', 'stat', 'file', 'diff', 'jq', 'tree'] : [])].join(', ')
+const builtinList = (t?: string) => (builtinGit(t).length ? [...['git'], ...SEARCH_CMDS, ...(builtinMore(t) ? ['sed -n', 'stat', 'file', 'diff', 'jq', 'tree'] : [])].join(', ') : 'none')
 async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: string[]): Promise<boolean> {
   let i = 1
   let seenC = false // one -C only (git chains them)

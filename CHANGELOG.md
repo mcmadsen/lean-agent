@@ -8,7 +8,7 @@
   paths inside the same roots as `git -C` (the thread's worktree, registered projects, `~/.lean-agent`), joined only by `|`. Listed
   flags only, so these stay refused: `find -exec/-execdir/-ok/-delete/-fprint*/-fls`, `sed` without `-n`, with `-i`, `-f`, or a script that
   has `w W e r R a i c b t` or an `s` flag `w` / `e` (a bracket expression holding the delimiter is refused too: GNU sed and the macOS
-  sed split it differently), `stat -L`, `file -L/-f`, `diff -r/-X/--from-file`, `jq -f`, `--rawfile`, `--slurpfile`, `-L`, `env`,
+  sed split it differently), `stat -L/-f`, `file -L/-f`, `diff -r/-X/--from-file` (and `diff` on anything but two existing plain files: on directories it follows a symlink out of the roots), `jq -f`, `--rawfile`, `--slurpfile`, `-L`, `env`,
   `$ENV`, `import`, `include`, `tree -o/-l/--fromfile`, redirects, `;`, `&&`, `||`, `$(...)`, backticks, `&`, here-docs and any stage that
   is not itself in the set. The explorer, the auditor and the desk keep their smaller sets.
 - **The guard's refusal names the refused program** (first word only, never an argument; a plain name or `?`): `lean-agent: refused: npm

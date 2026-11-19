@@ -53,9 +53,10 @@ const KEEP = '\u0003' // stands for PUBLIC_REPO while the name rules run (contro
 const HEX_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g
 // an id after the word that names what it identifies: PR 12, pull request #12, pullrequest 12, work item 12, work-item 12, thread 12,
 // issue / ticket / story 12, `--id 12`, `--id=12` (a work item, PR or comment thread id from a command's arguments or a result)
-const ID_WORD_RE = /(?<![A-Za-z0-9])(PR|pull ?request|work[ -]?items?|thread|issue|ticket|story|--id)(\s*[#!=:]?\s*)\d+\b/gi
-// `"id": 123`, `pullRequestId=123`, `thread_id: 123`, `number: 123`: a result's id field
-const ID_FIELD_RE = /(?<![A-Za-z0-9_])((?:i[dD]|number|[A-Za-z]+I[dD]|[A-Za-z]+_id)["']?\s*[:=]\s*["']?)\d+\b/g
+// (plurals and lists too: `PRs 12, 13`, `issues 8 and 9`; `--work-item-id 12`, `--thread-id 9`)
+const ID_WORD_RE = /(?<![A-Za-z0-9])(PRs?|pull[ -]?requests?|work[ -]?items?|threads?|issues?|tickets?|stor(?:y|ies)|--[a-z-]*id)(\s*[#!=:]\s*|\s*)\d+(?:\s*(?:,|and|&)\s*\d+)*\b/gi
+// `"id": 123`, `"ID": 5`, `pullRequestId=123`, `thread_id: 123`, `pull_request_id: 5`, `number: 123`: a result's id field
+const ID_FIELD_RE = /(?<![A-Za-z0-9_])((?:(?:[A-Za-z0-9]+_)*(?:[iI][dD]|number)|[A-Za-z]+I[dD])["']?\s*[:=]\s*["']?)\d+\b/g
 // a bare number of 4+ digits inside a quoted or backticked command (a PR, work item or comment id nobody put a word before); a count
 // followed by its unit (4500 chars, 12000 tokens, 3000 ms, 1500 lines ...) is not an id
 const QUOTED_RE = /`[^`\n]*`|"[^"\n]*"|'[^'\n]*'/g
