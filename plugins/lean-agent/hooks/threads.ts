@@ -1,4 +1,6 @@
 import { writeApproval } from './reviews'
+import { deskPush } from './push'
+import type { PrInput } from './push'
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { goalsLocked, unconsumed, wakeMark } from './delivery'
@@ -186,7 +188,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -663,6 +665,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           await appendJsonl(h, `${tpath(home, id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'approve-push', sha, project: t.project, reason: (i.reason ?? '').trim().slice(0, 200) || undefined })
           return { ok: true, text: `approved: one push of ${sha.slice(0, 8)} for ${t.project} by ${id}, valid 2 h, single use` }
         }
+        case 'push':
+          // the push (and an optional PR) runs here, in the desk, where the user said yes: a thread's own session never saw that yes
+          // and its permission check refuses `git push`. Consumes the approval approve-push wrote (push.ts has the checks).
+          return await deskPush(h, home, t, i)
         case 'park': {
           t.state = 'parked'
           await save(h, home, t)

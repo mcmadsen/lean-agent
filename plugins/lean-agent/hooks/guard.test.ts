@@ -452,7 +452,8 @@ test('approve-push: the desk approves one sha once, for 2 h; forged, wrong-sha a
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   const push = { tool: 'Bash', command: 'git push origin feature' }
   const refusal = (await run(h, thread, push)) as string
-  expect(refusal).toContain(`ask the desk: approve-push t1 ${SHA}`)
+  expect(refusal).toContain(`ready to push ${SHA}`) // a thread reports and stops: the desk pushes
+  expect(refusal).toContain('a thread does not push')
   expect(refusal).toContain('git -C /r/app push origin feature')
   await writeApproval(h.host, { project: 'app', sha: 'c'.repeat(40), thread: 't1' }) // make sure the signing key exists: the signature is what fails below
   // a thread-written record carries no valid signature

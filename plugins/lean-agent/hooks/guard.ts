@@ -242,7 +242,8 @@ async function pushDenial($: Host, c: string, cwd: string, role?: Role): Promise
     if (await hasApproval($, p.slug, sha, thread)) { need.push(sha); continue }
     const first = pushArgs(segs[0] ?? []).rest
     const manual = `git -C ${dir} push ${first[0] ?? '<remote>'} ${first[1] ?? '<branch>'}`
-    const who = role?.kind === 'thread' ? `ask the desk: approve-push ${role.id} ${sha}` : `the desk's lean_thread approve-push <tN> ${sha}`
+    if (role?.kind === 'thread') return `lean-agent push gate: a thread does not push (its own permission check refuses it, and the user's yes goes to the desk). ${sha.slice(0, 8)} has no green review in project ${p.slug}: run the review skill, then lean_report "ready to push ${sha} (<branch>, <PR title>)" and stop; the desk asks the user and pushes. Or the user can push by hand: ${manual}`
+    const who = `the desk's lean_thread approve-push <tN> ${sha}, then push`
     return `lean-agent push gate: no green review for ${sha.slice(0, 8)} (project ${p.slug}). Run the review skill first, or have the user approve this exact commit (${who}); or the user can push by hand: ${manual}`
   }
   for (const sha of need) if (!(await takeApproval($, p.slug, sha, thread))) return `lean-agent push gate: the approval for ${sha.slice(0, 8)} was just used by another push; ask the desk to approve again`

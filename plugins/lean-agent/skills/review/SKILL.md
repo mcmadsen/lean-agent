@@ -7,10 +7,12 @@ roles: thread
 
 # Review and push gate
 
-Run in a thread, in the repo or worktree to push. The push guard allows `git push` only when
-`lean_review` recorded a green verdict for the full HEAD sha (registered projects only); any new commit changes the sha, so
-the review must be redone after every change. Without a green review the refusal says what to do: ask the desk for
-`approve-push <tN> <sha>` (the user's yes, one sha, single use, 2 hours) or push by hand with the printed `git -C ... push` command.
+Run in a thread, in the repo or worktree to push. A push needs `lean_review` to have recorded a green verdict for the
+full HEAD sha (registered projects only); any new commit changes the sha, so the review must be redone after every change.
+**A thread never runs `git push` or `gh pr create` itself**: its own permission check judges the command in a session that
+never heard the user's yes (it was said to the desk), so it refuses. After a green review, `lean_report` "ready to push
+<full sha> (branch, PR title)" and stop. The desk asks the user, records the yes with `approve-push <tN> <sha>` (one sha, single
+use, 2 hours) and pushes with `push` (and opens the PR) from the desk. Or the user pushes by hand with the printed `git -C ... push` command.
 
 1. `git rev-parse HEAD` (full sha), `git diff <base>...HEAD --stat`; base defaults to the default branch.
 2. Pass 1: spawn the `lean-agent:reviewer` agent with the diff command and the project's test command. It lists findings by

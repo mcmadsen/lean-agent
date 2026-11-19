@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A thread could not push even after the user approved it.** A push has two gates: lean-agent's (a green review or the desk's
+  `approve-push` for the exact sha) and Claude Code's own permission check, which judges each command in the session that runs it.
+  The user's "push and open the PR" is said to the desk, so a thread's session never saw it and refused `git push` as unwanted.
+  The push now runs where the user approved it, in the desk: the new `lean_thread` action `push` (`tN`, full `sha`, optional
+  `pr: { title, body?, base?, draft? }`) follows `approve-push`. Before anything leaves the machine it checks, in order, and refuses
+  with the reason: the desk role, the thread and a non-private project, the full sha, the thread's registered worktree with that
+  sha as HEAD on a branch that is not protected, guarded or the remote's default, a green review for the sha, a valid approval
+  (consumed by the push: a second `push` is refused). Then `git push -u <remote> <branch>` (never `--force`, never a tag) and, with
+  `pr`, `gh pr create` from the worktree (`gh` found on PATH, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; missing: the
+  reply gives the compare URL from the push output; no PR after a failed push). The reply, the thread's `history.jsonl` and a
+  queued message to the thread record what happened, failures with the step and the first error line.
+- Threads never run `git push` or `gh pr create`: the push gate's refusal for a thread, the `review` and `pr` skills, the thread
+  rules and the desk guide now say "report `ready to push <sha> (branch, PR title)` and stop"; the desk asks the user, naming the
+  exact sha and branch, and pushes. The push gate itself is unchanged (the thread's pre-push hook too).
+
 ## 1.0.7
 
 ### Removed

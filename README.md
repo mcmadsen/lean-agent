@@ -181,6 +181,20 @@ the answers; a private project is never compared. `lean_doctor` `compare` with `
 only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into rules: it learns from every
 author except the lean-agent owner's own comments.
 
+**The push runs in the desk, not in a thread.** Claude Code judges every command in the session that runs it, and your "push and
+open a PR" is said to the desk, so a thread's own session would refuse `git push` as unwanted. A thread therefore never runs
+`git push` or `gh pr create`: after a green review it reports "ready to push `<sha>` (branch, PR title)" and stops. The desk asks you
+(naming the exact sha and branch), and only after your explicit yes calls `lean_thread` `approve-push` (one sha, single use, 2 hours)
+and then `push` (`tN`, `sha`, optional `pr: { title, body?, base?, draft? }`). Before anything leaves the machine the mod checks, in
+order, and refuses with the reason: the desk role; the thread exists and its project is not private; the sha is the full one; the
+thread's registered worktree has that sha as HEAD on a branch that is not protected (`main`, `release/*` ...), guarded or the remote's
+default; a green review for that sha; a valid approval. Then it consumes the approval and runs `git push -u <remote> <branch>` (the
+branch's own remote or `origin`; never `--force`, never a tag), and with `pr` `gh pr create --head <branch>` from the worktree
+(`gh` is looked up on PATH, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; without it the reply gives the compare URL from
+the push output). No PR is attempted after a failed push. The reply, the thread's `history.jsonl` and a queued message to the
+thread ("the desk pushed `<sha>`; PR `<url>`") say what happened; a failure names the step and its first error line. A second
+`push` needs a new approval.
+
 ## Budgets
 
 Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:

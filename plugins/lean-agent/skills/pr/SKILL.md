@@ -35,10 +35,16 @@ with the token in the header, read from an environment variable and never printe
 
 ## Steps
 
-- **create** (thread only): `git push -u origin <branch>` (after a green review), then `gh pr create --title "<title>" --body-file <file>`
-  or `az repos pr create --source-branch <branch> --target-branch <base> --title "<title>" --description "<text>"`. The body is what
-  changed and why, plus how it was tested. Add the attribution lines only if `~/.lean-agent/config.json` `attribution` is true (your thread CLAUDE.md states the value; default off).
-  Then thread: `lean_report` the URL (state done only when nothing else is left); desk: relay the URL to the user.
+- **create** (desk pushes; a thread prepares it and never runs `git push` or `gh pr create`: its own permission check refuses them,
+  because the user's yes was said to the desk):
+  - thread: after a green `review`, `lean_report` "ready to push <full sha> (branch, PR title)" with the PR body text (what changed
+    and why, plus how it was tested; add the attribution lines only if `~/.lean-agent/config.json` `attribution` is true, your thread
+    CLAUDE.md states the value; default off) and stop.
+  - desk: ask the user, naming that sha and branch; only after an explicit yes call `lean_thread` `approve-push` (tN, sha) and then
+    `push` (tN, sha, `pr: { title, body, base?, draft? }`). The mod checks the review, the approval and the thread's worktree, runs
+    the push and the PR itself (or answers with the compare URL when gh is missing) and queues a message to the thread.
+    Relay the URL to the user. Azure DevOps: the push runs the same way and the PR link is the compare URL; the PR itself
+    is then the user's to open.
 - **status** (desk or thread; the desk's folder is not a repo, so it names the repo: github `--repo {owner}/{repo}`, Azure
   `--organization https://dev.azure.com/{org} --project {project} --repository {repo}`): github: `gh pr view <n> --json state,reviewDecision,statusCheckRollup,url,isDraft,mergeable`;
   find a branch's PR with `gh pr list --head <branch> --json number,url,state`. Azure: `az repos pr show --id <n>`;
