@@ -8,7 +8,7 @@ import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
-import { writeReview } from './reviews'
+import { reviewTool } from './reviewtool'
 import { fillProfile, profileText } from './profile'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -90,7 +90,31 @@ export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter((
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
-  { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
+  {
+    name: 'lean_review',
+    description: 'The strict review\'s script side. action prepare (project, base, head, branch): the brief computed from the diff without a model (new symbols and files, edited tests, defaulted parameters, module state, changed exports, declines, a re-review\'s open findings), the reviewer model by risk and whether a second opinion comes first. action record (default; project, sha, base, green, review = the reviewer\'s JSON block, second, passes, branch): records the verdict for a commit (the push gate reads it; only this tool can write it); green is REFUSED, with the reason, when a new symbol has no reuse entry, an edited test no coverage entry, a second-opinion candidate no answer, or a blocker/major finding is open. action decline (project, branch or all, kind, symbol, why): a finding the user decided not to fix; later reviews do not raise it again.',
+    inputSchema: obj({
+      action: { type: 'string', enum: ['prepare', 'record', 'decline'] },
+      project: { type: 'string' },
+      sha: { type: 'string', description: 'record: full HEAD sha that was reviewed' },
+      base: { type: 'string', description: 'prepare, record: the base branch or sha (default for prepare: the default branch)' },
+      head: { type: 'string', description: 'prepare: the head (default HEAD)' },
+      branch: { type: 'string', description: 'the branch under review (declines and re-reviews are kept per branch)' },
+      since: { type: 'string', description: 'prepare, record: the last reviewed sha (default: found from the earlier record)' },
+      green: { type: 'boolean', description: 'record: true asks for a green record; the tool checks it' },
+      review: { type: 'object', description: 'record: the reviewer\'s JSON block, as it wrote it' },
+      second: { type: 'array', items: { type: 'object', properties: { symbol: { type: 'string' }, candidate: { type: 'string' } } }, description: 'record: the second opinion\'s candidates (each must be answered in review.reuse)' },
+      model: { type: 'string', description: 'record: the reviewer model used' },
+      passes: { type: 'number' },
+      findings: { type: 'array', items: { type: 'string' }, description: 'record without review: open findings as text (never green)' },
+      all: { type: 'boolean', description: 'decline: every branch of the project' },
+      kind: { type: 'string', description: 'decline: the finding category (duplication, scope, ...)' },
+      symbol: { type: 'string', description: 'decline: the symbol the finding is about' },
+      path: { type: 'string', description: 'decline: the file (with text, instead of a symbol)' },
+      text: { type: 'string', description: 'decline: the finding\'s wording (with path, instead of a symbol)' },
+      why: { type: 'string', description: 'decline: the user\'s reason' },
+    }, ['project']),
+  },
   { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
@@ -340,8 +364,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     }
     if (name === 'lean_review') {
       const project = str(i.project) || (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project || ''
-      const file = await writeReview(h, { project, sha: str(i.sha), green: i.green === true, passes: Number(i.passes) || undefined, findings: Array.isArray(i.findings) ? i.findings.filter((x: unknown) => typeof x === 'string') : undefined })
-      return { ok: true, text: `review recorded (${i.green === true ? 'green' : 'not green'}) in ${file}` }
+      return reviewTool(h, project, i)
     }
     if (name === 'lean_goal') {
       if (!str(i.update)) return { ok: false, text: 'lean_goal needs update' }
