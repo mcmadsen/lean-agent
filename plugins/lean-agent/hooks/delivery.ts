@@ -9,7 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
-import { learnLessons, lessonLines, lessonsFor, listLessons, removeLesson, undoLessons, verifyLessons } from './reviewlessons'
+import { learnLessons, lessonLines, lessonsFor, listLessons, removeLesson, repoOf, undoLessons, verifyLessons } from './reviewlessons'
 import { fillProfile, profileText } from './profile'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -355,8 +355,9 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         if (action === 'lessons-rm') return str(i.which) ? await removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
         if (action === 'lessons-undo') return await undoLessons(h, project)
         if (action === 'lessons-verify') {
-          if (!str(i.repo).startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path)' }
-          return { ok: true, text: (await verifyLessons(h, project, str(i.repo), i.apply === true)).lines.join('\n') }
+          const repo = await repoOf(h, project, str(i.repo) || undefined)
+          if (!repo.startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path) or a registered project' }
+          return { ok: true, text: (await verifyLessons(h, project, repo, i.apply === true)).lines.join('\n') }
         }
         return { ok: false, text: `unknown lean_review action ${action}` }
       }

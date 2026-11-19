@@ -126,6 +126,21 @@ test('learn: near-duplicates are skipped, a helper of a known name updates its l
   expect((await learnLessons(big.host, 'proj', { checklist: lines })).added.length).toBe(60) // more than 25
 })
 
+test('learn: two helpers of one name in different files are two lines; a line the user removed is not learned again; replace needs a close match', async () => {
+  const h = fakeHost(null)
+  const r = await learnLessons(h.host, 'proj', { helpers: [{ name: 'parse', where: 'src/a/parse.ts', what: 'parses A input' }, { name: 'parse', where: 'src/b/parse.ts', what: 'parses B input' }] })
+  expect(r.added.length).toBe(2)
+  expect((await learnLessons(h.host, 'proj', { helpers: [{ name: 'parse', where: 'src/b/parse.ts', what: 'parses B input and trims' }] })).updated.length).toBe(1)
+  expect((await readLessons(h.host, 'proj')).filter(l => l.text.includes('parse')).length).toBe(2)
+  await learnLessons(h.host, 'proj', { checklist: ['Never log the credential field in the exporter'] })
+  await removeLesson(h.host, 'proj', 'credential field')
+  const again = await learnLessons(h.host, 'proj', { checklist: ['Never log the credential field in the exporter please'] })
+  expect(again.added).toEqual([])
+  expect(again.skipped.join()).toContain('removed earlier')
+  const rep = await learnLessons(h.host, 'proj', { replace: [{ old: 'something about parse and input', new: 'x' }] })
+  expect(rep.updated).toEqual([]) // too far from every line: nothing is overwritten
+})
+
 test('remove by number or unique text is soft (undo brings it back); a missing or ambiguous target is refused', async () => {
   const h = fakeHost(null)
   await learnLessons(h.host, 'proj', { checklist: ['alpha first lesson about queues', 'bravo second lesson about queues'] })
@@ -288,7 +303,8 @@ test('lean_review actions: lessons selects by base/head or paths through git, le
   expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-list', project: 'proj' })).text).toContain('501. [other] Brand new unique zebra')
   expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-rm', project: 'proj', which: '501' })).ok).toBe(true)
   expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-undo', project: 'proj' })).ok).toBe(true)
-  expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-verify', project: 'proj' })).ok).toBe(false) // needs repo
+  expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-verify', project: 'proj' })).text).toContain('checking against') // the registered project's path is the default repo
+  expect((await threadTool(h.host, 't1', 'lean_review', { action: 'lessons-verify', project: 'unregistered' })).ok).toBe(false)
   expect((await threadTool(h.host, 't1', 'lean_review', { action: 'bogus', project: 'proj' })).ok).toBe(false)
   // the record action still needs a sha
   expect((await threadTool(h.host, 't1', 'lean_review', { project: 'proj', green: true })).ok).toBe(false)

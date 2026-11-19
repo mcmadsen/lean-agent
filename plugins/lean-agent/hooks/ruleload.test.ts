@@ -282,6 +282,15 @@ test('a git show / grep / diff / log -p of a project file loads the rules of its
   expect(await ruleContext(setup().host, who, 'Bash', { command: 'git show abc123:services/billing/a.ts' })).toBeNull() // no cwd, no -C
 })
 
+test('gitReads is quote aware: a message that mentions a git read is no read, a quoted | keeps the path, `-C .` and ./ are normalised', () => {
+  expect(gitReads('git -C /repo commit -m "x; git show HEAD:a/b.ts"').paths).toEqual([])
+  expect(gitReads('git -C /repo commit -m "fix\ngit show HEAD:a/b.ts\nmore"').paths).toEqual([])
+  expect(gitReads("git -C /repo grep -e 'a|b' -- src/x.ts").paths).toEqual(['/repo/src/x.ts'])
+  expect(gitReads('git -C . show HEAD:./a/b.ts', '/repo')).toEqual({ paths: ['/repo/a/b.ts'], repos: ['/repo'] })
+  expect(gitReads('/usr/bin/git -C /repo show HEAD:a/b.ts').paths).toEqual(['/repo/a/b.ts'])
+  expect(gitReads('echo hi && git -C /repo show HEAD:a/b.ts | head -5').paths).toEqual(['/repo/a/b.ts'])
+})
+
 test('git commands that are not reads, or that leave every project, load nothing', async () => {
   const h = setup()
   for (const command of ['git -C /repo status', 'git -C /repo commit -m x', 'git -C /repo push origin HEAD:services/billing', 'git -C /repo add services/billing/a.ts', 'git -C /elsewhere show abc:services/billing/a.ts', 'git -C /repo show HEAD:../services/billing/a.ts'])

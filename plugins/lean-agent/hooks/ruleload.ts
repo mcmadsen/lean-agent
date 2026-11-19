@@ -102,28 +102,45 @@ const insideArea = (globs: string[], rel: string) => globs.some(g => { const p =
 // (or a `cd <abs>` before it, or the session's cwd for a plain `git show <rev>:<path>`), and every path argument is joined to it.
 const GIT_READS = new Set(['show', 'grep', 'diff', 'log', 'blame', 'ls-tree', 'cat-file'])
 const MAX_CALL_PATHS = 8
-const unq = (t: string) => t.replace(/^['"`]+|['"`]+$/g, '')
 const safeAbs = (p: string) => p.startsWith('/') && p.length > 1 && !p.split('/').includes('..')
+// a `.` segment is dropped (`-C .` is the cwd; `/repo/./a.ts` is `/repo/a.ts`)
+const tidy = (p: string) => p.replace(/\/(\.\/)+/g, '/').replace(/\/\.$/, '')
+// the command split into simple commands (on | || & && ; newline OUTSIDE quotes), each into words with the quotes removed: a commit message
+// that mentions `git show ...` is one word of `git commit`, and `grep "a|b" -- path` keeps its path
+function shellSegments(cmd: string): string[][] {
+  const segs: string[][] = [[]]
+  let word = ''
+  let has = false
+  let q = ''
+  const end = () => { if (has) segs[segs.length - 1]!.push(word); word = ''; has = false }
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!
+    if (q) { if (c === q) q = ''; else if (c === '\\' && q === '"' && i + 1 < cmd.length) word += cmd[++i]; else word += c; continue }
+    if (c === '"' || c === "'") { q = c; has = true } else if (c === '\\' && i + 1 < cmd.length) { word += cmd[++i]; has = true } else if (/\s/.test(c) && c !== '\n') end()
+    else if (c === '\n' || c === ';' || c === '|' || c === '&') { end(); if (segs[segs.length - 1]!.length) segs.push([]) } else { word += c; has = true }
+  }
+  end()
+  return segs.filter(s => s.length)
+}
 export function gitReads(cmd: string, cwd = ''): { paths: string[]; repos: string[] } {
   const paths: string[] = []
   const repos: string[] = []
   let dir = cwd.replace(/\/+$/, '')
-  for (const seg of cmd.split(/&&|\|\||[|;&\n]/)) {
-    const t = seg.trim().split(/\s+/).map(unq).filter(Boolean)
-    if (t[0] === 'cd' && t[1]) { dir = t[1].startsWith('/') ? t[1].replace(/\/+$/, '') : dir && t[1] !== '-' ? `${dir}/${t[1]}` : ''; continue }
-    if (t[0] !== 'git') continue
+  for (const t of shellSegments(cmd)) {
+    if (t[0] === 'cd' && t[1]) { dir = tidy(t[1].startsWith('/') ? t[1].replace(/\/+$/, '') : dir && t[1] !== '-' ? `${dir}/${t[1]}` : ''); continue }
+    if (t[0] !== 'git' && t[0] !== '/usr/bin/git') continue
     let repo = dir
     let i = 1
     for (; i < t.length && t[i]!.startsWith('-'); i++) {
       if (t[i] === '-C' && t[i + 1]) { const p = t[++i]!; repo = p.startsWith('/') ? p : repo ? `${repo}/${p}` : '' } else if (t[i] === '-c') i++
     }
     const sub = t[i++]
-    repo = repo.replace(/\/+$/, '')
+    repo = tidy(repo.replace(/\/+$/, ''))
     if (!sub || !GIT_READS.has(sub) || !safeAbs(repo)) continue
     repos.push(repo)
     const add = (a: string) => {
       const rel = a.replace(/[*?[{].*$/, '').replace(/^\.\//, '').replace(/\/+$/, '')
-      const abs = rel.startsWith('/') ? rel : rel ? `${repo}/${rel}` : ''
+      const abs = tidy(rel.startsWith('/') ? rel : rel ? `${repo}/${rel}` : '')
       if (abs && !a.startsWith(':') && safeAbs(abs)) paths.push(abs)
     }
     let dd = false

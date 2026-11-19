@@ -127,6 +127,7 @@ export async function readLessons(h: Host, project: string): Promise<Lesson[]> {
 }
 const writeLessons = async (h: Host, home: string, project: string, all: Lesson[]) => atomicWrite(h, lessonFile(home, project), all.map(l => JSON.stringify(l)).join('\n') + (all.length ? '\n' : ''))
 const live = (all: Lesson[]) => all.filter(l => !l.dropped)
+const removedByUser = (all: Lesson[]) => all.filter(l => l.dropped && l.droppedWhy === 'removed') // (a line the user removed is not learned again)
 const nextId = (all: Lesson[]) => all.reduce((m, l) => Math.max(m, l.id), 0) + 1
 
 type Meta = { lastImport?: number; imported?: number; from?: string[] }
@@ -166,7 +167,7 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
       const o = lineOf(String(asObj(r).old ?? ''))
       const n = lineOf(String(asObj(r).new ?? ''))
       if (!o || !n) continue
-      const hit = live(all).map(l => ({ l, s: jaccard(wset(l.text), wset(o)) })).filter(x => x.s >= 0.5).sort((a, b) => b.s - a.s || a.l.id - b.l.id)[0]
+      const hit = live(all).map(l => ({ l, s: jaccard(wset(l.text), wset(o)) })).filter(x => x.s >= 0.7).sort((a, b) => b.s - a.s || a.l.id - b.l.id)[0]
       if (hit) { upd(hit.l, n); out.updated.push(`corrected #${hit.l.id}: ${n}`) } else out.skipped.push(`replace: no line like "${o.slice(0, 60)}"`)
     }
     const add = (family: Family, text: string) => {
@@ -181,21 +182,27 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
       const t = lineOf(String(c ?? ''))
       if (!t) continue
       if (live(all).some(l => similar(l.text, t))) out.skipped.push(`already there: ${t.slice(0, 80)}`)
+      else if (removedByUser(all).some(l => similar(l.text, t))) out.skipped.push(`removed earlier, not added again: ${t.slice(0, 80)}`)
       else add('review-checklist', t)
     }
     for (const hv of Array.isArray(inp.helpers) ? inp.helpers : []) {
       const t = helperLine(hv)
       if (!t) continue
-      const name = helperParts(t).name.toLowerCase()
-      const same = live(all).find(l => l.family === 'shared-helpers' && name && helperParts(l.text).name.toLowerCase() === name)
+      const mine = helperParts(t)
+      const name = mine.name.toLowerCase()
+      const sameName = live(all).filter(l => l.family === 'shared-helpers' && name && helperParts(l.text).name.toLowerCase() === name)
+      // the same name in the same place (or one side says no place) is the same helper; the same name elsewhere is another helper (`parse` in two files)
+      const wh = (w: string) => (w === '?' ? '' : clean(w).toLowerCase())
+      const same = sameName.find(l => { const a = wh(helperParts(l.text).where); const b = wh(mine.where); return !a || !b || a === b })
       if (same) {
         if (same.text !== t) { upd(same, t); out.updated.push(`helper #${same.id}: ${t}`) } else out.skipped.push(`unchanged helper: ${name}`)
-      } else if (live(all).some(l => l.family === 'shared-helpers' && similar(l.text, t, 0.7))) out.skipped.push(`already there: ${t.slice(0, 80)}`)
+      } else if (!sameName.length && live(all).some(l => l.family === 'shared-helpers' && similar(l.text, t, 0.7))) out.skipped.push(`already there: ${t.slice(0, 80)}`)
+      else if (!sameName.length && removedByUser(all).some(l => l.family === 'shared-helpers' && similar(l.text, t, 0.7))) out.skipped.push(`removed earlier, not added again: ${t.slice(0, 80)}`)
       else add('shared-helpers', t)
     }
     if (ops.length) {
+      await logBatch(h, home, project, ops, now) // (the undo entry first: a crash between the two loses no undo)
       await writeLessons(h, home, project, all)
-      await logBatch(h, home, project, ops, now)
     }
     return out
   })
@@ -212,8 +219,8 @@ export async function removeLesson(h: Host, project: string, which: string | num
     if (hits.length !== 1) return { ok: false, text: hits.length ? `${hits.length} lines contain "${w}": use the number from list` : `no line ${/^\d+$/.test(w) ? '#' : 'contains '}${w}` }
     const l = hits[0]!
     ops_drop(l, day(now), why)
-    await writeLessons(h, home, project, all)
     await logBatch(h, home, project, [{ kind: 'rm', id: l.id }], now)
+    await writeLessons(h, home, project, all)
     return { ok: true, text: `removed #${l.id}: ${l.text.slice(0, 120)}` }
   })
 }
@@ -257,41 +264,45 @@ async function git(h: Host, repo: string, ...a: string[]): Promise<string | null
 export async function verifyLessons(h: Host, project: string, repo: string, apply = false): Promise<{ lines: string[]; flagged: number }> {
   const home = await homeDir(h)
   const now = await h.clock.now()
-  return withFolderLock(h, lockOf(home, project), async () => {
-    const refs: string[] = []
-    for (const r of ['HEAD', 'origin/HEAD', 'main', 'master']) if ((await git(h, repo, 'rev-parse', '--verify', '--quiet', `${r}^{commit}`)) !== null && !refs.includes(r)) refs.push(r)
-    const files = new Map<string, string[]>()
-    for (const r of refs) files.set(r, ((await git(h, repo, 'ls-tree', '-r', '--name-only', r)) ?? '').split('\n').filter(Boolean))
-    const all = await readLessons(h, project)
-    const lines = [`checking against: ${refs.join(', ') || 'nothing (no git ref found)'}`]
-    let flagged = 0
-    const removed: number[] = []
-    if (!refs.length) return { lines: [...lines, 'cannot verify: the repo has no commit'], flagged }
-    for (const l of live(all).filter(x => x.family === 'shared-helpers')) {
-      const hp = helperParts(l.text)
-      let why = ''
-      const where = pathsIn(hp.where)
-      const hasPath = where.some(p => refs.some(r => files.get(r)!.some(f => f === p || f.endsWith('/' + p) || f.startsWith(p.replace(/\/$/, '') + '/'))))
-      if (!hasPath) {
-        const names = (hp.name.match(/[A-Za-z_$][\w$]{2,}/g) ?? []).slice(0, 3)
-        let sym = false
-        for (const r of refs) for (const n of names) if (!sym && (await git(h, repo, 'grep', '-q', '-w', n, r, '--')) !== null) sym = true
-        if (!sym) why = `path ${where.join(', ') || '(none)'} and symbol ${names.join(', ') || '(none)'} not found on ${refs.join(', ')}`
-      }
-      if (/not confirmed/i.test(l.text)) why = 'it says it was not confirmed'
-      if (why) {
-        flagged++
-        lines.push(`${apply ? 'removed' : 'would remove'} #${l.id}: ${l.text.slice(0, 120)}\n    because ${why}`)
-        if (apply) { ops_drop(l, day(now), `verify: ${why.slice(0, 100)}`); removed.push(l.id) }
-      }
+  // the git work (many spawns for a big store) runs OUTSIDE the lock; the drops are applied under it to a fresh read, by id and unchanged text
+  const refs: string[] = []
+  for (const r of ['HEAD', 'origin/HEAD', 'main', 'master']) if ((await git(h, repo, 'rev-parse', '--verify', '--quiet', `${r}^{commit}`)) !== null && !refs.includes(r)) refs.push(r)
+  const files = new Map<string, string[]>()
+  for (const r of refs) files.set(r, ((await git(h, repo, 'ls-tree', '-r', '--name-only', r)) ?? '').split('\n').filter(Boolean))
+  const lines = [`checking against: ${refs.join(', ') || 'nothing (no git ref found)'}`]
+  if (!refs.length) return { lines: [...lines, 'cannot verify: the repo has no commit'], flagged: 0 }
+  const bad: { l: Lesson; why: string }[] = []
+  for (const l of live(await readLessons(h, project)).filter(x => x.family === 'shared-helpers')) {
+    const hp = helperParts(l.text)
+    let why = ''
+    const where = pathsIn(hp.where)
+    const hasPath = where.some(p => refs.some(r => files.get(r)!.some(f => f === p || f.endsWith('/' + p) || f.startsWith(p.replace(/\/$/, '') + '/'))))
+    if (!hasPath) {
+      const names = (hp.name.match(/[A-Za-z_$][\w$]{2,}/g) ?? []).slice(0, 3)
+      let sym = false
+      for (const r of refs) for (const n of names) if (!sym && (await git(h, repo, 'grep', '-q', '-F', '-w', '-e', n, r, '--')) !== null) sym = true
+      if (!sym) why = `path ${where.join(', ') || '(none)'} and symbol ${names.join(', ') || '(none)'} not found on ${refs.join(', ')}`
     }
-    if (apply && flagged) {
-      await writeLessons(h, home, project, all)
-      await logBatch(h, home, project, removed.map(id => ({ kind: 'rm' as const, id })), now)
-    }
-    lines.push(`${flagged} line(s) ${apply ? 'removed' : 'flagged'}${apply || !flagged ? '' : '; nothing changed: remove them with verify apply'}`)
-    return { lines, flagged }
-  })
+    if (/not confirmed/i.test(l.text)) why = 'it says it was not confirmed'
+    if (why) bad.push({ l, why })
+  }
+  for (const b of bad) lines.push(`${apply ? 'removed' : 'would remove'} #${b.l.id}: ${b.l.text.slice(0, 120)}\n    because ${b.why}`)
+  if (apply && bad.length) {
+    await withFolderLock(h, lockOf(home, project), async () => {
+      const all = await readLessons(h, project)
+      const removed: number[] = []
+      for (const b of bad) {
+        const l = all.find(x => x.id === b.l.id && x.text === b.l.text && !x.dropped)
+        if (l) { ops_drop(l, day(now), `verify: ${b.why.slice(0, 100)}`); removed.push(l.id) }
+      }
+      if (removed.length) {
+        await logBatch(h, home, project, removed.map(id => ({ kind: 'rm' as const, id })), now) // (the undo entry first: a crash between the two loses no undo)
+        await writeLessons(h, home, project, all)
+      }
+    })
+  }
+  lines.push(`${bad.length} line(s) ${apply ? 'removed' : 'flagged'}${apply || !bad.length ? '' : '; nothing changed: remove them with verify apply'}`)
+  return { lines, flagged: bad.length }
 }
 
 // ---- selection --------------------------------------------------------------------------------------------------------------------
@@ -313,8 +324,7 @@ function pathHit(lp: string, changed: string[]): boolean {
   if (/[*?[{]/.test(lp)) {
     if (globProblem(lp)) return false
     const re = globRe(lp)
-    const pre = lp.replace(/[*?[{].*$/, '')
-    return changed.some(c => re.test(c) || (pre !== '' && c.startsWith(pre)))
+    return changed.some(c => re.test(c))
   }
   const p = clean(lp)
   return changed.some(c => c === p || c.endsWith('/' + p) || p.endsWith('/' + c) || c.startsWith(p + '/'))
@@ -391,14 +401,16 @@ export async function reviewLessons(h: Host, project: string, changedPaths: stri
 // ---- the tool side: changed paths and the diff of a branch, then reviewLessons -----------------------------------------------------
 const REF = /^[A-Za-z0-9_][\w./@^~{}:-]*$/
 export type LessonsFor = { project: string; repo?: string; base?: string; head?: string; paths?: string[]; goal?: string; budget?: number }
+// the checkout to read: the given absolute path, else the registered project's own
+export async function repoOf(h: Host, project: string, given?: string): Promise<string> {
+  if (given) return given
+  const projs = asObj(await readJson<unknown>(h, `${leanDir(await homeDir(h))}/projects.json`, {}))
+  const p = asObj(projs[project]).path
+  return typeof p === 'string' ? p : ''
+}
 export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean; text: string }> {
   if (!slugOk(a.project)) return { ok: false, text: 'lessons needs a project name' }
-  const home = await homeDir(h)
-  let repo = a.repo ?? ''
-  if (!repo) {
-    const projs = asObj(await readJson<unknown>(h, `${leanDir(home)}/projects.json`, {}))
-    repo = typeof asObj(projs[a.project]).path === 'string' ? asObj(projs[a.project]).path : ''
-  }
+  const repo = await repoOf(h, a.project, a.repo)
   if (!repo.startsWith('/')) return { ok: false, text: `lessons needs repo (an absolute path) or a registered project ${a.project}` }
   if ((a.base && !REF.test(a.base)) || (a.head && !REF.test(a.head))) return { ok: false, text: 'lessons: base and head must be plain refs' }
   const paths = (a.paths ?? []).filter(p => typeof p === 'string' && p && !p.startsWith('-') && !p.split('/').includes('..') && !p.startsWith('/')).slice(0, 200)
@@ -408,10 +420,10 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
     let base = a.base
     if (!base) for (const r of ['origin/HEAD', 'origin/main', 'origin/master', 'main', 'master']) if (!base && (await git(h, repo, 'rev-parse', '--verify', '--quiet', `${r}^{commit}`)) !== null) base = r
     const range = base ? `${base}...${a.head || 'HEAD'}` : a.head || 'HEAD'
-    const names = await git(h, repo, 'diff', '--name-only', range)
+    const names = await git(h, repo, 'diff', '--name-only', range, '--')
     if (names === null) return { ok: false, text: `lessons: git diff ${range} failed in ${repo}` }
     changed = [...new Set([...names.split('\n').filter(Boolean), ...paths])]
-    diff = ((await git(h, repo, 'diff', '-U0', '--no-color', range)) ?? '').slice(0, MAX_DIFF_CHARS)
+    diff = ((await git(h, repo, 'diff', '-U0', '--no-color', range, '--')) ?? '').slice(0, MAX_DIFF_CHARS)
   } else if (paths.length) diff = ((await git(h, repo, 'diff', '-U0', '--no-color', 'HEAD', '--', ...paths)) ?? '').slice(0, MAX_DIFF_CHARS)
   const r = await reviewLessons(h, a.project, changed, diff, { budget: a.budget, goal: a.goal })
   const tail = r.total ? `\n(${r.picked.length} of ${r.total} lessons offered for ${changed.length} changed file(s): ${r.picked.map(p => `#${p.id}`).join(' ') || 'none matched'})` : `\n(no learned lessons for ${a.project} yet)`
@@ -441,7 +453,10 @@ async function legacyLessons(h: Host, lean: string, p: string): Promise<{ rows: 
     const f = fam(String(asObj(e).cid ?? ''))
     const t = lineOf(String(asObj(e).line ?? ''))
     if (!f || !t) continue
-    rows.push({ family: f, topic: topicSuffix(String(e.cid)), text: t, id: Number.isInteger(e.id) ? e.id : undefined, added: typeof e.date === 'string' ? e.date.slice(0, 10) : '', batch: String(e.batch ?? 'legacy'), dropped: e.gone === true })
+    const row: Legacy = { family: f, topic: topicSuffix(String(e.cid)), text: t, id: Number.isInteger(e.id) ? e.id : undefined, added: typeof e.date === 'string' ? e.date.slice(0, 10) : '', batch: String(e.batch ?? 'legacy'), dropped: e.gone === true }
+    const prev = rows.findIndex(r => norm(r.text) === norm(t))
+    if (prev < 0) rows.push(row)
+    else if (rows[prev]!.dropped && !row.dropped) rows[prev] = row // removed, then learned again: the live entry wins whatever the order
     have.add(norm(t))
   }
   const list: any[] = Array.isArray(cards) ? cards : Array.isArray(asObj(cards).cards) ? asObj(cards).cards : []
