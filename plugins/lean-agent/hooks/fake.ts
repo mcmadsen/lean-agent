@@ -1,7 +1,7 @@
 // @ts-nocheck
 // A fake host for the specs: an in-memory file system and a scripted process table, answering the engine's
 // ops beneath the plugin. Not used by the mod itself.
-export type Call = { argv: string[]; cwd?: string; stdin?: string; env?: Record<string, string> }
+export type Call = { argv: string[]; cwd?: string; stdin?: string; env?: Record<string, string>; timeoutMs?: number }
 
 export function fakeHost(on: any, opts: { home?: string } = {}) {
   const home = opts.home ?? '/h'
@@ -44,7 +44,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       return [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false }))
     },
     run: (argv: readonly string[], init?: any) => {
-      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin, env: init?.env }
+      const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin, env: init?.env, timeoutMs: init?.timeoutMs }
       calls.push(call)
       // opt-in (strict.on): a spawn whose cwd does not exist rejects with ENOENT naming the command, as Node does; with no cwd the
       // session's own folder is used, and strict.sessionGone says that folder vanished (a removed worktree the thread had cd'ed into)

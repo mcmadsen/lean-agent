@@ -187,9 +187,11 @@ open a PR" is said to the desk, so a thread's own session would refuse `git push
 (naming the exact sha and branch), and only after your explicit yes calls `lean_thread` `approve-push` (one sha, single use, 2 hours)
 and then `push` (`tN`, `sha`, optional `pr: { title, body?, base?, draft? }`). Before anything leaves the machine the mod checks, in
 order, and refuses with the reason: the desk role; the thread exists and its project is not private; the sha is the full one; the
-thread's registered worktree has that sha as HEAD on a branch that is not protected (`main`, `release/*` ...), guarded or the remote's
-default; a green review for that sha; a valid approval. Then it consumes the approval and runs `git push -u <remote> <branch>` (the
-branch's own remote or `origin`; never `--force`, never a tag), and with `pr` `gh pr create --head <branch>` from the worktree
+thread's registered worktree (a linked worktree of the project's own repository, so its config is the project's) has that sha as
+HEAD on a branch that is not protected (`main`, `release/*` ...), guarded or the remote's default (read from the remote when this
+checkout has none; unknown = refused); a green review for that sha; a valid approval. Then it consumes the approval and pushes
+that exact commit to `<remote>/<branch>` (the branch's own remote or `origin`; never `--force`, never a tag, no prompt, bounded in
+time), and with `pr` runs `gh pr create --head <branch>` from the worktree
 (`gh` is looked up on PATH, then `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; without it the reply gives the compare URL from
 the push output). No PR is attempted after a failed push. The reply, the thread's `history.jsonl` and a queued message to the
 thread ("the desk pushed `<sha>`; PR `<url>`") say what happened; a failure names the step and its first error line. A second

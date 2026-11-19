@@ -8,10 +8,12 @@
   The user's "push and open the PR" is said to the desk, so a thread's session never saw it and refused `git push` as unwanted.
   The push now runs where the user approved it, in the desk: the new `lean_thread` action `push` (`tN`, full `sha`, optional
   `pr: { title, body?, base?, draft? }`) follows `approve-push`. Before anything leaves the machine it checks, in order, and refuses
-  with the reason: the desk role, the thread and a non-private project, the full sha, the thread's registered worktree with that
-  sha as HEAD on a branch that is not protected, guarded or the remote's default, a green review for the sha, a valid approval
-  (consumed by the push: a second `push` is refused). Then `git push -u <remote> <branch>` (never `--force`, never a tag) and, with
-  `pr`, `gh pr create` from the worktree (`gh` found on PATH, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; missing: the
+  with the reason: the desk role, the thread and a non-private project, the full sha, the thread's registered worktree (a linked
+  worktree of the project's own repository) with that sha as HEAD on a branch that is not protected, guarded or the remote's
+  default (read from the remote when unknown here; still unknown = refused), a green review for the sha, a valid approval
+  (consumed by the push: a second `push` is refused). Then it pushes that exact commit to `<remote>/<branch>` (never `--force`,
+  never a tag, no prompt, bounded in time; the upstream is set afterwards) and, with `pr`, runs `gh pr create` from the worktree
+  (the body on stdin) (`gh` found on PATH, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; missing: the
   reply gives the compare URL from the push output; no PR after a failed push). The reply, the thread's `history.jsonl` and a
   queued message to the thread record what happened, failures with the step and the first error line.
 - Threads never run `git push` or `gh pr create`: the push gate's refusal for a thread, the `review` and `pr` skills, the thread

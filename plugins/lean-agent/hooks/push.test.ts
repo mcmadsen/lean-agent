@@ -8,7 +8,7 @@ const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -18,6 +18,8 @@ async function setup(o: Opts = {}) {
   h.git.handler = a => {
     const s = a.join(' ')
     log.push(a)
+    if (s.includes('--git-common-dir')) return { exitCode: 0, stdout: (o.wtCommon && s.includes(WT) ? o.wtCommon : '/r/app/.git') + '\n' }
+    if (s.includes('ls-remote')) return o.lsFail ? { exitCode: 128, stdout: '', stderr: 'fatal: unable to access remote' } : { exitCode: 0, stdout: `ref: refs/heads/${o.lsDefault ?? 'main'}\tHEAD\n${SHA}\tHEAD\n` }
     if (s.includes('rev-parse')) return { exitCode: 0, stdout: (o.head ?? SHA) + '\n' }
     if (s.includes('refs/remotes/origin/HEAD')) return o.defaultBranch === '' ? { exitCode: 1, stdout: '' } : { exitCode: 0, stdout: `origin/${o.defaultBranch ?? 'main'}\n` }
     if (s.includes('symbolic-ref')) return branch ? { exitCode: 0, stdout: branch + '\n' } : { exitCode: 1, stdout: '' }
@@ -26,11 +28,10 @@ async function setup(o: Opts = {}) {
     if (a.includes('push')) return { exitCode: 0, stderr: PUSH_OUT, stdout: '', ...(o.pushResult ?? {}) }
     return { exitCode: 1, stdout: '' }
   }
-  const ghCalls: { argv: string[]; cwd?: string; body: string }[] = []
+  const ghCalls: { argv: string[]; cwd?: string; body: string; env?: Record<string, string>; timeoutMs?: number }[] = []
   h.exec.handler = (argv, c) => {
     if (argv[1] === '--version') return { exitCode: o.gh === false ? 127 : 0, stdout: 'gh version 2\n' }
-    const bodyArg = argv.find(x => x.startsWith('--body-file='))
-    ghCalls.push({ argv, cwd: c.cwd, body: bodyArg ? String(h.files.get(bodyArg.slice(12)) ?? '<missing>') : '' })
+    ghCalls.push({ argv, cwd: c.cwd, body: c.stdin ?? '<none>', env: c.env, timeoutMs: c.timeoutMs })
     return o.ghFailure ? { exitCode: 1, stdout: '', stderr: o.ghFailure } : { exitCode: 0, stdout: (o.ghUrl ?? 'https://github.com/o/r/pull/7') + '\n' }
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
@@ -39,10 +40,11 @@ async function setup(o: Opts = {}) {
   if (o.review !== false) await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   const pushes = () => log.filter(a => a.includes('push'))
+  const pushCall = () => h.calls.find(c => c.argv.includes('push'))
   const push = (extra: Record<string, unknown> = {}) => leanThread(h.host, '/p', { action: 'push', tN: 't1', sha: SHA, ...extra } as any)
   const history = () => String(h.files.get('/h/.lean-agent/threads/t1/history.jsonl') ?? '')
   const inbox = () => String(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl') ?? '')
-  return { h, push, pushes, ghCalls, history, inbox }
+  return { h, push, pushes, pushCall, log, ghCalls, history, inbox }
 }
 
 test('push refuses with the precise reason before anything leaves the machine, and keeps the approval', async () => {
@@ -55,6 +57,9 @@ test('push refuses with the precise reason before anything leaves the machine, a
     ['no worktree registered', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', '{}')],
     ['a worktree of another thread', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, branch: 'feat', thread: 't2' } }))],
     ['a worktree outside the project', {}, {}, 'does not belong to project app', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/elsewhere/feat', branch: 'feat', thread: 't1' } }))],
+    ['a worktree of another repository (its config is the thread\'s own)', { wtCommon: '/h/.lean-agent/worktrees/app/feat/.git' }, {}, 'is not a worktree of the repository of project app'],
+    ['a project without a folder', {}, {}, 'not a registered project with a folder', s => void s.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: {} }))],
+    ['the default branch of the remote is unknown', { defaultBranch: '', lsFail: true }, {}, 'default branch of origin is unknown'],
     ['HEAD is another commit', { head: 'f'.repeat(40) }, {}, `HEAD of ${WT} is ffffffff, not ${SHA.slice(0, 8)}`],
     ['a detached HEAD', { branch: '' }, {}, 'no branch checked out'],
     ['the registered branch differs', {}, {}, 'worktrees.json says other', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: WT, branch: 'other', thread: 't1' } }))],
@@ -85,7 +90,7 @@ test('push refuses with the precise reason before anything leaves the machine, a
   // a refusal before the push leaves the approval usable: fix the cause and the same approval pushes
   const s = await setup({ head: 'f'.repeat(40) })
   expect((await s.push()).ok).toBe(false)
-  s.h.git.handler = ((old: any) => (a: string[], c: any) => (a.join(' ').includes('rev-parse') ? { exitCode: 0, stdout: SHA + '\n' } : old(a, c)))(s.h.git.handler)
+  s.h.git.handler = ((old: any) => (a: string[], c: any) => (a.join(' ').includes('rev-parse') && !a.includes('--git-common-dir') ? { exitCode: 0, stdout: SHA + '\n' } : old(a, c)))(s.h.git.handler)
   expect((await s.push()).ok).toBe(true)
 })
 
@@ -94,14 +99,18 @@ test('push then PR: the desk pushes the exact branch, opens the PR with gh from 
   const r = await s.push({ pr: { title: 'Fix the thing', body: 'What changed.\n\nTested: yes.' } })
   expect(r.ok).toBe(true)
   expect(r.text).toBe(`pushed ${SHA} to origin/feat; PR https://github.com/o/r/pull/7`)
-  expect(s.pushes()).toEqual([['-C', WT, 'push', '-u', 'origin', 'refs/heads/feat:refs/heads/feat']])
-  expect(JSON.stringify(s.pushes())).not.toMatch(/--force|--tags|--delete|\+refs/)
+  // the approved object goes out (not whatever the branch is at by then), no tag rides along, nothing is forced
+  expect(s.pushes()).toEqual([['-C', WT, '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  expect(JSON.stringify(s.pushes())).not.toMatch(/--force|--tags|--delete|\+refs|--mirror|--all/)
+  expect(s.pushCall()).toMatchObject({ timeoutMs: 120_000, env: { GIT_TERMINAL_PROMPT: '0' } }) // bounded, never waits for a prompt
+  expect(s.ghCalls[0]).toMatchObject({ timeoutMs: 120_000, env: { GH_PROMPT_DISABLED: '1' } })
+  expect(s.log).toContainEqual(['-C', WT, 'branch', '--set-upstream-to=origin/feat', 'feat']) // what -u would have set
   expect(s.ghCalls).toHaveLength(1)
-  expect(s.ghCalls[0]!.argv.slice(0, 8)).toEqual(['gh', 'pr', 'create', '--head', 'feat', '--base', 'main', '--title=Fix the thing'])
+  expect(s.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'feat', '--base', 'main', '--title=Fix the thing', '--body-file=-'])
   expect(s.ghCalls[0]!.argv).not.toContain('--draft')
   expect(s.ghCalls[0]!.cwd).toBe(WT)
-  expect(s.ghCalls[0]!.body).toBe('What changed.\n\nTested: yes.') // the body file existed during the call ...
-  expect([...s.h.files.keys()].filter(k => k.includes('/push/'))).toEqual([]) // ... and is gone
+  expect(s.ghCalls[0]!.body).toBe('What changed.\n\nTested: yes.') // the body goes in on stdin: no file is written
+  expect(s.h.writes.filter(w => !w.includes('.tmp-'))).not.toContainEqual(expect.stringMatching(/\.md$/))
   const hist = s.history().trim().split('\n').map(l => JSON.parse(l))
   expect(hist).toHaveLength(1)
   expect(hist[0]).toMatchObject({ kind: 'push', sha: SHA, project: 'app', remote: 'origin', branch: 'feat', ok: true, pr: 'https://github.com/o/r/pull/7', compare: 'https://github.com/o/r/pull/new/feat' })
@@ -123,15 +132,21 @@ test('push without pr, an explicit base and a draft, a remote from the branch co
   const a = await setup({ remoteCfg: 'fork' })
   const r = await a.push()
   expect(r).toMatchObject({ ok: true, text: `pushed ${SHA} to fork/feat; compare URL https://github.com/o/r/pull/new/feat` })
-  expect(a.pushes()[0]).toEqual(['-C', WT, 'push', '-u', 'fork', 'refs/heads/feat:refs/heads/feat'])
+  expect(a.pushes()[0]).toEqual(['-C', WT, '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'fork', `${SHA}:refs/heads/feat`])
+  expect(JSON.stringify(a.log)).not.toContain('--set-upstream-to') // the branch already has an upstream
   expect(a.ghCalls).toEqual([]) // no pr, no gh
   expect(JSON.parse(a.inbox().trim()).text).toBe(`the desk pushed ${SHA} to fork/feat; no PR, compare URL https://github.com/o/r/pull/new/feat`)
-  const b = await setup({ defaultBranch: '' })
+  const b = await setup()
   await b.push({ pr: { title: 'T', base: 'develop', draft: true } })
-  expect(b.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'feat', '--base', 'develop', '--title=T', expect.stringMatching(/^--body-file=/), '--draft'])
-  const c = await setup({ defaultBranch: '' }) // the remote's default is unknown: gh picks it
+  expect(b.ghCalls[0]!.argv).toEqual(['gh', 'pr', 'create', '--head', 'feat', '--base', 'develop', '--title=T', '--body-file=-', '--draft'])
+  // no remote HEAD here: the remote is asked (read-only), and its answer is the default branch (and the PR base)
+  const c = await setup({ defaultBranch: '', lsDefault: 'trunk' })
   await c.push({ pr: { title: 'T' } })
-  expect(c.ghCalls[0]!.argv).not.toContain('--base')
+  expect(c.log).toContainEqual(['-C', WT, 'ls-remote', '--symref', 'origin', 'HEAD'])
+  expect(c.ghCalls[0]!.argv).toContain('trunk')
+  const d = await setup({ defaultBranch: '', lsDefault: 'feat' }) // ... and it is refused when that is the branch itself
+  expect((await d.push()).text).toContain('is the default branch of origin')
+  expect(d.pushes()).toEqual([])
 })
 
 test('gh missing: the push still happens and the reply gives the compare URL; gh is found in the usual places', async () => {

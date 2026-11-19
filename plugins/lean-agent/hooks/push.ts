@@ -5,7 +5,7 @@
 // Order: sha is full -> thread has a project that is not private -> the thread's worktree, its branch and HEAD == sha -> the
 // branch is neither protected nor guarded -> green review for the sha -> a valid, unused approval for (project, sha, thread);
 // only then is the approval consumed and git push run (never --force, never a tag, never the default branch).
-import { appendJsonl, leanDir, mkdirp, readJson, threadsDir } from './state'
+import { appendJsonl, leanDir, readJson, realPath, threadsDir } from './state'
 import type { Host } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { PROTECTED, guardedBy, patternsFor, projectOf } from './guard'
@@ -20,6 +20,11 @@ const nameOk = (n: string) => NAME.test(n) && !n.includes('..') && !n.includes('
 const GH_PLACES = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] // the app's PATH (a macOS GUI app) often lacks these
 
 const err = (text: string): Out => ({ ok: false, text })
+// no credential or ssh prompt can wait on a terminal nobody is at; every spawn is bounded (the thread's lock is held meanwhile)
+const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }
+const NET_MS = 120_000
+// text from a remote or gh goes to the thread as a quote, never as plain words
+const quoted = (s: string) => JSON.stringify(s.replace(/[^\x20-\x7e]/g, ' ').slice(0, 200))
 
 // the first line that says what went wrong (the first line of the output when none does)
 export function firstError(r: { stdout?: string; stderr?: string }): string {
@@ -40,7 +45,7 @@ export function compareUrl(output: string): string | null {
 
 async function git(h: Host, dir: string, ...a: string[]): Promise<{ ok: boolean; out: string; first: string }> {
   try {
-    const r = await h.process.run(['git', '-C', dir, ...a])
+    const r = await h.process.run(['git', '-C', dir, ...a], { timeoutMs: 30_000, env: NO_PROMPT })
     return { ok: r.exitCode === 0, out: r.stdout.trim(), first: firstError(r) }
   } catch (e) {
     return { ok: false, out: '', first: String((e as Error)?.message ?? e).slice(0, 200) }
@@ -79,8 +84,13 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   }
   // 1. the thread's project, never a private one
   if (!t.project) return err(`${id} has no project, so there is nothing to push`)
-  const pj = (await readJson<Record<string, { private?: boolean }>>(h, `${leanDir(home)}/projects.json`, {}))?.[t.project]
+  const pj = (await readJson<Record<string, { private?: boolean; path?: string }>>(h, `${leanDir(home)}/projects.json`, {}))?.[t.project]
   if (pj?.private === true) return err(`${t.project} is a private project: it is never pushed. Give the user the manual push command instead`)
+  if (typeof pj?.path !== 'string' || !pj.path.startsWith('/')) return err(`${t.project} is not a registered project with a folder, so the desk cannot tell which repository the worktree must belong to`)
+  // worktrees.json and the folders under ~/.lean-agent/worktrees are writable by the thread: only a LINKED worktree of the project's own
+  // repository counts (same git common dir, so the remotes and config pushed with are the project's, not a repo the thread made)
+  const common = await git(h, pj.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+  if (!common.ok || !common.out.startsWith('/')) return err(`not pushed: cannot read the git directory of project ${t.project} (${common.first})`)
   // 2. the thread's worktree: the registered one whose HEAD is the approved commit
   const reg = await readJson<Record<string, Wt>>(h, `${leanDir(home)}/worktrees.json`, {})
   const mine = Object.values(reg && typeof reg === 'object' ? reg : {}).filter((w): w is Wt & { path: string } => !!w && typeof w === 'object' && w.thread === id && typeof w.path === 'string' && w.path.startsWith('/'))
@@ -91,6 +101,8 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const p = await projectOf(h, w.path)
     if (!p || p.slug !== t.project) { seen = seen || `${w.path} does not belong to project ${t.project}`; continue }
     if (p.private) return err(`${p.slug} is a private project: it is never pushed. Give the user the manual push command instead`)
+    const wc = await git(h, w.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+    if (!wc.ok || (await realPath(h, wc.out)) !== (await realPath(h, common.out))) { seen = seen || `${w.path} is not a worktree of the repository of project ${t.project}`; continue }
     const head = await git(h, w.path, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}')
     if (!head.ok || !FULL.test(head.out)) { seen = seen || `${w.path}: cannot read HEAD (${head.first})`; continue }
     if (head.out !== sha) { seen = seen || `HEAD of ${w.path} is ${head.out.slice(0, 8)}, not ${short}`; continue }
@@ -112,9 +124,17 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   const remote = (await bc('pushRemote')) || (await bc('remote')) || 'origin'
   if (!nameOk(remote)) return err(`not pushed: the remote of ${branch} is ${JSON.stringify(remote)}, a name was expected (a URL or path is never pushed to)`)
   if (!(await git(h, dir, 'remote', 'get-url', '--push', remote)).ok) return err(`not pushed: ${dir} has no remote ${remote}`)
-  const head = await git(h, dir, 'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`)
-  const deflt = head.ok && head.out.startsWith(`${remote}/`) ? head.out.slice(remote.length + 1) : ''
-  if (deflt && branch === deflt) return err(`not pushed: ${branch} is the default branch of ${remote}`)
+  // the remote's default branch: the local remote HEAD, else asked of the remote (read-only); unknown = refused, never assumed
+  const rh = await git(h, dir, 'symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`)
+  let deflt = rh.ok && rh.out.startsWith(`${remote}/`) ? rh.out.slice(remote.length + 1) : ''
+  let asked = ''
+  if (!deflt) {
+    const ls = await git(h, dir, 'ls-remote', '--symref', remote, 'HEAD')
+    deflt = (ls.ok && /^ref:\s*refs\/heads\/(\S+)\s+HEAD\b/m.exec(ls.out)?.[1]) || ''
+    asked = ls.ok ? 'it named no branch' : ls.first
+  }
+  if (!deflt || !nameOk(deflt)) return err(`not pushed: the default branch of ${remote} is unknown (no ${remote}/HEAD here, asking the remote: ${asked}); the user can run git remote set-head ${remote} -a`)
+  if (branch === deflt) return err(`not pushed: ${branch} is the default branch of ${remote}`)
   // 4. a green review record for this very commit (what the thread's push gate checks first)
   if (!(await greenReview(h, t.project, sha))) return err(`not pushed: no green review record for ${short} (project ${t.project}): have ${id} run the review skill on this commit`)
   // 5. the user's approval for (project, sha, thread): valid, unused; consumed here, once, just before the push
@@ -141,13 +161,16 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
 
   let pushed: { stdout: string; stderr: string; exitCode: number }
   try {
-    pushed = await h.process.run(['git', '-C', dir, 'push', '-u', remote, `refs/heads/${branch}:refs/heads/${branch}`])
+    // the approved OBJECT is pushed, not whatever the branch points at by now (the thread's session may commit meanwhile); a tag
+    // never rides along (push.followTags), nothing is forced. -u cannot name a bare sha, so the upstream is set afterwards.
+    pushed = await h.process.run(['git', '-C', dir, '-c', 'push.followTags=false', 'push', '--no-follow-tags', remote, `${sha}:refs/heads/${branch}`], { timeoutMs: NET_MS, env: NO_PROMPT })
+    if (pushed.exitCode === 0 && !(await git(h, dir, 'config', `branch.${branch}.remote`)).out) await git(h, dir, 'branch', `--set-upstream-to=${remote}/${branch}`, branch) // best effort
   } catch (e) {
     pushed = { exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }
   }
   if (pushed.exitCode !== 0) {
     const text = `push failed at git push (${short} to ${where}): ${firstError(pushed)}. Nothing was pushed${pr ? ' and no PR was created' : ''}; the approval is used: the user's yes is needed again (approve-push) to retry`
-    return await finish(err(text), 'push', { step: 'git push' }, `the desk tried to push ${sha} to ${where} and git push failed: ${firstError(pushed)}. Nothing was pushed; the desk decides what happens next`)
+    return await finish(err(text), 'push', { step: 'git push' }, `the desk tried to push ${sha} to ${where} and git push failed (git said ${quoted(firstError(pushed))}). Nothing was pushed; the desk decides what happens next`)
   }
   const compare = compareUrl(`${pushed.stderr}\n${pushed.stdout}`)
   const done = `pushed ${sha} to ${where}`
@@ -160,21 +183,18 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const text = `${done}; gh was not found (PATH, ${GH_PLACES.join(', ')}), so no PR was created: ${compare ? `open it from ${compare}` : 'the push output had no compare URL, open the PR by hand'}`
     return await finish({ ok: true, text, data }, 'push', { compare, pr: null }, `the desk pushed ${sha} to ${where}; PR not created (no gh), ${compare ? `compare URL ${compare}` : 'no compare URL'}`)
   }
-  const bodyFile = `${leanDir(home)}/push/${id}-${short}.md`
   let created: { stdout: string; stderr: string; exitCode: number }
   try {
-    await mkdirp(h, `${leanDir(home)}/push`)
-    await h.fs.write(bodyFile, pr.body)
-    created = await h.process.run([gh, 'pr', 'create', '--head', branch, ...(base ? ['--base', base] : []), `--title=${pr.title}`, `--body-file=${bodyFile}`, ...(pr.draft ? ['--draft'] : [])], { cwd: dir })
+    // the body goes in on stdin: no file at a path the thread could have planted a link at
+    created = await h.process.run([gh, 'pr', 'create', '--head', branch, ...(base ? ['--base', base] : []), `--title=${pr.title}`, '--body-file=-', ...(pr.draft ? ['--draft'] : [])], { cwd: dir, stdin: pr.body, timeoutMs: NET_MS, env: NO_PROMPT })
   } catch (e) {
     created = { exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }
   }
-  await h.process.run(['rm', '-f', bodyFile]).catch(() => undefined)
   const all = `${created.stdout}\n${created.stderr}`
   const url = [...all.matchAll(/https?:\/\/[^\s"'<>]+/g)].map(m => m[0]).pop() ?? null
   if (created.exitCode === 0 && url) return await finish({ ok: true, text: `${done}; PR ${url}`, data: { ...data, pr: url } }, 'push', { compare, pr: url }, `the desk pushed ${sha} to ${where}; PR ${url}`)
   if (created.exitCode !== 0 && url && /already exists/i.test(all)) return await finish({ ok: true, text: `${done}; PR already open: ${url}`, data: { ...data, pr: url } }, 'push', { compare, pr: url }, `the desk pushed ${sha} to ${where}; PR ${url}`)
   const why = created.exitCode === 0 ? 'gh printed no PR link' : firstError(created)
   const text = `${done}; the PR step failed at gh pr create: ${why}. The branch is pushed${compare ? `; open the PR from ${compare}` : ''}`
-  return await finish({ ok: false, text, data }, 'push', { step: 'gh pr create', compare }, `the desk pushed ${sha} to ${where}; the PR was not created (${why})${compare ? `, compare URL ${compare}` : ''}`)
+  return await finish({ ok: false, text, data }, 'push', { step: 'gh pr create', compare }, `the desk pushed ${sha} to ${where}; the PR was not created (gh said ${quoted(why)})${compare ? `, compare URL ${compare}` : ''}`)
 }
