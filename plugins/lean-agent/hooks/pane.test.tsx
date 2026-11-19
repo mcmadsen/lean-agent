@@ -447,6 +447,17 @@ test('the /lean-agent-restart-desk command does the same in the desk, and refuse
   expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(true)
 })
 
+test('a new desk session start serves the handover: it is renamed, so a later desk does not find a stale one', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  h.files.set('/h/.lean-agent/desk/handover.md', '# Desk handover (written earlier)')
+  await inDesk($)
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false)
+  const moved = [...h.files.keys()].filter(k => /\/desk\/handover-read-.+\.md$/.test(k))
+  expect(moved).toHaveLength(1)
+  expect(h.files.get(moved[0]!)).toBe('# Desk handover (written earlier)')
+})
+
 test('the desk guide tells a new desk session to read desk/handover.md (the restart path relies on it)', async () => {
   const h = fakeHost(null)
   // the template's own line, as templates/front-desk.md has it

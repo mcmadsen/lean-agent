@@ -16,7 +16,7 @@ import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
 import { markNative, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
-import { autoMigrate, check, guardParents, migrate } from './doctor'
+import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
 import { squeezeResult, trimTools } from './squeeze'
@@ -33,7 +33,7 @@ import { takeNotice } from './notices'
 import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
-import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact } from './deskcompact'
+import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
@@ -370,6 +370,10 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       // failure is recorded with its reason and tried again when the turn ends; when it is not possible the mod writes desk/handover.md
       // and says so in the status line (deskcompact.ts)
       every($, 30_000, 'desk', async host2 => void (await compactDesk($, host2)))
+      // a stale parent guide that reappears while the desk runs: stat only, guardParents runs when something changed
+      every($, 30_000, 'desk', async host2 => {
+        for (const line of await guardTick(host2)) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
+      })
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
       every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
     })
@@ -504,6 +508,11 @@ export const register: Register = on => {
       // the desk's next prompt says so once, whichever session did it (the pane lists the notice until then)
       const said = await takeNotice(host, 'ledger-rotation')
       if (said) pending.push(`[lean-agent] ${said}`)
+      // a handover left by the previous desk session is served now: renamed (a later desk must not find it as a fresh one), and named in the first prompt
+      await soft($, 'desk handover', async () => {
+        const served = await serveHandover(host)
+        if (served) pending.push(`[lean-agent] ${served}`)
+      })
     }
     // once per plugin version (desk): learned rules past a size cap, and the 0.45 `rules: off` key nothing reads
     if (role.kind === 'desk') {

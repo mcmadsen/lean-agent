@@ -2,7 +2,7 @@
 // (root = its own folder, project read by absolute path) gets them from the store through the tool results.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { MAX_INJECT_RULE, markNative, pathsOfCall, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
+import { MAX_COMPILED, MAX_INJECT_RULE, compiledCount, markNative, pathsOfCall, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
 
 const L = '/h/.lean-agent'
 const rule = (paths: string[], body: string) => `${paths.length ? `---\npaths:\n${paths.map(p => `  - "${p}"`).join('\n')}\n---\n` : ''}${body}\n<!-- lean-agent: learned abc 2026-01-01 -->\n`
@@ -135,6 +135,44 @@ test('rules the size budget cuts are not marked given: a later call in the area 
   expect(logRows(h).filter(r => /^big/.test(r.rule))).toHaveLength(first) // only what was delivered is logged
   const b = await ruleContext(h.host, who, 'Read', { file_path: '/repo/big/y.ts' })
   expect((b!.match(/rule proj\/(big\d)/g) ?? []).length + first).toBeGreaterThanOrEqual(3)
+})
+
+test('globs are compiled once per rule file and bounded; a pattern over the caps never matches (and no other pattern of the rule is lost)', async () => {
+  const h = setup()
+  const real = globalThis.RegExp
+  let made = 0
+  // count the regular expressions built for the globs of a read: the second read of the same files builds none
+  const Counting: any = function (this: any, ...a: any[]) { made++; return new real(a[0], a[1]) }
+  Counting.prototype = real.prototype
+  await ruleContext(h.host, who, 'Read', { file_path: '/repo/services/billing/warm.ts' }) // reads the rule files (and compiles)
+  ;(globalThis as any).RegExp = Counting
+  try {
+    for (let i = 0; i < 20; i++) await ruleContext(h.host, { ...who, agent: `a${i}` }, 'Read', { file_path: `/repo/apps/web/src/${i}.ts` })
+  } finally {
+    ;(globalThis as any).RegExp = real
+  }
+  expect(made).toBeLessThan(10) // uncached it is one per glob and call (20 calls, 3 globs): 60 and more
+  // over the caps: 5 `**`, 300 characters, 5 brace groups, 17 commas; the rule's other, normal pattern still matches
+  const bad = ['a/**/b/**/c/**/d/**/e/**/f', `x/${'y'.repeat(300)}/*.ts`, '{a,b}/{a,b}/{a,b}/{a,b}/{a,b}', 'k/{a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r}/*']
+  h.files.set(`${L}/proj/rules/odd.md`, rule([...bad, 'odd/*.ts'], '# odd\n- careful'))
+  h.clock.t += 60_000 // past the rules' 15 s cache
+  expect(await ruleContext(h.host, who, 'Read', { file_path: '/repo/a/1/b/2/c/3/d/4/e/5/f' })).toBeNull() // `**` x5 would have matched
+  expect(await ruleContext(h.host, who, 'Read', { file_path: '/repo/a/b/c/d/e/x.ts' })).toBeNull()
+  expect(await ruleContext(h.host, who, 'Read', { file_path: '/repo/k/a/z' })).toBeNull()
+  expect(await ruleContext(h.host, who, 'Read', { file_path: '/repo/odd/x.ts' })).toContain('rule proj/odd.md')
+  // loose (a folder named in a shell command) never counts an over-cap pattern's prefix either
+  const bigPrefix = ['p/**/a/**/b/**/c/**/d/**/e']
+  h.files.set(`${L}/proj/rules/pre.md`, rule(bigPrefix, '# pre'))
+  h.clock.t += 60_000
+  expect(await ruleContext(h.host, { ...who, agent: 'z' }, 'Bash', { command: 'ls /repo/p' })).not.toContain('proj/pre.md')
+})
+
+test('the compiled-glob map is bounded: past MAX_COMPILED rule files the oldest entry goes', async () => {
+  const h = setup()
+  for (let i = 0; i < MAX_COMPILED + 20; i++) h.files.set(`${L}/proj/rules/r${String(i).padStart(3, '0')}.md`, rule([`dir${i}/**`], `# r${i}`))
+  await ruleContext(h.host, who, 'Read', { file_path: '/repo/dir1/x.ts' })
+  expect(compiledCount()).toBeLessThanOrEqual(MAX_COMPILED)
+  expect(compiledCount()).toBe(MAX_COMPILED)
 })
 
 test('projectRule: _project.md once per context, nothing for a project without one', async () => {

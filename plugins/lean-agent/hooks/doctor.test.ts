@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { autoMigrate, check, fix, guardParents, legacyIndex, migrate, plist, tidyLegacy, GUARD_TEXT, MIGRATE_NOTICE, TIDY_VERSION } from './doctor'
+import { autoMigrate, check, fix, guardParents, guardTick, resetGuardTick, legacyIndex, migrate, plist, tidyLegacy, GUARD_TEXT, MIGRATE_NOTICE, TIDY_VERSION } from './doctor'
 import { running, setRunning } from './skew'
 import { readNotices, setNotice } from './notices'
 
@@ -217,6 +217,56 @@ test('tidy (also for users already on 1.0.x): 0.45 guide files and current-threa
   expect(h.files.has(`${L}/CLAUDE.md`)).toBe(false)
   h.files.set(`${L}/worktrees/CLAUDE.md`, 'lean-agent new again')
   expect((await migrate(h.host, '/plug')).lines.join('\n')).toContain('moved to legacy-0.45') // migrate forces it
+})
+
+test('doctor names a rule whose path pattern is over the glob caps; none, no row', async () => {
+  const h = fakeHost(null)
+  h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
+  const rule = (g: string) => `---\npaths:\n  - "${g}"\n---\n# r\n- x\n`
+  h.files.set(`${L}/app/rules/ok.md`, rule('src/**/*.{ts,tsx}'))
+  expect((await check(h.host, '/plug')).join('\n')).not.toContain('glob caps')
+  expect((await check(h.host, '/plug')).join('\n')).not.toContain('never matches')
+  h.files.set(`${L}/app/rules/wide.md`, rule('a/**/b/**/c/**/d/**/e/**/f'))
+  const out = (await check(h.host, '/plug')).filter(l => l.includes('never matches'))
+  expect(out).toHaveLength(1)
+  expect(out[0]).toMatch(/^FIX {2}rule app\/wide\.md: path pattern "a\/\*\*\/b\/\*\*\/c\/\*\*\/d\/\*\*\/e\/\*\*\/f" is more than 4 '\*\*'/)
+})
+
+test('guardTick (the desk\'s 30 s tick): stats only while nothing changed; a guide that reappears mid-session is moved at the next tick', async () => {
+  resetGuardTick()
+  const h = fakeHost(null)
+  h.files.set(`${L}/threads/t1/thread.json`, '{}')
+  const reads: string[] = []
+  const read = h.host.fs.read
+  h.host.fs.read = async (p: string) => { reads.push(p); return read(p) }
+  expect(await guardTick(h.host)).toEqual([]) // the first look runs guardParents (it writes the guard file)
+  expect(h.files.get(`${L}/threads/CLAUDE.md`)).toBe(GUARD_TEXT)
+  reads.length = 0
+  for (let i = 0; i < 3; i++) expect(await guardTick(h.host)).toEqual([]) // its own write is no change: no read, no work
+  expect(reads).toEqual([])
+  // an old guide is written back above the threads: the next tick moves it aside
+  h.files.set(`${L}/threads/CLAUDE.md`, '# lean-agent orchestrator guide\n' + 'delegate with lean-agent run\n')
+  expect(await guardTick(h.host)).toEqual(['stale 0.45 guide moved to legacy-0.45: threads__CLAUDE.md'])
+  expect(h.files.get(`${L}/threads/CLAUDE.md`)).toBe(GUARD_TEXT)
+  expect(await guardTick(h.host)).toEqual([]) // and it is quiet again
+  // one at the top of ~/.lean-agent
+  h.files.set(`${L}/CLAUDE.md`, 'lean-agent new something')
+  expect((await guardTick(h.host)).length).toBe(1)
+  expect(h.files.has(`${L}/CLAUDE.md`)).toBe(false)
+  // the guard file deleted: written again
+  h.files.delete(`${L}/threads/CLAUDE.md`)
+  await guardTick(h.host)
+  expect(h.files.get(`${L}/threads/CLAUDE.md`)).toBe(GUARD_TEXT)
+  // a move that fails (or a lock held by a starting session) is tried again at the next tick, not given up on
+  h.files.set(`${L}/worktrees/CLAUDE.md`, 'lean-agent new again')
+  const run = h.host.process.run
+  let failing = true
+  h.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mv' && failing ? { exitCode: 1, stdout: '', stderr: 'busy' } : run(argv, init))
+  expect(await guardTick(h.host)).toEqual([])
+  expect(h.files.has(`${L}/worktrees/CLAUDE.md`)).toBe(true)
+  failing = false
+  expect((await guardTick(h.host)).length).toBe(1)
+  expect(h.files.has(`${L}/worktrees/CLAUDE.md`)).toBe(false)
 })
 
 test('guardParents: not version gated; a guide that comes back after the tidy is moved at any session start, the guard file stays put', async () => {

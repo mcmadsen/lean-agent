@@ -219,6 +219,30 @@ export async function writeDeskHandover(h: Host, tokens: number, recent: string[
   await atomicWrite(h, handoverFile(await homeDir(h)), await deskHandover(h, tokens, recent))
 }
 
+// A new desk session's start serves the handover: the file is renamed to handover-read-<date>.md (the last 3 are kept), so a later desk
+// never reads a stale one as if it were fresh, and the first prompt names where it is now. null = no handover waiting (or it could not be moved:
+// then it stays as it was, and the desk's guide still tells it to read handover.md).
+export const KEEP_READ_HANDOVERS = 3
+export async function serveHandover(h: Host): Promise<string | null> {
+  try {
+    const home = await homeDir(h)
+    const from = handoverFile(home)
+    if (!(await h.fs.exists(from))) return null
+    const date = new Date(await h.clock.now()).toISOString().slice(0, 19).replace(/:/g, '-')
+    let to = `${deskState(home)}/handover-read-${date}.md`
+    for (let n = 2; await h.fs.exists(to); n++) to = `${deskState(home)}/handover-read-${date}-${n}.md` // (two starts in one second)
+    const written = /^# Desk handover \(written (\S+?),/.exec(String(await h.fs.read(from).catch(() => '')))?.[1] // (its own first line says when)
+    const r = await h.process.run(['mv', from, to])
+    if (r.exitCode !== 0 || (await h.fs.exists(from))) return null
+    const old = (await h.fs.list(deskState(home)).catch(() => [])).filter(f => f.kind === 'file' && /^handover-read-.+\.md$/.test(f.name)).map(f => f.name.replace(/\.md$/, '')).sort().map(n => `${n}.md`) // (the date sorts as text; without the extension, `-2` after the same second sorts after it)
+    const drop = old.slice(0, Math.max(0, old.length - KEEP_READ_HANDOVERS)).filter(n => `${deskState(home)}/${n}` !== to)
+    if (drop.length) await h.process.run(['rm', '-f', ...drop.map(n => `${deskState(home)}/${n}`)]).catch(() => undefined)
+    return `a desk handover${written ? ` (written ${written})` : ''} from an earlier desk session is waiting in ${to}: read it now (goals, open threads, questions, approvals; disregard it if it is old news), then carry on`
+  } catch {
+    return null
+  }
+}
+
 // "Restart desk": the handover is written now, then a new desk session is opened (`open` = setup.ts openDesk). The new session reads the
 // handover at its start (the desk's CLAUDE.md says so); the old one stays open until the user closes it.
 export const DESK_RESTARTED = 'New desk opened with the handover: close this one'

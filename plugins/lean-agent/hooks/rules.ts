@@ -41,7 +41,23 @@ export function expandBraces(g: string): string[] {
   return m[1]!.split(',').flatMap(alt => expandBraces(g.slice(0, m.index) + alt + g.slice(m.index + m[0].length)))
 }
 
+// A `paths:` pattern is text a thread's learn run wrote, and the loader tests it on every tool call: a pattern past these caps is not
+// compiled (brace groups multiply: ten `{a,b}` are 1024 alternatives) and never matches. Real globs are far below them.
+export const MAX_GLOB_LEN = 200
+export const MAX_GLOB_STARS = 4 // `**` runs
+export const MAX_GLOB_BRACES = 4
+export const MAX_GLOB_COMMAS = 16
+export function globProblem(g: string): string | null {
+  if (g.length > MAX_GLOB_LEN) return `longer than ${MAX_GLOB_LEN} characters`
+  if ((g.match(/\*\*/g) ?? []).length > MAX_GLOB_STARS) return `more than ${MAX_GLOB_STARS} '**'`
+  if ((g.match(/\{/g) ?? []).length > MAX_GLOB_BRACES) return `more than ${MAX_GLOB_BRACES} brace groups`
+  if ((g.match(/,/g) ?? []).length > MAX_GLOB_COMMAS) return `more than ${MAX_GLOB_COMMAS} commas`
+  return null
+}
+const NEVER = /(?!)/
+
 export function globRe(g: string): RegExp {
+  if (globProblem(g)) return NEVER
   const alts = expandBraces(g)
   if (alts.length === 1 && alts[0] !== g) return globRe(alts[0]!)
   if (alts.length > 1) return new RegExp(alts.map(a => globRe(a).source).join('|'))
@@ -431,7 +447,9 @@ export async function checkRules(h: Host, project: string, maxExplorers = MAX_EX
     const m = ruleMetrics(t)
     const cap = capsOf(n)
     const bad = ruleProblems(n, t)
-    const warn = n !== '_project.md' && !pathsOf(t).length ? ['no paths: it would load in every session'] : []
+    const globs = pathsOf(t)
+    const warn = n !== '_project.md' && !globs.length ? ['no paths: it would load in every session'] : []
+    for (const g of globs) { const p = globProblem(g); if (p) warn.push(`path pattern ${JSON.stringify(g.slice(0, 60))} is ${p}: it never matches`) }
     if (bad.length) over++
     lines.push(`${n}: ${m.lines}/${cap.lines} lines, ${m.chars}/${cap.chars} chars, widest ${m.widest}${bad.length ? ` OVER: ${bad.join(', ')}` : warn.length ? ` WARN: ${warn.join(', ')}` : ' ok'}`)
   }
@@ -442,6 +460,22 @@ export async function checkRules(h: Host, project: string, maxExplorers = MAX_EX
   }
   lines.unshift(`limits: rule <= ${MAX_RULE_LINES} lines / ${MAX_RULE_CHARS} chars, _project <= ${MAX_PROJECT_LINES} lines / ${MAX_PROJECT_CHARS} chars, line <= ${MAX_LINE_WIDTH} chars, <= ${MAX_RULE_FILES} files, <= ${maxExplorers} explorers; ${names.length} rule(s), ${over} over the cap (copied anyway up to ${HARD_FACTOR}x the cap, skipped beyond; shorten them)`)
   return { lines, over }
+}
+
+// Rule files of registered projects whose `paths:` has a pattern past the glob caps (never matches, so the rule never loads); for doctor
+export async function overCapGlobs(h: Host): Promise<string[]> {
+  const home = await homeDir(h)
+  const projs = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})
+  const out: string[] = []
+  for (const name of Object.keys(projs && typeof projs === 'object' ? projs : {})) {
+    if (!slugOk(name)) continue
+    const dir = `${projectDir(home, name)}/rules`
+    for (const f of (await h.fs.list(dir).catch(() => [])).filter(x => x.kind === 'file' && x.name.endsWith('.md')).sort((a, b) => a.name.localeCompare(b.name))) {
+      const t = String(await h.fs.read(`${dir}/${f.name}`).catch(() => ''))
+      for (const g of pathsOf(t)) { const p = globProblem(g); if (p) out.push(`rule ${name}/${f.name}: path pattern ${JSON.stringify(g.slice(0, 60))} is ${p}, so it never matches and the rule never loads: shorten it (learn --trim)`) }
+    }
+  }
+  return out
 }
 
 // Once per plugin version (the desk's first session after an update): `lean_rules check` for every registered project, so rules a

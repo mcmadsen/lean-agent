@@ -10,9 +10,14 @@
 //   - each injection is logged to logs/rules-loaded.jsonl ({ts, src: 'loader', rule, project, session, agent, thread, trigger, sha}), which
 //     rulesStats counts; a load the engine did itself (InstructionsLoaded, a session rooted in the checkout) marks the rule as given, so a
 //     rule is never injected twice (the key is rule + sha of its body).
+// Threads only, on purpose (a plain session in a registered project gets no injected rules): a session rooted in a synced checkout loads
+// the rules natively (they are copied into every checkout when a thread of the project starts), so injecting there too would double them
+// and the engine-root dedupe above was only measured for threads; it would change every non-lean session in a project folder (a read of
+// the rule files per tool call, `git worktree list` per registered project per minute) with no opt-out; and it needs the same care at four
+// more places (the compaction reset, `_project.md` at start, a private-project check the roots do not carry, the plain role's tool hook).
 import { appendJsonl, homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
-import { RULES_LOG, bodyOf, checkoutsOf, matches, pathsOf, projectDir, slugOk } from './rules'
+import { RULES_LOG, bodyOf, checkoutsOf, globProblem, globRe, pathsOf, projectDir, slugOk } from './rules'
 import { hashText } from './recipe'
 
 export const MAX_INJECT_RULE = 4000 // characters of one rule's body in a tool result (a grandfathered rule is cut here)
@@ -22,14 +27,30 @@ const READS = /(?:^|[\s|;&(])(?:cat|head|tail|rg|grep|ls|find|sed|awk|wc|bat|les
 const TTL = 60_000
 const RULES_TTL = 15_000
 
-type Rule = { name: string; globs: string[]; body: string; sha: string }
+type Rule = { name: string; globs: string[]; body: string; sha: string; fsha: string } // fsha: the whole file (the globs are in its frontmatter, not its body)
 type Root = { project: string; root: string }
 let roots: { at: number; list: Root[] } | null = null
 const rulesCache = new Map<string, { at: number; list: Rule[] }>()
 const given = new Map<string, Set<string>>() // context (the session '', or a subagent's id) -> `project/rule\0sha`
 const agents = new Set<string>() // subagents whose first tool call was seen
+// compiled globs per rule FILE sha (the same file in two projects, or the same text read again after the 15 s TTL, compiles once); bounded:
+// the oldest entry goes first. A pattern over the caps (rules.ts globProblem) is left out: it never matches.
+export const MAX_COMPILED = 200
+const compiled = new Map<string, { usable: string[]; res: RegExp[] }>()
+export const compiledCount = () => compiled.size
+function compiledOf(r: Rule): { usable: string[]; res: RegExp[] } {
+  let c = compiled.get(r.fsha)
+  if (!c) {
+    const usable = r.globs.filter(g => !globProblem(g))
+    c = { usable, res: usable.map(globRe) }
+    if (compiled.size >= MAX_COMPILED) compiled.delete(compiled.keys().next().value as string)
+    compiled.set(r.fsha, c)
+  }
+  return c
+}
 export const resetRuleLoader = () => {
   roots = null
+  compiled.clear()
   rulesCache.clear()
   given.clear()
   agents.clear()
@@ -65,7 +86,7 @@ async function rulesOf(h: Host, project: string): Promise<Rule[]> {
   for (const f of (await h.fs.list(dir).catch(() => [])).filter(x => x.kind === 'file' && x.name.endsWith('.md')).sort((a, b) => a.name.localeCompare(b.name))) {
     const t = await h.fs.read(`${dir}/${f.name}`).then(String).catch(() => '')
     const body = bodyOf(t).replace(/\n{3,}/g, '\n\n').trim()
-    if (body) list.push({ name: f.name, globs: pathsOf(t), body, sha: hashText(body).slice(0, 12) })
+    if (body) list.push({ name: f.name, globs: pathsOf(t), body, sha: hashText(body).slice(0, 12), fsha: hashText(t).slice(0, 12) })
   }
   rulesCache.set(project, { at: now, list })
   return list
@@ -138,7 +159,8 @@ export async function ruleContext(h: Host, who: Who, tool: string, e: any, opts:
       const at = await resolve(h, abs)
       if (!at) continue
       for (const r of await rulesOf(h, at.project)) {
-        const wanted = r.name === '_project.md' ? true : r.globs.length === 0 ? true : matches(r.globs, at.rel) || (loose && insideArea(r.globs, at.rel))
+        const c = r.name === '_project.md' || r.globs.length === 0 ? null : compiledOf(r)
+        const wanted = !c ? true : c.res.some(re => re.test(at.rel)) || (loose && insideArea(c.usable, at.rel))
         if (wanted && !has(at.project, r)) cand.push({ project: at.project, r })
       }
     }

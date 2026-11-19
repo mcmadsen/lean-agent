@@ -13,6 +13,7 @@ import { modelMismatches } from './stats'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction } from './deskcompact'
 import { reportFailures } from './delivery'
+import { overCapGlobs } from './rules'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -127,6 +128,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   if (cmp) row(cmp.result === 'compacted', `last desk compaction at ${new Date(cmp.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${cmp.result} (desk context ${kTokens(cmp.tokens)})${cmp.reason ? `: ${cmp.reason}` : ''}${cmp.result === 'compacted' ? '' : '; it is tried again when the desk turn ends (or type /compact, or start a new desk session)'}`)
   // a lean_report that could not be written (the thread was given the text and the error): shown until that thread reports again (or 24 h)
   for (const rf of await reportFailures(h).catch(() => [])) row(false,`a lean_report from ${rf.thread} could not be written at ${new Date(rf.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${rf.error} (the thread had to paste the text; cause: its session folder is usually gone, e.g. a removed worktree it had cd'ed into). Text: ${rf.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+  const bigGlobs = await overCapGlobs(h).catch(() => [] as string[])
+  for (const g of bigGlobs.slice(0, 5)) row(false, g)
+  if (bigGlobs.length > 5) row(false, `${bigGlobs.length - 5} more rule path pattern(s) over the glob caps (lean_rules check names them)`)
   const odd = await modelMismatches(h).catch(() => [] as string[])
   for (const m of odd) row(false, m)
   if (!odd.length) out.push('ok   no session on an unexpected model today')
@@ -226,6 +230,37 @@ export async function guardParents(h: Host): Promise<string[]> {
   const have = await text(h, guard)
   // written when absent (and the threads folder exists, or a stale file just left it), or when it is 1.0's own older text; a user's own file stays
   if (have === null ? moved.length > 0 || (await h.fs.exists(threadsDir(home)).catch(() => false)) : have !== GUARD_TEXT && GENERATED.test(have.split('\n').slice(0, 3).join('\n'))) await atomicWrite(h, guard, GUARD_TEXT)
+  return lines
+}
+// The desk's 30 s tick: a parent guide that reappears mid-session (an old install, a restored backup) is caught without waiting for the
+// next lean_thread call. Four stats (the size, and the mtime when the host gives one, or "absent"); guardParents runs only when that
+// signature changed since the last look, and the signature is taken again after it ran (its own moves and writes are not a change). A
+// stale guide that is still there afterwards (a move that failed, the lock held by a starting session) is looked at again at the next tick.
+let guardSeen = ''
+export const resetGuardTick = () => { guardSeen = '' }
+async function guardSignature(h: Host): Promise<string> {
+  const home = await homeDir(h)
+  const lean = leanDir(home)
+  const out: string[] = []
+  for (const f of [`${lean}/CLAUDE.md`, `${threadsDir(home)}/CLAUDE.md`, `${lean}/worktrees/CLAUDE.md`, threadsDir(home)]) {
+    try {
+      const s = await h.fs.stat(f)
+      out.push(`${s.size}:${(s as { mtimeMs?: number }).mtimeMs ?? ''}`) // (the typed stat has no mtime; a host that returns one gets it counted)
+    } catch {
+      out.push('-')
+    }
+  }
+  return out.join('|')
+}
+export async function guardTick(h: Host): Promise<string[]> {
+  const sig = await guardSignature(h)
+  if (sig === guardSeen) return []
+  const lines = await guardParents(h).catch(() => [] as string[])
+  const home = await homeDir(h)
+  const lean = leanDir(home)
+  let stuck = false
+  for (const f of [`${lean}/CLAUDE.md`, `${threadsDir(home)}/CLAUDE.md`, `${lean}/worktrees/CLAUDE.md`]) if (isOldGuide(await text(h, f))) stuck = true
+  guardSeen = stuck ? '' : await guardSignature(h)
   return lines
 }
 // ---- legacy-0.45/index.md: one line per old card (title, size, area guess) so `learn` can pick candidate facts ----------------

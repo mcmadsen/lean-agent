@@ -19,6 +19,26 @@
 - Threads never run `git push` or `gh pr create`: the push gate's refusal for a thread, the `review` and `pr` skills, the thread
   rules and the desk guide now say "report `ready to push <sha> (branch, PR title)` and stop"; the desk asks the user, naming the
   exact sha and branch, and pushes. The push gate itself is unchanged (the thread's pre-push hook too).
+- **Desk push follow-ups.** A branch pushed to a fork (the push remote's repository is not that of `upstream`, else `origin`) is
+  opened with `gh pr create --head <owner>:<branch> --repo <base>` (owner and repository read from the remote URLs; a URL that is
+  not plain host/owner/repo is never guessed at, and without `pr.base` the base repository's own default branch is used). A closed
+  or closing thread cannot be pushed ("reopen tN first"; nothing is consumed); a parked one only paused, so it can.
+- **Rule path patterns are compiled once and bounded.** The loader compiled every `paths:` glob on every tool call; it now keeps the
+  compiled globs per rule file sha (at most 200 files, the oldest goes first). A pattern past 200 characters, 4 `**`, 4 brace
+  groups or 16 commas never matches (brace groups multiply), and doctor shows a `FIX` row naming the rule (`lean_rules check` warns).
+- **The desk handover is served once.** A new desk session's start renames `desk/handover.md` to `handover-read-<date>.md` (the last
+  3 are kept) and its first prompt names that path and when it was written, so a later desk never finds a stale handover as a fresh one.
+- **A parent guide that comes back while the desk runs is caught within 30 s**, not at the next `lean_thread` call: the desk's tick
+  stats the guide files (size, and mtime when the host gives one) and runs the guard when one changed, and again at the next tick
+  when a stale guide is still there (a failed move).
+- **The ledger split keeps equal rows.** Byte-identical rows (two equal turns in one second) were dropped when 1.0 rows moved out of
+  a legacy file; they are kept now (a retry after a crash still adds only what is missing). The notice names the rows kept in
+  `ledger.jsonl` and the rows of a past month moved to `ledger-YYYY-MM.jsonl` files separately.
+- **`desk/reports/` is pruned**: files older than 30 days, then all but the newest 500, at most once an hour when a full-text report
+  file is written. The file of a send the desk refused is removed (the unread row hands the text over in full).
+- Not done: learned rules for a plain (non-thread) session in a registered project. The checkouts already load synced rules natively,
+  and injecting them into every non-lean session would double them and cost a `git worktree list` per project each minute (the
+  reasons are in `ruleload.ts`).
 
 ## 1.0.7
 

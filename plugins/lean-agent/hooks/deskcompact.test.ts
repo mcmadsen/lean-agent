@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { check } from './doctor'
-import { DEFAULT_TOKENS, DESK_COMPACT_INSTRUCTIONS, DESK_RETRY_MS, DESK_RESTARTED, contextTokens, deskHandover, deskNote, deskRetryWanted, deskTick, deskTokens, deskTurnEnded, lastCompaction, resetDeskCompact, restartDesk } from './deskcompact'
+import { DEFAULT_TOKENS, DESK_COMPACT_INSTRUCTIONS, DESK_RETRY_MS, DESK_RESTARTED, contextTokens, deskHandover, deskNote, deskRetryWanted, deskTick, deskTokens, deskTurnEnded, lastCompaction, resetDeskCompact, restartDesk, serveHandover } from './deskcompact'
 
 const L = '/h/.lean-agent'
 const T1 = `${L}/threads/t1`
@@ -209,6 +209,43 @@ test('the handover marks a finished thread and carries no checkpoint count', asy
   expect(md).toContain('open (finished: the next message starts a new session)')
   expect(md).toContain('size unknown')
   expect(md.toLowerCase()).not.toContain('checkpoint')
+})
+
+test('serving the handover renames it to handover-read-<date>.md, keeps the last 3, and names the new path; nothing waiting says nothing', async () => {
+  const { h } = setup()
+  const D = `${L}/desk`
+  expect(await serveHandover(h.host)).toBeNull()
+  const served: string[] = []
+  for (let i = 0; i < 5; i++) {
+    h.clock.t += 60_000
+    h.files.set(`${D}/handover.md`, `# handover ${i}`)
+    const line = await serveHandover(h.host)
+    expect(h.files.has(`${D}/handover.md`)).toBe(false)
+    const path = /in (\S+handover-read-\S+\.md):/.exec(line ?? '')?.[1]
+    expect(line).not.toContain('(written ') // (these test files carry no first line)
+    expect(path).toMatch(/^\/h\/\.lean-agent\/desk\/handover-read-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d\.md$/)
+    expect(h.files.get(path!)).toBe(`# handover ${i}`)
+    served.push(path!)
+  }
+  const left = [...h.files.keys()].filter(k => k.includes('/handover-read-')).sort()
+  expect(left).toEqual(served.slice(-3)) // the newest three
+  // two starts in one second never overwrite each other
+  h.files.set(`${D}/handover.md`, 'a')
+  await serveHandover(h.host)
+  h.files.set(`${D}/handover.md`, 'b')
+  await serveHandover(h.host)
+  const texts = [...h.files].filter(([k]) => k.includes('/handover-read-')).map(([, v]) => v)
+  expect(texts).toContain('a')
+  expect(texts).toContain('b')
+  // a real handover says when it was written
+  h.files.set(`${D}/handover.md`, '# Desk handover (written 2026-11-01T10:00:00.000Z, context 250k)\n\nbody')
+  expect(await serveHandover(h.host)).toContain('(written 2026-11-01T10:00:00.000Z)')
+  // a move that fails leaves the handover where it was, and says nothing
+  h.files.set(`${D}/handover.md`, 'c')
+  const run = h.host.process.run
+  h.host.process.run = async (argv: string[], init?: any) => (argv[0] === 'mv' ? { exitCode: 1, stdout: '', stderr: 'denied' } : run(argv, init))
+  expect(await serveHandover(h.host)).toBeNull()
+  expect(h.files.get(`${D}/handover.md`)).toBe('c')
 })
 
 test('restart desk writes the handover now and opens a new desk session', async () => {
