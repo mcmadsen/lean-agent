@@ -30,7 +30,11 @@ goes to an `UNVERIFIED` list in your final report, never into a rule.
      `legacy-0.45/cards-<project>/`), read the index, then the cards of the area at hand, as **candidate facts, not rules**.
      Drop: commit hashes, PR/branch status, sizes, counts, dates, diaries, `file:line` cites. Keep: mechanisms, invariants,
      commands, traps. Every kept fact is checked against the code (hard rule); narrative worth keeping that is not a path
-     rule (a decision, why something is the way it is) goes to `lean_remember`.
+     rule (a decision, why something is the way it is) goes to `lean_remember`. The 0.45 library cards of the project
+     (`legacy-0.45/lessons-<project>/cards.json`, a JSON list; the index lists its note cards) are the same kind of
+     candidates. Its **review-checklist and shared-helpers** cards are NOT rule material: their lines were imported into the
+     project's lesson store (`lean_rules` `check` shows the count and warns when 0.45 lessons are not imported yet: tell the
+     user to run migrate), and the reviewer reads them from there. Do not copy them into rules.
    - *The repo's own docs.* `git -C <repo> ls-files | rg 'CLAUDE\.md|\.claude/rules'`. Optional, once: a doc index (path +
      first heading, `rg -m1 '^#' <doc>`) pasted into every brief.
 1. **List the areas**: workspace packages/services (`package.json` workspaces, `go.work`, `Cargo.toml`, `pyproject`), else

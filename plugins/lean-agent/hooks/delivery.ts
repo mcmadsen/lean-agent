@@ -9,6 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
+import { learnLessons, lessonLines, lessonsFor, listLessons, removeLesson, undoLessons, verifyLessons } from './reviewlessons'
 import { fillProfile, profileText } from './profile'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -90,7 +91,7 @@ export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter((
 
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
-  { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
+  { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open. Other actions work on the project\'s learned review lessons (the checklist and the shared helpers earlier human reviews found): lessons (the text block for a reviewer prompt, chosen by base/head or paths: no model involved), learn (add lines; near-duplicates skipped, a helper\'s name updates its line, replace corrects one), lessons-list, lessons-rm, lessons-undo, lessons-verify (helper lines whose code cannot be found; apply: true removes them).', inputSchema: obj({ action: { type: 'string', enum: ['record', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify'], description: 'default record' }, project: { type: 'string' }, sha: { type: 'string', description: 'record: full HEAD sha that was reviewed' }, green: { type: 'boolean', description: 'record' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } }, repo: { type: 'string', description: 'lessons, lessons-verify: absolute path of the checkout (default: the registered project\'s path)' }, base: { type: 'string', description: 'lessons: the base ref (default: the default branch)' }, head: { type: 'string', description: 'lessons: the head ref (default HEAD)' }, paths: { type: 'array', items: { type: 'string' }, description: 'lessons: changed paths relative to the repo (instead of or besides base/head)' }, goal: { type: 'string', description: 'lessons: the change\'s goal; its words select lessons too' }, budget: { type: 'number', description: 'lessons: tokens (default config.json review.lessonTokens, 3200)' }, checklist: { type: 'array', items: { type: 'string' }, description: 'learn: general checklist lines' }, helpers: { type: 'array', items: { type: 'object' }, description: 'learn: shared helpers {name, where (path relative to the repo), what}' }, replace: { type: 'array', items: { type: 'object' }, description: 'learn: corrections {old, new}' }, source: { type: 'string', description: 'learn: where the lines come from' }, which: { type: 'string', description: 'lessons-rm: the number from lessons-list, or a unique piece of the text' }, apply: { type: 'boolean', description: 'lessons-verify: remove the flagged lines' } }, ['project']) },
   { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
@@ -340,6 +341,25 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     }
     if (name === 'lean_review') {
       const project = str(i.project) || (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project || ''
+      const action = str(i.action) || 'record'
+      if (action !== 'record') {
+        if (!slugOk(project)) return { ok: false, text: `lean_review ${action} needs a project name` }
+        const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
+        if (action === 'lessons') return await lessonsFor(h, { project, repo: str(i.repo) || undefined, base: str(i.base) || undefined, head: str(i.head) || undefined, paths: strs(i.paths), goal: str(i.goal) || undefined, budget: typeof i.budget === 'number' && i.budget > 0 ? i.budget : undefined })
+        if (action === 'learn') {
+          const r = await learnLessons(h, project, { checklist: Array.isArray(i.checklist) ? i.checklist : [], helpers: Array.isArray(i.helpers) ? i.helpers : [], replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
+          const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`)]
+          return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
+        }
+        if (action === 'lessons-list') return { ok: true, text: await listLessons(h, project) }
+        if (action === 'lessons-rm') return str(i.which) ? await removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
+        if (action === 'lessons-undo') return await undoLessons(h, project)
+        if (action === 'lessons-verify') {
+          if (!str(i.repo).startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path)' }
+          return { ok: true, text: (await verifyLessons(h, project, str(i.repo), i.apply === true)).lines.join('\n') }
+        }
+        return { ok: false, text: `unknown lean_review action ${action}` }
+      }
       const file = await writeReview(h, { project, sha: str(i.sha), green: i.green === true, passes: Number(i.passes) || undefined, findings: Array.isArray(i.findings) ? i.findings.filter((x: unknown) => typeof x === 'string') : undefined })
       return { ok: true, text: `review recorded (${i.green === true ? 'green' : 'not green'}) in ${file}` }
     }
@@ -365,7 +385,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (i.action === 'stats') return { ok: true, text: JSON.stringify(await rulesStats(h, project)) }
       if (i.action === 'check') {
         const lim = Number(((await readConfig(h, home)) as any)?.learn?.maxExplorers)
-        return { ok: true, text: (await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines.join('\n') }
+        return { ok: true, text: [...(await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines, ...(await lessonLines(h, project).catch(() => [] as string[]))].join('\n') }
       }
       if (i.action === 'record') {
         if (!str(i.area) || !Array.isArray(i.globs) || !str(i.sha)) return { ok: false, text: 'record needs area, globs and sha' }
