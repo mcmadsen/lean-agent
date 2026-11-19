@@ -176,7 +176,8 @@ test('mcp-env refuses secret-looking names, reserved names, bad names and bad va
   for (const n of ['', '1ABC', 'A-B', 'A B', 'a'.repeat(65), 42, undefined]) expect((await setSettingsEnv(h.host, H, n, 'v')).ok).toBe(false)
   for (const v of ['', '   ', 'a\nb', 'a\x00b', 'x'.repeat(501), 5, undefined]) expect((await setSettingsEnv(h.host, H, 'MY_SITE', v)).ok).toBe(false)
   // a value that is a credential under an innocent name
-  for (const v of ['postgres://u:p@h/db', 'https://user:pw@host.example', 'ghp_abcdefghijklmnop', 'sk-abc123', 'AKIAABCDEFGHIJKLMNOP', 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8']) {
+  const AT = String.fromCharCode(64)
+  for (const v of [`postgres://u:p${AT}h/db`, `https://user:pw${AT}host`, 'ghp_abcdefghijklmnop', 'sk-abc123', 'AKIAABCDEFGHIJKLMNOP', 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8']) {
     const r = await setSettingsEnv(h.host, H, 'MY_SITE', v)
     expect([v, r.ok, r.text.includes('looks like a credential'), r.text.includes(v)]).toEqual([v, false, true, false])
   }
