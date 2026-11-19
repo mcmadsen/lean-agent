@@ -436,6 +436,19 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   await ui.unmount()
 })
 
+// (the engine's test host loads the plugin as its own module instance, so the compaction state that puts the advice row on top
+// cannot be seeded from here: deskcompact.test.ts covers that state, this one the quiet case)
+test('a desk under its limit has no advice row and no second Restart desk button', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' } as any)
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /the app cannot compact the desk automatically/ })).toBeFalsy()
+  await ui.unmount()
+})
+
 test('the /lean-agent-restart-desk command does the same in the desk, and refuses elsewhere', async ($, on) => {
   const h = setup(on, [])
   on('command.run', () => ({}))

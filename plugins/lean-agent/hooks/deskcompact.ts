@@ -4,6 +4,17 @@
 // the mod writes desk/handover.md and the status line asks the user to type /compact or start a new desk session, which reads it.
 // "Restart desk" (pane button, /lean-agent-restart-desk) writes the same handover on demand and opens a new desk session.
 //
+// A headless (-p / SDK) session, which is what the desk is in Claude Desktop, rejects `$.session.compact` ("not available in a headless
+// (-p / SDK) session yet: compaction here runs inside a turn (a /compact prompt)"). That is no failure and no retry will help: it is
+// tried ONCE per session start, recorded as `unavailable` (not `failed`: no notice, the doctor shows an info row, not FIX) and from then on
+// the pane and the status line say that the app cannot compact the desk automatically, with the Restart desk button next to it.
+//
+// Why the mod does not start a /compact itself in such a session: the engine types (plugin-authoring skill) document `$.command.run`
+// ("as if the person typed /command args", queued until the session is idle), `$.prompt.submit` and `$.skill.prompt`, but none of them
+// says that it works headless, and the only line about the headless case is the rejection above. A `/compact` text sent as a prompt
+// would be an ordinary user message to the model, not the command, in an engine that does not run commands there. Until the engine
+// documents a headless path, the user types /compact or presses Restart desk.
+//
 // Threads have no size trigger: a thread that reports done is finished as a session (finish.ts), and the pane's Restart button starts
 // a new session of a thread when its context is large.
 import { atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
@@ -63,9 +74,9 @@ export type DeskDeps = {
   reset: () => void // forget the context size: the next request tells the new one
 }
 // fallback: the size the handover file was written at (0 = none); again: try at the turn's end; vetoes: in a row; episode: a failure or a
-// veto is on record and not yet settled
-type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean; vetoes: number; episode: boolean }
-const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false, vetoes: 0, episode: false })
+// veto is on record and not yet settled; manual: the size at which the engine said it cannot compact this (headless) session (0 = not so)
+type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean; vetoes: number; episode: boolean; manual: number }
+const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false, vetoes: 0, episode: false, manual: 0 })
 export const MAX_VETOES = 3 // vetoes in a row before the handover file and the /compact line
 let ds: Desk = freshDesk()
 export const resetDeskCompact = (): void => {
@@ -73,10 +84,16 @@ export const resetDeskCompact = (): void => {
   sawUsage = false
   ds = freshDesk()
 }
+// a headless (-p / SDK) session: the engine's own text is "lean-agent: $.session.compact: not available in a headless (-p / SDK) session
+// yet: compaction here runs inside a turn (a /compact prompt); ..." (the prefix and the `$.` vary with the engine)
+const HEADLESS = /not available in a headless|headless \(-p|\(-p \/ SDK\) session/i
+export const isHeadlessReject = (text: unknown): boolean => HEADLESS.test(String(text ?? ''))
 // an engine without session.compact (a TypeError, "not available"): no retry will help
-const hopeless = (e: unknown) => e instanceof TypeError || /not a function|session\.compact is not available|no implementation/i.test(String((e as Error)?.message ?? e))
-// the sentence the pane footer and the status line carry while the mod could not compact
-export const deskNote = (): string => (ds.fallback ? `desk context ${kTokens(ds.fallback)}: type /compact (or start a new desk session; it reads the handover)` : '')
+const NO_COMPACT = /not a function|no implementation|session\.compact\b[^]{0,80}not available|not available[^]{0,120}session\.compact/i
+const hopeless = (e: unknown) => e instanceof TypeError || NO_COMPACT.test(String((e as Error)?.message ?? e)) || isHeadlessReject((e as Error)?.message ?? e)
+// the sentences the pane and the status line carry while the mod could not compact
+export const manualNote = (tokens: number): string => `desk context ${kTokens(tokens)}: the app cannot compact the desk automatically. Press Restart desk (fresh desk with the handover) or type /compact`
+export const deskNote = (): string => (ds.manual ? manualNote(ds.manual) : ds.fallback ? `desk context ${kTokens(ds.fallback)}: type /compact (or start a new desk session; it reads the handover)` : '')
 
 // a vetoed or failed compaction is tried again when the desk's turn ends (register.tsx calls deskTick then)
 export const deskRetryWanted = (): boolean => ds.again
@@ -85,11 +102,13 @@ export const deskTurnEnded = (): void => {
 }
 
 // ---- the record of the last compaction (desk/compact.json): the doctor shows it, a notice tells the user ----------------
-export type CompactRec = { ts: number; tokens: number; result: 'compacted' | 'vetoed' | 'failed'; reason?: string }
+// unavailable: the session cannot compact at all (headless): nothing is broken, the user acts (manualNote)
+export type CompactRec = { ts: number; tokens: number; result: 'compacted' | 'vetoed' | 'failed' | 'unavailable'; reason?: string }
 const recFile = (home: string) => `${deskState(home)}/compact.json`
 export async function lastCompaction(h: Host): Promise<CompactRec | null> {
   const r = await readJson<CompactRec | null>(h, recFile(await homeDir(h)), null)
-  return r && typeof r === 'object' && typeof r.result === 'string' ? r : null
+  if (!r || typeof r !== 'object' || typeof r.result !== 'string') return null
+  return r.result === 'failed' && isHeadlessReject(r.reason) ? { ...r, result: 'unavailable' } : r // (a 1.0.8 record of the same rejection)
 }
 async function record(h: Host, tokens: number, result: CompactRec['result'], reason?: string): Promise<void> {
   try {
@@ -97,7 +116,7 @@ async function record(h: Host, tokens: number, result: CompactRec['result'], rea
   } catch {
     /* the record is best effort */
   }
-  await setNotice(h, 'desk-compaction', result === 'compacted' ? null : `desk compaction ${result} at ${kTokens(tokens)}: ${reason || 'no reason given'}; it is tried again when the turn ends`)
+  await setNotice(h, 'desk-compaction', result === 'compacted' || result === 'unavailable' ? null : `desk compaction ${result} at ${kTokens(tokens)}: ${reason || 'no reason given'}; it is tried again when the turn ends`)
 }
 const why = (e: unknown) => String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 160) || 'no reason given'
 
@@ -105,14 +124,21 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   const limit = await deskTokens(h)
   const tokens = await d.tokens().catch(() => 0)
   if (tokens < limit) {
-    if (ds.fallback) d.status('') // the "type /compact" line goes away with the reason for it
+    if (ds.fallback || ds.manual) d.status('') // the "type /compact" line goes away with the reason for it
     if (ds.episode) await record(h, tokens, 'compacted', 'the context is below the limit again') // the notice and the doctor row go with it
     ds.fallback = 0
+    ds.manual = 0
     ds.rejected = 0
     ds.vetoes = 0
     ds.again = false
     ds.episode = false
     return 'quiet'
+  }
+  if (ds.manual) {
+    // this session cannot compact (headless): asked once, not again until a new session; the line is put back (it may have been replaced)
+    ds.again = false
+    d.status(deskNote())
+    return 'fallback'
   }
   if (d.busy()) return 'busy'
   const now = await h.clock.now()
@@ -133,6 +159,14 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       return 'busy'
     }
     ds.episode = true
+    if (isHeadlessReject((err as Error)?.message ?? err)) {
+      // nothing is broken and no retry will help: one calm state, no failure row, no notice, no handover (Restart desk writes it)
+      await record(h, tokens, 'unavailable', why(err))
+      ds.manual = tokens
+      ds.rejected = 0
+      d.status(deskNote())
+      return 'fallback'
+    }
     await record(h, tokens, 'failed', why(err))
     // a rejection can be transient (an API error, a limit): once more at the turn's end; twice in a row, or an engine that has no
     // session.compact, is "not possible": the handover file and the status line

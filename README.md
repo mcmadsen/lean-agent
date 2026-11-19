@@ -234,6 +234,12 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   threads, questions, your decisions and approvals kept; tool output dropped). A compaction that was vetoed or failed is recorded with
   its reason (a notice, and `lean_doctor check`) and tried again when the desk's turn ends. If it cannot compact, `desk/handover.md`
   is written and the status line reads "desk context Nk: type /compact (or start a new desk session; it reads the handover)".
+  **In Claude Desktop the desk is an SDK (headless) session, and the engine does not offer `session.compact` there** ("compaction
+  here runs inside a turn"). That is not a failure: it is asked once per session start (no retry, no red row, no notice), and while
+  the desk is over `deskTokens` the pane shows, at the top, "desk context Nk: the app cannot compact the desk automatically. Press
+  Restart desk (fresh desk with the handover) or type /compact" with the `Restart desk` button next to it (press twice).
+  `lean_doctor check` shows it as a `note` row, not `FIX`. The mod does not send `/compact` itself: no engine call is documented to
+  run a slash command in a headless session.
   The 1.0.6 key `checkpoint.deskTokens` is still read; `checkpoint.threadTokens` and `checkpoint.enabled` do nothing.
 
 ## Guards

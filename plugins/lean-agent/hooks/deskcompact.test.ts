@@ -161,6 +161,55 @@ test('a failed compact is recorded with its reason; twice in a row (or an engine
   expect(deskNote()).toBe('')
 })
 
+// the engine's own text in a headless (SDK) session, as the pane showed it
+const HEADLESS_TEXT = 'lean-agent: $.session.compact: not available in a headless (-p / SDK) session yet: compaction here runs inside a turn (a /compact prompt); catch it and carry on; it is tried again when the desk turn ends (or type /compact, or start a new desk session)'
+const MANUAL = 'desk context 250k: the app cannot compact the desk automatically. Press Restart desk (fresh desk with the handover) or type /compact'
+
+test('a headless (SDK) session cannot compact: asked once, no failure row, no notice, one calm line; the doctor shows an info note, not FIX', async () => {
+  const { h } = setup()
+  const d = deskDeps({ compact: async () => { throw new Error(HEADLESS_TEXT) } })
+  expect(await deskTick(h.host, d.deps)).toBe('fallback')
+  expect(d.seen.status).toEqual([MANUAL])
+  expect(deskNote()).toBe(MANUAL)
+  expect((await lastCompaction(h.host))?.result).toBe('unavailable')
+  expect(h.files.has(`${L}/notices/desk-compaction.txt`)).toBe(false) // no red notice
+  expect(h.files.has(`${L}/desk/handover.md`)).toBe(false) // Restart desk writes it when pressed
+  expect(deskRetryWanted()).toBe(false)
+  // never again in this session: not at the turn end, not after the retry gap
+  deskTurnEnded()
+  h.clock.t += DESK_RETRY_MS * 3
+  expect(await deskTick(h.host, d.deps)).toBe('fallback')
+  expect(d.seen.compact.length).toBe(1)
+  expect(deskRetryWanted()).toBe(false)
+  h.files.set('/plug/opener/open-desk.sh', 'x')
+  h.claude.handler = () => ({ exitCode: 0, stdout: '2.1.327' })
+  const rows = (await check(h.host, '/plug')).filter(l => l.includes('last desk compaction'))
+  expect(rows.length).toBe(1)
+  expect(rows[0]).toMatch(/^note {1}last desk compaction at .* UTC: not possible in this session; desk context 250k: the app cannot compact/)
+  expect(rows[0]).not.toMatch(/^FIX/)
+  // the context falls below the limit (a restart, a /compact by hand): the line and the record go
+  const low = deskDeps({ tokens: 20_000 })
+  expect(await deskTick(h.host, low.deps)).toBe('quiet')
+  expect(low.seen.status).toEqual([''])
+  expect(deskNote()).toBe('')
+  expect((await lastCompaction(h.host))?.result).toBe('compacted')
+})
+
+test('a 1.0.8 record of the headless rejection reads as unavailable; both message shapes and any "not available" for session.compact are hopeless (no retry)', async () => {
+  const { h } = setup()
+  h.files.set(`${L}/desk/compact.json`, JSON.stringify({ ts: 1, tokens: 263_000, result: 'failed', reason: HEADLESS_TEXT.slice(0, 160) }))
+  expect((await lastCompaction(h.host))?.result).toBe('unavailable')
+  for (const msg of ['session.compact is not available', 'lean-agent: $.session.compact: not available here', 'not available: session.compact', 'x is not a function', HEADLESS_TEXT, '$.session.compact: not available in a headless (-p / SDK) session']) {
+    const r = setup()
+    const d = deskDeps({ compact: async () => { throw new Error(msg) } })
+    expect(await deskTick(r.h.host, d.deps)).toBe('fallback')
+    expect(deskRetryWanted()).toBe(false)
+  }
+  // a transient failure is not hopeless
+  const t = setup()
+  expect(await deskTick(t.h.host, deskDeps({ compact: async () => { throw new Error('overloaded, 529') } }).deps)).toBe('skipped')
+})
+
 test('a transient rejection is recorded and tried again at the turn end before the handover file; the status line is cleared when the reason is gone', async () => {
   const { h } = setup()
   let n = 0

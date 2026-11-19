@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **The desk retried a compaction after every turn and showed a red failure in Claude Desktop.** The desk there is an SDK
+  (headless) session, and the engine answers `$.session.compact: not available in a headless (-p / SDK) session yet: compaction
+  here runs inside a turn (a /compact prompt)`; the "hopeless" check did not match that text. It now matches both message shapes
+  and any "not available" for `session.compact`. The headless answer is asked once per session start and recorded as
+  `unavailable` (not `failed`): no retry at the turn end or after the retry gap, no notice, no automatic handover. One calm
+  state instead: "desk context Nk: the app cannot compact the desk automatically. Press Restart desk (fresh desk with the handover)
+  or type /compact".
+- **Pane:** while the desk is over `deskTokens` and cannot be compacted by the mod, that line is shown at the top with a
+  `Restart desk` button next to it (same two-step press as the one at the bottom); it replaces the footer line.
+- **Doctor:** the `last desk compaction` row for that case is a `note` row with the advice, not `FIX`. A `failed` record that
+  holds the headless text (written by 1.0.8) reads as the same note.
+- Not done: the mod does not start `/compact` itself in a headless session. The engine types document `$.command.run`,
+  `$.prompt.submit` and `$.skill.prompt`, but none of them says it works headless (reasons in the header of `deskcompact.ts`).
+
 ## 1.0.8
 
 ### Fixed

@@ -386,6 +386,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const unreadLabel = v?.unread ? `, ${v.unread} unread` : ''
     return (
       <Box flexDirection="column">
+        {/* the desk is over its limit and cannot be compacted by the mod: the advice and the button that does it, at the top */}
+        {!!deskNote() && (
+          <Box>
+            <Text color="yellow">{deskNote()}</Text>
+            <Button key="restart-desk-top" label={confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'} onPress={restartDeskPress} />
+          </Box>
+        )}
         {problems.length > 0 ? problemRows : noteRows}
         {mcpBlock}
         {section('goals', `Goals (${v?.goals.length ?? 0})`, (v?.goals.length ?? 0) > 0)}
@@ -501,7 +508,6 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           lean-agent {VERSION} · refreshed {lastRefresh || 'never'} · last error: {lastError || 'none'} · budget today: {v?.budget ?? 'n/a'}
           {contextSize() > 0 ? ` · desk context ${kTokens(contextSize())}` : ''}
         </Text>
-        {!!deskNote() && <Text color="yellow">{deskNote()}</Text>}
       </Box>
     )
   })
