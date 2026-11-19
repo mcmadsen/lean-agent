@@ -33,8 +33,8 @@ export async function readDeskModel(h: Host): Promise<DeskModelState | null> {
 }
 async function clearState(h: Host): Promise<void> {
   const f = stateFile(await homeDir(h))
+  await setNotice(h, NOTICE_KEY, null) // the notice first: a pane load in between never shows it as a stray red line
   if (await h.fs.exists(f).catch(() => false)) await h.process.run(['rm', '-f', f]).catch(() => undefined)
-  await setNotice(h, NOTICE_KEY, null)
 }
 
 // what the mod needs of the engine ($.session.model, $.config.list, $.config.set), each bounded by the caller
@@ -72,9 +72,11 @@ export async function applyPin(eng: Engine, pin: Choice, needModel: boolean): Pr
       out.why.push(`${what}: ${String((e as Error)?.message ?? e).slice(0, 80)}`)
     }
   }
-  if (needModel) await set('model', rows.find(isModelRow), o => modelFamily(o) === pin.model)
+  // the exact option first (`sonnet`), then the family (`opusplan` or `sonnet[1m]` never beat the plain one)
+  if (needModel) { const mr = rows.find(isModelRow); const exact = (mr?.options ?? []).some(o => o === pin.model); await set('model', mr, o => (exact ? o === pin.model : modelFamily(o) === pin.model)) }
   const er = rows.find(isEffortRow)
-  if (er && String(er.value ?? '').toLowerCase() !== pin.effort) await set('effort', er, o => o.toLowerCase() === pin.effort)
+  if (!er) out.why.push('no effort row')
+  else if (String(er.value ?? '').toLowerCase() !== pin.effort) await set('effort', er, o => o.toLowerCase() === pin.effort)
   return out
 }
 
@@ -91,7 +93,7 @@ export async function checkDeskModel(h: Host, eng: Engine | null, running: strin
   if (!need) {
     await clearState(h)
     if (done?.effort) {
-      const text = `the desk's effort was not ${pin.effort}: lean-agent set it (its pin)`
+      const text = `the desk's effort was not ${pin.effort}: lean-agent set it through /config (the app may keep that as your default for new sessions)`
       await setNotice(h, NOTICE_SET, text)
       return { kind: 'set', text }
     }
@@ -102,7 +104,9 @@ export async function checkDeskModel(h: Host, eng: Engine | null, running: strin
     const now = eng ? String(await eng.model().catch(() => '')) : ''
     if (!now || modelFamily(now) === pin.model) {
       await clearState(h)
-      const text = `the desk was on ${running} (the app chose it); lean-agent set ${pin.model} / ${pin.effort} for this session`
+      // only what was really written is claimed; `$.config.set` is the /config menu's own writer, so the app may keep it as the default
+      const eff = done.effort ? ` / ${pin.effort}` : ` (effort not changed: ${done.why.find(w => /effort/.test(w)) ?? 'it already was the pin'})`
+      const text = `the desk was on ${running} (the app chose it); lean-agent set ${pin.model}${eff} through /config (the app may keep that as your default for new sessions)`
       await setNotice(h, NOTICE_SET, text) // (shown until the next desk session's attempt)
       return { kind: 'set', text }
     }

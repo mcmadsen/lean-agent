@@ -27,8 +27,11 @@
   menu") and a `turn.step` hook that rewrites one request's model (not used: it would override the user's own choice at every step).
   So, once per desk session (at `session.start` when the model is known then, else at the first request), when the session's model or
   the effort row differs from the pin (`config.json` `desk`, default sonnet / high), the Model and Effort rows are set through
-  `$.config.set` and a notice says so (`the desk was on <model> (the app chose it); lean-agent set sonnet / high for this session`; the
-  desk's next prompt says it too). Nothing is forced when that is not possible (no such row, no option of that family, locked, denied,
+  `$.config.set` and a dim pane line says so (`the desk was on <model> (the app chose it); lean-agent set sonnet / high through
+  /config (the app may keep that as your default for new sessions)`, naming only what was really written; the desk's next prompt says
+  it too). `$.config.set` is the /config menu's own writer, so whether the app keeps the change as the user's default for other
+  sessions could not be checked from the types: the line says so. The session's own model is what is judged (`$.session.model()`;
+  a title or summary request on a small model is nobody's pin), the plain `sonnet` option wins over `sonnet[1m]`. Nothing is forced when that is not possible (no such row, no option of that family, locked, denied,
   throws, or the model did not move): `~/.lean-agent/desk/model.json` holds the state, the pane shows one top row `the desk runs
   <model>; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)` and a notice, and a later request on the pin clears both.
   After the one attempt a changed model is only noted, never written again (no fight with the user's menu). A model of no known family

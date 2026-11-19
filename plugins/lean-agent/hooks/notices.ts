@@ -32,6 +32,16 @@ export async function takeNotice(h: Host, key: string): Promise<string | null> {
   }
 }
 
+// The text of one notice, left where it is
+export async function peekNotice(h: Host, key: string): Promise<string | null> {
+  try {
+    const t = await h.fs.read(`${dirOf(await homeDir(h))}/${key.replace(/[^\w.-]/g, '_')}.txt`).catch(() => '')
+    return typeof t === 'string' && t.trim() ? t.trim() : null
+  } catch {
+    return null
+  }
+}
+
 export async function readNotices(h: Host): Promise<string[]> {
   try {
     const d = dirOf(await homeDir(h))

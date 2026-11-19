@@ -38,10 +38,26 @@ test('a model the app chose is set through the Model and Effort rows once; the n
   const r = await checkDeskModel(h.host, e.engine, OPUS, true)
   expect(r.kind).toBe('set')
   expect(e.sets).toEqual([{ key: 'model', value: 'sonnet' }, { key: 'effort', value: 'high' }])
-  expect(r.text).toBe(`the desk was on ${OPUS} (the app chose it); lean-agent set sonnet / high for this session`)
-  expect(notice(h, 'desk-model-set')).toContain('lean-agent set sonnet / high')
+  expect(r.text).toBe(`the desk was on ${OPUS} (the app chose it); lean-agent set sonnet / high through /config (the app may keep that as your default for new sessions)`)
+  expect(notice(h, 'desk-model-set')).toContain('lean-agent set sonnet / high through /config')
   expect(h.files.has(stateFile)).toBe(false)
   expect(await readDeskModel(h.host)).toBeNull()
+  // only what was written is claimed: no Effort row -> the model alone
+  const m = world()
+  const e2 = engine([modelRow()], { models: ['claude-sonnet-5-5'] })
+  const r2 = await checkDeskModel(m.host, e2.engine, OPUS, true)
+  expect(r2.kind).toBe('set')
+  expect(r2.text).toContain('set sonnet (effort not changed: no effort row) through /config')
+  expect(r2.text).not.toContain('sonnet / high')
+  // the plain option beats `opusplan`-like names of the same family
+  const x = world()
+  const e3 = engine([modelRow({ options: ['opusplan', 'sonnet[1m]', 'sonnet', 'opus'] })], { models: ['claude-sonnet-5-5'] })
+  await checkDeskModel(x.host, e3.engine, OPUS, true)
+  expect(e3.sets[0]).toEqual({ key: 'model', value: 'sonnet' })
+  const y = world()
+  const e4 = engine([modelRow({ options: ['opusplan', 'sonnet[1m]'] })], { models: ['claude-sonnet-5-5'] })
+  await checkDeskModel(y.host, e4.engine, OPUS, true)
+  expect(e4.sets[0]).toEqual({ key: 'model', value: 'sonnet[1m]' }) // no exact option: the family
 })
 
 test('already on the pin: nothing is written; only an effort that differs is set', async () => {
@@ -174,6 +190,33 @@ test('through the hooks: a desk session that starts on another model has the Mod
   expect(h.files.has(stateFile)).toBe(false)
 })
 
+test('a side request on a small model does not move the pin: the session\'s own model is judged, and what the mod set is a dim line, not an error', async ($, on) => {
+  const h = fakeHost(on)
+  resetLocks()
+  resetViewCache()
+  const sets: any[] = []
+  on('session.model', () => ({ value: 'claude-sonnet-5-5' }) as any) // the session is on the pin
+  on('config.list', () => ({ value: [modelRow({ value: 'sonnet' }), effortRow()] }) as any)
+  on('config.set', (_: any, e: any) => { sets.push({ key: e.key, value: e.value }); return { value: e.value } as any })
+  on('turn.step', async function* (_: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: e.model, input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any
+  })
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  expect(sets).toEqual([{ key: 'effort', value: 'high' }]) // only the effort row differed
+  const st = $.turn.step({ turnId: 't', index: 0, model: 'claude-haiku-5-5', messageCount: 1 } as any)
+  for (;;) { const n = await st.next(); if (n.done) break }
+  expect(h.files.has(stateFile)).toBe(false) // a title request on haiku is nobody's pin
+  expect(sets).toHaveLength(1)
+  expect(notice(h, 'desk-model-set')).toContain("the desk's effort was not high")
+  const ui = await $.ui.mount({ plugin: 'lean-agent', component: 'Pane', requestId: 'lean-agent', surface: 'desktop', props: { title: 'lean-agent', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as any)
+  expect(await ui.find({ type: 'Text', text: /the desk's effort was not high/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /error: the desk's effort/ })).toBeFalsy()
+  await ui.unmount()
+})
+
 // ---- the doctor's wording ------------------------------------------------------------------------------------------------------
 const desk = (startedAt: number, model = OPUS) => ({ sessionId: 'D', status: 'busy', model, cwd: '/h/lean-agent-desk', startedAt })
 function spent(rows: unknown[], pinned?: { at: number; model: string }) {
@@ -194,6 +237,7 @@ test('doctor: "started before setup pinned the model" only when the live desk se
   expect(await deskLine(spent([], { at: NOON - 3_600_000, model: 'sonnet' }))).toBe(chose) // no live desk session to compare with
   expect(await deskLine(spent([desk(0)], { at: NOON - 3_600_000, model: 'sonnet' }))).toBe(chose) // no start time
   expect(await deskLine(spent([desk(NOON - 7_200_000)], { at: NOON - 3_600_000, model: 'opus' }))).toBe(chose) // the record is for another pin
+  expect(await deskLine(spent([desk(NOON - 7_200_000, 'claude-sonnet-5-5')], { at: NOON - 3_600_000, model: 'sonnet' }))).toContain('the app chose another model') // it runs the pin now: no "started before"
   expect(await deskLine(spent([desk(NOON - 100, 'claude-sonnet-5-5')]))).toBe(`${chose} (the live desk session runs sonnet now)`) // the spend is of an earlier session
 })
 

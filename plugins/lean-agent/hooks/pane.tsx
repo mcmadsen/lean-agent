@@ -399,6 +399,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       <Box flexDirection="column">
         {/* the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick, at the top */}
         {!!v?.deskModel && <Text color="yellow">{v.deskModel}</Text>}
+        {!!v?.deskModelSet && <Text dimColor>{v.deskModelSet}</Text>}
         {/* the desk is over its limit and cannot be compacted by the mod: the advice and the button that does it, at the top */}
         {!!deskNote() && (
           <Box>

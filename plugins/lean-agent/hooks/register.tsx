@@ -20,6 +20,7 @@ import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
 import { checkDeskModel } from './deskmodel'
+import { MODELS, modelFamily } from './models'
 import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -484,13 +485,18 @@ function redetect($: any, hint?: string, force = false): Promise<unknown> {
 
 // The desk runs on `running`: the pin is applied once per session (session.start when the model is known, else the first request), and
 // a later change of model is only noted (state for the pane's top row). Never throws; the text, when there is one, goes to the next prompt.
+// (async: a call that throws before it returns a promise is a rejection too)
 const engineOf = ($: any): Engine => ({
-  configList: () => bounded($, Promise.resolve($.config.list()), 'config.list'),
-  configSet: a => bounded($, Promise.resolve($.config.set(a)), 'config.set'),
-  model: () => bounded($, Promise.resolve($.session.model()), 'session.model'),
+  configList: async () => bounded($, Promise.resolve($.config.list()), 'config.list'),
+  configSet: async a => bounded($, Promise.resolve($.config.set(a)), 'config.set'),
+  model: async () => bounded($, Promise.resolve($.session.model()), 'session.model'),
 })
-async function deskModelCheck($: any, running: string): Promise<void> {
+// The session's own model is what is judged (a request may be a side request on a small model, a title or a summary); the request's
+// model only stands in when the session cannot say.
+async function deskModelCheck($: any, fromRequest = ''): Promise<void> {
   try {
+    const sm = String((await engineOf($).model().catch(() => '')) ?? '')
+    const running = (MODELS as readonly string[]).includes(modelFamily(sm)) ? sm : fromRequest
     if (!running) return
     const apply = !deskModelTried
     if (!apply && running === deskModelSeen) return
@@ -543,7 +549,7 @@ export const register: Register = on => {
       })
     }
     // the desk's model and effort pin, when the session's model is already known (else the first request does it)
-    if (role.kind === 'desk') await deskModelCheck($, String(await engineOf($).model().catch(() => '') ?? ''))
+    if (role.kind === 'desk') await deskModelCheck($)
     // once per plugin version (desk): learned rules past a size cap, and the 0.45 `rules: off` key nothing reads
     if (role.kind === 'desk') {
       await soft($, 'rules check', async () => {

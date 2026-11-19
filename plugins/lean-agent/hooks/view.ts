@@ -4,8 +4,8 @@ import type { Host } from './state'
 import { approvalOf, deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
-import { readNotices } from './notices'
-import { deskModelText, readDeskModel } from './deskmodel'
+import { peekNotice, readNotices } from './notices'
+import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
 import { spendLine } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { isLimitRow, pausedRec, readLimit } from './limits'
@@ -23,7 +23,7 @@ import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
 import { scriptCounts, waitingScripts } from './scripts'
 import type { Waiting } from './scripts'
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[]; deskModel?: string }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[]; deskModel?: string; deskModelSet?: string }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 
@@ -183,7 +183,10 @@ export async function loadView(h: Host): Promise<View> {
       deskModelNote = v.deskModel
     }
   })
-  v.errors.push(...(await readNotices(h)).filter(n => n !== deskModelNote))
+  // what the mod set is information, not an error: a dim line at the top, not a red one (and not counted in a thread's status line)
+  const setNote = await peekNotice(h, NOTICE_SET)
+  if (setNote) v.deskModelSet = setNote
+  v.errors.push(...(await readNotices(h)).filter(n => n !== deskModelNote && n !== setNote))
   return v
 }
 
@@ -201,6 +204,7 @@ export async function threadStatus(h: Host, id: string): Promise<string> {
   const home = await homeDir(h)
   const n = (await unconsumed(h, home, id)).msgs.length
   const b = (await loadBudget(h, home)) ?? 'budget n/a'
-  const notes = (await readNotices(h)).length
+  const setNote = await peekNotice(h, NOTICE_SET)
+  const notes = (await readNotices(h)).filter(n => n !== setNote).length
   return `${id} · ${b} · ${n} unread${notes ? ` · ⚠ ${notes} notice${notes > 1 ? 's' : ''} (see the desk pane)` : ''}`
 }

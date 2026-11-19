@@ -197,7 +197,7 @@ export async function modelMismatches(h: Host): Promise<string[]> {
   // (desk/pinned.json, written by setup when the pin changed). Otherwise the app chose the model for that session.
   const deskLive = (listing ?? []).find(a => isRunning(a) && !sids.has(a.sid) && a.cwd.replace(/\/$/, '') === deskDir(home))
   const pinRec = await readJson<{ at?: number; model?: string } | null>(h, `${leanDir(home)}/desk/pinned.json`, null)
-  const beforePin = !!deskLive && deskLive.startedAt > 0 && typeof pinRec?.at === 'number' && pinRec.at > 0 && pinRec.model === desk && deskLive.startedAt < pinRec.at
+  const beforePin = !!deskLive && deskLive.startedAt > 0 && typeof pinRec?.at === 'number' && pinRec.at > 0 && pinRec.model === desk && deskLive.startedAt < pinRec.at && !(deskLive.model && family(deskLive.model) === desk)
   const deskWhy = beforePin ? 'that session started before setup pinned the model; close it and open the desk again' : `the app chose another model for this session: pick ${desk.charAt(0).toUpperCase() + desk.slice(1)} in its model menu${deskLive?.model && family(deskLive.model) === desk ? ` (the live desk session runs ${desk} now)` : ''}`
   const ro = await syncRollup(h, now)
   const rm = ro.days[dayOf(now)]?.rmm ?? {} // the sessions' own requests: a worker's model is chosen per call and is no mismatch
