@@ -12,7 +12,7 @@ import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
-import { contextSize, deskNote, kTokens, recentUser, restartDesk } from './deskcompact'
+import { contextSize, deskNote, kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.7'
@@ -64,7 +64,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     if (roleOf().kind !== 'desk') return { text: 'This is not the desk: run /lean-agent-restart-desk in the desk session.' }
     try {
       const host = hostOf($)
-      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), open: () => openDesk(host, e?.surface) }), 'restart desk', 45_000)
+      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e?.surface) }), 'restart desk', 45_000)
       return { text: r.text }
     } catch (err) {
       return { text: `Restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
@@ -295,7 +295,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // Restart desk: the handover is written now, then a new desk session is opened; this one stays until the user closes it
     const restartDeskPress = twoStep('restart:desk', async () => {
       resetViewCache()
-      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), open: () => openDesk(host, e.surface) }), 'restart desk', 45_000).catch(err => ({ ok: false, text: `restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
+      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e.surface) }), 'restart desk', 45_000).catch(err => ({ ok: false, text: `restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
       notice = short(r.text, 200)
       if (!r.ok) lastError = notice
       tell()

@@ -58,6 +58,7 @@ export type DeskDeps = {
   compact: (instructions: string) => Promise<unknown> // $.session.compact; a rejection or a missing function = not possible
   notes: () => Promise<void> // the compaction notes (the session.compact hook does not run for the plugin's own call)
   recent: () => Promise<string[]> // the user's latest messages, for the handover file
+  sid?: () => string // this desk session's id: recorded in the handover, so this session's own start never consumes it
   status: (text: string) => void
   reset: () => void // forget the context size: the next request tells the new one
 }
@@ -139,7 +140,7 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       ds.again = true
       return 'skipped'
     }
-    await writeDeskHandover(h, tokens, await d.recent().catch(() => []))
+    await writeDeskHandover(h, tokens, await d.recent().catch(() => []), d.sid?.())
     ds.fallback = tokens
     d.status(deskNote())
     return 'fallback'
@@ -153,7 +154,7 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       return 'skipped'
     }
     // vetoed every time: the mod cannot compact, the user can (the notice and the doctor row keep the reason)
-    await writeDeskHandover(h, tokens, await d.recent().catch(() => []))
+    await writeDeskHandover(h, tokens, await d.recent().catch(() => []), d.sid?.())
     ds.fallback = tokens
     d.status(deskNote())
     return 'fallback'
@@ -173,12 +174,22 @@ export async function recentUser($: any): Promise<string[]> {
   return (Array.isArray(m) ? m : []).filter((x: any) => x?.role === 'user' && typeof x.text === 'string' && x.text.trim() && !x.text.startsWith('[lean-agent]')).slice(-6).map((x: any) => x.text as string)
 }
 
+// this session's id, '' when the engine gives none (never a made-up one: the handover names its writer by it)
+export async function sessionId($: any): Promise<string> {
+  const s = await $.session.id()
+  return typeof s === 'string' ? s : ''
+}
+
 // ---- desk/handover.md ---------------------------------------------------------------------------------------------
 const flat = (s: string, n: number) => (s.replace(/\s+/g, ' ').trim().length > n ? s.replace(/\s+/g, ' ').trim().slice(0, n - 1) + '…' : s.replace(/\s+/g, ' ').trim())
 const cell = (s: string, n: number) => flat(s, n).replace(/\|/g, '/')
 export const handoverFile = (home: string) => `${deskState(home)}/handover.md`
 
-export async function deskHandover(h: Host, tokens: number, recent: string[]): Promise<string> {
+// the last line of the file names the session that wrote it (serveHandover: that session's own start must not consume it)
+// (anchored to the END of the file: the user's messages, titles and report texts above it may quote such a comment, and none of them counts)
+const WRITER = /\n<!-- lean-agent: written-by-session ([A-Za-z0-9_-]{1,80}) -->\s*$/
+const sidOk = (s: unknown): s is string => typeof s === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(s)
+export async function deskHandover(h: Host, tokens: number, recent: string[], sid = ''): Promise<string> {
   const home = await homeDir(h)
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
@@ -211,27 +222,35 @@ export async function deskHandover(h: Host, tokens: number, recent: string[]): P
     `## Unanswered thread questions\n${qs.length ? qs.join('\n') : 'none'}`,
     `## Pending approvals\n${waiting.length ? waiting.join('\n') : 'none known to the mod (a push approval the user gave in the old chat is single use: ask again if needed)'}`,
     recent.length ? `## What the user said last (newest last; their preferences and decisions of the old session are in the old conversation)\n${recent.map(m => `- ${flat(m, 300)}`).join('\n')}` : '',
+    sidOk(sid) ? `<!-- lean-agent: written-by-session ${sid} -->` : '',
   ]
   return parts.filter(Boolean).join('\n\n') + '\n'
 }
 
-export async function writeDeskHandover(h: Host, tokens: number, recent: string[]): Promise<void> {
-  await atomicWrite(h, handoverFile(await homeDir(h)), await deskHandover(h, tokens, recent))
+// `sid`: the writing desk session. Unknown, no writer is named (desk.json may still hold an older desk's id): any desk may then serve it.
+export async function writeDeskHandover(h: Host, tokens: number, recent: string[], sid = ''): Promise<void> {
+  await atomicWrite(h, handoverFile(await homeDir(h)), await deskHandover(h, tokens, recent, sid))
 }
 
 // A new desk session's start serves the handover: the file is renamed to handover-read-<date>.md (the last 3 are kept), so a later desk
 // never reads a stale one as if it were fresh, and the first prompt names where it is now. null = no handover waiting (or it could not be moved:
 // then it stays as it was, and the desk's guide still tells it to read handover.md).
 export const KEEP_READ_HANDOVERS = 3
-export async function serveHandover(h: Host): Promise<string | null> {
+// Only a NEW desk session consumes it: the file names the session that wrote it, and that session's own start (a resume, a compaction, a
+// reload) leaves it where it is. A start whose own id is unknown cannot tell, so it leaves a named handover alone too; a handover that
+// names no writer (an older file) goes to whichever desk starts.
+export async function serveHandover(h: Host, sid = ''): Promise<string | null> {
   try {
     const home = await homeDir(h)
     const from = handoverFile(home)
     if (!(await h.fs.exists(from))) return null
+    const body = String(await h.fs.read(from).catch(() => ''))
+    const writer = WRITER.exec(body)?.[1]
+    if (writer && (!sid || writer === sid)) return null
     const date = new Date(await h.clock.now()).toISOString().slice(0, 19).replace(/:/g, '-')
     let to = `${deskState(home)}/handover-read-${date}.md`
     for (let n = 2; await h.fs.exists(to); n++) to = `${deskState(home)}/handover-read-${date}-${n}.md` // (two starts in one second)
-    const written = /^# Desk handover \(written (\S+?),/.exec(String(await h.fs.read(from).catch(() => '')))?.[1] // (its own first line says when)
+    const written = /^# Desk handover \(written (\S+?),/.exec(body)?.[1] // (its own first line says when)
     const r = await h.process.run(['mv', from, to])
     if (r.exitCode !== 0 || (await h.fs.exists(from))) return null
     const old = (await h.fs.list(deskState(home)).catch(() => [])).filter(f => f.kind === 'file' && /^handover-read-.+\.md$/.test(f.name)).map(f => f.name.replace(/\.md$/, '')).sort().map(n => `${n}.md`) // (the date sorts as text; without the extension, `-2` after the same second sorts after it)
@@ -246,10 +265,10 @@ export async function serveHandover(h: Host): Promise<string | null> {
 // "Restart desk": the handover is written now, then a new desk session is opened (`open` = setup.ts openDesk). The new session reads the
 // handover at its start (the desk's CLAUDE.md says so); the old one stays open until the user closes it.
 export const DESK_RESTARTED = 'New desk opened with the handover: close this one'
-export async function restartDesk(h: Host, o: { recent: () => Promise<string[]>; open: () => Promise<{ ok: boolean; text: string }> }): Promise<{ ok: boolean; text: string }> {
+export async function restartDesk(h: Host, o: { recent: () => Promise<string[]>; open: () => Promise<{ ok: boolean; text: string }>; sid?: () => Promise<string> }): Promise<{ ok: boolean; text: string }> {
   const home = await homeDir(h)
   try {
-    await writeDeskHandover(h, contextSize(), await o.recent().catch(() => []))
+    await writeDeskHandover(h, contextSize(), await o.recent().catch(() => []), await o.sid?.().catch(() => '') || '')
   } catch (e) {
     return { ok: false, text: `desk not restarted: the handover could not be written (${why(e)})` }
   }

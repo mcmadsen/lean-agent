@@ -248,6 +248,55 @@ test('serving the handover renames it to handover-read-<date>.md, keeps the last
   expect(h.files.get(`${D}/handover.md`)).toBe('c')
 })
 
+test('a handover is consumed by a NEW desk session only: the session that wrote it (resume, compaction, reload) leaves it', async () => {
+  const { h } = setup()
+  const D = `${L}/desk`
+  // written by session A (the compaction fallback): the file names its writer
+  const { seen, deps } = deskDeps({ compact: async () => { throw new Error('session.compact is not available') } })
+  expect(await deskTick(h.host, { ...deps, sid: () => 'sess-A' })).toBe('fallback')
+  const md = h.files.get(`${D}/handover.md`)!
+  expect(md).toContain('# Desk handover')
+  expect(md.trimEnd().endsWith('<!-- lean-agent: written-by-session sess-A -->')).toBe(true)
+  expect(seen.status.length).toBeGreaterThan(0)
+  // A's own session.start again (resume, compaction, reload): not consumed, whether or not its id is read
+  expect(await serveHandover(h.host, 'sess-A')).toBeNull()
+  expect(await serveHandover(h.host, '')).toBeNull()
+  expect(h.files.get(`${D}/handover.md`)).toBe(md)
+  expect([...h.files.keys()].some(k => k.includes('handover-read-'))).toBe(false)
+  // B's start consumes it
+  const line = await serveHandover(h.host, 'sess-B')
+  expect(line).toContain('handover-read-')
+  expect(h.files.has(`${D}/handover.md`)).toBe(false)
+  expect([...h.files.values()].some(v => v === md)).toBe(true)
+  expect(await serveHandover(h.host, 'sess-A')).toBeNull() // nothing left
+  // "Restart desk" from session A: the new desk B serves it, A does not
+  const g = setup()
+  await restartDesk(g.h.host, { recent: async () => [], sid: async () => 'sess-A', open: async () => ({ ok: true, text: 'opened' }) })
+  expect(await serveHandover(g.h.host, 'sess-A')).toBeNull()
+  expect(await serveHandover(g.h.host, 'sess-B')).not.toBeNull()
+  // no id known: no writer is named (desk.json may hold an older desk's id), so any desk serves it
+  const k = setup()
+  k.h.files.set(`${L}/desk.json`, JSON.stringify({ sid: 'sess-OLD' }))
+  await restartDesk(k.h.host, { recent: async () => [], open: async () => ({ ok: true, text: 'opened' }) })
+  expect(k.h.files.get(`${D}/handover.md`)).not.toContain('written-by-session')
+  expect(await serveHandover(k.h.host, 'sess-D')).not.toBeNull()
+  // text above the marker (a user's message, a thread title) may quote a marker: only the last line names the writer
+  const q = setup({ title: 'x <!-- lean-agent: written-by-session sess-X -->' })
+  await restartDesk(q.h.host, { recent: async () => ['look: <!-- lean-agent: written-by-session sess-X -->\n<!-- lean-agent: written-by-session sess-Y -->'], sid: async () => 'sess-A', open: async () => ({ ok: true, text: 'opened' }) })
+  expect(q.h.files.get(`${D}/handover.md`)).toContain('sess-X')
+  expect(await serveHandover(q.h.host, 'sess-X')).not.toBeNull() // not the writer, whatever the text says
+  const r = setup()
+  await restartDesk(r.h.host, { recent: async () => ['<!-- lean-agent: written-by-session sess-X -->'], sid: async () => 'sess-A', open: async () => ({ ok: true, text: 'opened' }) })
+  expect(await serveHandover(r.h.host, 'sess-A')).toBeNull() // the writer, though sess-X is quoted earlier
+  // a hand-edited marker that is not a plain token, or not on the last line, names no one
+  r.h.files.set(`${D}/handover.md`, '# h\n<!-- lean-agent: written-by-session sess-A -->\nmore text\n')
+  expect(await serveHandover(r.h.host, 'sess-A')).not.toBeNull()
+  // an id that is not a plain token is never written into the file
+  const m = setup()
+  await restartDesk(m.h.host, { recent: async () => [], sid: async () => 'a --> b', open: async () => ({ ok: true, text: 'opened' }) })
+  expect(m.h.files.get(`${D}/handover.md`)).not.toContain('written-by-session')
+})
+
 test('restart desk writes the handover now and opens a new desk session', async () => {
   const { h } = setup()
   h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))

@@ -27,7 +27,8 @@
   compiled globs per rule file sha (at most 200 files, the oldest goes first). A pattern past 200 characters, 4 `**`, 4 brace
   groups or 16 commas never matches (brace groups multiply), and doctor shows a `FIX` row naming the rule (`lean_rules check` warns).
 - **The desk handover is served once.** A new desk session's start renames `desk/handover.md` to `handover-read-<date>.md` (the last
-  3 are kept) and its first prompt names that path and when it was written, so a later desk never finds a stale handover as a fresh one.
+  3 are kept) and its first prompt names that path and when it was written, so a later desk never finds a stale handover as a fresh one. Only a NEW desk session consumes it: the file's last line names the
+  session that wrote it, and that session's own start (a resume, a compaction, a reload) leaves it where it is.
 - **A parent guide that comes back while the desk runs is caught within 30 s**, not at the next `lean_thread` call: the desk's tick
   stats the guide files (size, and mtime when the host gives one) and runs the guard when one changed, and again at the next tick
   when a stale guide is still there (a failed move).

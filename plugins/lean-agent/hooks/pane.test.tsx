@@ -458,6 +458,41 @@ test('a new desk session start serves the handover: it is renamed, so a later de
   expect(h.files.get(moved[0]!)).toBe('# Desk handover (written earlier)')
 })
 
+test('a desk session start whose own id is not known leaves a handover that names its writer', async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  const md = '# Desk handover (written earlier)\n\n<!-- lean-agent: written-by-session sess-A -->\n'
+  h.files.set('/h/.lean-agent/desk/handover.md', md)
+  await inDesk($)
+  expect(h.files.get('/h/.lean-agent/desk/handover.md')).toBe(md)
+  expect([...h.files.keys()].some(k => k.includes('handover-read-'))).toBe(false)
+})
+
+test('through the real session start: the writer\'s own start (same id) leaves the handover, another desk session consumes it', async ($, on) => {
+  const h = setup(on, [])
+  let sid = 'sess-A'
+  on('session.id', () => ({ value: sid }))
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  const md = '# Desk handover (written earlier)\n\n<!-- lean-agent: written-by-session sess-A -->\n'
+  h.files.set('/h/.lean-agent/desk/handover.md', md)
+  await inDesk($) // session A starts again (resume, reload)
+  expect(h.files.get('/h/.lean-agent/desk/handover.md')).toBe(md)
+  sid = 'sess-B'
+  await inDesk($) // a new desk session B
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false)
+  expect([...h.files.keys()].filter(k => /\/desk\/handover-read-.+\.md$/.test(k))).toHaveLength(1)
+})
+
+test('the restart command writes the handover with the id of the session that ran it', async ($, on) => {
+  const h = setup(on, [])
+  on('command.run', () => ({}))
+  on('session.id', () => ({ value: 'sess-A' }))
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  await $.command.run({ command: 'lean-agent-restart-desk', surface: 'desktop' } as any)
+  expect(String(h.files.get('/h/.lean-agent/desk/handover.md')).trimEnd().endsWith('<!-- lean-agent: written-by-session sess-A -->')).toBe(true)
+})
+
 test('the desk guide tells a new desk session to read desk/handover.md (the restart path relies on it)', async () => {
   const h = fakeHost(null)
   // the template's own line, as templates/front-desk.md has it

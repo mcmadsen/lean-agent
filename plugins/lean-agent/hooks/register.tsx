@@ -213,6 +213,7 @@ async function compactDesk($: any, host2: Host): Promise<string> {
       await writeCompactNotes(host2, role, Array.isArray(m) ? m : [])
     },
     recent: () => recentUser($),
+    sid: () => lastSid,
     status: text => $.ui.status(text),
     reset: forgetContext,
   })
@@ -510,7 +511,7 @@ export const register: Register = on => {
       if (said) pending.push(`[lean-agent] ${said}`)
       // a handover left by the previous desk session is served now: renamed (a later desk must not find it as a fresh one), and named in the first prompt
       await soft($, 'desk handover', async () => {
-        const served = await serveHandover(host)
+        const served = await serveHandover(host, lastSid)
         if (served) pending.push(`[lean-agent] ${served}`)
       })
     }
