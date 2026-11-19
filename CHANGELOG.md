@@ -47,7 +47,7 @@
   tests with a coverage table; defaults and state; style last), the severity rules, and a structured JSON block before the
   `LEAN-FEEDBACK` line. `skills/review` runs it in up to 3 passes with a second pass that only sees the open findings, the declines and
   the delta since the last reviewed sha.
-- **`lean_review` is now three actions.** `prepare` computes the review's inputs from the diff without a model (new symbols and files,
+- **`lean_review` has three review actions** (`prepare`, `record`, `decline`; the lesson actions are listed under Added). `prepare` computes the review's inputs from the diff without a model (new symbols and files,
   edited tests whose assertions change, new defaulted parameters, new module-level state, changed/moved/removed exports; TS/JS, Python,
   Go, Rust, C#, Java, Kotlin, Swift), picks the reviewer model by risk (opus for security, concurrency, migrations/schema/storage, UI
   strings, public API, config formats, removed public symbols, ~800+ lines; sonnet otherwise and on re-reviews; `config.json`

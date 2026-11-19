@@ -28,7 +28,7 @@ tool's refusal: do what it says.
    line is `LEAN-REVIEW-PREP {...}` (the model and why, whether a second opinion comes first, whether this is a re-review); everything
    after the first lines goes into the reviewer's prompt as it is. Print the model line (`reviewer model: opus (risk: ...)`) so the
    user sees which model reviews and why.
-3. **Lessons:** call `lean_review` with `action: "lessons"` (`project`, `base`, head) and add the text block it returns to the
+3. **Lessons:** call `lean_review` with `action: "lessons"` (`project`, `base`, `head` = the full HEAD sha, `goal` = the one-line goal from step 1: its words select lessons too) and add the text block it returns to the
    reviewer's prompt (the project's review checklist and shared helpers that match the changed paths). If the tool says it has no such
    action or errors, go on without it.
 4. **Second opinion (only when prepare says so: a new abstraction or a big diff, never on a re-review):** spawn

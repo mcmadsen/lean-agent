@@ -423,8 +423,8 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
     const names = await git(h, repo, 'diff', '--name-only', range, '--')
     if (names === null) return { ok: false, text: `lessons: git diff ${range} failed in ${repo}` }
     changed = [...new Set([...names.split('\n').filter(Boolean), ...paths])]
-    diff = ((await git(h, repo, 'diff', '-U0', '--no-color', range, '--')) ?? '').slice(0, MAX_DIFF_CHARS)
-  } else if (paths.length) diff = ((await git(h, repo, 'diff', '-U0', '--no-color', 'HEAD', '--', ...paths)) ?? '').slice(0, MAX_DIFF_CHARS)
+    diff = ((await git(h, repo, 'diff', '--no-ext-diff', '--no-textconv', '-U0', '--no-color', range, '--')) ?? '').slice(0, MAX_DIFF_CHARS)
+  } else if (paths.length) diff = ((await git(h, repo, 'diff', '--no-ext-diff', '--no-textconv', '-U0', '--no-color', 'HEAD', '--', ...paths)) ?? '').slice(0, MAX_DIFF_CHARS)
   const r = await reviewLessons(h, a.project, changed, diff, { budget: a.budget, goal: a.goal })
   const tail = r.total ? `\n(${r.picked.length} of ${r.total} lessons offered for ${changed.length} changed file(s): ${r.picked.map(p => `#${p.id}`).join(' ') || 'none matched'})` : `\n(no learned lessons for ${a.project} yet)`
   return { ok: true, text: r.text + tail }
