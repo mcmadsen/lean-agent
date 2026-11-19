@@ -300,32 +300,41 @@ async function append(h: Host, path: string, text: string): Promise<boolean> {
 }
 
 // Append the rows that `path` does not hold yet (a retry after a crash never writes one twice); false = the file could not be read whole
-// or the append failed: nothing more is done.
+// or the append failed: nothing more is done. Byte-identical rows are legitimate (two equal turns in one second), so rows are COUNTED: a row
+// that `rows` holds M times and the file already holds N times is appended M - N times (at most: a live session that wrote an identical
+// row to the file between a crash and the retry makes the retry one short, and only then).
 async function appendNew(h: Host, path: string, rows: string[]): Promise<boolean> {
   const size = await fileSize(h, path)
   const have = size ? await readFrom(h, path, 0) : ''
   if (size && enc.encode(have).length !== size) return false
-  const there = new Set(have.split('\n'))
-  const fresh = rows.filter(l => !there.has(l))
+  const there = new Map<string, number>()
+  for (const l of have.split('\n')) there.set(l, (there.get(l) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  const fresh = rows.filter(l => {
+    const n = (seen.get(l) ?? 0) + 1
+    seen.set(l, n)
+    return n > (there.get(l) ?? 0)
+  })
   // (a file that ends in a torn line, no newline: the first new row would be glued to it and lost to every reader)
   return !fresh.length || (await append(h, path, (have && !have.endsWith('\n') ? '\n' : '') + fresh.join('\n') + '\n'))
 }
 
-// Returns {kept, moved, done}: the 1.0 rows appended to ledger.jsonl and the file rewritten with the 0.45 (and unreadable) rows only;
-// kept 0 = nothing to do; done false = the rows were copied but the rewrite failed (a retry does not append them twice: rows already in
+// Returns {kept, months, moved, done}: the 1.0 rows of this month appended to ledger.jsonl (kept), those of a past month appended to their
+// ledger-YYYY-MM.jsonl (months), the 0.45 rows left in the file (moved), and the file rewritten with the 0.45 (and unreadable) rows only;
+// kept and months 0 = nothing to do; done false = the rows were copied but the rewrite failed (a retry does not append them twice: rows already in
 // ledger.jsonl are skipped). null = it was not safe (the file could not be read whole, or changed meanwhile): nothing was touched.
 // Order: stage the old rows (tmp), append the 1.0 rows, swap the file; a crash between the last two leaves the 1.0 rows in both files,
 // which the retry (the next start) repairs without a duplicate.
-async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept: number; moved: number; done: boolean } | null> {
+async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept: number; months: number; moved: number; done: boolean } | null> {
   const path = `${leanDir(home)}/${name}`
   const cur = `${leanDir(home)}/${LEDGER}`
   const size0 = await fileSize(h, path)
-  if (!size0) return { kept: 0, moved: 0, done: true }
+  if (!size0) return { kept: 0, months: 0, moved: 0, done: true }
   const text = await readFrom(h, path, 0)
   if (enc.encode(text).length !== size0) return null // a read that did not return the whole file is never treated as the whole file
   const lines = text.split('\n').filter(l => l.trim())
   const keep = lines.filter(isNew)
-  if (!keep.length) return { kept: 0, moved: 0, done: true }
+  if (!keep.length) return { kept: 0, months: 0, moved: 0, done: true }
   // a 1.0 row of THIS month goes to ledger.jsonl; an older one to its own ledger-YYYY-MM.jsonl: ledger.jsonl must not start in a past
   // month, or the next start would rotate the whole file (today's rows with it) away again. (A `ts` that is no date goes to ledger.jsonl.)
   const month = dayOf(await h.clock.now()).slice(0, 7)
@@ -349,7 +358,8 @@ async function splitLegacy(h: Host, home: string, name: string): Promise<{ kept:
   if ((await fileSize(h, path)) !== size0) { await drop(); return null } // another process appended to it meanwhile: the next start tries again
   for (const [file, rows] of targets) if (!(await appendNew(h, file === LEDGER ? cur : `${leanDir(home)}/${file}`, rows))) { await drop(); return null }
   const r = await h.process.run(['mv', '-f', tmp, path])
-  return { kept: keep.length, moved: old.length, done: r.exitCode === 0 }
+  const kept = targets.get(LEDGER)?.length ?? 0
+  return { kept, months: keep.length - kept, moved: old.length, done: r.exitCode === 0 }
 }
 
 export const REPAIR_V = 1 // store key 'ledger-repair.v': the scan for 1.0 rows inside legacy files (1.0.5's whole-file move) ran once
@@ -372,7 +382,7 @@ export async function rotateLedger(h: Host): Promise<string[]> {
     let ok = true // the repair is marked done only when every legacy file was clean or split
     if (whole.length && info.legacy && info.target) {
       const s = await splitLegacy(h, home, info.target).catch(() => null)
-      if (s?.kept) { split = true; lines.push(`ledger rotated: ${s.moved} 0.45 row(s) moved to ledger-legacy.jsonl, ${s.kept} 1.0 row(s) kept in ledger.jsonl; stats read every ledger file`) }
+      if (s?.kept || s?.months) { split = true; lines.push(`ledger rotated: ${s.moved} 0.45 row(s) moved to ledger-legacy.jsonl, ${s.kept} 1.0 row(s) kept in ledger.jsonl${s.months ? `, ${s.months} 1.0 row(s) of a past month moved to ledger-YYYY-MM.jsonl files` : ''}; stats read every ledger file`) }
       else lines.push(...whole) // nothing to split, or it was not safe: the whole file sits in the legacy file as before, and says so
     }
     // a legacy file that already holds 1.0 rows (1.0.5 moved them there): repaired at the next start
@@ -385,7 +395,7 @@ export async function rotateLedger(h: Host): Promise<string[]> {
         if (!tail.split('\n').some(l => l.trim() && isNew(l))) continue
         const s = await splitLegacy(h, home, f)
         if (!s || !s.done) ok = false // tried again at the next start
-        if (s?.kept) { split = true; lines.push(`ledger repaired: ${s.kept} 1.0 row(s) moved from ${f} back to ledger.jsonl, ${s.moved} 0.45 row(s) stay in ${f}${s.done ? '' : ' (the rewrite of the file failed: tried again at the next start)'}`) }
+        if (s?.kept || s?.months) { split = true; lines.push(`ledger repaired: ${s.kept} 1.0 row(s) moved from ${f} back to ledger.jsonl${s.months ? `, ${s.months} to ledger-YYYY-MM.jsonl files (a past month)` : ''}, ${s.moved} 0.45 row(s) stay in ${f}${s.done ? '' : ' (the rewrite of the file failed: tried again at the next start)'}`) }
       } catch {
         ok = false
       }

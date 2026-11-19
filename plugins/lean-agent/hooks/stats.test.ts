@@ -157,6 +157,25 @@ test('a split sends the 1.0 rows of a past month to their own file: ledger.jsonl
   expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }))
 })
 
+test('a split keeps byte-identical rows (two equal turns in one second) in ledger.jsonl and in a month file; a retry adds only what is missing; the notice names both counts', async () => {
+  const h = setup()
+  const sep = Date.UTC(2026, 8, 20)
+  h.files.set(`${L}/ledger.jsonl`, old('2026-09-01T08:00:00') + row(NOON) + row(NOON) + row(NOON) + row(sep, { usd: 4 }) + row(sep, { usd: 4 }))
+  const lines = await rotateLedger(h.host)
+  expect(lines.join('\n')).toContain('1 0.45 row(s) moved to ledger-legacy.jsonl, 3 1.0 row(s) kept in ledger.jsonl, 2 1.0 row(s) of a past month moved to ledger-YYYY-MM.jsonl files')
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON).repeat(3))
+  expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }).repeat(2))
+  expect((await syncRollup(h.host)).rows).toBe(6) // none dropped
+  // a retry after a crash (the same rows are in the legacy file and already in both targets, one September row missing in its file)
+  h.files.set(`${L}/ledger-legacy.jsonl`, old('2026-09-01T08:00:00') + row(NOON).repeat(3) + row(sep, { usd: 4 }).repeat(2))
+  h.files.set(`${L}/ledger-2026-09.jsonl`, row(sep, { usd: 4 }))
+  await h.store.set('ledger-repair.v', undefined)
+  const again = await rotateLedger(h.host)
+  expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON).repeat(3)) // all three are there already: nothing is added
+  expect(h.files.get(`${L}/ledger-2026-09.jsonl`)).toBe(row(sep, { usd: 4 }).repeat(2)) // one short: one is added
+  expect(again.join('\n')).toContain('ledger repaired: 3 1.0 row(s) moved from ledger-legacy.jsonl back to ledger.jsonl, 2 to ledger-YYYY-MM.jsonl files (a past month), 1 0.45 row(s) stay')
+})
+
 test('a split into an existing past-month file that ends in a torn line does not glue a row to it; a row whose ts is no date is damaged, never a throw', async () => {
   const h = setup()
   const sep = Date.UTC(2026, 8, 20)
