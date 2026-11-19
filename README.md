@@ -28,7 +28,7 @@ Python.
 | **Threads** | Background sessions (`claude --bg`), one folder each under `~/.lean-agent/threads/tN`, visible in the Claude app. A thread works in its own git worktree and reports back with `lean_report` / `lean_ask` / `lean_goal` |
 | **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when a cheaper one failed; read-only readers and a reviewer |
 | **Pane** | The desk's side pane: goals, answers (with acknowledge), threads with Resume / Start buttons, a status line with spend |
-| **Opener** | A login item that waits for the Claude app (never launches it) and opens the desk folder with `claude --desktop` |
+| **Opener** | A login item that waits for the Claude app (never launches it) and opens a new session in the desk folder through the app's `claude://code/new?folder=…` link (`open`; `claude --desktop` only as the last fallback) |
 | **Rules** | What the `learn` skill writes per project: short `paths:`-scoped rules that load only when a matching file is read |
 
 The desk and threads talk through small files under `~/.lean-agent`: a message to a thread is queued and handed over

@@ -21,6 +21,13 @@
   failing opener answers "Could not open the Claude app: <first line>; start a new session in ~/lean-agent-desk by hand" (Restart
   desk keeps the handover either way and says where it is). `claude --desktop` is only tried when the opener cannot be started
   at all. The "app is not running" check is macOS only.
+- **The login opener had the same bug.** `opener/open-desk.sh` ran `claude --desktop >>"$log" 2>&1`, which the CLI refuses
+  (redirected output). It now opens the same deep link with `/usr/bin/open` (the real desk path, percent-encoded byte by byte
+  in `sh`), and runs `claude --desktop` in the desk folder only when `open` fails. The last log line, which the doctor shows as
+  "last opener run", is always the outcome: "desk opened in the Claude app (deep link, exit 0)", "desk opened in the desk folder
+  (claude --desktop, ...; the deep link failed: ...)" or "desk not opened: open exit N (first line); claude --desktop exit M; start a
+  new session in ~/lean-agent-desk by hand". An installed copy is refreshed by `doctor --fix` (the doctor's "opener script
+  current" row).
 - Not done: the mod does not start `/compact` itself in a headless session. The engine types document `$.command.run`,
   `$.prompt.submit` and `$.skill.prompt`, but none of them says it works headless (reasons in the header of `deskcompact.ts`).
 

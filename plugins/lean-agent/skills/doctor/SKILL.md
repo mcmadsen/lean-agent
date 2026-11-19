@@ -46,8 +46,9 @@ because the desk and threads are started from the Claude app and never see the u
 
 ## Login opener
 
-At login the opener waits (up to 10 minutes) for the Claude app, never launches it, then runs `claude --desktop` in the
-desk folder. If the desk did not open: run `check`, read the "last opener run" line, then `fix`. No Claude app running
+At login the opener waits (up to 10 minutes) for the Claude app, never launches it, then opens the app's new-session link for the
+desk folder with `open` (`claude --desktop`, which refuses when its output is redirected, only as the last fallback). The last line of
+the opener log says what happened ("desk opened ..." or "desk not opened: ..."). If the desk did not open: run `check`, read the "last opener run" line, then `fix`. No Claude app running
 means nothing is opened; that is by design.
 
 ## What migrate does (design section 4)
