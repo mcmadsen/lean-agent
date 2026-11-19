@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **The learned review checklist was orphaned by the 0.45 -> 1.0 migration, so reviews ran without it.** 0.45 kept the lessons human
+  reviewers taught it (a `review-checklist` and a `shared-helpers` card per project, hundreds of lines in a big project) in
+  `library/<project>/cards.json` plus a registry (`_lessons`, with ids, batches, dates) in `<project>/review-learned.json` and an undo log
+  in `<project>/review-learn-batches.json`. `migrate` only moved `<project>/cards/`, so none of it was copied, indexed or read, and a PR
+  that added a second implementation of an existing helper got no warning. Now `migrate` and the versioned tidy step (`TIDY_VERSION` 5,
+  so installs that already migrated get it at their next start) copy those four files of every registered project to
+  `legacy-0.45/lessons-<project>/` (the originals are never deleted) and import the live lines into a per-project lesson store,
+  `~/.lean-agent/<project>/review-lessons.jsonl` (id, family, topic, text, paths, keywords, source, added, dropped). Lines 0.45 had already
+  removed are kept as `dropped`; a re-run adds nothing; a line you removed here is not brought back by a later import. The note cards of
+  `cards.json` are listed in `legacy-0.45/index.md` as candidate facts for `learn`; the two review families are not (they are lessons).
+- **The reviewer got no project knowledge when it read through git.** The path-scoped rule loader fired on a Read or on a shell command
+  naming an absolute path, never on `git -C <repo> show <rev>:<path>`, `git grep`, `git diff -- <path>`, `git log -p -- <path>`, `git blame`,
+  or a plain `git show <rev>:<path>` in the project's worktree. Those read-only git commands now count as touching the files they name
+  (relative to the repo, `cd <abs> &&` and `-C` followed), and for the reviewer the checkout itself counts: a path-less `git diff` gets
+  `_project.md` and the rules written for the whole repo, once per context. Writing git commands (`status`, `commit`, `push`, `add`) never
+  trigger it; a `..` path is refused as before.
+
+### Added
+- **The review lesson store** (`hooks/reviewlessons.ts`): the learned checklist and the list of existing shared helpers live outside
+  `rules/*.md` (25 lines / 2000 characters per rule cannot hold hundreds of lines). It has its own cap (1500 live lines,
+  `config.json` `review.lessonMax`).
+- **Selection by script, not by a model.** `lean_review` `lessons` (`project`, `base`/`head` or `paths`, optional `goal`, `repo`,
+  `budget`) returns the text block for a reviewer prompt: the lines whose paths or globs match the changed files, whose helper symbol
+  occurs in the diff, whose symbols or words occur in the diff or the goal, plus the helpers in the same or the next folder, grouped by
+  topic, capped at about 4 x 800 tokens (`config.json` `review.lessonTokens`, default 3200), always starting with the general reuse rule
+  ("before accepting new code that detects, parses or normalises something, search for an existing helper and name it"). Deterministic;
+  every call logs which lines and why to `~/.lean-agent/logs/review-lessons.jsonl`. For other code: `reviewLessons(host, project,
+  changedPaths, diffText, { budget?, goal? })` and `lessonsFor(host, { project, repo?, base?, head?, paths?, goal? })`.
+- **Learning into the store.** `review-learn` adds lines with `lean_review` `learn` (`checklist`, `helpers` `{name, where, what}`,
+  `replace` `[{old, new}]`): near-duplicates are skipped, a helper with a known name updates its line. `lessons-list`, `lessons-rm`
+  (soft: the line is marked dropped), `lessons-undo` (the last batch, 30 are kept) and `lessons-verify` (helper lines whose code path or
+  symbol cannot be found; `apply: true` drops them) work like 0.45's `review learn --list / --rm / --undo / --verify`.
+- `lean_rules check` and the doctor warn when a project has 0.45 lessons that are not imported, and report the store's size by family,
+  the last import and how many lines are dropped.
+
 ## 1.0.10
 
 ### Fixed

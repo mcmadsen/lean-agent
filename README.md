@@ -178,8 +178,26 @@ the answers; a private project is never compared. `lean_doctor` `compare` with `
 
 `review` runs the read-only `lean-agent:reviewer` on the diff, one full pass and then deltas, and writes
 `~/.lean-agent/<project>/reviews/<sha>.json`. A green record unlocks `git push` and PR publishing for that commit
-only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into rules: it learns from every
-author except the lean-agent owner's own comments.
+only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into lessons (below) and, for one area's
+commands and layout, into rules: it learns from every author except the lean-agent owner's own comments.
+
+**Review lessons.** What human reviewers caught that an automated review missed ("before adding a date parser, check
+`parseDate` in `src/lib/dates.ts`") and the shared helpers that already exist are kept per project in
+`~/.lean-agent/<project>/review-lessons.jsonl`, not in `rules/*.md`: a rule holds 25 lines, a project that has been reviewed for a
+year has hundreds. A review does not read them all. `lean_review` `lessons` (`project`, `base`/`head` or `paths`) picks, with a script
+and no model, the lines whose paths or globs match the changed files, whose helper name occurs in the diff, or whose keywords occur in
+the diff or the goal, plus the helpers in the same or the next folder; they are grouped by topic and capped at about 3200 tokens
+(`config.json` `review.lessonTokens`), always under a short rule to search for an existing helper before accepting new code that detects,
+parses or normalises something. Every call logs which lines and why to `~/.lean-agent/logs/review-lessons.jsonl`. The store holds at most
+1500 live lines (`review.lessonMax`). Manage it with `lean_review` `learn`, `lessons-list`, `lessons-rm`, `lessons-undo` and
+`lessons-verify` (helper lines whose code cannot be found). Coming from 0.45: `migrate` copies `library/<project>/cards.json`,
+`review-learned.json` (with its lesson registry), `review-learn-batches.json` and `review-learned-threads.json` to
+`legacy-0.45/lessons-<project>/` (never deleting the originals) and imports the live lines; installs that migrated before get it at the
+next start. `lean_rules check` and the doctor say when 0.45 lessons are not imported yet.
+
+The reviewer reads the project's path rules through git too: `git -C <repo> show <rev>:<path>`, `git grep`, `git diff -- <path>`,
+`git log -p -- <path>` and a plain `git show <rev>:<path>` in the project's worktree load the rules of the files they name, and for the
+reviewer a path-less `git diff` loads `_project.md` and the rules written for the whole repo.
 
 **The push runs in the desk, not in a thread.** Claude Code judges every command in the session that runs it, and your "push and
 open a PR" is said to the desk, so a thread's own session would refuse `git push` as unwanted. A thread therefore never runs
