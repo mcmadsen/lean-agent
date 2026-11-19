@@ -273,11 +273,14 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   `lean_doctor mcp-env` with the name and value, which merges the variable into the `env` block of `~/.claude/settings.json`
   (every other key kept, atomic write). Every session started from then on has it: app, terminal, desk, threads. A session that is
   already running keeps its old environment, so start a new desk session before its MCP server picks the value up. Only a
-  variable that an enabled MCP config references is written (an allowlist: no other name can be planted). Names that look secret
-  (`KEY`, `TOKEN`, `SECRET`, `PASS*`, `CRED*`, `AUTH`, `COOKIE`, `DSN`, `WEBHOOK`, `*_URL`, `PAT`, ...), values that look like a
-  credential (a URL with a password, `ghp_`/`sk-`-style tokens, long random strings) and names that change how sessions run
-  (`PATH`, `NODE_*`, `GIT_*`, proxies, `CLAUDE_*`, ...) are refused. Setting a name again replaces its value and says
-  "replaced". The pane has no text field, so the desk asks you and makes the call.
+  variable that an enabled plugin's or your own MCP config references is written (an allowlist: no other name can be planted; a
+  project's `.mcp.json` is listed but never opens it, add such a variable to the `env` block by hand). Names that look secret
+  (`KEY`, `TOKEN`, `SECRET`, `PASS*`, `CRED*`, `AUTH`, `COOKIE`, `DSN`, `WEBHOOK`, `DATABASE_URL`-style, `PAT`, ...; a plain site
+  variable such as `JIRA_URL` or `AUTH0_DOMAIN` is fine), values that look like a credential (a URL with a password or a
+  `?key=` parameter, `ghp_`/`sk-`-style tokens, long random strings; a UUID or a path is fine) and names that change how sessions
+  run (`PATH`, `NODE_*`, `GIT_*`, proxies, `CLAUDE_*`, ...) are refused. A value that is already set is not overwritten: the desk
+  passes `replace: true` only when you asked to change it, and the reply says "replaced". The pane has no text field, so the desk
+  asks you and makes the call.
 - **Secrets never go into `settings.json`** (a plain file, often synced or committed). For the **desk** and the app, sign in
   through the server itself (OAuth): the Datadog plugin's server asks for a login, and the stored login needs no key. For
   **threads**, put a command that prints the value in `~/.lean-agent/mcp-env.json` (`chmod 600`, your own file; edit it by hand,
@@ -295,7 +298,8 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   values into **that thread's** `.claude/settings.json` (created empty and `chmod 600` first, the mode checked after; if that
   fails the thread starts without the values and the start reply says so), never anywhere else, never into a log, a report or the
   feedback export; the start reply names the variables only. Only names an MCP config references are used, and a file that is not
-  yours (owner, symlinks followed) is ignored. A `{ "value": "..." }` entry also works for threads. The desk and the app do not
+  yours, or that others can write (checked before it is read, symlinks followed), is ignored; one others can only read is
+  tightened to `chmod 600`. A `{ "value": "..." }` entry also works for threads. The desk and the app do not
   read `mcp-env.json`. Limits to know: the values stay in the thread folder's settings file after the thread closes (until its next
   start rewrites it; the file is user-only), and the thread's Bash tool inherits them like any settings `env` value.
 - **Which value wins.** Checked with Claude Code 2.1.328: a variable in the user `env` block and the same one in a project's

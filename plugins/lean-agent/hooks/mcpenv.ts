@@ -26,11 +26,13 @@ const LEGACY_ENV = (home: string) => `${leanDir(home)}/legacy-0.45/mcp-env.json`
 // ---- names and values ------------------------------------------------------------------------------------------------
 export const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 // a name that looks like a credential: never written to a settings file (settings.json is plain text, often synced or committed)
-const SECRET_RE = /KEY|TOKEN|SECRET|PASS|CRED|COOKIE|BEARER|JWT|DSN|SESSION|WEBHOOK|SIGNATURE|CONNECTION|AUTH|PRIVATE|_URL$|URI$|(^|_)(PAT|PWD)(_|\d|$)|PAT\d|PAT$/i
+// (a site or base URL such as JIRA_URL is NOT secret; credential-bearing URLs are named: DATABASE_URL, REDIS_URL, ...; AUTH0_DOMAIN,
+// AUTHORITY, KEYCLOAK_*, BYPASS_* and PASSTHROUGH are not secrets either)
+const SECRET_RE = /KEY(?!CLOAK)|TOKEN|SECRET|(?<!BY)PASS(?!THROUGH)|CRED|COOKIE|BEARER|JWT|DSN|SESSION|WEBHOOK|SIGNATURE|CONNECTION|AUTH(?!0|ORITY|OR\b|ORS\b|OR_)|PRIVATE|(?:DATABASE|DB|REDIS|MONGO\w*|AMQP|BROKER|POSTGRES\w*|MYSQL)_(?:URL|URI)|(^|_)(PAT|PWD)(_|\d|$)|PAT\d|GITHUBPAT/i
 export const looksSecret = (name: string) => SECRET_RE.test(name)
 // names that change how every session runs (search path, runtime, git, proxies, tool options, Claude's own): never written by this
 // feature. (Defence in depth: setSettingsEnv also requires an MCP config to reference the name.)
-const RESERVED = /^(?:PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TERM|LANG|LANGUAGE|LC_[A-Z0-9_]+|IFS|ENV|BASH_[A-Z0-9_]+|PS[1-4]|SHLVL|EDITOR|VISUAL|PAGER|MANPAGER|BROWSER|ZDOTDIR|LESS(?:OPEN|CLOSE|CHARSET|HISTFILE)?|PROMPT_COMMAND|NODE_[A-Z0-9_]+|NPM_[A-Z0-9_]*|YARN_[A-Z0-9_]*|PIP_[A-Z0-9_]*|UV_[A-Z0-9_]*|CARGO_[A-Z0-9_]*|GO(?:PATH|ROOT|FLAGS|PROXY|PRIVATE|SUMDB|NOSUMDB|INSECURE|TOOLCHAIN|MODCACHE)|JAVA_[A-Z0-9_]*|_JAVA_OPTIONS|LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|PYTHON[A-Z0-9_]*|RUBY[A-Z0-9_]*|PERL[A-Z0-9_]*|GIT_[A-Z0-9_]+|SSH_[A-Z0-9_]+|XDG_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE[A-Z0-9_]*|MCP_TIMEOUT|MCP_TOOL_TIMEOUT|(?:DISABLE|ENABLE|USE)_[A-Z0-9_]+|(?:HTTPS?|ALL|NO|FTP|SOCKS)_PROXY|SSL_CERT_[A-Z0-9]+|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|OPENSSL_[A-Z0-9_]+)$/i
+const RESERVED = /^(?:PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TERM|LANG|LANGUAGE|LC_[A-Z0-9_]+|IFS|ENV|BASH_[A-Z0-9_]+|PS[1-4]|SHLVL|EDITOR|VISUAL|PAGER|MANPAGER|BROWSER|ZDOTDIR|LESS(?:OPEN|CLOSE|CHARSET|HISTFILE)?|PROMPT_COMMAND|NODE_[A-Z0-9_]+|NPM_[A-Z0-9_]*|YARN_[A-Z0-9_]*|PIP_[A-Z0-9_]*|UV_[A-Z0-9_]*|CARGO_[A-Z0-9_]*|GO(?:PATH|ROOT|FLAGS|PROXY|PRIVATE|SUMDB|NOSUMDB|INSECURE|TOOLCHAIN|MODCACHE)|JAVA_[A-Z0-9_]*|_JAVA_OPTIONS|LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|PYTHON[A-Z0-9_]*|RUBY[A-Z0-9_]*|PERL[A-Z0-9_]*|GIT_[A-Z0-9_]+|SSH_(?:AUTH_SOCK|ASKPASS|ASKPASS_REQUIRE)|XDG_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE[A-Z0-9_]*|MCP_TIMEOUT|MCP_TOOL_TIMEOUT|DISABLE_(?:TELEMETRY|AUTOUPDATER|ERROR_REPORTING|NON_ESSENTIAL_MODEL_CALLS)|USE_BUILTIN_RIPGREP|OPENAI_[A-Z0-9_]+|AWS_(?:ENDPOINT[A-Z0-9_]*|PROFILE|CONFIG_FILE|SHARED_CREDENTIALS_FILE)|DOCKER_[A-Z0-9_]+|KUBECONFIG|BASHOPTS|SHELLOPTS|CLASSPATH|MAVEN_OPTS|JDK_JAVA_OPTIONS|ELECTRON_[A-Z0-9_]+|HF_ENDPOINT|(?:HTTPS?|ALL|NO|FTP|SOCKS)_PROXY|SSL_CERT_[A-Z0-9]+|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|OPENSSL_[A-Z0-9_]+)$/i
 // variables a session always has (or Claude Code itself fills in a plugin config): never reported as missing
 const PROVIDED = new Set(['HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'PWD', 'TMPDIR', 'LANG', 'CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_PROJECT_DIR', 'CLAUDE_CONFIG_DIR'])
 
@@ -41,14 +43,21 @@ export function nameProblem(name: unknown): string | null {
 }
 export function valueProblem(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return 'the value is empty'
+  if (value !== value.trim()) return 'the value starts or ends with a space' // a padded value would slip past the credential checks
   if (value.length > 500) return 'the value is longer than 500 characters'
   if (/[\x00-\x1f\x7f]/.test(value)) return 'the value has a line break or control character'
   return null
 }
-// a value that looks like a credential whatever its name: a URL with a password, a well-known token prefix, a long random string.
+// a value that looks like a credential whatever its name: a URL with a password or a key/token query parameter, a well-known token
+// prefix anywhere (also after "Bearer " or "token="), a long random string (a UUID or a path is not one).
 // Only used for the settings file (plain text); a thread's own user-only file takes anything valueProblem accepts.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function secretValue(value: string): boolean {
-  return /:\/\/[^/\s@]*:[^/\s@]*@/.test(value) || /^(?:ghp_|gho_|ghs_|github_pat_|glpat-|xox[abprs]-|sk-|pk_live|sk_live|AKIA|ASIA|eyJ)/.test(value) || /^[A-Za-z0-9+/_=-]{32,}$/.test(value)
+  if (/:\/\/[^/\s@]*:[^/\s@]*@/.test(value) || /[?&;](?:[a-z_]*(?:key|token|secret|sig|signature|auth|password|passwd|pwd))=/i.test(value)) return true
+  if (/(?:^|[^A-Za-z0-9])(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[abprs]-|sk-[A-Za-z0-9_-]{8,}|pk_live_|sk_live_|AKIA[A-Z0-9]{12,}|ASIA[A-Z0-9]{12,}|eyJ[A-Za-z0-9_-]{10,})/.test(value)) return true
+  if (UUID.test(value)) return false
+  if (/^[A-Za-z0-9_]{32,}$/.test(value) && /\d/.test(value)) return true // hex / random identifiers
+  return /^[A-Za-z0-9+/]{40,}={0,2}$/.test(value) && !value.startsWith('/') && (/[+=]/.test(value) || (/\d/.test(value) && /[a-z]/.test(value) && /[A-Z]/.test(value))) // base64
 }
 
 // ---- reading configs ---------------------------------------------------------------------------------------------------
@@ -78,7 +87,7 @@ async function setNames(h: Host, home: string, files: string[]): Promise<Set<str
 
 // ---- finding the servers -----------------------------------------------------------------------------------------------
 type Ref = { name: string; dflt: string | null; host: boolean } // dflt: null = no default (`${VAR}`); host: sits in the URL's host part
-export type Server = { id: string; refs: Ref[] }
+export type Server = { id: string; refs: Ref[]; writable: boolean } // writable: plugin and user configs (they are in effect); a project's .mcp.json is not
 const REF_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g
 
 function strings(v: unknown, out: string[] = [], depth = 0): string[] {
@@ -162,18 +171,20 @@ async function pluginServers(h: Host, p: Plugin): Promise<Record<string, any>> {
 
 export async function scanServers(h: Host, home: string): Promise<Server[]> {
   const out: Server[] = []
-  const add = (id: string, cfg: unknown) => {
+  // ids go into rows the desk model reads and are made of names from configs (a cloned repo's .mcp.json is not trusted text)
+  const safe = (s: string) => s.replace(/[^\w.@:-]/g, '_').slice(0, 60)
+  const add = (id: string, cfg: unknown, writable = true) => {
     const refs = refsOf(cfg)
-    if (refs.length) out.push({ id, refs })
+    if (refs.length) out.push({ id, refs, writable })
   }
-  for (const p of await enabledPlugins(h, home)) for (const [name, cfg] of Object.entries(await pluginServers(h, p))) add(`plugin:${p.name}:${name}`, cfg)
+  for (const p of await enabledPlugins(h, home)) for (const [name, cfg] of Object.entries(await pluginServers(h, p))) add(`plugin:${safe(p.name)}:${safe(name)}`, cfg)
   const doc = await readObj(h, `${home}/.claude.json`)
-  if (isObj(doc?.mcpServers)) for (const [name, cfg] of Object.entries(doc!.mcpServers)) add(`user:${name}`, cfg)
+  if (isObj(doc?.mcpServers)) for (const [name, cfg] of Object.entries(doc!.mcpServers)) add(`user:${safe(name)}`, cfg)
   const projects = await readJson<Record<string, any>>(h, `${leanDir(home)}/projects.json`, {})
   for (const [pname, v] of Object.entries(isObj(projects) ? projects : {})) {
     if (!isObj(v) || typeof v.path !== 'string' || !v.path.startsWith('/')) continue
     const mj = await readObj(h, `${v.path}/.mcp.json`)
-    if (isObj(mj?.mcpServers)) for (const [name, cfg] of Object.entries(mj!.mcpServers)) add(`project:${pname}:${name}`, cfg)
+    if (isObj(mj?.mcpServers)) for (const [name, cfg] of Object.entries(mj!.mcpServers)) add(`project:${safe(pname)}:${safe(name)}`, cfg, false) // a project's .mcp.json needs the user's approval and may never run: it never opens the write allowlist
   }
   return out
 }
@@ -182,7 +193,7 @@ export async function scanServers(h: Host, home: string): Promise<Server[]> {
 // a default that cannot be a real value: a placeholder word, or a bare host (no dot) in a URL's host part
 const PLACEHOLDER = /^(?:not[-_ ]?set(?:[-_ ]?up)?|unset|none|changeme|change[-_]me|placeholder|replace[-_]?me|todo|tbd|example|your[-_\w.]*|x{3,}|<.*>)$/i
 const bareHost = (d: string) => !d.includes('.') && !d.includes(':') && !/^localhost$/i.test(d) && !/^\d+$/.test(d)
-export type Need = { server: string; vars: { name: string; why: string }[] }
+export type Need = { server: string; writable: boolean; vars: { name: string; why: string }[] }
 
 async function fileNames(h: Host, home: string): Promise<Set<string>> {
   const f = await readJson<Record<string, unknown>>(h, mcpEnvPath(home), {})
@@ -205,7 +216,7 @@ export async function mcpNeeds(h: Host, home: string): Promise<Need[]> {
       }
       // an empty default or a usable default needs nothing
     }
-    if (vars.length) out.push({ server: s.id, vars })
+    if (vars.length) out.push({ server: s.id, writable: s.writable, vars })
   }
   return out
 }
@@ -215,19 +226,20 @@ export const HOW = 'set a non-secret value with lean_doctor mcp-env NAME VALUE (
 export async function mcpRows(h: Host, home: string): Promise<string[]> {
   const needs = await mcpNeeds(h, home)
   if (!needs.length) return []
-  return [...needs.map(n => `MCP  ${n.server} needs ${n.vars.map(v => `${v.name} (${v.why})`).join(', ')}`), `MCP  ${HOW}`]
+  return [...needs.map(n => `MCP  ${n.server} needs ${n.vars.map(v => `${v.name} (${v.why})`).join(', ')}${n.writable ? '' : "; a project's .mcp.json, which mcp-env does not write for: if you use that server, add the variable to the env block of ~/.claude/settings.json by hand"}`), `MCP  ${HOW}`]
 }
 
 // ---- fix: a non-secret value into the user settings env block -------------------------------------------------------------
-export async function setSettingsEnv(h: Host, home: string, name: unknown, value: unknown): Promise<{ ok: boolean; text: string }> {
+// `replace`: the caller says the user asked to CHANGE a value that is already set (without it an existing non-empty, different value stays)
+export async function setSettingsEnv(h: Host, home: string, name: unknown, value: unknown, replace = false): Promise<{ ok: boolean; text: string }> {
   const bad = nameProblem(name) ?? valueProblem(value)
   if (bad) return { ok: false, text: `mcp-env: ${bad}` }
   const n = name as string
   if (looksSecret(n)) return { ok: false, text: `mcp-env: ${n} looks like a secret (key, token, password...) and settings.json is plain text: not written. Sign in through the server (OAuth), or keep it out of files with a command in ~/.lean-agent/mcp-env.json (README: MCP servers that need a variable).` }
   if (secretValue(value as string)) return { ok: false, text: `mcp-env: the value for ${n} looks like a credential (a URL with a password, a token, a long random string) and settings.json is plain text: not written. Use OAuth sign-in, or a command in ~/.lean-agent/mcp-env.json for threads.` }
-  // an allowlist, not only a denylist: only a variable an MCP server config really references (a prompt-injected caller cannot set
-  // PIP_INDEX_URL or any other name that changes how every later session behaves)
-  if (!(await scanServers(h, home)).some(s => s.refs.some(r => r.name === n))) return { ok: false, text: `mcp-env: no enabled MCP server config references ${n}: not written (lean_doctor mcp-env without arguments lists the names that are needed)` }
+  // an allowlist, not only a denylist: only a variable an MCP server config in effect (a plugin's or the user's own) references (a
+  // prompt-injected caller cannot set PIP_INDEX_URL or any other name that changes how every later session behaves)
+  if (!(await scanServers(h, home)).some(s => s.writable && s.refs.some(r => r.name === n))) return { ok: false, text: `mcp-env: no enabled plugin or user MCP server config references ${n}: not written (lean_doctor mcp-env without arguments lists the names that are needed)` }
   const file = userSettingsPath(home)
   const lock = `${leanDir(home)}/.settings-lock`
   try {
@@ -255,8 +267,9 @@ export async function setSettingsEnv(h: Host, home: string, name: unknown, value
       if (cur.env !== undefined && !isObj(cur.env)) return { ok: false, text: 'mcp-env: the "env" key of ~/.claude/settings.json is not an object: fix it by hand, nothing written' }
       const env = isObj(cur.env) ? cur.env : {}
       if (env[n] === value) return { ok: true, text: `${n} is already set in the env block of ~/.claude/settings.json (value not shown).` }
-      const next = { ...cur, env: { ...env, [n]: value } }
       const replaced = typeof env[n] === 'string' && env[n] !== ''
+      if (replaced && !replace) return { ok: false, text: `mcp-env: ${n} already has a different value in the env block of ~/.claude/settings.json (not shown): nothing changed. If the user asked to change it, call again with replace: true.` }
+      const next = { ...cur, env: { ...env, [n]: value } }
       await mkdirp(h, dirOf(real))
       await atomicWrite(h, real, JSON.stringify(next, null, 2) + '\n')
       return { ok: true, text: `${n} ${replaced ? 'replaced' : 'set'} in the env block of ~/.claude/settings.json (value not shown). Sessions started from now on get it; a session already running keeps its old environment, so the desk needs a new session before its MCP server uses it.` }
@@ -276,12 +289,14 @@ async function facts(h: Host, path: string): Promise<{ uid: number; mode: number
   }
   return null
 }
-// true when the file is the user's own; a group/other-accessible file is tightened to 600 first
+// true when the file is the user's own and nobody else can WRITE it (a file others could have written is not trusted, whoever owns it
+// now: it is refused, not tightened and then believed); one that others can only read is tightened to 600
 async function userOnly(h: Host, path: string): Promise<boolean> {
   const f = await facts(h, path)
   if (!f) return false
   const me = await h.process.run(['id', '-u']).catch(() => null)
   if (!me || me.exitCode !== 0 || Number(me.stdout.trim()) !== f.uid) return false
+  if (f.mode & 0o022) return false
   if (f.mode & 0o077) return (await h.process.run(['chmod', '600', path]).catch(() => ({ exitCode: 1 }))).exitCode === 0
   return true
 }
@@ -300,17 +315,26 @@ export async function threadEnv(h: Host, home: string): Promise<ThreadEnv> {
   const none: ThreadEnv = { env: {}, lines: [] }
   const file = mcpEnvPath(home)
   if (!(await h.fs.exists(file).catch(() => false))) return none
+  // the owner and write bits are judged BEFORE the content is read: a file others could write is never believed
+  if (!(await userOnly(h, file))) return { env: {}, lines: ['mcp-env.json is not your own file, or others can write it (owner or permissions): ignored, chmod 600 it'] }
   const doc = await readJson<Record<string, any>>(h, file, {})
   const entries = Object.entries(isObj(doc) ? doc : {}).filter(([, v]) => isObj(v) && (typeof v.value === 'string' || v.command !== undefined))
   if (!entries.length) return none
-  if (!(await userOnly(h, file))) return { env: {}, lines: ['mcp-env.json is not your own user-only file (owner or permissions): ignored, chmod 600 it'] }
   const userSet = await setNames(h, home, [userSettingsPath(home)])
   const referenced = new Set((await scanServers(h, home)).flatMap(s => s.refs.map(r => r.name)))
   const env: Record<string, string> = {}
   const lines: string[] = []
   const pending: { name: string; argv: string[] }[] = []
   for (const [name, rec] of entries) {
-    if (nameProblem(name) || userSet.has(name)) continue
+    if (!NAME_RE.test(name)) {
+      lines.push('mcp-env.json: an entry with an invalid variable name was skipped') // the name itself is never echoed
+      continue
+    }
+    if (nameProblem(name)) {
+      lines.push(`mcp-env.json ${name}: a name that changes how sessions run is never set, skipped`)
+      continue
+    }
+    if (userSet.has(name)) continue
     if (!referenced.has(name)) {
       lines.push(`mcp-env.json ${name}: no MCP server config uses it, skipped`)
       continue
@@ -382,14 +406,17 @@ export async function writeThreadSettings(h: Host, path: string, text: string, s
 // Plain non-secret values go into the settings env block once (a name the block already sets is left alone). Command entries and
 // anything secret-looking stay in mcp-env.json (made user-only). Returns the lines to tell the user (names only) and whether to retry.
 export async function importMcpEnv(h: Host, home: string): Promise<{ lines: string[]; retry: boolean }> {
-  const main = await readJson<Record<string, any>>(h, mcpEnvPath(home), {})
-  const old = await readJson<Record<string, any>>(h, LEGACY_ENV(home), {})
+  // a file that is not the user's own, or that others can write, is never read (the live one and the archive each): nothing is imported from it
+  const trusted = async (p: string) => ((await h.fs.exists(p).catch(() => false)) ? ((await userOnly(h, p)) ? 'yes' : 'no') : 'none')
+  const liveOk = await trusted(mcpEnvPath(home))
+  const oldOk = await trusted(LEGACY_ENV(home))
+  const untrusted = liveOk === 'no' || oldOk === 'no'
+  const main = liveOk === 'yes' ? await readJson<Record<string, any>>(h, mcpEnvPath(home), {}) : {}
+  const old = oldOk === 'yes' ? await readJson<Record<string, any>>(h, LEGACY_ENV(home), {}) : {}
   const all: Record<string, any> = { ...(isObj(main) ? main : {}) } // the live file first; the archived one only adds names it lacks
   for (const [k, v] of Object.entries(isObj(old) ? old : {})) if (!(k in all)) all[k] = v
-  const names = Object.keys(all).filter(k => isObj(all[k]))
-  if (!names.length) return { lines: [], retry: false }
-  // a live file that is not the user's own (owner) is never trusted: nothing is imported from it or from the archive
-  if ((await h.fs.exists(mcpEnvPath(home)).catch(() => false)) && !(await userOnly(h, mcpEnvPath(home)))) return { lines: ['0.45 mcp-env.json: not your own user-only file (owner or permissions): not imported, chmod 600 it'], retry: false }
+  const names = Object.keys(all).filter(k => isObj(all[k]) && NAME_RE.test(k)) // names are printed: only plain ones
+  if (!names.length) return { lines: untrusted ? ['0.45 mcp-env.json: not your own file, or others can write it (owner or permissions): not imported, chmod 600 it, then run lean_doctor migrate'] : [], retry: untrusted }
   const have = await setNames(h, home, [userSettingsPath(home)])
   const referenced = new Set((await scanServers(h, home)).flatMap(s => s.refs.map(r => r.name)))
   const imported: string[] = []
@@ -406,6 +433,7 @@ export async function importMcpEnv(h: Host, home: string): Promise<{ lines: stri
     if (have.has(name)) continue // the user already set it: theirs wins, nothing to do
     const r = await setSettingsEnv(h, home, name, rec.value)
     if (r.ok) imported.push(name)
+    else if (!/parse|cannot be read|not text|not an object/.test(r.text)) kept.push(name) // refused by a rule (nothing wrong with the file): kept, no retry
     else {
       retry = true
       kept.push(name)
@@ -414,7 +442,11 @@ export async function importMcpEnv(h: Host, home: string): Promise<{ lines: stri
   const lines: string[] = []
   if (imported.length) lines.push(`0.45 mcp-env.json: moved into the env block of ~/.claude/settings.json (every session gets them): ${imported.join(', ')}`)
   if (kept.length) lines.push(`0.45 mcp-env.json: kept in ~/.lean-agent/mcp-env.json (a secret, a command, or no MCP server config uses the name): ${kept.join(', ')}; threads read them at start`)
-  if (retry) lines.push('0.45 mcp-env.json: ~/.claude/settings.json could not be updated (does not parse?): fix it, then run lean_doctor migrate')
+  if (untrusted) {
+    lines.push('0.45 mcp-env.json: one file is not yours, or others can write it (owner or permissions): it was not read, chmod 600 it, then run lean_doctor migrate')
+    retry = true
+  }
+  if (retry && !untrusted) lines.push('0.45 mcp-env.json: ~/.claude/settings.json could not be updated (does not parse?): fix it, then run lean_doctor migrate')
   if (imported.length || kept.length) await writeJson(h, `${leanDir(home)}/mcp-env-import.json`, { imported, kept }).catch(() => undefined)
   return { lines, retry }
 }

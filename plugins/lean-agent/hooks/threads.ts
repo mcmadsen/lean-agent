@@ -271,7 +271,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
     await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off)) // never a failed start, never a secret left in a loose file
     return false
   })
-  if (hasEnv && !kept) menv.lines = ["mcp env: the thread's settings file could not be made user-only, so its variables were left out"]
+  if (hasEnv && !kept) menv.lines = [...menv.lines.filter(l => !l.startsWith('mcp env for this thread')), "mcp env: the thread's settings file could not be made user-only, so its variables were left out"]
   await writeLoaded(h, home, t.id, loaded).catch(() => undefined)
   await startUsage(h, home, t.id).catch(() => undefined)
   const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
