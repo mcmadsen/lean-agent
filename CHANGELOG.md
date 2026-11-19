@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.10
 
 ### Fixed
 - **Readers and the reviewer could not read enough.** The built-in read-only Bash set of `lean-agent:reader-*` and `reviewer` (already
