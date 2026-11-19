@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.7
 
 ### Removed
 - **Thread checkpoints (1.0.6) are gone.** A thread is no longer asked mid-work to report its context size and restart: no

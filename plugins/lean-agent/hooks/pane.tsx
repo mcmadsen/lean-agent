@@ -15,7 +15,7 @@ import type { Role } from './role'
 import { contextSize, deskNote, kTokens, recentUser, restartDesk } from './deskcompact'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.6'
+export const VERSION = '1.0.7'
 const ANSWERS_SHOWN = 5 // Answers: the newest rows drawn until "show all"
 const GROUP_MIN = 8 // "show all" groups the rows by thread when there are more than this
 const GROUP_ROWS = 20 // rows drawn in one unfolded group
