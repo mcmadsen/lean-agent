@@ -199,6 +199,44 @@ The reviewer reads the project's path rules through git too: `git -C <repo> show
 `git log -p -- <path>` and a plain `git show <rev>:<path>` in the project's worktree load the rules of the files they name, and for the
 reviewer a path-less `git diff` loads `_project.md` and the rules written for the whole repo.
 
+**The review is strict** (the 0.45 review, restored): ordered passes, inputs computed by a script and enforcement by a script.
+
+- **Passes**, in order: 0 completeness (what the change promises against what it delivers, self-declared gaps); 1 correctness, each
+  changed path traced from its entry points to its effects; 2 behaviour before -> after (intended or unintended), `risks` with one
+  concrete check each, side effects the old code did that the new code no longer does; 3 reuse and duplication (at least one search
+  per new symbol; verdicts `wraps-existing`, `extends-existing`, `duplicate`, `justified-new`); 4 scope and platform (siblings checked
+  and listed; does a lifecycle already do it reversibly); 5 tests (a coverage table: edited test -> what it protected -> `still-covered`,
+  `lost` or `intentional`; would the new test fail without the fix); 6 defaults and state (a defaulted parameter every production
+  caller passes, widened values and their consumers, module state the specs never reset); 7 style, last.
+- **Severity**: `blocker`, `major`, `minor`, `nit`. Duplication is major only for ~10+ copied lines or a second mechanism (smaller
+  is a `style` minor); a fix too narrow for its siblings is major; "optional" is minor; a finding the reviewer did not verify
+  goes to `checks`, never major. The reviewer ends with one JSON block (`findings`, `gaps`, `user_facing`, `risks`, `checks`, `reuse`,
+  `coverage`, `siblings`, `searches`, `unverified`).
+- **Inputs by script, not model**: `lean_review` `prepare` (project, base, head, branch) reads the diff and lists new symbols and
+  files, tests whose assertions the change edits (renamed, flipped, deleted, skipped; a pure rename needs nothing), new parameters
+  with defaults, new module-level state and changed, moved or removed exported symbols. The heuristics are language-agnostic
+  (TS/JS, Python, Go, Rust, C#, Java, Kotlin, Swift) and err toward listing more; the reviewer extends the lists.
+- **Enforcement by the record**: `lean_review` `record` recomputes those lists from the commit itself and REFUSES green (the record is
+  written not green, with the reason) when a new symbol has no `reuse` entry, an edited test has no `coverage` entry, a second-opinion
+  candidate was not confirmed or rejected, or a blocker or major finding is open. Duplication, scope and platform findings are at least
+  major; so are an unintended user-facing change, a removed side effect and a goal-blocking gap; a `duplicate` verdict next to existing
+  code outside the change becomes a major duplication finding; a short `justified-new` next to an existing candidate becomes a check.
+  The HMAC signing is unchanged: only the tool signs, and a green needs the reviewer's JSON.
+- **Declines**: `lean_review` `decline` (project, branch or `all`, finding kind plus symbol, why) records a decision the user made.
+  Later reviews of that branch are told and a matching finding is left out, on later commits too; a decline never turns a verdict
+  green by itself (the open findings are what the gate counts).
+- **Second opinion and model**: for a new abstraction or a big diff (3+ new symbols, 2+ new files) a cheap `reader-haiku` search-only
+  pass (or 12+ changed files with something new in them) looks for existing code first, and the main reviewer must confirm or reject each candidate. The reviewer model is chosen by
+  risk and printed with the reason: `opus` for security, concurrency, migrations/schema/storage, UI strings/locales, public API, config
+  formats, removed public symbols or ~800+ changed lines; `sonnet` otherwise and on every re-review (`config.json` `review.model` wins).
+- **Re-review**: pass 2+ gives the reviewer only the open findings, the declines and the diff since the last reviewed sha (plus the
+  reuse, scope and platform passes on the files changed since). An earlier round's `reuse` and `coverage` entries still count (kept in
+  the mod's own store, which a session cannot write), an earlier blocker or major must be listed again or named in `fixed`, and a new
+  major about code that did not change since is a minor, so it converges. A record is refused green when git could not produce the diff,
+  the range is empty, or `base` is not a branch or tag name (a sha or `HEAD~1` would shrink the range).
+- **Project lessons**: the review loads the matching review checklist and shared-helper lessons through `lean_review` `lessons`
+  (the lesson store is owned by a separate change; the review skips it when the action is absent).
+
 **The push runs in the desk, not in a thread.** Claude Code judges every command in the session that runs it, and your "push and
 open a PR" is said to the desk, so a thread's own session would refuse `git push` as unwanted. A thread therefore never runs
 `git push` or `gh pr create`: after a green review it reports "ready to push `<sha>` (branch, PR title)" and stops. The desk asks you

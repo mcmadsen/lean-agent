@@ -37,6 +37,29 @@
   symbol cannot be found; `apply: true` drops them) work like 0.45's `review learn --list / --rm / --undo / --verify`.
 - `lean_rules check` and the doctor warn when a project has 0.45 lessons that are not imported, and report the store's size by family,
   the last import and how many lines are dropped.
+- The lesson actions are part of the same `lean_review` tool as `prepare`, `record` and `decline` (one action enum, one schema); the
+  `review` skill asks for `lessons` after `prepare` and puts the block into the reviewer's prompt.
+
+### Changed
+- **The strict review of 0.45 is back** (the 1.0 port had cut it to "find bugs, list by severity"). `agents/reviewer.md` carries the
+  ordered passes 0-7 (completeness; correctness traced end to end; behaviour before -> after with intended/unintended, risks with one
+  concrete check each, removed side effects; reuse and duplication with a search per new symbol; scope and platform with siblings;
+  tests with a coverage table; defaults and state; style last), the severity rules, and a structured JSON block before the
+  `LEAN-FEEDBACK` line. `skills/review` runs it in up to 3 passes with a second pass that only sees the open findings, the declines and
+  the delta since the last reviewed sha.
+- **`lean_review` is now three actions.** `prepare` computes the review's inputs from the diff without a model (new symbols and files,
+  edited tests whose assertions change, new defaulted parameters, new module-level state, changed/moved/removed exports; TS/JS, Python,
+  Go, Rust, C#, Java, Kotlin, Swift), picks the reviewer model by risk (opus for security, concurrency, migrations/schema/storage, UI
+  strings, public API, config formats, removed public symbols, ~800+ lines; sonnet otherwise and on re-reviews; `config.json`
+  `review.model` wins) and says whether a search-only second opinion comes first. `record` (the default) now REFUSES green, with the
+  reason and recorded not green, when a new symbol has no `reuse` entry, an edited test no `coverage` entry, a second-opinion candidate
+  no answer, an earlier blocker/major is neither listed again nor `fixed`, git could not produce the diff, the range is empty, `base` is not a
+  branch or tag name, or a blocker/major finding is open; green without the reviewer's JSON (`review`) is refused. `decline`
+  records a finding the user decided not to fix (project, branch or all branches, kind + symbol, why); later reviews are told and
+  leave it out. The HMAC signing is unchanged.
+- Earlier rounds' reuse and coverage entries are kept in the mod's own store (not in a file a session can write), so a re-review
+  converges: a new major about code unchanged since the last review is a minor.
+- The reviewer's built-in command line now names the 1.0 read-only set (`git ls-files` too; no `git grep`).
 
 ## 1.0.10
 

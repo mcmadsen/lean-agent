@@ -430,6 +430,28 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
   return { ok: true, text: r.text + tail }
 }
 
+// ---- the lean_review actions of the lesson store (reviewtool.ts hands them over; null = not one of mine) ------------------------------
+export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify']
+export async function lessonsTool(h: Host, project: string, i: any): Promise<{ ok: boolean; text: string } | null> {
+  const action = typeof i?.action === 'string' ? i.action.trim() : ''
+  if (!LESSON_ACTIONS.includes(action)) return null
+  if (!slugOk(project)) return { ok: false, text: `lean_review ${action} needs a project name` }
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
+  if (action === 'lessons') return lessonsFor(h, { project, repo: str(i.repo) || undefined, base: str(i.base) || undefined, head: str(i.head) || undefined, paths: strs(i.paths), goal: str(i.goal) || undefined, budget: typeof i.budget === 'number' && i.budget > 0 ? i.budget : undefined })
+  if (action === 'learn') {
+    const r = await learnLessons(h, project, { checklist: Array.isArray(i.checklist) ? i.checklist : [], helpers: Array.isArray(i.helpers) ? i.helpers : [], replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
+    const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`)]
+    return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
+  }
+  if (action === 'lessons-list') return { ok: true, text: await listLessons(h, project) }
+  if (action === 'lessons-rm') return str(i.which) ? removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
+  if (action === 'lessons-undo') return undoLessons(h, project)
+  const repo = await repoOf(h, project, str(i.repo) || undefined)
+  if (!repo.startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path) or a registered project' }
+  return { ok: true, text: (await verifyLessons(h, project, repo, i.apply === true)).lines.join('\n') }
+}
+
 // ---- 0.45 import --------------------------------------------------------------------------------------------------------------------
 type Legacy = { family: Family; topic?: string; text: string; id?: number; added: string; batch: string; dropped?: boolean }
 const fam = (cid: string): Family | null => (cid === 'shared-helpers' || cid.startsWith('shared-helpers-') ? 'shared-helpers' : cid === 'review-checklist' || cid.startsWith('review-checklist-') ? 'review-checklist' : null)

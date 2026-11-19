@@ -8,7 +8,7 @@ import type { Host } from './state'
 import { slugOk } from './rules'
 import { sha256 } from './sha'
 
-export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; ts?: number; sig?: string }
+export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; base?: string; branch?: string; model?: string; ts?: number; sig?: string }
 export const reviewFile = (home: string, project: string, sha: string) => `${leanDir(home)}/${project}/reviews/${sha}.json`
 const KEY = 'review.key'
 const LEGACY = (home: string) => `${leanDir(home)}/review.key`
