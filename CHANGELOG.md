@@ -24,9 +24,10 @@
 - **The desk now runs Opus / high** (the user's decision; the alias `opus` is the latest Opus). `DESK_DEFAULT` in `hooks/models.ts`
   is `opus` / `high`; `config.json` `desk.model` / `desk.effort` still override and win. Threads stay sonnet / high. Setup (`doctor fix`)
   pins the desk folder's `settings.json` to it and replaces a sonnet pin an older setup wrote, the doctor row then reads `desk pinned to
-  opus / effort high (was sonnet / high: updated, the desk default is now opus / high)` (a user's `desk.model` in config.json is kept and
-  named: `... config.json desk.model`); the check row for such a file says `... doctor fix updates it`. The desk template, README,
-  the doctor skill and the texts below follow the pin (`pick Opus in the app's model menu (lean-agent pins opus / high)`).
+  opus / effort high (was sonnet / high: updated, an older setup pinned sonnet; the desk default is now opus)` (a user's `desk.model` in
+  config.json is kept and named: `... config.json desk.model`; a hand-edited model gets no cause: `... the desk default is opus`); the
+  check row for such a file says `... doctor fix updates it`. The README, the doctor skill and the texts below follow the pin (the
+  desk template never named the desk's model) (`pick Opus in the app's model menu (lean-agent pins opus / high)`).
 - **The desk ran another model than its pin.** The pin is in the desk folder's `settings.json`, but a session the Claude app
   starts (by hand or through the new-session deep link) can take the app's own model menu instead. The engine has no model setter
   (`$.session.model()` only reads), but it has the `/config` rows (`$.config.list()` / `$.config.set()`, "as if the person did in the

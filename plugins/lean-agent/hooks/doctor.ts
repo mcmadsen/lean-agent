@@ -4,7 +4,7 @@ import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, mkdirp, readJson, 
 import type { Host } from './state'
 import { trustFolder } from './threads'
 import { withFolderLock } from './folderlock'
-import { deskChoice, deskModelConfigured, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
+import { DESK_DEFAULT, deskChoice, deskModelConfigured, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
 import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
@@ -52,6 +52,13 @@ const asObj = (v: unknown): Record<string, any> => (v && typeof v === 'object' &
 
 // ---- install: desk folder, opener script, launch agent, trust ---------------------------------------------------
 export type FixOut = { lines: string[] }
+// why a desk pin was replaced, said only as far as it is known: the user's own config.json desk.model, the old default (sonnet / high,
+// what an older setup wrote), or neither (a hand-edited file: no cause is named)
+async function pinCause(h: Host, home: string, before: { model?: string; effort?: string }): Promise<string> {
+  if (await deskModelConfigured(h, home)) return ', config.json desk.model'
+  if (before.model === 'sonnet' && before.effort === 'high') return `, an older setup pinned sonnet; the desk default is now ${DESK_DEFAULT.model}`
+  return `, the desk default is ${DESK_DEFAULT.model}`
+}
 export async function fix(h: Host, root: string): Promise<FixOut> {
   const home = await homeDir(h)
   const lines: string[] = []
@@ -88,7 +95,7 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
     await writeJson(h, `${leanDir(home)}/desk/pinned.json`, { at: await h.clock.now(), model: want.model, effort: want.effort })
   }
   // an older setup's pin (sonnet) is replaced by today's (opus / high, or the user's config.json `desk`): the row says so
-  const was = pinned && before?.model && before.model !== want.model ? ` (was ${before.model} / ${before.effort ?? 'no effort'}: updated${(await deskModelConfigured(h, home)) ? ', config.json desk.model' : ', the desk default is now opus / high'})` : ''
+  const was = pinned && typeof before?.model === 'string' && before.model && before.model !== want.model ? ` (was ${before.model} / ${typeof before.effort === 'string' ? before.effort : 'no effort'}: updated${await pinCause(h, home, before)})` : ''
   lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}${was}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   lines.push(opened ? 'desk can open files in ~/.lean-agent' : 'desk .claude/settings.json does not parse: ~/.lean-agent not added to the desk\'s folders, fix the file by hand')
@@ -128,7 +135,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const have = await readModelSettings(h, `${deskDir(home)}/.claude/settings.json`)
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
-  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${have?.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : ' (the desk default is now opus / high; an older setup pinned another model: doctor fix updates it)') : ''}`)
+  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${typeof have?.model === 'string' && have.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : have.model === 'sonnet' && have.effort === 'high' ? ' (an older setup pinned sonnet: doctor fix updates it)' : ' (doctor fix updates it)') : ''}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason

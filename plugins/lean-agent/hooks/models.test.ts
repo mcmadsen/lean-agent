@@ -22,9 +22,9 @@ test('a sonnet pin from an older setup is updated to opus / high by fix and the 
   h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', theme: 'dark' }))
   const l = (await check(h.host, '/p')).find(x => x.includes('desk model'))!
   expect(l).toContain('FIX')
-  expect(l).toContain('desk model is sonnet / effort high, want opus / high (the desk default is now opus / high; an older setup pinned another model: doctor fix updates it)')
+  expect(l).toContain('desk model is sonnet / effort high, want opus / high (an older setup pinned sonnet: doctor fix updates it)')
   const f = await fix(h.host, '/p')
-  expect(f.lines).toContain('desk pinned to opus / effort high (was sonnet / high: updated, the desk default is now opus / high)')
+  expect(f.lines).toContain('desk pinned to opus / effort high (was sonnet / high: updated, an older setup pinned sonnet; the desk default is now opus)')
   expect(await readModelSettings(h.host, DESK)).toEqual({ model: 'opus', effort: 'high' })
   expect(JSON.parse(h.files.get(DESK)!).theme).toBe('dark')
   expect((await check(h.host, '/p')).find(x => x.includes('desk model'))!.startsWith('ok')).toBe(true)
@@ -40,6 +40,18 @@ test('a sonnet pin from an older setup is updated to opus / high by fix and the 
   c.files.set(DESK, JSON.stringify({ model: 'opus', effortLevel: 'high' }))
   expect((await check(c.host, '/p')).find(x => x.includes('desk model'))).toContain('want sonnet / high (config.json desk)')
   expect((await fix(c.host, '/p')).lines).toContain('desk pinned to sonnet / effort high (was opus / high: updated, config.json desk.model)')
+  // only the effort is configured: the row names no model cause that is not true
+  const e = fakeHost(null)
+  e.files.set('/p/opener/open-desk.sh', '#!/bin/sh\n')
+  e.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { effort: 'low' } }))
+  e.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high' }))
+  expect((await fix(e.host, '/p')).lines).toContain('desk pinned to opus / effort low (was sonnet / high: updated, an older setup pinned sonnet; the desk default is now opus)')
+  // a hand-edited model: no cause is named
+  const x = fakeHost(null)
+  x.files.set('/p/opener/open-desk.sh', '#!/bin/sh\n')
+  x.files.set(DESK, JSON.stringify({ model: 'haiku', effortLevel: 'low' }))
+  expect((await check(x.host, '/p')).find(r => r.includes('desk model'))).toContain('want opus / high (doctor fix updates it)')
+  expect((await fix(x.host, '/p')).lines).toContain('desk pinned to opus / effort high (was haiku / low: updated, the desk default is opus)')
 })
 
 test('setup lets the desk open files in ~/.lean-agent: the folder is merged into permissions.additionalDirectories, user keys and folders stay, a second run changes nothing', async () => {
