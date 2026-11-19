@@ -9,11 +9,14 @@
 //   - declined findings (below) are left out last, whoever raised them, and never flip a verdict on their own.
 import type { Host } from './state'
 import { appendJsonl, homeDir, leanDir, readJsonl } from './state'
+import { jaccard, words } from './reviewprep'
 import type { Prep } from './reviewprep'
 
 export const SEVERITIES = ['blocker', 'major', 'minor', 'nit'] as const
 export const CATEGORIES = ['completeness', 'correctness', 'duplication', 'scope', 'platform', 'tests', 'security', 'compatibility', 'performance', 'style']
 export const AT_LEAST_MAJOR = new Set(['duplication', 'scope', 'platform'])
+export const VERDICTS = ['approve', 'changes-requested', 'needs-checks']
+const CODE_FILE = /\.(tsx?|jsx?|mjs|cjs|py|go|rs|cs|java|kt|swift|scala|rb|php|c|cc|cpp|h|hpp|vue|svelte)$/i // a new file of these needs a reuse entry even with no symbol found
 export type Finding = { n: number; severity: string; category: string; path: string; line: number; text: string; fix: string; symbol?: string; auto?: boolean }
 export type Entry = Record<string, unknown>
 export type Result = {
@@ -21,6 +24,7 @@ export type Result = {
   goal: string
   findings: Finding[]
   gaps: Entry[]
+  fixed: number[] // a re-review: the numbers of the earlier open findings that are fixed now
   user_facing: Entry[]
   risks: Entry[]
   removed_effects: Entry[]
@@ -37,13 +41,6 @@ const str = (v: unknown) => (typeof v === 'string' ? v.trim() : typeof v === 'nu
 const objs = (v: unknown): Entry[] => (Array.isArray(v) ? v.filter((x): x is Entry => !!x && typeof x === 'object' && !Array.isArray(x)) : [])
 const truthy = (v: unknown) => /^(true|yes|1)$/i.test(String(v).trim())
 const falsy = (v: unknown) => /^(false|no|0|unintended)$/i.test(String(v).trim())
-const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (!a.size || !b.size) return 0
-  let n = 0
-  for (const x of a) if (b.has(x)) n++
-  return n / (a.size + b.size - n)
-}
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
 const hasName = (text: string, name: string) => !!name && new RegExp(`(?<![\\w$])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`).test(text)
 const base = (p: string) => p.split('/').pop() ?? p
@@ -55,7 +52,7 @@ export function normalize(raw: unknown): Result {
     const sev = str(f.severity).toLowerCase()
     return {
       n: Number.isFinite(Number(f.n)) && Number(f.n) > 0 ? Number(f.n) : ++n,
-      severity: (SEVERITIES as readonly string[]).includes(sev) ? sev : 'minor',
+      severity: (SEVERITIES as readonly string[]).includes(sev) ? sev : 'major', // an unknown word ("critical", "high") never fails open
       category: str(f.category).toLowerCase(),
       path: str(f.path) || str(f.file),
       line: Number(f.line) > 0 ? Number(f.line) : 0,
@@ -65,9 +62,10 @@ export function normalize(raw: unknown): Result {
     }
   })
   return {
-    verdict: str(r.verdict).toLowerCase(),
+    verdict: VERDICTS.includes(str(r.verdict).toLowerCase()) ? str(r.verdict).toLowerCase() : '', // anything else counts as missing
     goal: str(r.goal),
     findings,
+    fixed: Array.isArray(r.fixed) ? r.fixed.map(Number).filter(n => Number.isInteger(n) && n > 0) : [],
     gaps: objs(r.gaps),
     user_facing: objs(r.user_facing),
     risks: objs(r.risks),
@@ -107,8 +105,12 @@ export const declinesText = (ds: Decline[]): string =>
   ds.length ? `Declined by the user (decided, do not raise a matching finding again; they never change your verdict for you):\n${ds.map(d => `- ${d.kind || 'any kind'}${d.symbol ? ` ${d.symbol}` : ''}${d.path ? ` (${d.path})` : ''}${d.text ? `: ${d.text.slice(0, 120)}` : ''} (why: ${d.why})`).join('\n')}` : ''
 
 // ---- enforcement -------------------------------------------------------------------------------------------------------------
-const OPTIONAL = /\b(optional(ly)?\b(?! (param|arg|field|chain))|(as|in) a (separate )?follow-?up|follow-?up (pr|change|ticket|task|work)|not required (for|in) this|nice[- ]to[- ]have|could be done later|pre-?existing (issue|duplication|pattern|code)|already (duplicated|repeated) (in|across)|out of scope for this (pr|change))/i
-const UNVERIFIED = /\b(i )?(did not|didn't|could not|couldn't|cannot|can't) (confirm|verify|check|see)|\bunverified\b|\bnot (verified|confirmed)\b/i
+const OPTIONAL = /\b(\(optional\)|optional:|optionally,|(as|in) a (separate )?follow-?up|follow-?up (pr|change|ticket|task|work)|not required (for|in) this|nice[- ]to[- ]have|could be done later|pre-?existing (issue|duplication|pattern|code)|already (duplicated|repeated) (in|across)|out of scope for this (pr|change))/i
+// first person only: "the signature is not verified" is a finding about the code, not a gap in the review
+const UNVERIFIED = /\bI (did not|didn't|could not|couldn't|cannot|can't) (confirm|verify|check|see)\b|^\s*unverified\b|\bunverified:/i
+const sameFile = (a: string, b: string) => { const x = a.replace(/^\.\//, ''); const y = b.replace(/^\.\//, ''); return !!x && !!y && (x === y || x.endsWith(`/${y}`) || y.endsWith(`/${x}`)) }
+// a line inside (or within 5 lines of) a hunk of the delta, in a file the delta touches
+const nearDelta = (f: { path: string; line: number }, d: Prep) => { const file = d.changed.find(c => sameFile(c, f.path)); return !!file && (d.hunks[file] ?? []).some(([a, b]) => f.line >= a - 5 && f.line <= b + 5) }
 const inChanged = (path: string, line: number, hunks: Prep['hunks']) => !!path && !!line && (hunks[path] ?? []).some(([a, b]) => line >= a && line <= b)
 const candInChange = (cand: string, hunks: Prep['hunks']) => { const m = /([^\s:]+):(\d+)/.exec(cand); return !!m && inChanged(m[1]!.replace(/^\.\//, ''), Number(m[2]), hunks) }
 const label = (f: Finding) => `[${f.severity}/${f.category || '?'}] ${f.path}${f.line ? `:${f.line}` : ''} ${f.text}`.slice(0, 220)
@@ -151,12 +153,16 @@ export function enforce(res: Result, ctx: Context): Verdict {
     if (!cands.length) continue
     const sym = r.symbol.split(' (')[0]!
     const names = [sym, ...cands.map(c => c.split(':')[0]!)]
-    if (!findings.some(f => f.category === 'duplication' && mention(f, names))) add({ severity: 'major', category: 'duplication', path: sym, line: 0, text: `${sym} duplicates existing code: ${cands.join(', ').slice(0, 200)}`, fix: `reuse the existing code instead${r.why ? `: ${r.why}` : ''}` })
+    // a finding of any category that names the symbol stops the automatic one (a small copy the reviewer wrote up as a minor style finding stays minor)
+    if (!findings.some(f => mention(f, names))) add({ severity: 'major', category: 'duplication', path: ctx.prep.symbols.find(s => s.name === sym)?.path ?? sym, line: 0, text: `${sym} duplicates existing code: ${cands.join(', ').slice(0, 200)}`, fix: `reuse the existing code instead${r.why ? `: ${r.why}` : ''}` })
   }
   const reasons: string[] = []
-  const entryFor = (name: string) => reuse.find(e => hasName(`${e.symbol} ${e.candidate}`, name))
+  const entryFor = (name: string) => reuse.find(e => hasName(e.symbol, name))
   const missingReuse = ctx.prep.symbols.filter(s => !entryFor(s.name))
   if (missingReuse.length) reasons.push(`reuse not checked for ${missingReuse.length} new symbol(s): ${missingReuse.slice(0, 10).map(s => `${s.name} (${s.path})`).join(', ')}: every new symbol needs a reuse entry (with a search)`)
+  // a new code file in which no symbol was found (helpers that are not exported, a script) still needs an entry, named by its path or file name
+  const bareFiles = ctx.prep.files.filter(f => CODE_FILE.test(f) && !ctx.prep.symbols.some(s => s.path === f) && !reuse.some(e => e.symbol.includes(f) || e.symbol.includes(base(f))))
+  if (bareFiles.length) reasons.push(`reuse not checked for ${bareFiles.length} new file(s) with no symbol found: ${bareFiles.slice(0, 10).join(', ')}: give each a reuse entry (symbol = the file name) after searching for existing code that does its job`)
   for (const s of ctx.second ?? []) {
     const e = reuse.find(x => hasName(x.symbol, s.symbol))
     if (!e) reasons.push(`second opinion: ${s.symbol}${s.candidate ? ` (candidate ${s.candidate})` : ''} was not confirmed or rejected: answer it with a reuse entry`)
@@ -172,8 +178,7 @@ export function enforce(res: Result, ctx: Context): Verdict {
   const cmerged = new Map<string, Result['coverage'][number]>()
   for (const e of [...(ctx.earlier?.coverage ?? []), ...res.coverage]) cmerged.set(norm(e.test), e)
   const coverage = [...cmerged.values()]
-  const covText = coverage.map(c => norm(c.test)).join(' | ')
-  const missingCov = ctx.prep.tests.filter(t => !covText.includes(norm(t.test).slice(0, 40)))
+  const missingCov = ctx.prep.tests.filter(t => !coverage.some(c => norm(c.test).includes(norm(t.test).slice(0, 40))))
   if (missingCov.length) reasons.push(`coverage not checked for ${missingCov.length} edited test(s): ${missingCov.slice(0, 8).map(t => `${t.path}: '${t.test}' (${t.why})`).join('; ')}: every edited test needs a coverage entry (what it protected, still covered / lost / intentional)`)
   const lost = coverage.filter(c => c.status === 'lost')
   if (lost.length && !findings.some(f => f.category === 'tests' && (f.severity === 'blocker' || f.severity === 'major'))) add({ severity: 'major', category: 'tests', path: 'tests', line: 0, text: `coverage lost: ${lost.slice(0, 6).map(c => `'${c.test}' protected ${c.protected || '?'}`).join('; ')}`, fix: 'add tests for these back, or say why they no longer apply' })
@@ -197,7 +202,7 @@ export function enforce(res: Result, ctx: Context): Verdict {
     add({ severity: 'major', category: 'correctness', path: file || '?', line: Number(line) || 0, text: `removed side effect: ${str(e.effect).slice(0, 140)} is no longer done on every path`, fix: 'do it on the new path too, or confirm it is intended' })
   }
   for (const g of res.gaps) {
-    if (g.blocks_goal === true && !str(g.scoped_out) && !findings.some(f => f.category === 'completeness' && base(f.path) === base(str(g.path)))) {
+    if (truthy(g.blocks_goal) && !str(g.scoped_out) && !findings.some(f => f.category === 'completeness' && base(f.path) === base(str(g.path)))) {
       add({ severity: 'major', category: 'completeness', path: str(g.path) || '?', line: Number(g.line) || 0, text: `the change does not deliver: ${str(g.what).slice(0, 200)}`, fix: 'deliver it, or have the user confirm it is out of scope (decline it)' })
     }
   }
@@ -212,8 +217,15 @@ export function enforce(res: Result, ctx: Context): Verdict {
     for (const f of findings) {
       if (f.auto || (f.severity !== 'blocker' && f.severity !== 'major')) continue
       if (earlier.some(e => jaccard(words(f.text), e) >= 0.3)) continue
-      if (!inChanged(f.path, f.line, ctx.delta.hunks)) { f.severity = 'minor'; notes.push(`new on re-review, about code that did not change since the last review: minor (${f.path}:${f.line})`) }
+      // only a finding with a known file and line, away from everything the delta touched (never line 0, never an unmatched path spelling)
+      if (f.path && f.line > 0 && !nearDelta(f, ctx.delta)) { f.severity = 'minor'; notes.push(`new on re-review, about code that did not change since the last review: minor (${f.path}:${f.line})`) }
     }
+  }
+  // an earlier open blocker/major does not just vanish: the reviewer lists it again or says it is fixed (`fixed`: its number)
+  for (const ef of ctx.earlier?.open ?? []) {
+    if (ef.severity !== 'blocker' && ef.severity !== 'major') continue
+    if (isDeclined(ef, ctx.declines) || res.fixed.includes(ef.n) || res.findings.some(f => jaccard(words(f.text), words(ef.text)) >= 0.3)) continue
+    reasons.push(`earlier ${ef.severity} #${ef.n} (${label(ef).slice(0, 120)}) is neither listed again nor in "fixed": say whether it is fixed`)
   }
 
   // declines last, so nothing re-adds a declined finding

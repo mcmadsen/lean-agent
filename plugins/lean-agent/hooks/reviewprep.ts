@@ -27,8 +27,11 @@ export type Prep = {
   truncated?: boolean
 }
 
-export const TEST_PATH_RE = /(^|\/)(tests?|__tests__|specs?|e2e)(\/|$)|[._-](test|spec)s?\.\w+$|_test\.go$|(^|\/)test_[^/]*$|[A-Za-z](Tests?|Spec)\.(kt|java|cs|swift|scala)$|(^|\/)src\/(test|androidTest|integrationTest)\//i
-export const isTestPath = (p: string) => TEST_PATH_RE.test(p)
+export const TEST_PATH_RE = /(^|\/)(tests?|__tests__|specs?|e2e)(\/|$)|[._-](test|spec)s?\.\w+$|_test\.go$|(^|\/)test_[^/]*$|(^|\/)src\/(test|androidTest|integrationTest)\//i
+const TEST_CLASS_RE = /[A-Za-z](Tests?|Spec)\.(kt|java|cs|swift|scala)$/ // case-sensitive: Latest.kt is not a test
+export const isTestPath = (p: string) => TEST_PATH_RE.test(p) || TEST_CLASS_RE.test(p)
+// config and data files: a `key = [` there is not module state
+const DATA_FILE = /\.(toml|ini|ya?ml|json|md|env|cfg|conf|txt|csv|lock)$/i
 
 const SYMBOL_RES: RegExp[] = [
   /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:abstract\s+)?(?:function\*?|const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/,
@@ -67,20 +70,21 @@ const TITLE_RES: RegExp[] = [
   /^\s*(?:public\s+)?(?:async\s+)?(?:suspend\s+)?(?:fun|void|Task)\s+(`[^`]+`|test\w*|\w+Test\w*|should\w+)\s*\(/, // Kotlin, Java, C#
   /^\s*func\s+(test\w+)\s*\(/, // Swift XCTest
   /^\s*(?:public\s+)?(?:async\s+)?\w+\s+(\w+Test\w*)\s*\(/,
+  /^\s*public\s+(?:async\s+)?(?:Task|void)\s+(\w+)\s*\(/, // C#/Java: a public test-class method (a [Fact] or @Test method has no marker in its own line)
 ]
 export function testTitle(body: string): string | null {
   for (const re of TITLE_RES) {
     const m = re.exec(body)
     if (m) return (m[2] ?? m[1])!.replace(/^`|`$/g, '')
   }
-  const attr = /^\s*\[(?:Fact|Test|TestMethod|Theory)\b[^\]]*\]/.exec(body)
-  return attr ? attr[0].trim().slice(0, 60) : null
+  return null
 }
 const ASSERT_RE = /\b(?:expect|assert\w*|should|toBe|toEqual|toHaveBeenCalled\w*|toMatch\w*|XCT\w+|verify|require)\b|\bAssert\.|#expect/i
 const SKIP_RE = /\b(?:it|test|describe)\.skip\b|\bx(?:it|describe)\s*\(|@(?:pytest\.mark\.)?skip|@Disabled|@Ignore\b|\[Ignore\]|\[Fact\([^)]*Skip|t\.Skip\(|XCTSkip/
+const FOCUS_RE = /\b(?:it|test|describe)\.only\b|\bf(?:it|describe)\s*\(/ // turns every other test in the file off
 
-const words = (s: string) => new Set((s.toLowerCase().match(/[a-z0-9]+/g) ?? []))
-function jaccard(a: Set<string>, b: Set<string>): number {
+export const words = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
+export function jaccard(a: Set<string>, b: Set<string>): number {
   if (!a.size || !b.size) return 0
   let n = 0
   for (const x of a) if (b.has(x)) n++
@@ -88,7 +92,7 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 }
 
 // ---- parameters with defaults -----------------------------------------------------------------------------------------
-const NOT_CALL = /^(?:if|for|while|switch|catch|return|else|do|await|new|typeof|throw|assert|expect)$/
+const NOT_CALL = /^(?:if|for|foreach|while|switch|catch|return|else|do|await|new|typeof|throw|assert|expect|using|try|lock|synchronized)$/
 const HEADS: RegExp[] = [
   /\bfunction\*?\s*[\w$]*\s*(?:<[^>]*>)?\s*\(/,
   /\bdef\s+\w+\s*\(/,
@@ -160,7 +164,7 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
   let oldLine = 0
   let newLine = 0
   let inHunk = false
-  const note = (path: string, t: string, why: string) => { const m = tests.get(path) ?? new Map<string, string>(); tests.set(path, m); if (!m.has(t) || why === 'skipped') m.set(t, why) }
+  const note = (path: string, t: string, why: string) => { const m = tests.get(path) ?? new Map<string, string>(); tests.set(path, m); if (!m.has(t) || why === 'skipped' || why === 'focused') m.set(t, why) }
   for (const line of diff.split('\n')) {
     if (line.startsWith('diff --git ')) { inHunk = false; oldP = null; newP = null; continue }
     if (!inHunk && line.startsWith('--- ')) { oldP = fileOf(line, '---'); continue }
@@ -172,11 +176,13 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
       newLine = Number(hm[2])
       hunks.push({ file: newP ?? oldP ?? '', rem: [], add: [] })
       const n = hm[3] === undefined ? 1 : Number(hm[3])
-      if (newP && n > 0) (out.hunks[newP] ??= []).push([newLine, newLine + n - 1])
+      // a deletion-only hunk (+N,0) still marks the spot where lines were removed
+      if (newP) (out.hunks[newP] ??= []).push(n > 0 ? [newLine, newLine + n - 1] : [Math.max(1, newLine), newLine + 1])
       continue
     }
     if (!inHunk) continue
     const c = line[0]
+    if (c === ' ') { oldLine++; newLine++; continue }
     if (c === '-') {
       out.lines++
       const body = line.slice(1)
@@ -200,6 +206,7 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
         const t = testTitle(body)
         if (t) addedTitles.set(f, (addedTitles.get(f) ?? new Set()).add(t))
         if (SKIP_RE.test(body)) note(f, (t ?? body.trim()).slice(0, 80), 'skipped')
+        else if (FOCUS_RE.test(body)) note(f, (t ?? body.trim()).slice(0, 80), 'focused')
       } else if (f) {
         const name = symbolOf(body)
         if (name && name.length > 2) {
@@ -211,8 +218,8 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
           const d = defaultOf(part)
           if (d && !removedHere.includes(part.trim())) params.set(`${d.name}=${d.default}@${f}`, { ...d, path: f, line: newLine })
         }
-        const sm = STATE_TOP.exec(body)
-        const name2 = sm ? sm.slice(1).find(Boolean) : STATE_STATIC.exec(body)?.[1]
+        const sm = DATA_FILE.test(f) ? null : STATE_TOP.exec(body)
+        const name2 = sm ? sm.slice(1).find(Boolean) : DATA_FILE.test(f) ? undefined : STATE_STATIC.exec(body)?.[1]
         if (name2 && (sm ? !/^\s/.test(body) : true)) stateCands.push({ name: name2, path: f, line: newLine })
       }
       newLine++
@@ -323,16 +330,21 @@ export async function resolveRange(h: Host, project: string, baseIn: string | un
 }
 
 // the prep of `from`..`r.head` (default: the whole range from the merge base), with the diff text the risk classifier reads
-export async function prepare(h: Host, r: Range, from: string = r.mb): Promise<{ prep: Prep; diff: string }> {
-  const git = async (...a: string[]) => { const x = await h.process.run(['git', '-C', r.path, ...a], { timeoutMs: 60_000 }).catch(() => null); return x && x.exitCode === 0 ? x.stdout : '' }
-  let diff = await git('diff', '-U0', '--no-color', '--no-renames', '--end-of-options', from, r.head)
+// `failed`: git did not answer (an error or a timeout): an empty prep from that is NOT "nothing to check", so a green must be refused
+export async function prepare(h: Host, r: Range, from: string = r.mb): Promise<{ prep: Prep; diff: string; failed: boolean }> {
+  // fixed options: the user's diff.noprefix / diff.external / core.quotePath settings must not change what the parser reads
+  const GIT = ['-c', 'core.quotePath=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false']
+  const git = async (...a: string[]): Promise<string | null> => { const x = await h.process.run(['git', '-C', r.path, ...GIT, ...a], { timeoutMs: 60_000 }).catch(() => null); return x && x.exitCode === 0 ? x.stdout : null }
+  const raw = await git('diff', '-U0', '--no-color', '--no-renames', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--end-of-options', from, r.head)
+  const names = await git('diff', '--name-status', '--no-renames', '--end-of-options', from, r.head)
+  let diff = raw ?? ''
   const truncated = diff.length > MAX_DIFF_CHARS
   if (truncated) diff = diff.slice(0, MAX_DIFF_CHARS)
   const newFiles = new Set<string>()
-  for (const l of (await git('diff', '--name-status', '--no-renames', '--end-of-options', from, r.head)).split('\n')) {
+  for (const l of (names ?? '').split('\n')) {
     const [st, f] = l.split('\t')
     if (st?.startsWith('A') && f) newFiles.add(f)
   }
-  const p = await analyzeDiff(diff, async f => git('show', `${from}:${f}`), newFiles)
-  return { prep: truncated ? { ...p, truncated } : p, diff }
+  const p = await analyzeDiff(diff, async f => (await git('show', `${from}:${f}`)) ?? '', newFiles)
+  return { prep: truncated ? { ...p, truncated } : p, diff, failed: raw === null || names === null }
 }

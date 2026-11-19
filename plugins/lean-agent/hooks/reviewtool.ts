@@ -1,7 +1,7 @@
 // `lean_review` actions beyond the plain record: prepare (the script-computed brief, model and second-opinion advice), record (the
 // reviewer's JSON checked by reviewgate.ts before a green is signed) and decline. The HMAC signing stays in reviews.ts.
 import type { Host } from './state'
-import { homeDir, leanDir } from './state'
+import { homeDir } from './state'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
 import type { Review } from './reviews'
@@ -18,46 +18,59 @@ type Earlier = { sha: string; carry: Carry }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
 // what a later round needs from this one lives in the mod's own store (a session cannot write it: it would void the enforcement)
-const carryKey = (project: string, sha: string) => `review.carry.${project}.${sha}`
+// One blob per project (sha -> carry), the newest CARRY_KEEP kept: the store has no way to list or delete keys
+const carryKey = (project: string) => `review.carry.${project}`
+const CARRY_KEEP = 20
+const carries = async (h: Host, project: string): Promise<Record<string, Carry>> => {
+  const v = await h.store.get(carryKey(project)).catch(() => undefined)
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, Carry>) : {}
+}
+async function putCarry(h: Host, project: string, sha: string, c: Carry): Promise<void> {
+  const all = { ...(await carries(h, project)), [sha]: c }
+  const keep = Object.entries(all).sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0)).slice(0, CARRY_KEEP)
+  await h.store.set(carryKey(project), Object.fromEntries(keep))
+}
 
 async function findEarlier(h: Host, project: string, r: Range, branch: string, since: string): Promise<Earlier | null> {
-  const home = await homeDir(h)
   const git = async (...a: string[]) => h.process.run(['git', '-C', r.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
-  const names = (await h.fs.list(`${leanDir(home)}/${project}/reviews`).catch(() => [])).map(f => f.name.replace(/\.json$/, '')).filter(n => /^[0-9a-f]{40,64}$/.test(n) && n !== r.head)
+  const isAncestor = async (a: string, b: string) => (await git('merge-base', '--is-ancestor', a, b))?.exitCode === 0
   const cands: Earlier[] = []
-  for (const sha of names) {
-    if (since && sha !== since) continue
-    const carry = (await h.store.get(carryKey(project, sha)).catch(() => undefined)) as Carry | undefined
+  for (const [sha, carry] of Object.entries(await carries(h, project))) {
+    if (sha === r.head || sha === r.mb || (since && sha !== since)) continue
     if (carry && typeof carry === 'object' && Array.isArray(carry.open) && (!branch || !carry.branch || carry.branch === branch)) cands.push({ sha, carry })
   }
   cands.sort((a, b) => b.carry.ts - a.carry.ts)
-  for (const c of cands.slice(0, 20)) {
-    const anc = await git('merge-base', '--is-ancestor', c.sha, r.head)
-    if (anc && anc.exitCode === 0) return c
-  }
+  // an earlier round lies between the merge base and the head: a record from before the branch or from another line of history is not one
+  for (const c of cands) if ((await isAncestor(c.sha, r.head)) && (await isAncestor(r.mb, c.sha))) return c
   if (since && refOk(since)) { // a delta start the caller names but this tool did not record: the diff since it, no earlier findings
     const ok = await git('rev-parse', '--verify', '--end-of-options', `${since}^{commit}`)
-    if (ok && ok.exitCode === 0) return { sha: ok.stdout.trim(), carry: { open: [], reuse: [], coverage: [], branch, ts: 0 } }
+    const sha = ok && ok.exitCode === 0 ? ok.stdout.trim() : ''
+    if (sha && sha !== r.head && (await isAncestor(sha, r.head))) return { sha, carry: { open: [], reuse: [], coverage: [], branch, ts: 0 } }
   }
   return null
 }
 
 async function loadContext(h: Host, project: string, r: Range, branch: string, since: string, second?: Context['second']) {
-  const { prep, diff } = await prepare(h, r)
+  const { prep, diff, failed } = await prepare(h, r)
   const earlier = await findEarlier(h, project, r, branch, since)
-  const delta = earlier ? (await prepare(h, r, earlier.sha)).prep : null
+  const d = earlier ? await prepare(h, r, earlier.sha) : null
   const declines = await declinesFor(h, project, branch)
-  const ctx: Context = { prep, delta, earlier: earlier ? earlier.carry : null, declines, ...(second ? { second } : {}) }
-  return { ctx, diff, earlier }
+  const ctx: Context = { prep, delta: d?.prep ?? null, earlier: earlier ? earlier.carry : null, declines, ...(second ? { second } : {}) }
+  return { ctx, diff, earlier, failed: failed || !!d?.failed }
 }
 
-const short = (s: string) => s.slice(0, 10)
+const namedRef = async (git: (...a: string[]) => Promise<{ exitCode: number } | null>, name: string): Promise<boolean> => {
+  if (!refOk(name)) return false
+  for (const ns of ['refs/heads/', 'refs/remotes/', 'refs/tags/']) if ((await git('show-ref', '--verify', '--quiet', `${ns}${name}`))?.exitCode === 0) return true
+  return false
+}
 
 async function doPrepare(h: Host, project: string, i: any): Promise<Out> {
   const range = await resolveRange(h, project, str(i.base) || undefined, str(i.head) || undefined)
   if (typeof range === 'string') return { ok: false, text: `prepare: ${range}` }
   const branch = str(i.branch)
-  const { ctx, diff, earlier } = await loadContext(h, project, range, branch, str(i.since))
+  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since))
+  if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
   const rereview = !!earlier
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { model?: unknown } }
   const { model, why } = chooseModel(ctx.prep, diff, { rereview, config: cfg?.review?.model })
@@ -86,7 +99,7 @@ const parseResult = (v: unknown): unknown => {
 
 async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   const sha = str(i.sha)
-  if (!/^[0-9a-f]{7,64}$/.test(sha)) return { ok: false, text: 'review needs a full commit sha' }
+  if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, text: 'review needs the full commit sha (git rev-parse HEAD)' }
   const wantGreen = i.green === true
   const raw = parseResult(i.review)
   const strings = Array.isArray(i.findings) ? i.findings.filter((x: unknown): x is string => typeof x === 'string') : undefined
@@ -109,15 +122,22 @@ async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   }
   const res = normalize(raw)
   const second = Array.isArray(i.second) ? i.second.filter((x: any) => x && typeof x.symbol === 'string').map((x: any) => ({ symbol: String(x.symbol), candidate: typeof x.candidate === 'string' ? x.candidate : '' })) : undefined
-  const { ctx } = await loadContext(h, project, range, branch, str(i.since), second)
+  const { ctx, failed } = await loadContext(h, project, range, branch, str(i.since), second)
   const v = enforce(res, ctx)
+  // what the diff read must be believable: git answered, the range is not empty, and the base names a branch or tag (never a sha or
+  // HEAD~1, which would shrink the range and with it the symbols and tests that need entries)
+  const git = async (...a: string[]) => h.process.run(['git', '-C', range.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
+  if (failed) v.reasons.unshift('git could not produce the diff (an error or a timeout): nothing was checked, so no green')
+  if (range.mb === range.head) v.reasons.unshift(`the range is empty (the merge base of ${base || 'the default branch'} is the head itself): base must be the branch this work goes into`)
+  if (base && !(await namedRef(git, base))) v.reasons.unshift(`base ${base} is not a branch or tag name: pass the branch the work goes into (a sha or HEAD~n would shrink the range that is checked)`)
+  v.green = v.reasons.length === 0
   const green = wantGreen && v.green
   rec.green = green
   rec.base = base || range.base
   if (branch) rec.branch = branch
   rec.findings = v.open.map(findingLine)
   const file = await writeReview(h, rec)
-  await h.store.set(carryKey(project, sha), { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now() } satisfies Carry)
+  await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now() })
   const tail = [v.open.length ? `open findings:\n${v.open.map(findingLine).join('\n')}` : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : ''].filter(Boolean).join('\n')
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}` }
   return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}` }

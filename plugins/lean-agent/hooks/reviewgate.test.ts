@@ -151,7 +151,7 @@ const H1 = 'a'.repeat(40)
 const H2 = 'c'.repeat(40)
 const MB = 'm'.repeat(40)
 const newFileDiff = (path: string, ...body: string[]) => [`diff --git a/${path} b/${path}`, 'new file mode 100644', '--- /dev/null', `+++ b/${path}`, `@@ -0,0 +1,${body.length} @@`, ...body.map(b => `+${b}`)].join('\n') + '\n'
-function setup(diffs: Record<string, string>, added: Record<string, string> = {}) {
+function setup(diffs: Record<string, string>, added: Record<string, string> = {}, opts: { mb?: string; diffFails?: boolean } = {}) {
   const h = fakeHost(null)
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', project: 'app' }))
@@ -159,8 +159,10 @@ function setup(diffs: Record<string, string>, added: Record<string, string> = {}
     const s = a.join(' ')
     const ok = (stdout: string) => ({ exitCode: 0, stdout })
     if (s.includes('rev-parse --verify')) { const r = a[a.length - 1]!.replace('^{commit}', ''); return /^[0-9a-f]{40}$/.test(r) ? ok(r + '\n') : r === 'HEAD' ? ok(H2 + '\n') : ok('b'.repeat(40) + '\n') }
-    if (s.includes('merge-base --is-ancestor')) return { exitCode: a[a.length - 2] === H1 ? 0 : 1, stdout: '' }
-    if (s.includes('merge-base')) return ok(MB + '\n')
+    if (s.includes('show-ref')) return { exitCode: /refs\/heads\/main$/.test(s) ? 0 : 1, stdout: '' } // only `main` is a branch here
+    if (s.includes('merge-base --is-ancestor')) return { exitCode: a[a.length - 2] === H2 ? 1 : 0, stdout: '' }
+    if (s.includes('merge-base')) return ok((opts.mb ?? MB) + '\n')
+    if (opts.diffFails && s.includes(' diff ')) return { exitCode: 128, stdout: '' }
     if (s.includes('--name-status')) return ok((added[a[a.length - 2]!] ?? added['*'] ?? '') )
     if (s.includes(' diff ')) return ok(diffs[a[a.length - 2]!] ?? diffs['*'] ?? '')
     return { exitCode: 1, stdout: '' }
@@ -244,11 +246,71 @@ test('lean_review re-review: the second round gets the open findings and the del
   expect(p.text).toContain(`diff ${H1}...${H2}`)
   expect(p.text).toContain('the cache never expires entries')
   expect(JSON.parse(p.text.split('\n')[0]!.replace('LEAN-REVIEW-PREP ', ''))).toMatchObject({ rereview: true, since: H1, model: 'sonnet' })
-  // round 2: no reuse entry in this round's JSON, the earlier one counts; the fixed finding is gone
-  const r2 = await tool(h, { sha: H2, base: 'main', branch: 'feat', green: true, review: { ...base } })
+  // round 2 may not let the earlier major vanish: it is listed again or named in `fixed`
+  const silent = await tool(h, { sha: H2, base: 'main', branch: 'feat', green: true, review: { ...base } })
+  expect(silent.ok).toBe(false)
+  expect(silent.text).toContain('neither listed again nor in "fixed"')
+  // round 2: no reuse entry in this round's JSON, the earlier one counts; the finding is fixed
+  const r2 = await tool(h, { sha: H2, base: 'main', branch: 'feat', green: true, review: { ...base, fixed: [1] } })
   expect(r2.ok).toBe(true)
   expect(await greenReview(h.host, 'app', H2)).toBe(true)
-  // a record file a session wrote by hand carries nothing: no earlier round is found for it
-  h.files.set(`${L}/app/reviews/${'d'.repeat(40)}.json`, JSON.stringify({ project: 'app', sha: 'd'.repeat(40), green: false, open: [], reuse: [{ symbol: 'Cache' }] }))
-  expect((await tool(h, { action: 'prepare', base: 'main', branch: 'feat', since: 'd'.repeat(40) })).text).not.toContain('the cache never expires')
+  // a sha nobody recorded is a delta start with no earlier findings; the head itself is not a delta start
+  const odd = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', since: 'd'.repeat(40) })
+  expect(odd.text).toContain('RE-REVIEW')
+  expect(odd.text).not.toContain('the cache never expires')
+  expect((await tool(h, { action: 'prepare', base: 'main', since: H2 })).text).not.toContain('RE-REVIEW')
+})
+
+test('lean_review record: a failed or empty diff, a narrowed base and a silent re-review never give green', async () => {
+  const ok = { ...base }
+  const d = newFileDiff('src/cache.ts', 'export class Cache {}')
+  const reuse = [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }]
+  // git fails: an empty prep is not "nothing to check"
+  const failing = setup({}, {}, { diffFails: true })
+  const f = await tool(failing, { sha: H2, base: 'main', green: true, review: ok })
+  expect(f.ok).toBe(false)
+  expect(f.text).toContain('git could not produce the diff')
+  expect((await tool(failing, { action: 'prepare', base: 'main' })).ok).toBe(false)
+  // the merge base is the head: nothing would be checked
+  const empty = setup({}, {}, { mb: H2 })
+  expect((await tool(empty, { sha: H2, base: 'main', green: true, review: ok })).text).toContain('the range is empty')
+  // a sha or HEAD~1 as base shrinks the range; a branch name does not
+  const h = setup({ '*': d }, { '*': 'A\tsrc/cache.ts\n' })
+  const narrowed = await tool(h, { sha: H2, base: 'HEAD~1', green: true, review: { ...ok, reuse } })
+  expect(narrowed.ok).toBe(false)
+  expect(narrowed.text).toContain('not a branch or tag name')
+  expect((await tool(h, { sha: H2, base: H1, green: true, review: { ...ok, reuse } })).ok).toBe(false)
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: { ...ok, reuse } })).ok).toBe(true)
+  // a short sha is refused, the push gate only reads full ones
+  expect((await tool(h, { sha: 'abcdef1', base: 'main', green: true, review: { ...ok, reuse } })).ok).toBe(false)
+})
+
+test('a new code file with no symbol found needs a reuse entry named by its file; data files do not', () => {
+  const c = ctx({ files: ['src/helpers.ts', 'data/list.json', 'src/cache.ts'], symbols: [sym('Cache', 'src/cache.ts')] })
+  const v = run({ reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'nothing else caches this at all, checked' }] }, c)
+  expect(v.green).toBe(false)
+  expect(v.reasons.join()).toContain('src/helpers.ts')
+  expect(v.reasons.join()).not.toContain('list.json')
+  expect(run({ reuse: [{ symbol: 'Cache', verdict: 'justified-new', why: 'nothing else caches this at all, checked' }, { symbol: 'helpers.ts', candidate: '', verdict: 'justified-new', why: 'x' }] }, c).green).toBe(true)
+})
+
+test('gate hardening: a finding about unverified code stays a blocker, unknown severities and verdicts fail closed', () => {
+  const v = run({ findings: [finding({ severity: 'blocker', text: 'the token signature is not verified before use' })] })
+  expect(v.green).toBe(false)
+  expect(v.open[0]!.severity).toBe('blocker')
+  expect(run({ findings: [finding({ severity: 'critical' })] }).open[0]!.severity).toBe('major')
+  expect(run({ verdict: 'reject' }).green).toBe(false)
+  // a duplicate verdict the reviewer wrote up as a small style finding stays minor
+  const c = ctx({ symbols: [sym('labelOf')] })
+  const small = run({ reuse: [{ symbol: 'labelOf', candidate: 'src/l.ts:3 label', verdict: 'duplicate', why: '3 lines' }], findings: [finding({ severity: 'minor', category: 'style', text: 'labelOf repeats the 3 line label formatter' })] }, c)
+  expect(small.green).toBe(true)
+  // coverage is matched entry by entry: one entry never covers two tests
+  const t = ctx({ tests: [{ path: 'T.cs', test: 'AddsNumbers', why: 'assertions changed' }, { path: 'T.cs', test: 'SubsNumbers', why: 'assertions changed' }] })
+  expect(run({ coverage: [{ test: 'AddsNumbers', protected: 'x', status: 'still-covered' }] }, t).green).toBe(false)
+})
+
+test('a deletion-only hunk in the delta keeps a new major about removed code; line 0 is never downgraded', () => {
+  const delta = prep({ hunks: { 'src/a.ts': [[30, 31]] } })
+  const c = ctx({}, { delta, earlier: { open: [], reuse: [], coverage: [] } })
+  expect(run({ findings: [finding({ line: 31, text: 'the removed guard was needed' }), finding({ n: 2, line: 0, text: 'no line known for this one' })] }, c).open.map(f => f.severity)).toEqual(['major', 'major'])
 })

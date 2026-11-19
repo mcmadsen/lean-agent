@@ -42,11 +42,13 @@ tool's refusal: do what it says.
    keep them as `second` (`[{symbol, candidate}]`) for the record.
 5. **Pass 1:** spawn the `lean-agent:reviewer` agent on the model prepare chose (the Agent call's `model`: `opus` for security,
    concurrency, migrations/schema/storage, UI strings/locales, public API, config formats, removed public symbols or ~800+ changed
-   lines; `sonnet` otherwise and always on a re-review). Its prompt: the project path, base and full HEAD sha, the goal, the whole
+   lines; `sonnet` otherwise and on a re-review; the model line `prepare` prints is the one to use, `config.json` `review.model` wins). Its prompt: the project path, base and full HEAD sha, the goal, the whole
    prepare text, the lessons, the second opinion, the project's test command, and these lines, with the real base and full HEAD sha
    filled in (a grant matches the command or a prefix of it followed by a space; nothing else, no pipes or redirects):
    `allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>`
-   On a re-review add `git diff <since>...<sha>` to that line. Tell it to use them as written; `git diff|log|show|status|rev-parse`
+   On a re-review add `git diff <since>...<sha>` to that line. The prepare text names its commands as `git -C <checkout> diff|show`;
+   when the reviewer reports one refused (a checkout the guard does not know), add `git -C <checkout> diff, git -C <checkout> show,
+   git -C <checkout> log` to the same line. Tell it to use them as written; `git diff|log|show|status|rev-parse`
    and read-only `rg`/`grep`/`find`/`ls`/`cat` are built in, and Read covers the rest; it has no other shell access (no `git grep`).
    It answers in prose plus ONE fenced `json` block (findings, gaps, user_facing, risks, checks, reuse, coverage, siblings, searches,
    unverified) before its LEAN-FEEDBACK line. Keep that block: it is the `review` of the record.
@@ -59,10 +61,11 @@ tool's refusal: do what it says.
    converges: a new major about code that did not change since is minor. Stop after at most 3 passes; if blockers remain, record
    `green: false` and report with `lean_report`.
 8. **Record** with `lean_review` (`action: "record"`, the default): `project`, `sha` (full HEAD), `base`, `branch`, `green`,
-   `passes`, `model`, `second` (if any) and `review` (the reviewer's last JSON block, as it wrote it). Never write the file yourself:
+   `passes`, `model`, `second` (if any) and `review` (the reviewer's last JSON block, as it wrote it). `base` must be the NAME of
+   the branch or tag the work goes into (a sha or `HEAD~1` is refused: it would shrink what is checked). Never write the file yourself:
    only the tool signs a record, and an unsigned one is ignored. Green means: tests pass and the tool accepts it. The tool REFUSES green,
    with the reason, when a new symbol has no `reuse` entry, an edited test no `coverage` entry, a second-opinion candidate no answer,
-   or a blocker or major finding is open (duplication, scope and platform findings count as major; unintended user-facing changes,
+   an earlier blocker/major is neither listed again nor in `fixed`, git could not produce the diff, or a blocker or major finding is open (duplication, scope and platform findings count as major; unintended user-facing changes,
    removed side effects and a goal-blocking gap are majors too). A refusal is recorded as not green: send the reviewer back for the
    missing entries (same prompt, the refusal text added), or fix the open findings, then record again for the same or the new sha.
    Never record green for a sha you did not review, and never without the reviewer's JSON.

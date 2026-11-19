@@ -15,7 +15,8 @@
   strings, public API, config formats, removed public symbols, ~800+ lines; sonnet otherwise and on re-reviews; `config.json`
   `review.model` wins) and says whether a search-only second opinion comes first. `record` (the default) now REFUSES green, with the
   reason and recorded not green, when a new symbol has no `reuse` entry, an edited test no `coverage` entry, a second-opinion candidate
-  no answer, or a blocker/major finding is open; green without the reviewer's JSON (`review`) and `base` is refused. `decline`
+  no answer, an earlier blocker/major is neither listed again nor `fixed`, git could not produce the diff, the range is empty, `base` is not a
+  branch or tag name, or a blocker/major finding is open; green without the reviewer's JSON (`review`) is refused. `decline`
   records a finding the user decided not to fix (project, branch or all branches, kind + symbol, why); later reviews are told and
   leave it out. The HMAC signing is unchanged.
 - Earlier rounds' reuse and coverage entries are kept in the mod's own store (not in a file a session can write), so a re-review

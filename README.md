@@ -208,12 +208,14 @@ author except the lean-agent owner's own comments.
   Later reviews of that branch are told and a matching finding is left out, on later commits too; a decline never turns a verdict
   green by itself (the open findings are what the gate counts).
 - **Second opinion and model**: for a new abstraction or a big diff (3+ new symbols, 2+ new files) a cheap `reader-haiku` search-only
-  pass looks for existing code first, and the main reviewer must confirm or reject each candidate. The reviewer model is chosen by
+  pass (or 12+ changed files with something new in them) looks for existing code first, and the main reviewer must confirm or reject each candidate. The reviewer model is chosen by
   risk and printed with the reason: `opus` for security, concurrency, migrations/schema/storage, UI strings/locales, public API, config
   formats, removed public symbols or ~800+ changed lines; `sonnet` otherwise and on every re-review (`config.json` `review.model` wins).
 - **Re-review**: pass 2+ gives the reviewer only the open findings, the declines and the diff since the last reviewed sha (plus the
   reuse, scope and platform passes on the files changed since). An earlier round's `reuse` and `coverage` entries still count (kept in
-  the mod's own store, which a session cannot write), and a new major about code that did not change since is a minor, so it converges.
+  the mod's own store, which a session cannot write), an earlier blocker or major must be listed again or named in `fixed`, and a new
+  major about code that did not change since is a minor, so it converges. A record is refused green when git could not produce the diff,
+  the range is empty, or `base` is not a branch or tag name (a sha or `HEAD~1` would shrink the range).
 - **Project lessons**: the review loads the matching review checklist and shared-helper lessons through `lean_review` `lessons`
   (the lesson store is owned by a separate change; the review skips it when the action is absent).
 

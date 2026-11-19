@@ -91,8 +91,28 @@ test('Python, Go, Java and Kotlin test titles; XCTest and C# attributes', () => 
   expect(testTitle('func TestParse(t *testing.T) {')).toBe('TestParse')
   expect(testTitle('    fun `adds two numbers`() {')).toBe('adds two numbers')
   expect(testTitle('    func testFetch() {')).toBe('testFetch')
-  expect(testTitle('    [Fact]')).toBe('[Fact]')
+  expect(testTitle('    [Fact]')).toBeNull() // the attribute line has no name: the method line below it does
+  expect(testTitle('    public void AddsTwoNumbers()')).toBe('AddsTwoNumbers')
   expect(testTitle('const x = 1')).toBeNull()
+})
+
+test('a deletion-only hunk marks its spot, context lines advance the line numbers, focused tests are listed', async () => {
+  const d = file('src/a.ts', '@@ -5,2 +4,0 @@', '-  if (!x) return', '-  y()') +
+    file('src/b.ts', '@@ -3,3 +3,3 @@', ' keep', '-old', '+export function after() {}', ' tail') +
+    file('src/c.test.ts', '@@ -1 +1 @@', "+  it.only('just this', () => {")
+  const p = await analyzeDiff(d, reader({}))
+  expect(p.hunks['src/a.ts']).toEqual([[4, 5]])
+  expect(p.symbols).toEqual([{ name: 'after', path: 'src/b.ts', line: 4 }])
+  expect(p.tests).toEqual([{ path: 'src/c.test.ts', test: 'just this', why: 'focused' }])
+})
+
+test('Latest.kt is not a test but LatestTest.kt is; config files hold no module state; using( is not a default', async () => {
+  const d = added('app/Latest.kt', 'fun fresh() {}') + added('app/LatestTest.kt', 'fun fresh2() {}') + added('conf/a.toml', 'items = [') +
+    added('src/Util.cs', 'public class Util {', '  public void Run() {', '    using (var s = Open(a = 1)) {', '  }', '}')
+  const p = await analyzeDiff(d, reader({}), new Set(['app/Latest.kt', 'app/LatestTest.kt', 'conf/a.toml', 'src/Util.cs']))
+  expect(names(p.symbols)).toEqual(['Run', 'Util', 'fresh'])
+  expect(p.state).toEqual([])
+  expect(p.params).toEqual([])
 })
 
 test('parameter parsing', () => {
