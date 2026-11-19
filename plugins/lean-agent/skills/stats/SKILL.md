@@ -9,7 +9,7 @@ computes everything, so one call answers: spend today and for the window with re
 caps, tables by model, by role x model (a model lean-agent did not configure shows up there), by role, by agent and by
 thread (top 10 and the rest), by thread model/effort (the choice each thread was started with, from the ledger rows, with
 the share of thread spend from before that was recorded) and one line "threads at the default (sonnet/high): N, $X, median $Y" to judge the
-default, rule loads per project (including `_project.md` and the rules that never loaded), worker
+default, a line `output cap (7d): saved 140.0k chars in 12 results` when oversized Bash/MCP results were cut before a thread saw them, rule loads per project (including `_project.md` and the rules that never loaded), worker
 feedback and gaps, and how many ledger lines were 0.45 rows or unparsable. **Never read `~/.lean-agent/ledger.jsonl`
 yourself** (it can be tens of megabytes; the mod keeps per-day totals in `rollup.json`) and never start a thread to sum it.
 Show the tables as they are, then one or two sentences on where the money went (cache reads, output, an expensive model, a

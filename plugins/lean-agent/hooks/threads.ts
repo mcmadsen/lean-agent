@@ -374,7 +374,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
   if (isWorking(row) && !restart) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
   if (row && (row.pid > 0 || (restart && isWorking(row)))) {
-    const stopped = await stopAlive(h, t, '', 'started fresh', restart ? { force: true, own: tpath(home, t.id) } : {})
+    const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}) })
     if (stopped) return stopped
   }
   await refreshGuide(h, root, home, t, given)
@@ -424,7 +424,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
   // A session that reported done is over (finish.ts): its conversation is never resumed. Marked finished, or its last report is done
   // and the session is idle (the desk's tick has not stopped it yet): a NEW session starts with the handover, queued messages included.
-  if (!opts.limit && (t.finished || (await doneSession(h, home, t)))) {
+  if (t.finished || (!opts.limit && (await doneSession(h, home, t)))) {
     const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', 'Its previous session reported done and was finished; this message starts a new session.', {})
     return fresh(r) ? { ...r, text: `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
   }
@@ -533,6 +533,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           // and the tick's mark for this reset ("resumedFor", set just before this call: a call without it is refused). A thread woken
           // since the mark (lastWake past resumedAt) was resumed by an earlier call for this very mark: never a second one.
           if (t.state !== 'open') return err(`${id} is ${t.state}: not resumed after the usage limit`)
+          if (t.finished) return { ok: true, text: `${id} is finished: no usage-limit resume (its next message starts a new session)`, data: { resumed: false } }
           const rec = await readLimit(h, home, id)
           if (!usable(rec, t.sid, await h.clock.now()) || rec.cancelled) return err(`${id}: no usable usage-limit record for its session, nothing resumed`)
           if (rec.resumedFor !== rec.resetAt || typeof rec.resumedAt !== 'number') return err(`${id}: the usage-limit resume was not marked by the desk's check, nothing resumed`)

@@ -61,8 +61,11 @@ export type DeskDeps = {
   status: (text: string) => void
   reset: () => void // forget the context size: the next request tells the new one
 }
-type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean } // fallback: the size the handover file was written at (0 = none); again: try at the turn's end
-const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false })
+// fallback: the size the handover file was written at (0 = none); again: try at the turn's end; vetoes: in a row; episode: a failure or a
+// veto is on record and not yet settled
+type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean; vetoes: number; episode: boolean }
+const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false, vetoes: 0, episode: false })
+export const MAX_VETOES = 3 // vetoes in a row before the handover file and the /compact line
 let ds: Desk = freshDesk()
 export const resetDeskCompact = (): void => {
   ctxTokens = 0
@@ -102,9 +105,12 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   const tokens = await d.tokens().catch(() => 0)
   if (tokens < limit) {
     if (ds.fallback) d.status('') // the "type /compact" line goes away with the reason for it
+    if (ds.episode) await record(h, tokens, 'compacted', 'the context is below the limit again') // the notice and the doctor row go with it
     ds.fallback = 0
     ds.rejected = 0
+    ds.vetoes = 0
     ds.again = false
+    ds.episode = false
     return 'quiet'
   }
   if (d.busy()) return 'busy'
@@ -115,7 +121,7 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   }
   ds.retryAt = now + DESK_RETRY_MS // whatever happens next, not again before this (a turn's end brings it forward)
   ds.again = false
-  await d.notes().catch(() => undefined)
+  if (!ds.episode) await d.notes().catch(() => undefined) // (once per episode: a retry would append the same notes again)
   let res: any
   try {
     res = await d.compact(DESK_COMPACT_INSTRUCTIONS)
@@ -125,6 +131,7 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       ds.again = true
       return 'busy'
     }
+    ds.episode = true
     await record(h, tokens, 'failed', why(err))
     // a rejection can be transient (an API error, a limit): once more at the turn's end; twice in a row, or an engine that has no
     // session.compact, is "not possible": the handover file and the status line
@@ -139,13 +146,23 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   }
   ds.rejected = 0
   if (res && typeof res === 'object' && typeof res.skip === 'string') {
+    ds.episode = true
     await record(h, tokens, 'vetoed', res.skip || 'a hook vetoed it')
-    ds.again = true // a hook vetoed it: at the turn's end
-    return 'skipped'
+    if (++ds.vetoes < MAX_VETOES) {
+      ds.again = true // a hook vetoed it: at the turn's end
+      return 'skipped'
+    }
+    // vetoed every time: the mod cannot compact, the user can (the notice and the doctor row keep the reason)
+    await writeDeskHandover(h, tokens, await d.recent().catch(() => []))
+    ds.fallback = tokens
+    d.status(deskNote())
+    return 'fallback'
   }
   await record(h, tokens, 'compacted')
   if (ds.fallback) d.status('')
   ds.fallback = 0
+  ds.vetoes = 0
+  ds.episode = false
   d.reset()
   return 'compacted'
 }

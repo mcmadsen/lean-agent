@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread, resetLocks } from './threads'
-import { doneSession, finishedText, resetFinish, sweepFinished } from './finish'
+import { RETRY_MS, doneSession, finishedText, resetFinish, sweepFinished } from './finish'
 import { loadView } from './view'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -132,6 +132,27 @@ test('sweepFinished runs only the candidates and returns the ids that finished',
   expect(ran).toEqual(['t1'])
   expect(did).toEqual(['t1'])
   expect(await doneSession(h.host, '/h', JSON.parse(h.files.get(`${L}/threads/t5/thread.json`)!))).toBe(false)
+})
+
+test('a finish that fails is tried again after 5 minutes and given up after 5 tries, with a notice; a usage-limit resume skips a finished thread', async () => {
+  const { h, run, stops } = setup({ stopFails: true })
+  const go = () => sweepFinished(h.host, id => run({ action: 'finish', tN: id }))
+  await go()
+  await go() // inside the gap: nothing
+  expect(stops().length).toBe(1)
+  for (let n = 1; n < 5; n++) {
+    h.clock.t += RETRY_MS
+    await go()
+  }
+  expect(stops().length).toBe(5)
+  expect(h.files.get(`${L}/notices/finish-t1.txt`)).toContain('could not be stopped after 5 tries')
+  h.clock.t += RETRY_MS
+  await go()
+  expect(stops().length).toBe(5) // given up
+  const lim = setup({ thread: { finished: 3 } })
+  const r = await lim.run({ action: 'limit-resume', tN: 't1' })
+  expect(r.text).toContain('finished')
+  expect(lim.starts().length).toBe(0)
 })
 
 test('after finish a send starts a NEW session with the handover, never a resume', async () => {

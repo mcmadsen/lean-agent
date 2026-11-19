@@ -30,7 +30,11 @@
 - **Desk compaction** (not a checkpoint, stays): the default limit is 200k (config `deskTokens`; the 1.0.6 `checkpoint.deskTokens` is still
   read). The reason of every vetoed or failed compaction is recorded (`desk/compact.json`, a notice, a `lean_doctor check` row) and the
   compaction is tried again when the desk's turn ends (before: ten minutes later). The status text reads "desk context Nk: type
-  /compact (or start a new desk session; it reads the handover)". The code moved from `checkpoint.ts` to `deskcompact.ts`.
+  /compact (or start a new desk session; it reads the handover)". Three vetoes in a row give the handover file and that status line too;
+  the compaction notes are written once per episode; the notice and the doctor row clear when the context is small again. The code
+  moved from `checkpoint.ts` to `deskcompact.ts`.
+- The goals chaser skips a finished thread (or one whose last report is done): its message would start a whole new session. A finish
+  that fails (stop refused, session outside the thread folder) is retried after 5 minutes and given up after 5 tries with a notice.
 
 ## 1.0.6
 

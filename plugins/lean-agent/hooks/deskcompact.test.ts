@@ -98,6 +98,29 @@ test('a hook veto is recorded with its reason (record, notice, doctor), not turn
   expect((await check(h.host, '/plug')).join('\n')).toMatch(/ok {3}last desk compaction .*compacted/)
 })
 
+test('a hook that vetoes every time ends in the handover file and the /compact line; the notes are written once per episode; recovery clears the record', async () => {
+  const { h } = setup()
+  const v = deskDeps({ compact: async () => ({ skip: 'always no' }) })
+  expect(await deskTick(h.host, v.deps)).toBe('skipped')
+  for (let i = 0; i < 1; i++) {
+    deskTurnEnded()
+    expect(await deskTick(h.host, v.deps)).toBe('skipped')
+  }
+  expect(h.files.has(`${L}/desk/handover.md`)).toBe(false)
+  deskTurnEnded()
+  expect(await deskTick(h.host, v.deps)).toBe('fallback') // the third veto in a row
+  expect(h.files.has(`${L}/desk/handover.md`)).toBe(true)
+  expect(v.seen.status).toEqual(['desk context 250k: type /compact (or start a new desk session; it reads the handover)'])
+  expect(v.seen.notes).toBe(1)
+  expect(h.files.get(`${L}/notices/desk-compaction.txt`)).toContain('always no')
+  // the user compacts by hand: the context is small again, the line, the notice and the doctor row are gone
+  const low = deskDeps({ tokens: 20_000 })
+  expect(await deskTick(h.host, low.deps)).toBe('quiet')
+  expect(low.seen.status).toEqual([''])
+  expect(h.files.has(`${L}/notices/desk-compaction.txt`)).toBe(false)
+  expect((await lastCompaction(h.host))?.result).toBe('compacted')
+})
+
 test('without a turn end a veto is tried again after the retry gap', async () => {
   const { h } = setup()
   const v = deskDeps({ compact: async () => ({ skip: 'later' }) })

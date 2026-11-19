@@ -17,7 +17,7 @@ Without the tool, setup still works from the mod: the user types `/lean-agent-se
 
 | action | effect |
 |---|---|
-| `check` | read-only report: `claude` on PATH, desk folder `~/lean-agent-desk`, folder trusted, opener script current, launch agent installed, desk model/effort pin (sonnet / high), last line of the opener log, 0.45 leftovers, and how the desk's skill listing was trimmed (`desk skill listing: ...`, plus the attachment/section names seen this session; names only). Lines starting `FIX` need `fix` |
+| `check` | read-only report: `claude` on PATH, desk folder `~/lean-agent-desk`, folder trusted, opener script current, launch agent installed, desk model/effort pin (sonnet / high), last line of the opener log, 0.45 leftovers, the desk's last compaction (`last desk compaction ...: compacted | vetoed | failed` with the reason; a FIX row there is tried again when the desk turn ends, or type /compact), and how the desk's skill listing was trimmed (`desk skill listing: ...`, plus the attachment/section names seen this session; names only). Lines starting `FIX` need `fix` |
 | `fix` | creates the desk folder, installs `~/.lean-agent/bin/open-desk.sh` and the `com.lean-agent.desk` launch agent (macOS), trusts the desk folder by its real path, pins the desk to `sonnet` / effort `high` in `~/lean-agent-desk/.claude/settings.json` (other keys kept; config.json `desk.model` / `desk.effort` override) |
 | `migrate` | one-time 0.45 -> 1.0 conversion, then `fix`. Idempotent: a second run says "already migrated" |
 

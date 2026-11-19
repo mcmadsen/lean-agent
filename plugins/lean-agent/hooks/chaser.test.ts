@@ -24,6 +24,16 @@ test('chaser pings a stale open thread once; fresh, asking and closed ones are l
   expect(await chase(h.host, async () => undefined)).toContain('t1')
 })
 
+test('a finished thread, or one whose last report is done, is not chased (a message would start a whole new session)', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', state: 'open', sid: 'st1', finished: 5 }))
+  h.files.set('/h/.lean-agent/threads/t3/thread.json', JSON.stringify({ id: 't3', state: 'open', sid: 'st3', lastWake: 0 }))
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 2, from: 't3', kind: 'report', state: 'done', text: 'merged' }) + '\n')
+  const sent: string[] = []
+  expect(await chase(h.host, async id => void sent.push(id))).toEqual([])
+  expect(sent).toEqual([])
+})
+
 test('a green review record unlocks the push guard for that sha only', async () => {
   const h = fakeHost(null)
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ proj: { path: '/w/proj' } }))

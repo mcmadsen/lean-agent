@@ -82,7 +82,8 @@ export async function capResult(h: Host, thread: string, tool: string, r: any): 
   const f = (t: string) => {
     if (t.length <= cap) return t
     const out = cutText(t, cap, file)
-    saved += Math.max(0, t.length - out.length)
+    if (out.length >= t.length) return t // (a cap near the minimum: the pointer lines would make it longer)
+    saved += t.length - out.length
     return out
   }
   const next = bash ? { ...res, stdout: f(res.stdout), stderr: typeof res.stderr === 'string' ? f(res.stderr) : res.stderr } : mapTexts(res, f)

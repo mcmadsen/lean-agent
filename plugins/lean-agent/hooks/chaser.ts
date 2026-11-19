@@ -5,6 +5,7 @@ import type { Host } from './state'
 import { goalsLocked, unreadReports } from './delivery'
 import type { Thread } from './threads'
 import { threadsDir } from './state'
+import { doneSession } from './finish'
 
 export const STALE_MS = 60 * 60_000
 export type Goal = { text: string; ts: number; chased?: number }
@@ -23,6 +24,7 @@ export async function chase(h: Host, send: (id: string, text: string) => Promise
     if (now - (g.ts || 0) <= STALE_MS || now - (g.chased || 0) <= STALE_MS) continue
     const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
     if (!t || t.state !== 'open' || !t.sid) continue
+    if (t.finished || (await doneSession(h, home, t))) continue // a finished thread is not stuck: a message would start a whole new session
     g.chased = now
     chased.push(id)
     await send(id, CHASE_TEXT)
