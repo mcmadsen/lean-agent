@@ -1,7 +1,7 @@
 // The desk pane's data (design 2.5): read straight from the files, never throws; every failure becomes a line in `errors`.
 import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
-import { deskState, unconsumed } from './delivery'
+import { approvalOf, deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { readNotices } from './notices'
@@ -16,7 +16,7 @@ export type AnswerRow = { n: number; rec: DeskRec; unread: boolean }
 // working: the session is busy or reports state working (never closed from the pane); done: the thread's LAST record is a done report
 // (a later question or progress makes it not done); asking: its last record is a question or one is unread; needsYou: the session
 // waits on a prompt nobody answers (open it in the app)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -154,6 +154,7 @@ export async function loadView(h: Host): Promise<View> {
         asking: asking.has(t.id) || lr?.kind === 'ask',
         blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
         needsYou: !!ag?.needsYou && !paused,
+        ...(lr && t.state === 'open' && approvalOf(lr) ? { approval: approvalOf(lr) } : {}), // its last record is a blocked report that waits for the user's yes
         ...(paused ? { pausedUntil: paused.resetAt } : {}),
         ...(typeof t.finished === 'number' && t.finished > 0 ? { finished: true } : {}), // reported done and was stopped: the next message starts a new session
       })

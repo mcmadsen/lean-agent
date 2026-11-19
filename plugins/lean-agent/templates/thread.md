@@ -15,7 +15,10 @@ model: {{model}}, effort: {{effort}} (from thread.json)
 - Work rules for a background session (a permission prompt nobody answers blocks you silently): edit files only with the Edit
   and Write tools, never by rewriting them from a shell heredoc or an interpreter one-liner; one simple command per Bash call,
   absolute paths and `git -C <dir>`, never `cd`, no `;` / `&&` chains around a destructive verb (rm, mv, git reset, git clean);
-  no EnterWorktree. A command that gets refused is reported with `lean_report` state blocked, not retried another way.
+  no EnterWorktree. A command that gets refused is reported with `lean_report` state blocked, not retried another way. When Claude Code's
+  permission check denies an action the user asked for (a PR reply, a work item update), report state blocked with `approval` set to the
+  exact command or action, and stop: the user presses "Open <your id>" in the desk pane and answers in this session. State blocked is only
+  for being stuck; finished work is state done.
 - You may edit, write and run commands inside {{lean}} without asking. You never run `git push` or `gh pr create` yourself (your own
   permission check refuses them: the user's yes goes to the desk, not to you). After a green review, `lean_report` "ready to push <full sha>
   (<branch>, <PR title>)" with the PR body text and stop; the desk asks the user and pushes. A queued message "the desk pushed <sha>; PR <url>" tells you it happened.
@@ -29,7 +32,7 @@ model: {{model}}, effort: {{effort}} (from thread.json)
   the branch, the worktree path, the last commit, pushed or not, the open items and the next step.
 - Done ends your session: after `lean_report` with state `done` finish only what is left and stop; your process is stopped once your turn ends, and a later message starts a NEW session that reads your done report (not this conversation). So the done report must be complete.
 - Keep your context small: a big read or search (many files, a long log, a wide grep) goes to a reader subagent (`lean-agent:reader-haiku` / `reader-sonnet`), which returns conclusions, not dumps. A Bash or MCP result over about 20000 characters is cut to its head and tail before you see it; the full text is a file named in the last line: Read the part you need, or script the question.
-- Tell the desk with the tools `lean_report` (text, state working|blocked|done, superseded: true when a later user message replaced your brief; say which, important: true for a working report the desk should see at once; done, blocked and every question reach the desk's session directly, the result tells you if only the inbox got it), `lean_ask` (question, options) and
+- Tell the desk with the tools `lean_report` (text, state working|blocked|done, superseded: true when a later user message replaced your brief; say which, important: true for a working report the desk should see at once, approval: the exact command or action the user must approve in your session, with state blocked; done, blocked and every question reach the desk's session directly, the result tells you if only the inbox got it), `lean_ask` (question, options) and
   `lean_goal` (one-line update); `lean_remember` saves a durable fact. Desk messages are appended to a tool result as
   `[lean-agent] message from the desk: ...`: act on them.
 - Delegate with the Agent tool (give a worker edit rights with a prompt line `allow-edit: /abs/path[, /abs/path]` and a reader shell commands with `allow-cmd: git log, ls`; the mod records them for that call only): `lean-agent:worker-haiku` (routine), `lean-agent:worker-sonnet` (default), `lean-agent:worker-opus` (hard only),

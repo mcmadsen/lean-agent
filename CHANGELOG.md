@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Readers and the reviewer could not read enough.** The built-in read-only Bash set of `lean-agent:reader-*` and `reviewer` (already
+  `git`, `rg`, `grep`, `find`, `ls`, `wc`, `head`, `tail`, `cat`) now also has `sed -n`, `stat`, `file`, `diff`, `jq` and `tree`, on
+  paths inside the same roots as `git -C` (the thread's worktree, registered projects, `~/.lean-agent`), joined only by `|`. Listed
+  flags only, so these stay refused: `find -exec/-execdir/-ok/-delete/-fprint*/-fls`, `sed` without `-n`, with `-i`, `-f`, or a script that
+  has `w W e r R a i c b t` or an `s` flag `w` / `e` (a bracket expression holding the delimiter is refused too: GNU sed and the macOS
+  sed split it differently), `stat -L`, `file -L/-f`, `diff -r/-X/--from-file`, `jq -f`, `--rawfile`, `--slurpfile`, `-L`, `env`,
+  `$ENV`, `import`, `include`, `tree -o/-l/--fromfile`, redirects, `;`, `&&`, `||`, `$(...)`, backticks, `&`, here-docs and any stage that
+  is not itself in the set. The explorer, the auditor and the desk keep their smaller sets.
+- **The guard's refusal names the refused program** (first word only, never an argument; a plain name or `?`): `lean-agent: refused: npm
+  (not a built-in read-only command); reviewer may run only its built-in read-only commands (...)`. The reason says whether the program is
+  not built in, is built in but with a flag or path that is not allowed, or the command uses shell syntax. The feedback export's
+  guard-refusals section therefore shows WHAT was asked for (rows group by this text).
+- **Feedback export anonymiser gaps.** Ids after `work item`, `work-item`, `PR`, `pull request`, `pullrequest`, `thread`, `issue`,
+  `ticket`, `story` and `--id` are masked (`--id 123`, `--id=123`, `PR!123`), so are result fields (`"id": 123`, `pullRequestId=123`,
+  `thread_id: 123`, `number: 123`) and every bare number of 4+ digits inside a quoted or backticked command; counts followed by a unit
+  (`chars`, `tokens`, `k`, `ms`, `s`, `%`, `lines`, `rows`, `files`, `tests`) stay, and so do thread ids `tN`. The final check also
+  refuses to write the file when a word-plus-id survived.
+
+### Added
+- **A thread blocked on a permission denial can be answered where Claude Code judges it.** Claude Code's permission check judges a command
+  in the session that runs it, and the user's yes was given to the desk. `lean_report` has an optional `approval` (state `blocked` only:
+  the exact command or action the user must approve, at most 300 characters); the thread rules say: when the permission check denies an
+  action the user asked for, report blocked with `approval` and stop, never retry another way. The pane shows `tN needs your yes in its
+  own session: <action>` with an `Open tN` button (no button while the thread is working). The press stops the thread's idle process
+  (the stop-before-replace helper: only a session in the thread folder, never a working one; it waits until the process is gone),
+  then opens `claude://resume?session=<sessionId>` with the system opener (argv, no shell: `open` on macOS, `xdg-open`, `rundll32`). Nothing is
+  stopped when the Claude app is not running (macOS). A failing opener answers `Could not open the Claude app: <first line>; open tN
+  from the session list in the Claude app by hand`. The desk guide says: tell the user to press Open tN and answer there; the desk never
+  performs the action itself and never routes around the check (the push flow of 1.0.8 stays for pushes). The desk's direct line for
+  such a report carries the same instruction.
+- Thread rules: state `blocked` is for being stuck; finished work is `done`.
+
+### Checked, nothing to fix
+- **"Threads blocked" with a report that starts "Done:".** `lean_report` stores the `state` the thread passed, unchanged (it is neither
+  derived from the text nor coerced), and the export's filter is exactly `kind: report` and `state: blocked`; no other code writes
+  an inbox row with that state. So that thread really sent `blocked` with a text that said done. The export is right to list it; the
+  thread rule above now says what each state is for.
+- **claude.ai connectors in a project profile.** `profile.ts` already accepts `claude.ai X` and matches the connector's tools
+  (`mcp__claude_ai_X__...`) apart from a plugin server of the same product (`mcp__plugin_x_x__...`): the profile entry `claude.ai X`
+  loads the connector and defers the plugin's server (still found through ToolSearch), while the bare product name `x` matches both
+  spellings. Specs added. Threads get what the profile names and nothing is removed.
+
+### Not done
+- **Doctor row "plugin server <x> is not signed in; the claude.ai <X> connector is".** The data cannot be reached from the mod. The mod's
+  `Host` is files, processes, env, clock and store; there is no MCP status or tool-list API (the tool list is seen only per call or per
+  `tool.describe`), and a server's "needs sign-in" / "connected" state is in no config file. `claude mcp list` prints it, but it health-checks
+  every configured server (it starts stdio servers and calls remote ones), which a doctor check must not do. The existing `MCP` doctor rows
+  keep reporting unset `${VAR}` references only. A profile that names `claude.ai X` (above) is the way to make threads use the connector.
+
 ## 1.0.9
 
 ### Fixed

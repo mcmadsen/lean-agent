@@ -105,6 +105,31 @@ const firstLine = (s: string | undefined): string => ((s ?? '').split('\n').map(
 // a process that could not be started at all (not installed), as opposed to one that started and then timed out or failed
 const NOT_STARTED = /ENOENT|not found|spawn|no such file/i
 
+// The app's deep link that resumes one session (the pane's "Open tN": the user answers the permission check in the thread's own session).
+export const resumeLink = (sid: string): string => `claude://resume?session=${encodeURIComponent(sid)}`
+
+// Open tN: `release` stops the thread's idle process and says its session id (threads.ts action release; a working thread, a session
+// outside the thread folder or a process that does not go away are refused there, and nothing is opened), then the resume link goes to
+// the system opener (same argv, no shell, as openDesk). A failing opener answers with the hand-made way.
+export async function openThreadSession(h: Host, id: string, release: () => Promise<{ ok: boolean; text: string; data?: unknown }>, surface?: string): Promise<{ ok: boolean; text: string }> {
+  const plat = await platformOf(h)
+  // (checked first: nothing is stopped when there is no app to open the session in)
+  if (plat === 'mac' && surface !== 'desktop' && (await appRunning(h)) === false) return { ok: false, text: `The Claude app is not running: open it, then press Open ${id} again.` }
+  const r = await release()
+  if (!r.ok) return { ok: false, text: r.text }
+  const sid = String((r.data as { sid?: unknown } | undefined)?.sid ?? '')
+  if (!sid) return { ok: false, text: `${id} has no session to open` }
+  const argv = openerArgv(plat, resumeLink(sid))
+  const by = `open ${id} from the session list in the Claude app by hand`
+  try {
+    const x = await h.process.run(argv, { timeoutMs: 15_000 })
+    if (x.exitCode === 0) return { ok: true, text: `${id} opened in the Claude app: answer there.` }
+    return { ok: false, text: `Could not open the Claude app: ${firstLine(x.stderr) || firstLine(x.stdout) || `${argv[0]} exited ${x.exitCode}`}; ${by}` }
+  } catch (e) {
+    return { ok: false, text: `Could not open the Claude app: ${firstLine(String((e as Error)?.message ?? e)) || `${argv[0]} failed`}; ${by}` }
+  }
+}
+
 // Opens the desk in the Claude app: a new session in the desk folder through the app's deep link, and never launches the app
 // itself: without a running app there is nothing to open it in (checked on macOS; a pane drawn on the 'desktop' surface is inside
 // the app, so the check is skipped; if the check itself errors the link is opened anyway). `claude --desktop` is only the last

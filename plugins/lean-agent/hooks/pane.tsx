@@ -10,7 +10,7 @@ import { scriptTool } from './scripts'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
-import { NEXT_STEP, bounded, openDesk, setupCheck, setupFix, setupText } from './setup'
+import { NEXT_STEP, bounded, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 import { contextSize, deskNote, kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 
@@ -292,6 +292,17 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         if (!r.ok) lastError = notice
         tell()
       })
+    // Open tN: a thread blocked on an `approval` (Claude Code's permission check judges in the session that runs the command, and the
+    // user's yes was given to the desk): its idle process is stopped (threads.ts action release), then the app's resume link opens the
+    // thread's own session, where the user answers. One press: nothing is lost by it (an idle process only).
+    const openOne = (id: string) => async () => {
+      resetViewCache()
+      const r = await bounded($, openThreadSession(host, id, () => leanThread(host, $.plugin.root, { action: 'release', tN: id }), e.surface), `open ${id}`, 60_000).catch(err => ({ ok: false, text: `open ${id} failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
+      resetViewCache()
+      notice = short(r.text, 200)
+      if (!r.ok) lastError = notice
+      tell()
+    }
     // Restart desk: the handover is written now, then a new desk session is opened; this one stays until the user closes it
     const restartDeskPress = twoStep('restart:desk', async () => {
       resetViewCache()
@@ -454,7 +465,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box flexDirection="column">
             {v && !v.threads.length && <Text dimColor>No open threads.</Text>}
             {v?.threads.map(t => (
-              <Box key={`t-${t.id}`}>
+              <Box key={`t-${t.id}`} flexDirection="column">
+              {!!t.approval && (
+                <Box key={`ap-${t.id}`}>
+                  <Text color="yellow">{`${t.id} needs your yes in its own session: ${short(t.approval, 120)}`}</Text>
+                  {t.working ? <Text dimColor> (it is working: wait until it stops)</Text> : <Button key={`open-${t.id}`} label={`Open ${t.id}`} onPress={openOne(t.id)} />}
+                </Box>
+              )}
+              <Box>
                 <Text>
                   {t.id}{t.model ? ` · ${t.model}/${t.effort}` : ''} {short(t.title, 30)} [{t.run}] <Text dimColor>{short(t.last, 50)}</Text>
                   {t.finished ? <Text dimColor> finished: next message starts a new session</Text> : null}
@@ -475,6 +493,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 ) : (
                   <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />
                 )}
+              </Box>
               </Box>
             ))}
           </Box>

@@ -605,6 +605,22 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           return r
         }
+        case 'release': {
+          // the pane's "Open tN" (a thread blocked on an `approval`): the user answers Claude Code's permission check in the thread's OWN
+          // session, so the app must be able to resume it: the idle process is stopped first (only a session in the thread folder, never
+          // one that is working; stopAlive waits until it is gone) and the session id comes back for the deep link. Not offered to models.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: reopen it first`)
+          if (!t.sid) return err(`${id} has no session to open`)
+          const live = await agents(h)
+          if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not opened`)
+          const row = live.find(a => a.sid === t.sid)
+          if (isWorking(row)) return err(`${id} is working: not opened (the button is for a thread that stopped and waits for your yes)`)
+          if (row && row.pid > 0) {
+            const stopped = await stopAlive(h, t, '', 'opened', { own: tpath(home, id) })
+            if (stopped) return { ok: false, text: stopped.text }
+          }
+          return { ok: true, text: `${id} is idle`, data: { sid: t.sid } }
+        }
         case 'close': {
           // never "closed" while the session may still run: list twice, and if the listing keeps failing stay "closing"
           let live: AgentRow[] | null = null

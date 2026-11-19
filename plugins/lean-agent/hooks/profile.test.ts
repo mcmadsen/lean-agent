@@ -303,3 +303,16 @@ test('lean_thread profile: show, set (a list left out stays), fill from usage, r
   expect(await readProfile(h.host, '/h', 'app')).toBeNull()
   expect((await call({ action: 'profile', project: 'app', on: false })).text).toContain('has no profile')
 })
+
+test('a profile can name a claude.ai connector apart from a plugin server of the same product: `claude.ai X` loads the connector and defers the plugin\'s server', async () => {
+  const connector = 'mcp__claude_ai_Acme__search'
+  const plugin = 'mcp__plugin_acme_acme__authenticate'
+  expect(serverOf(connector)).toBe('claude_ai_Acme')
+  const only = { mcp: ['claude.ai Acme'], plugins: null, needs: [] }
+  expect(deferOutside(only, connector)).toBe(false) // the signed-in connector is loaded
+  expect(deferOutside(only, plugin)).toBe(true) // the plugin's server (maybe not signed in) is deferred: still findable through ToolSearch
+  expect(deferOutside({ mcp: ['acme'], plugins: null, needs: [] }, plugin)).toBe(false) // the bare product name matches both spellings
+  expect(deferOutside({ mcp: ['acme'], plugins: null, needs: [] }, connector)).toBe(false)
+  expect(deferOutside({ mcp: ['plugin:acme:acme'], plugins: null, needs: [] }, connector)).toBe(true)
+  expect(names(['claude.ai Acme', 'plugin:acme:acme'])).toEqual(['claude.ai Acme', 'plugin:acme:acme'])
+})
