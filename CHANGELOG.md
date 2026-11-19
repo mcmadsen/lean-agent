@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.8
 
 ### Fixed
 - **A thread could not push even after the user approved it.** A push has two gates: lean-agent's (a green review or the desk's
