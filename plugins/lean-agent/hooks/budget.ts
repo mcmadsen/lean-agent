@@ -24,7 +24,7 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
   return Math.round(usd * 1e6) / 1e6
 }
 
-export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean }; checkpoint?: { enabled?: boolean; threadTokens?: number; deskTokens?: number } }
+export type Config = { dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean }; deskTokens?: number; toolResultChars?: number; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
 // effort / tmodel: a thread's row carries the effort and the model the thread was started with (thread.json); `model` is what answered
 export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 

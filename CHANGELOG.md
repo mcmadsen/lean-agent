@@ -2,7 +2,23 @@
 
 ## Unreleased
 
+### Removed
+- **Thread checkpoints (1.0.6) are gone.** A thread is no longer asked mid-work to report its context size and restart: no
+  instruction at tool boundaries, no `lean_report` state `checkpoint` (the schema is `working | blocked | done`), no
+  `threads/tN/checkpoint.json`, no 10 s checkpoint sweep, no "checkpoint N" in the pane, no `checkpoints` line in `lean_doctor stats`,
+  no config `checkpoint.threadTokens` / `checkpoint.enabled`. A `checkpoint.json` left on disk by 1.0.6 is ignored; `checkpoints` /
+  `lastCheckpoint` in an old `thread.json` stay readable and nothing writes them; an old inbox row with state `checkpoint` shows as before.
+
 ### Fixed
+- **`lean_report` failed with "posix_spawn 'mkdir' ENOENT" and the report never reached the desk.** `$.process.run` defaults its working
+  folder to the SESSION's, and a thread that had cd'ed into a worktree that was then removed made every spawn fail before the command
+  started (Node names the command, not the folder). Now every process the mod runs has an existing folder: with no `cwd` given the
+  user's home is used (`hostOf`, the one place every call goes through), and when a spawn with a `cwd` that was given (a repo, a thread
+  folder) is refused with ENOENT the folder is looked at: gone = the call rejects with "folder <x> is gone" instead of a spawn error.
+  `lean_report` also never loses a report: a write refused by a spawn error is tried once more with the home folder; when that fails
+  too, the tool answers FAILED with the report text and the exact error, so the thread can paste it, and `lean_doctor check` shows the
+  failure (`report-failure.json`: one record per thread, cleared by that thread's next report, dropped after 24 h). The thread rules
+  say: never remove the worktree you are in.
 - **A plugin MCP server that needs a variable works again in the desk and in threads.** A config such as
   `https://${DD_MCP_DOMAIN:-not-setup}/v1/mcp` got its placeholder default (`getaddrinfo ENOTFOUND not-setup`), because the desk runs
   in the Claude app and threads are started from it: the user's shell variables never reach them, and editing the default in the
@@ -38,6 +54,33 @@
     `legacy-0.45/mcp-env.json`) into the settings `env` block once, keeps command entries and secrets in `mcp-env.json`, and the
     doctor names what moved and what stayed. A `settings.json` that does not parse keeps the import pending.
   - README section "MCP servers that need a variable (e.g. a site/domain)"; doctor skill and desk guide text.
+
+### Added
+- **Done = session over.** When a thread's last report is `done` and its turn has ended, the desk's 10 s tick stops its process
+  (the stop-before-replace helper; only a session in the thread's folder) and marks `thread.json` `finished`: "t3 finished: next
+  message starts a new session". A thread that reported done but is still on a final step is stopped only once it is idle. Any
+  later `send`, `wake`, `resume` or `start` starts a NEW session with the handover (brief, goal, notes, reports including the done
+  report, queued messages, branch/worktree) through the same path as a reopen, never a resume of the old conversation. Blocked, question
+  and progress reports never finish a session.
+- **Restart buttons in the pane.** Every open thread row has `Restart` (confirm on the second press; for a working thread the label
+  reads "Confirm restart t3 (it is working: the current step is lost)"): the session is stopped (only one in the thread's folder, waits
+  until it is gone) and a new session starts with the handover, same model and effort, reason "Restarted from the pane.". The same as
+  `lean_thread restart tN` (the desk, only when the user asks). `Restart desk` writes `desk/handover.md` now and opens a new desk
+  session (`openDesk`): "New desk opened with the handover: close this one"; also the command `/lean-agent-restart-desk`.
+- **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters (config `toolResultChars`,
+  `0` = off, below 2000 ignored) keeps head and tail; the full text is saved under `~/.lean-agent/output/` (one folder, shared with the Bash line squeeze; pruned: files older than 7 days and all but the newest 2000 go, at most once an hour) and one line says where. Edit and
+  Write results, errors, a subagent's results, lean-agent's own tools and the desk are never touched. `lean_doctor stats` counts it
+  ("saved 140.0k chars in 12 results"). The thread rules say: big reads and searches go to reader subagents, which return conclusions.
+
+### Changed
+- **Desk compaction** (not a checkpoint, stays): the default limit is 200k (config `deskTokens`; the 1.0.6 `checkpoint.deskTokens` is still
+  read). The reason of every vetoed or failed compaction is recorded (`desk/compact.json`, a notice, a `lean_doctor check` row) and the
+  compaction is tried again when the desk's turn ends (before: ten minutes later). The status text reads "desk context Nk: type
+  /compact (or start a new desk session; it reads the handover)". Three vetoes in a row give the handover file and that status line too;
+  the compaction notes are written once per episode; the notice and the doctor row clear when the context is small again. The code
+  moved from `checkpoint.ts` to `deskcompact.ts`.
+- The goals chaser skips a finished thread (or one whose last report is done): its message would start a whole new session. A finish
+  that fails (stop refused, session outside the thread folder) is retried after 5 minutes and given up after 5 tries with a notice.
 
 ## 1.0.6
 

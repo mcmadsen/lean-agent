@@ -86,7 +86,7 @@ export const handoverGaps = (text: string): string[] => HANDOVER_FIELDS.filter((
 const obj = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required })
 export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_review', description: 'Record the review verdict for a commit (the push gate reads it; only this tool can write it). green only when tests pass and no blocker/major finding is open.', inputSchema: obj({ project: { type: 'string' }, sha: { type: 'string', description: 'full HEAD sha that was reviewed' }, green: { type: 'boolean' }, passes: { type: 'number' }, findings: { type: 'array', items: { type: 'string' } } }, ['project', 'sha', 'green']) },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done | checkpoint. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. checkpoint: the same handover, written when the mod told you the context is large; the desk then continues the thread in a fresh session from it, so stop after it.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done', 'checkpoint'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -218,6 +218,63 @@ async function deliveredKeys(h: Host, home: string): Promise<Set<string>> {
 }
 const keyOf = (r: DeskRec) => `${r.ts}:${r.from}:${r.kind}`
 
+// ---- a report that could not be written -------------------------------------------------------------------------------
+// The record of the last one is written with `fs.write` (no process is spawned: the failure was usually that) and shown by the doctor.
+export type ReportFailure = { ts: number; thread: string; error: string; text: string }
+const FAILURE = (home: string) => `${leanDir(home)}/report-failure.json`
+const msgOf = (e: unknown) => String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 300)
+// null = written; else the exact error(s)
+async function writeReport(h: Host, home: string, rec: DeskRec): Promise<string | null> {
+  const file = `${deskState(home)}/inbox.jsonl`
+  try {
+    await appendJsonl(h, file, rec)
+    return null
+  } catch (e1) {
+    // only a spawn that was refused is tried again (with the home folder as cwd): any other failure may have written the line already
+    if (!/ENOENT|spawn|is gone/i.test(msgOf(e1))) return msgOf(e1)
+    const homed: Host = { ...h, process: { run: (argv, init) => h.process.run(argv, { ...init, cwd: home }) } }
+    try {
+      await appendJsonl(homed, file, rec)
+      return null
+    } catch (e2) {
+      const a = msgOf(e1)
+      const b = msgOf(e2)
+      return a === b ? a : `${a}; again with the home folder: ${b}`
+    }
+  }
+}
+// one record per thread (a failure of one thread never hides another's), kept 24 h
+export const FAILURE_KEEP_MS = 24 * 3_600_000
+async function failures(h: Host, home: string): Promise<Record<string, ReportFailure>> {
+  const f = await readJson<Record<string, ReportFailure> | null>(h, FAILURE(home), null)
+  return f && typeof f === 'object' && !Array.isArray(f) ? f : {}
+}
+async function noteReportFailure(h: Host, home: string, f: ReportFailure): Promise<void> {
+  try {
+    await h.fs.write(FAILURE(home), JSON.stringify({ ...(await failures(h, home)), [f.thread]: { ...f, text: f.text.slice(0, 500) } }) + '\n')
+  } catch {
+    /* the thread has the text and the error either way */
+  }
+}
+async function clearReportFailure(h: Host, home: string, thread: string): Promise<void> {
+  try {
+    const all = await failures(h, home)
+    if (all[thread]) {
+      delete all[thread]
+      await h.fs.write(FAILURE(home), JSON.stringify(all) + '\n')
+    }
+  } catch {
+    /* best effort */
+  }
+}
+// the failures of the last 24 h, oldest first (the doctor shows them)
+export async function reportFailures(h: Host): Promise<ReportFailure[]> {
+  const now = await h.clock.now()
+  return Object.values(await failures(h, await homeDir(h)))
+    .filter(f => f && typeof f.thread === 'string' && typeof f.error === 'string' && typeof f.ts === 'number' && now - f.ts < FAILURE_KEEP_MS)
+    .sort((a, b) => a.ts - b.ts)
+}
+
 export async function threadTool(h: Host, id: string, name: string, i: any, send?: Send): Promise<{ ok: boolean; text: string }> {
   try {
     const home = await homeDir(h)
@@ -225,10 +282,21 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
     if (name === 'lean_report') {
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
-      await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec)
-      const missing = str(i.state) === 'done' || str(i.state) === 'checkpoint' ? handoverGaps(str(i.text)) : []
+      // A report is never lost: a failed write is tried once more with the user's home as the working folder (a session whose own folder
+      // is gone makes every spawn fail); when that fails too the thread gets the text back with the exact error, to paste to the user
+      const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec
+      const failed = await writeReport(h, home, rec)
+      if (failed) {
+        await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
+        return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
+      }
+      await clearReportFailure(h, home, id)
+      const isDone = str(i.state) === 'done'
+      const missing = isDone ? handoverGaps(str(i.text)) : []
       const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text) }, i.important === true)
-      return { ok: true, text: (missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (a closed thread is reopened as a new session from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`) }
+      const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
+      const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
+      return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : base }
     }
     if (name === 'lean_ask') {
       if (!str(i.question)) return { ok: false, text: 'lean_ask needs a question' }
@@ -313,12 +381,9 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
   await writeJson(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: upTo })
 }
 
-// a done report carries the hint that closing is the desk's job (a thread cannot close itself); a checkpoint report is the thread's own
-// handover for its fresh session (that session reads it in full): the desk only sees its first lines, so checkpoints do not fill its context
-export const CHECKPOINT_VIEW = 300
-const reportText = (r: DeskRec) => (r.kind === 'report' && r.state === 'checkpoint' && r.text.length > CHECKPOINT_VIEW ? `${oneLine(r.text, CHECKPOINT_VIEW)} (cut to ${CHECKPOINT_VIEW} characters: the full text is in the pane's Answers list)` : r.text)
+// a done report carries the hint that closing is the desk's job (a thread cannot close itself)
 export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${reportText(r)}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a

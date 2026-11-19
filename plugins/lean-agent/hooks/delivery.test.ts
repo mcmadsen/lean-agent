@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { readJsonl } from './state'
-import { ASK_MAX, DIRECT_MAX, RELAY_GAP_MS, consumeWake, directLine, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { ASK_MAX, DIRECT_MAX, RELAY_GAP_MS, consumeWake, directLine, markDelivered, markRead, recordDeskSid, relayReports, renderReports, sweep, takeBatch, takeReports, threadTool, THREAD_TOOLS, unreadReports } from './delivery'
 import { leanThread, resetLocks } from './threads'
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -142,7 +142,8 @@ test('a done report without handover fields gets a one-line reminder; a complete
   expect(bare.text).toContain('Reminder')
   for (const w of ['the branch', 'the worktree path', 'the last commit', 'pushed or not', 'the open items', 'the next step']) expect(bare.text).toContain(w)
   const full = await threadTool(h.host, 't1', 'lean_report', { text: 'branch fix-x in /h/.lean-agent/worktrees/app/fix-x, last commit abc1234, not pushed; open items: none; next: open the PR', state: 'done' })
-  expect(full.text).toBe('reported to the desk')
+  expect(full.text).not.toContain('Reminder')
+  expect(full.text).toMatch(/^reported to the desk\./) // (a done report also says the session is over, see below)
   expect((await threadTool(h.host, 't1', 'lean_report', { text: 'halfway', state: 'working' })).text).toBe('reported to the desk')
   expect((await unreadReports(h.host)).recs).toHaveLength(3) // the report is written either way
 })
@@ -159,7 +160,7 @@ test('direct send to the desk: done / blocked / questions (and important progres
   await recordDeskSid(h.host, 'desk-sid-1')
   expect(JSON.parse(h.files.get('/h/.lean-agent/desk.json')!).sid).toBe('desk-sid-1')
   const done = await tool('lean_report', { text: 'branch b, commit abc1234, pushed; open items none; next: pr', state: 'done' })
-  expect(done.text).toBe('reported to the desk (also sent to the desk)')
+  expect(done.text).toContain('reported to the desk (also sent to the desk)')
   expect(sent[0]!.sid).toBe('desk-sid-1')
   expect(sent[0]!.text).toMatch(/^\[lean-agent\] t1 done: branch b, commit abc1234.* \(close t1 when nothing is left\) <!-- lean:r=\d+:t1:report -->$/)
   expect(sent[0]!.text).not.toContain('\n') // one compact line
@@ -327,12 +328,17 @@ test('lean_report superseded: true is kept, shown to the desk text and the pane 
   expect(renderReports(recs)).toContain('[brief superseded by a later user message]: user changed')
 })
 
-test('a checkpoint report reaches the desk cut (the fresh thread session reads it whole); a done report of the same size is not cut', () => {
+test('lean_report has no checkpoint state; a done report says the session is over once the turn ends, other reports do not', async () => {
+  const rep: any = THREAD_TOOLS.find(t => t.name === 'lean_report')
+  expect(rep.inputSchema.properties.state.enum).toEqual(['working', 'blocked', 'done'])
+  expect(rep.description).not.toMatch(/checkpoint/i)
+  const { h } = setup()
+  const done = await threadTool(h.host, 't1', 'lean_report', { text: 'branch b, worktree /w, last commit abc1234, pushed no, open: none, next: pr', state: 'done' })
+  expect(done.text).toContain('This session is over once your turn ends')
+  for (const state of ['working', 'blocked']) expect((await threadTool(h.host, 't1', 'lean_report', { text: 'x', state })).text).not.toContain('session is over')
+  // a long report is no longer cut in the desk's view, whatever its state (an old 1.0.6 row with state checkpoint shows as it is)
   const long = 'handover '.repeat(300)
-  const t = renderReports([{ ts: 1, from: 't1', kind: 'report', state: 'checkpoint', text: long }, { ts: 2, from: 't2', kind: 'report', state: 'done', text: long }])
-  const [ck, done] = t.split('\n') as [string, string]
-  expect(ck.length).toBeLessThan(600)
-  expect(ck).toContain("(cut to 300 characters: the full text is in the pane's Answers list)")
-  expect(done.length).toBeGreaterThan(2500)
-  expect(renderReports([{ ts: 3, from: 't1', kind: 'report', state: 'checkpoint', text: 'short handover' }])).toContain('short handover')
+  const [a, b] = renderReports([{ ts: 1, from: 't1', kind: 'report', state: 'checkpoint', text: long }, { ts: 2, from: 't2', kind: 'report', state: 'done', text: long }]).split('\n') as [string, string]
+  expect(a.length).toBeGreaterThan(2500)
+  expect(b.length).toBeGreaterThan(2500)
 })

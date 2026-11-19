@@ -8,6 +8,7 @@ import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './st
 import type { Host } from './state'
 import { deskChoice, threadChoice } from './models'
 import { isRunning, parseAgents } from './threads'
+import { capStats } from './cap'
 
 export const STATS_DAYS = 7
 export const MAX_STATS_DAYS = 90
@@ -76,17 +77,9 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by role (${n}d)`, sum.role))
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
   out.push(...table(`by thread (${n}d)`, sum.tN))
-  // checkpoints (checkpoint.ts): threads that continued in a fresh session because their context grew large (all time, from thread.json)
-  const cks: string[] = []
-  let ckTotal = 0
-  for (const e of (await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])).filter(x => /^t\d+$/.test(x.name)).sort((a, b) => Number(a.name.slice(1)) - Number(b.name.slice(1)))) {
-    const c = (await readJson<{ checkpoints?: unknown } | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null))?.checkpoints
-    if (typeof c === 'number' && c > 0) {
-      cks.push(`${e.name} ${c}`)
-      ckTotal += c
-    }
-  }
-  if (cks.length) out.push(`checkpoints: ${ckTotal} (${cks.join(', ')})`)
+  // small messages (cap.ts): characters of Bash / MCP output that were cut before they entered a thread's conversation
+  const cut = await capStats(h, now, n).catch(() => ({ results: 0, chars: 0 }))
+  if (cut.results) out.push(`output cap (${n}d): saved ${tok(cut.chars)} chars in ${cut.results} result${cut.results === 1 ? '' : 's'} (the full text of each is a file under the thread folder)`)
   out.push(...(await threadChoices(h, home, sum.tme, sum.role.thread?.[0] ?? 0, n)))
   // rules
   const projects = await readJson<Record<string, unknown>>(h, `${leanDir(home)}/projects.json`, {})

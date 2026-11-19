@@ -1,6 +1,6 @@
 // Output squeezing (design 35) and tool trimming (design 34). Pure helpers; register.tsx wires them.
-import { homeDir, leanDir, mkdirp, atomicWrite } from './state'
 import type { Host } from './state'
+import { saveOutput } from './output'
 import { deskToolPossible } from './guard'
 
 export type SqueezeOpts = { maxLines?: number; head?: number; tail?: number }
@@ -29,7 +29,7 @@ export function squeezeText(text: string, o: SqueezeOpts = {}): { text: string; 
   return { text: out.join('\n'), squeezed: true }
 }
 
-// Squeeze a Bash tool result; the full text is saved under ~/.lean-agent/output/.
+// Squeeze a Bash tool result; the full text is saved under ~/.lean-agent/output/ (output.ts: the same folder as the character cap's).
 // The engine validates what a hook answers against the tool's OUTPUT SCHEMA: for Bash a successful call's `result` is the record
 // `{ stdout, stderr, interrupted, ... }` (BuiltinToolResults.Bash), so that is what is squeezed, and the answer keeps that shape
 // (every other field is carried over). Any other shape passes unchanged: in particular a failed call's `result` is the error TEXT
@@ -43,11 +43,9 @@ export async function squeezeResult(h: Host, r: any, o: SqueezeOpts = {}): Promi
   const so = squeezeText(res.stdout, o)
   const se = squeezeText(err, o)
   if (!so.squeezed && !se.squeezed) return r
-  const dir = `${leanDir(await homeDir(h))}/output`
-  const file = `${dir}/${await h.clock.now()}-${Math.random().toString(36).slice(2, 8)}.txt`
+  let file: string
   try {
-    await mkdirp(h, dir)
-    await atomicWrite(h, file, err ? `${res.stdout}\n--- stderr ---\n${err}` : res.stdout)
+    file = await saveOutput(h, '', err ? `${res.stdout}\n--- stderr ---\n${err}` : res.stdout)
   } catch {
     return r // cannot save the full text: never drop it
   }
