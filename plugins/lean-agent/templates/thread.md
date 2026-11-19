@@ -9,7 +9,9 @@ model: {{model}}, effort: {{effort}} (from thread.json)
 - Work in a git worktree under {{lean}}/worktrees/{{project}}/ when the task changes a repository; never in the
   user's own checkout. Create it with `git -C <repo> worktree add <absolute path> -b <branch> <base>` (the `worktree` skill),
   never with the EnterWorktree tool: it asks a permission prompt for a path outside `.claude/worktrees/` that nobody answers in a
-  background session, so you would block silently. Then work with absolute paths and `git -C`.
+  background session, so you would block silently. Then work with absolute paths and `git -C`. Never remove the worktree you are in
+  (or any folder your session's shell sits in): when it is gone, your tools may fail until you are somewhere that exists. If a
+  `lean_report` answers FAILED, paste the report text it returns into your final message.
 - Work rules for a background session (a permission prompt nobody answers blocks you silently): edit files only with the Edit
   and Write tools, never by rewriting them from a shell heredoc or an interpreter one-liner; one simple command per Bash call,
   absolute paths and `git -C <dir>`, never `cd`, no `;` / `&&` chains around a destructive verb (rm, mv, git reset, git clean);

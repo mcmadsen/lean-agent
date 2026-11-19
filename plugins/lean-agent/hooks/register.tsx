@@ -178,6 +178,25 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
 
 const spent = new Map<string, number>() // usd per subagent id, this session
 
+// the desk's 10 s tick (exported for the specs): finished threads, queued messages, unread reports
+export async function deskSweep($: any, host2: Host): Promise<void> {
+  await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
+  // a thread whose last report is done and whose turn has ended is finished as a session (its process stopped; the next message
+  // starts a new session with the handover); before the wake sweep, which would otherwise find it idle
+  for (const id of await sweepFinished(host2, id => leanThread(host2, $.plugin.root, { action: 'finish', tN: id })).catch(() => [] as string[])) $.ui.notify(finishedText(id), { key: `lean-finished-${id}` })
+  await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
+  const n = (await unreadReports(host2)).recs.length
+  if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
+  notified = n
+  // an idle desk gets ONE turn for a question or a done/blocked report (config desk.autoRelay, default on)
+  if (n && (await readConfig(host2, await homeDir(host2))).desk?.autoRelay !== false) {
+    const now = await host2.clock.now()
+    const busy = busySince > 0 && now - busySince < BUSY_MAX_MS
+    const sent = await relayReports(host2, { busy, last: lastRelay, submit: text => $.prompt.submit({ text }) })
+    if (sent) lastRelay = now
+  }
+}
+
 // one desk compaction attempt (the 30 s timer, and the end of a desk turn after a veto or failure)
 async function compactDesk($: any, host2: Host): Promise<string> {
   const now = await host2.clock.now()
@@ -330,23 +349,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
     await step('desk timers', async () => {
-      every($, 10_000, 'desk', async host2 => {
-        await ensureGitHooks(host2).catch(() => undefined) // watch: projects.json may change behind the mod's back
-        // a thread whose last report is done and whose turn has ended is finished as a session (its process stopped; the next message
-        // starts a new session with the handover); before the wake sweep, which would otherwise find it idle
-        for (const id of await sweepFinished(host2, id => leanThread(host2, $.plugin.root, { action: 'finish', tN: id })).catch(() => [] as string[])) $.ui.notify(finishedText(id), { key: `lean-finished-${id}` })
-        await sweep(host2, id => leanThread(host2, $.plugin.root, { action: 'wake', tN: id }))
-        const n = (await unreadReports(host2)).recs.length
-        if (n && n !== notified) $.ui.notify(`${n} unread report(s) from threads`, { key: 'lean-reports' })
-        notified = n
-        // an idle desk gets ONE turn for a question or a done/blocked report (config desk.autoRelay, default on)
-        if (n && (await readConfig(host2, await homeDir(host2))).desk?.autoRelay !== false) {
-          const now = await host2.clock.now()
-          const busy = busySince > 0 && now - busySince < BUSY_MAX_MS
-          const sent = await relayReports(host2, { busy, last: lastRelay, submit: text => $.prompt.submit({ text }) })
-          if (sent) lastRelay = now
-        }
-      })
+      every($, 10_000, 'desk', host2 => deskSweep($, host2))
       // the chaser: a goal untouched for an hour gets one status message to its open thread
       every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
       // usage limit: a thread blocked by it is resumed once, two minutes after the reset (docs/usage-limit-resume.md; config desk.autoResume)

@@ -218,6 +218,49 @@ async function deliveredKeys(h: Host, home: string): Promise<Set<string>> {
 }
 const keyOf = (r: DeskRec) => `${r.ts}:${r.from}:${r.kind}`
 
+// ---- a report that could not be written -------------------------------------------------------------------------------
+// The record of the last one is written with `fs.write` (no process is spawned: the failure was usually that) and shown by the doctor.
+export type ReportFailure = { ts: number; thread: string; error: string; text: string }
+const FAILURE = (home: string) => `${leanDir(home)}/report-failure.json`
+const msgOf = (e: unknown) => String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 300)
+// null = written; else the exact error(s)
+async function writeReport(h: Host, home: string, rec: DeskRec): Promise<string | null> {
+  const file = `${deskState(home)}/inbox.jsonl`
+  try {
+    await appendJsonl(h, file, rec)
+    return null
+  } catch (e1) {
+    const homed: Host = { ...h, process: { run: (argv, init) => h.process.run(argv, { ...init, cwd: home }) } }
+    try {
+      await appendJsonl(homed, file, rec)
+      return null
+    } catch (e2) {
+      const a = msgOf(e1)
+      const b = msgOf(e2)
+      return a === b ? a : `${a}; again with the home folder: ${b}`
+    }
+  }
+}
+async function noteReportFailure(h: Host, home: string, f: ReportFailure): Promise<void> {
+  try {
+    await h.fs.write(FAILURE(home), JSON.stringify({ ...f, text: f.text.slice(0, 500) }) + '\n')
+  } catch {
+    /* the thread has the text and the error either way */
+  }
+}
+async function clearReportFailure(h: Host, home: string, thread: string): Promise<void> {
+  try {
+    const f = await readJson<ReportFailure | null>(h, FAILURE(home), null)
+    if (f && f.thread === thread) await h.fs.write(FAILURE(home), '')
+  } catch {
+    /* best effort */
+  }
+}
+export async function lastReportFailure(h: Host): Promise<ReportFailure | null> {
+  const f = await readJson<ReportFailure | null>(h, FAILURE(await homeDir(h)), null)
+  return f && typeof f === 'object' && typeof f.thread === 'string' && typeof f.error === 'string' ? f : null
+}
+
 export async function threadTool(h: Host, id: string, name: string, i: any, send?: Send): Promise<{ ok: boolean; text: string }> {
   try {
     const home = await homeDir(h)
@@ -225,7 +268,15 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
     if (name === 'lean_report') {
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
-      await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec)
+      // A report is never lost: a failed write is tried once more with the user's home as the working folder (a session whose own folder
+      // is gone makes every spawn fail); when that fails too the thread gets the text back with the exact error, to paste to the user
+      const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}) } satisfies DeskRec
+      const failed = await writeReport(h, home, rec)
+      if (failed) {
+        await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
+        return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
+      }
+      await clearReportFailure(h, home, id)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
       const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text) }, i.important === true)

@@ -21,6 +21,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     return d
   }
 
+  const strict = { on: false, sessionGone: false }
   const store = new Map<string, unknown>()
   const clock = { t: 1_000_000 }
   const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
@@ -43,6 +44,9 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     run: (argv: readonly string[], init?: any) => {
       const call: Call = { argv: [...argv], cwd: init?.cwd, stdin: init?.stdin, env: init?.env }
       calls.push(call)
+      // opt-in (strict.on): a spawn whose cwd does not exist rejects with ENOENT naming the command, as Node does; with no cwd the
+      // session's own folder is used, and strict.sessionGone says that folder vanished (a removed worktree the thread had cd'ed into)
+      if (strict.on && (init?.cwd !== undefined ? !impl.exists(init.cwd) : strict.sessionGone)) throw new Error(`spawn failed: posix_spawn '${argv[0]}' ENOENT`)
       const [c, ...rest] = argv
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
       if (c === 'mv') { const s = files.get(a[0]); if (s === undefined) { const ks = [...files.keys()].filter(k => k.startsWith(a[0] + '/')); if (!ks.length) return { exitCode: 1, stdout: '', stderr: 'no such file' }; for (const k of ks) { files.set(a[1] + k.slice(a[0].length), files.get(k)!); files.delete(k) } return ok() } files.set(a[1], s); files.delete(a[0]); return ok() }
@@ -84,7 +88,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
 // An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the

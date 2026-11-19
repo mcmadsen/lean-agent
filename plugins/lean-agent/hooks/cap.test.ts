@@ -4,9 +4,10 @@ import { fakeHost } from './fake'
 import { resetLocks } from './threads'
 import { DEFAULT_CAP, capChars, capResult, capStats, cutText } from './cap'
 import { statsText } from './stats'
+import { pruneOutput } from './output'
 
 const L = '/h/.lean-agent'
-const OUT = `${L}/threads/t1/output`
+const OUT = `${L}/output` // the one output folder (the Bash line squeeze saves there too)
 // n characters in lines of 1000 (few lines: the older line-based squeeze of Bash output, which runs first, leaves them alone)
 const big = (n: number, line = 'line of output number') => Array.from({ length: Math.ceil(n / 1000) }, (_, i) => `${line} ${i} `.padEnd(999, '.')).join('\n').slice(0, n)
 const outFiles = (h: any) => [...h.files.keys()].filter((k: string) => k.startsWith(OUT + '/'))
@@ -113,6 +114,31 @@ test('a result that cannot be saved in full is never cut', async () => {
   const r = { result: { stdout: big(50_000), stderr: '' } }
   expect(await capResult(h.host, 't1', 'Bash', r)).toBe(r)
   h.host.fs.write = w
+})
+
+test('the cap and the Bash line squeeze save into the same folder; old files are pruned by their name\'s time, then all but the newest 400', async () => {
+  const h = fakeHost(null)
+  const DAY = 86_400_000
+  h.clock.t = 100 * DAY
+  const put = (ts: number, tag = 'x') => h.files.set(`${OUT}/${ts}-${tag}.txt`, 'old')
+  put(100 * DAY - 8 * DAY) // older than 7 days
+  put(100 * DAY - 9 * DAY, 't3-1')
+  put(100 * DAY - 6 * DAY) // kept
+  h.files.set(`${OUT}/notes.txt`, 'not ours: no time in the name, never pruned')
+  await capResult(h.host, 't1', 'Bash', { result: { stdout: big(30_000), stderr: '' } }) // saves, and prunes once
+  const names = outFiles(h).map((k: string) => k.slice(OUT.length + 1))
+  expect(names.some((n: string) => n.startsWith(`${100 * DAY - 8 * DAY}-`))).toBe(false)
+  expect(names.some((n: string) => n.startsWith(`${100 * DAY - 9 * DAY}-`))).toBe(false)
+  expect(names.some((n: string) => n.startsWith(`${100 * DAY - 6 * DAY}-`))).toBe(true)
+  expect(names).toContain('notes.txt')
+  expect(names.filter((n: string) => n.startsWith(`${100 * DAY}-t1-`)).length).toBe(1) // this thread's cut
+  // past MAX_FILES the oldest go, whatever their age (deterministic: by the time in the name)
+  for (let i = 0; i < 450; i++) put(100 * DAY - 3 * DAY + i, 'a')
+  expect((await pruneOutput(h.host, 100 * DAY)).length).toBe(52) // 450 + 1 (6 days old) + 1 (this cut) - 400
+  const left = outFiles(h).filter((k: string) => /\/\d{10,}-/.test(k))
+  expect(left.length).toBe(400)
+  expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY}-a`))).toBe(false) // the oldest of them went
+  expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY + 449}-a`))).toBe(true)
 })
 
 test('cutText keeps the head and the tail on line ends', () => {

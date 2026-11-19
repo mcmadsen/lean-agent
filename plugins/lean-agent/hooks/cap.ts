@@ -1,13 +1,14 @@
 // Small messages (scripts over models): an oversized tool result is cut BEFORE it enters a thread's conversation. A Bash or MCP text
-// over config.json `toolResultChars` (default 20000, 0 = off) keeps its head and tail; the full text is saved under the thread's own
-// folder (threads/tN/output/) and one line says where (Read it if it is needed). Never touched: Edit and Write results, errors, the
+// over config.json `toolResultChars` (default 20000, 0 = off) keeps its head and tail; the full text is saved in the one output
+// folder (~/.lean-agent/output/, output.ts; the Bash line squeeze saves there too) and one line says where (Read it if it is needed). Never touched: Edit and Write results, errors, the
 // desk, a subagent's results, lean-agent's own tools. A result that cannot be saved in full is never cut. Every cut is counted
 // (capped.jsonl) for `lean_doctor stats` ("saved 140k chars in 12 results").
 //
 // The result keeps the shape the engine gave (it validates a hook's answer against the tool's output schema): Bash's `{ stdout, stderr, ... }`
 // record, an MCP result's text blocks, or a plain string; only the text is replaced.
-import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJsonl, threadsDir } from './state'
+import { appendJsonl, homeDir, leanDir, readJsonl } from './state'
 import type { Host } from './state'
+import { resetOutput, saveOutput } from './output'
 import { readConfig } from './budget'
 
 export const DEFAULT_CAP = 20_000
@@ -56,6 +57,7 @@ const cappable = (tool: string) => tool === 'Bash' || (tool.startsWith('mcp__') 
 let seq = 0
 export const resetCap = (): void => {
   seq = 0
+  resetOutput()
 }
 
 // `r` is what `next(e)` resolved to. Returns it unchanged unless a text of it is over the cap.
@@ -70,11 +72,9 @@ export async function capResult(h: Host, thread: string, tool: string, r: any): 
   const all = bash ? [res.stdout as string, typeof res.stderr === 'string' ? (res.stderr as string) : ''] : textsOf(res)
   if (!all.some(t => t.length > cap)) return r
   const home = await homeDir(h)
-  const dir = `${threadsDir(home)}/${thread}/output`
-  const file = `${dir}/${await h.clock.now()}-${++seq}-${Math.random().toString(36).slice(2, 6)}.txt`
+  let file: string
   try {
-    await mkdirp(h, dir)
-    await atomicWrite(h, file, bash && all[1] ? `${all[0]}\n--- stderr ---\n${all[1]}` : all.filter(Boolean).join('\n--- next block ---\n'))
+    file = await saveOutput(h, `${thread}-${++seq}`, bash && all[1] ? `${all[0]}\n--- stderr ---\n${all[1]}` : all.filter(Boolean).join('\n--- next block ---\n'))
   } catch {
     return r // cannot save the full text: never drop it
   }
