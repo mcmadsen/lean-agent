@@ -51,7 +51,15 @@ const PUBLIC_REPO = 'mcmadsen/lean-agent'
 const PUBLIC_REPO_RE = /(?<![A-Za-z0-9._-])mcmadsen\/lean-agent(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])/gi
 const KEEP = '\u0003' // stands for PUBLIC_REPO while the name rules run (control character: no name can match it)
 const HEX_RE = /\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,}\b/g
-const ID_WORD_RE = /\b(PR|pull request|issue|ticket|story)(\s*#?\s*)\d+\b/gi
+// an id after the word that names what it identifies: PR 12, pull request #12, pullrequest 12, work item 12, work-item 12, thread 12,
+// issue / ticket / story 12, `--id 12`, `--id=12` (a work item, PR or comment thread id from a command's arguments or a result)
+const ID_WORD_RE = /(?<![A-Za-z0-9])(PR|pull ?request|work[ -]?items?|thread|issue|ticket|story|--id)(\s*[#!=:]?\s*)\d+\b/gi
+// `"id": 123`, `pullRequestId=123`, `thread_id: 123`, `number: 123`: a result's id field
+const ID_FIELD_RE = /(?<![A-Za-z0-9_])((?:i[dD]|number|[A-Za-z]+I[dD]|[A-Za-z]+_id)["']?\s*[:=]\s*["']?)\d+\b/g
+// a bare number of 4+ digits inside a quoted or backticked command (a PR, work item or comment id nobody put a word before); a count
+// followed by its unit (4500 chars, 12000 tokens, 3000 ms, 1500 lines ...) is not an id
+const QUOTED_RE = /`[^`\n]*`|"[^"\n]*"|'[^'\n]*'/g
+const BARE_ID_RE = /(?<![\w.])\d{4,}\b(?!\s*(?:%|(?:chars?|tokens?|k|ms|s|lines?|rows?|files?|tests?)\b))/g
 const ID_KEY_RE = /\b(?!(?:UTF|SHA|ISO|MD|AES|RSA|TLS|SSL|HTTP|ECMA|RFC|GPT|TCP|UDP|IPV)-)[A-Z][A-Z0-9]{1,9}-\d+\b/g // a tracker key like ABC-123, not UTF-8
 const LABEL_RE = /(project-(?:[A-Z]|\d+)\b)/
 const AZURE_PATH = /dev\.azure\.com\/[^/\s]+(?:\/[^/\s]+)?/g
@@ -143,7 +151,8 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
     t = t.replace(GH_PATH, (m, org: string, repo?: string) => (ghKept(org, repo) ? m : 'github.com/<org>/<repo>'))
     t = names(t)
-    t = t.replace(ID_WORD_RE, '$1$2<id>').replace(/#\d+\b/g, '#<id>').replace(ID_KEY_RE, '<id>')
+    t = t.replace(ID_WORD_RE, '$1$2<id>').replace(ID_FIELD_RE, '$1<id>').replace(/#\d+\b/g, '#<id>').replace(ID_KEY_RE, '<id>')
+    t = t.replace(QUOTED_RE, q => q.replace(BARE_ID_RE, '<id>'))
     t = t.replace(HEX_RE, '<sha>')
     t = t.replace(LONG_TOKEN, '<secret>')
     return restore(t)
@@ -167,6 +176,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     if (CRED_LEFT.test(t) || SECRET_RES.some(re => { const hit = new RegExp(re.source, re.flags.replace('g', '')).exec(t); return !!hit && !/<secret>$/.test(hit[0]) })) out.push('token or key')
     if (/dev\.azure\.com\/(?!<org>)[^/\s]/.test(t) || /\b(?!<org>)[A-Za-z0-9-]+\.visualstudio\.com/.test(t)) out.push('azure organisation')
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
+    if (new RegExp(ID_WORD_RE.source, 'i').test(t)) out.push('work item, PR or thread id')
     return [...new Set(out)]
   }
   return { anonymise, name, missed }

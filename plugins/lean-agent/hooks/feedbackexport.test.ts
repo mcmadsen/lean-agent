@@ -115,6 +115,38 @@ test('thread ids stay; hashes, ticket and PR numbers, tokens and keys are replac
   expect(a.anonymise('-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----')).toBe('<secret>')
 })
 
+test('ids after work item, PR, thread, --id and in quoted commands are masked; counts with units and thread tN stay', async () => {
+  const a = await makeAnonymiser(setup().host)
+  const m = (s: string) => a.anonymise(s)
+  expect(m('Work item 4821 and work-item 4821 and work items 12 and Work Item #77')).toBe('Work item <id> and work-item <id> and work items <id> and Work Item #<id>')
+  expect(m('blocked: work-item update --id 4821 --state Done')).toBe('blocked: work-item update --id <id> --state Done')
+  expect(m('az boards work-item update --id=4821')).toBe('az boards work-item update --id=<id>')
+  expect(m('reply on PR 31337, pullrequest 31337, pull request #31337, PR!31337')).toBe('reply on PR <id>, pullrequest <id>, pull request #<id>, PR!<id>')
+  expect(m('az repos pr show --id 31337')).toBe('az repos pr show --id <id>')
+  expect(m('comment thread 90210 and thread 5 resolved, issue 8812, ticket 8812')).toBe('comment thread <id> and thread <id> resolved, issue <id>, ticket <id>')
+  expect(m('{"id": 60606, "pullRequestId": "60606", "thread_id":60606, "number": 60606}')).toBe('{"id": <id>, "pullRequestId": "<id>", "thread_id":<id>, "number": <id>}')
+  // a bare 4+ digit number inside a quoted or backticked command
+  expect(m('ran `gh pr comment 40404 --body x` and "az boards work-item show 40404" and \'curl x/40404/y\'')).toBe('ran `gh pr comment <id> --body x` and "az boards work-item show <id>" and \'curl x/<id>/y\'')
+  // a count followed by its unit, thread tN, a number outside a command and short numbers stay
+  expect(m('ran `rg x` saved 12000 chars, 5000 tokens, 3000 ms, 1500 lines, 4000 rows, 2000 files, 1200 tests, 90 %, 4500ms, 7k')).toBe('ran `rg x` saved 12000 chars, 5000 tokens, 3000 ms, 1500 lines, 4000 rows, 2000 files, 1200 tests, 90 %, 4500ms, 7k')
+  expect(m('"saved 12000 chars in 40404 results" and "cmd 123"')).toBe('"saved 12000 chars in <id> results" and "cmd 123"')
+  expect(m('t4 and t12 reported; waited 40404 seconds')).toBe('t4 and t12 reported; waited 40404 seconds')
+  expect(m(m('work-item update --id 4821 `gh pr view 40404`'))).toBe('work-item update --id <id> `gh pr view <id>`') // twice: unchanged
+  expect(a.missed('work item 4821')).toContain('work item, PR or thread id')
+  expect(a.missed(m('work item 4821, PR 12, thread 9'))).toEqual([])
+})
+
+test('the blocked-thread lines of the export carry no work item, PR or comment thread id', async () => {
+  const h = setup()
+  h.files.set(lean(h, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'refused: work-item update --id 4821 --state Done (Work item 4821)' }, { ts: T0 - 900, from: 't2', kind: 'report', state: 'blocked', text: 'cannot reply on thread 90210 of PR 31337' }]))
+  const r = await run(h)
+  expect(r.ok).toBe(true)
+  const t = read(h, r) as string
+  expect(t).toContain('t1: refused: work-item update --id <id> --state Done (Work item <id>)')
+  expect(t).toContain('t2: cannot reply on thread <id> of PR <id>')
+  for (const n of ['4821', '90210', '31337']) expect(t).not.toContain(n)
+})
+
 test('the OS user name becomes <user> (as a word); running the anonymiser twice changes nothing', async () => {
   const h = setup('/q/zeldaquux')
   const a = await makeAnonymiser(h.host)
