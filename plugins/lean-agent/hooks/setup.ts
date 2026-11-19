@@ -4,7 +4,9 @@ import { check, fix } from './doctor'
 import { deskDir, homeDir } from './state'
 import type { Host } from './state'
 
-export type SetupOut = { fixed: string[]; checked: string[]; problems: string[]; notes: string[] }
+// `mcp`: what the doctor's `MCP ` rows say (an MCP server needs a variable the desk and threads do not have): not a repair a press
+// can make, so it is neither a problem nor a note; it needs a value from the user (lean_doctor mcp-env, asked by the desk)
+export type SetupOut = { fixed: string[]; checked: string[]; problems: string[]; notes: string[]; mcp?: string[] }
 
 // a step that hangs is given up after `ms` (the engine's own timer, so it works in the mod); the work itself runs on
 export function bounded<T>($: any, p: Promise<T>, label: string, ms = 5_000): Promise<T> {
@@ -34,9 +36,11 @@ const UNFIXABLE = /needs Claude Desktop|not on PATH|start a new session|close it
 export const problemsOf = (lines: string[]): string[] => fixLines(lines).filter(l => !UNFIXABLE.test(l))
 export const notesOf = (lines: string[]): string[] => fixLines(lines).filter(l => UNFIXABLE.test(l))
 
-export async function setupCheck(h: Host, root: string): Promise<{ checked: string[]; problems: string[]; notes: string[] }> {
+export const mcpOf = (lines: string[]): string[] => lines.filter(l => l.startsWith('MCP ')).map(l => l.replace(/^MCP\s+/, ''))
+
+export async function setupCheck(h: Host, root: string): Promise<{ checked: string[]; problems: string[]; notes: string[]; mcp: string[] }> {
   const checked = await check(h, root)
-  return { checked, problems: problemsOf(checked), notes: notesOf(checked) }
+  return { checked, problems: problemsOf(checked), notes: notesOf(checked), mcp: mcpOf(checked) }
 }
 
 // repair, then check again. One run at a time: a press, the command and lean_doctor that arrive meanwhile share it.
@@ -60,6 +64,7 @@ export function setupText(o: SetupOut, isDesk: boolean): string {
   const out = [...o.fixed]
   if (o.problems.length || o.notes.length) out.push('Still to fix:', ...[...o.problems, ...o.notes].map(p => `  - ${p}`))
   if (!o.problems.length) out.push(isDesk ? 'lean-agent is set up.' : `lean-agent is set up, but this is not the desk. ${NEXT_STEP}`)
+  if (o.mcp?.length) out.push('MCP servers that need a value (the desk asks you; or tell it "set NAME to ..."):', ...o.mcp.map(p => `  - ${p}`))
   return out.join('\n')
 }
 

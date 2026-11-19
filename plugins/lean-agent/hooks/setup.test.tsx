@@ -162,3 +162,36 @@ test('a pgrep that fails with a code other than 1 is not "app not running": clau
   expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
   await ui.unmount()
 })
+
+// an MCP server whose config references a variable the desk does not have (a plugin synced from claude.ai, as Claude Code lays it out)
+function withUnsetServer(h: any) {
+  const b = '/h/.claude/plugins/synced/b1'
+  h.files.set(`${b}/manifest.json`, JSON.stringify({ plugins: [{ name: '16a0', generation: 2 }] }))
+  h.files.set(`${b}/16a0~g2/.claude-plugin/plugin.json`, JSON.stringify({ name: 'datadog', mcpServers: './.dd_mcp.json' }))
+  h.files.set(`${b}/16a0~g2/.dd_mcp.json`, JSON.stringify({ mcpServers: { mcp: { type: 'http', url: 'https://${DD_MCP_DOMAIN:-not-setup}/v1/mcp' } } }))
+}
+
+test('the desk pane names an MCP server that needs a variable (no text field: the desk asks), and it is not a setup problem', async ($, on) => {
+  const { h, start } = fresh(on, '/h/lean-agent-desk')
+  withUnsetServer(h)
+  await start($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /MCP servers that need a value/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /plugin:datadog:mcp needs DD_MCP_DOMAIN/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Tell the desk/ })).toBeTruthy()
+  await ui.press({ key: 'repair' }) // after a setup run the rows are all that is left: no "not set up" heading, the MCP block stays
+  expect(await ui.find({ type: 'Text', text: /lean-agent is not set up/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /plugin:datadog:mcp needs DD_MCP_DOMAIN/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('/lean-agent-setup lists the MCP servers that need a value and still says lean-agent is set up', async ($, on) => {
+  const { h, start } = fresh(on, '/h/lean-agent-desk')
+  await start($)
+  await $.command.run({ command: 'lean-agent-setup' } as any) // everything else set up first
+  withUnsetServer(h)
+  const r: any = await $.command.run({ command: 'lean-agent-setup' } as any)
+  expect(r.text).toContain('lean-agent is set up.')
+  expect(r.text).toContain('MCP servers that need a value')
+  expect(r.text).toContain("plugin:datadog:mcp needs DD_MCP_DOMAIN (unset: it falls back to 'not-setup'")
+})

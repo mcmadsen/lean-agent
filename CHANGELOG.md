@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A plugin MCP server that needs a variable works again in the desk and in threads.** A config such as
+  `https://${DD_MCP_DOMAIN:-not-setup}/v1/mcp` got its placeholder default (`getaddrinfo ENOTFOUND not-setup`), because the desk runs
+  in the Claude app and threads are started from it: the user's shell variables never reach them, and editing the default in the
+  plugin folder is lost (background sessions copy synced plugins, updates reset them). 0.45 solved this; 1.0 had dropped it. Restored
+  as mod code (no model reads configs or values):
+  - **Detect.** `lean_doctor check` (also `/lean-agent-setup` and the pane) scans the MCP configs of enabled plugins (installed ones
+    and plugins synced from claude.ai, `plugin.json` `mcpServers` / `.mcp.json`), the user's MCP servers (`~/.claude.json`) and
+    registered projects' `.mcp.json` for `${VAR}` / `${VAR:-default}` whose variable is not in the env a desk or thread session gets
+    (the user settings `env` block; not the shell). One `MCP ` row per server, names only: `plugin:<p>:<server> needs NAME (unset: it
+    falls back to 'not-setup', a placeholder, so the server cannot connect)`. A placeholder default (a word like `not-setup`, or a bare
+    host in a URL) is flagged; empty and usable defaults are not reported. These rows are not setup problems.
+  - **Fix (non-secret values).** `lean_doctor` action `mcp-env` (desk): with `name` + `value` it merges the variable into the `env`
+    block of `~/.claude/settings.json` (other keys kept, atomic, written through a symlinked file), so every new session gets it
+    (app, terminal, desk, threads); without arguments it lists what needs one. Names that look secret (`KEY`, `TOKEN`, `SECRET`,
+    `PASSWORD`, `CREDENTIAL`, `AUTH`, `PAT`) and names that change how sessions run (`PATH`, `NODE_*`, `GIT_*`, proxies, `CLAUDE_*`...)
+    are refused; the reply never repeats the value. The pane has no text field, so the desk asks (AskUserQuestion) and makes the call.
+  - **Secrets never go into `settings.json`.** `~/.lean-agent/mcp-env.json` (0.45's form, user-only) holds `{"NAME": {"command":
+    "..."}}` (a string runs as `/bin/sh -c`, a list as an argv) or `{"value": "..."}`. At THREAD start the mod runs the command (15 s)
+    and writes the value into that thread's own `.claude/settings.json` (created empty and `chmod 600` before it is filled), only for
+    names an MCP config references and only when the user `env` block does not already set them; a file that is not the user's own is
+    ignored, and one readable by others is tightened to 600. Nothing writes a command (no tool, no model); the start reply names names
+    only. For the desk and the app the way is OAuth sign-in through the server.
+  - **Which value wins** (checked live with Claude Code 2.1.328): a user `env` value resolves `${VAR:-default}` in a user MCP server's
+    URL; a project's (thread folder's) `env` value resolves it too when the user block lacks the name; with both set the user's value
+    is used. So a thread's env fills gaps and never shadows; `threadSettings` merges it with the git-hooks env.
+  - **0.45 import.** The versioned tidy (now version 4) moves the plain non-secret values of `~/.lean-agent/mcp-env.json` (and
+    `legacy-0.45/mcp-env.json`) into the settings `env` block once, keeps command entries and secrets in `mcp-env.json`, and the
+    doctor names what moved and what stayed. A `settings.json` that does not parse keeps the import pending.
+  - README section "MCP servers that need a variable (e.g. a site/domain)"; doctor skill and desk guide text.
+
 ## 1.0.6
 
 One combined release: checkpoints (threads and the desk), the 1.0.6b reply, delivery and feedback-export fixes, lazy loading per

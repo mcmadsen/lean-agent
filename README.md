@@ -250,10 +250,57 @@ Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved fr
 | `memory/`, `todo.json`, `worktrees.json`, `handovers/` | shared notes and lists |
 | `config.json`, `ledger.jsonl` | caps and spend |
 | `bin/open-desk.sh`, `logs/opener.log`, `migrated-1.0.json`, `legacy-0.45/` | opener, its log, migration marker and archive |
+| `mcp-env.json` (user-only, `chmod 600`), `mcp-env-import.json` | MCP variables a thread gets from a command or a value; what the 0.45 import did (names only) |
 
 Writes are atomic (temp file then rename); appends are single `O_APPEND` writes; a damaged file reads as empty.
 
+## MCP servers that need a variable (e.g. a site/domain)
+
+A plugin's MCP config may reference variables, for example `https://${DD_MCP_DOMAIN:-not-setup}/v1/mcp` with headers
+`${DD_API_KEY:-}`. Claude Code fills `${VAR}` from the **session's environment**. The desk runs inside the Claude app and threads
+are started from it, so a variable you export in `~/.zshrc` never reaches them; the server then connects to its placeholder
+default (`getaddrinfo ENOTFOUND not-setup`). Editing the default inside the plugin folder does not help either: background
+sessions get their own copy of synced plugins, and a plugin update resets it.
+
+What every session does get is the `env` block of `~/.claude/settings.json`. lean-agent writes there for you:
+
+- **Detect.** `lean_doctor check` (and the pane, and `/lean-agent-setup`) lists, per server, the variables its config references
+  that the desk and threads do not have, names only: `MCP  plugin:datadog:mcp needs DD_MCP_DOMAIN (unset: it falls back to
+  'not-setup', a placeholder, so the server cannot connect)`. It reads the config of enabled plugins (installed and synced), your
+  user MCP servers (`~/.claude.json`) and the `.mcp.json` of registered projects. A variable with an empty or a usable default is
+  not reported.
+- **Fix a non-secret value** (a site, a domain, a region): tell the desk "set DD_MCP_DOMAIN to mcp.<site>". It calls
+  `lean_doctor mcp-env` with the name and value, which merges the variable into the `env` block of `~/.claude/settings.json`
+  (every other key kept, atomic write). Every session started from then on has it: app, terminal, desk, threads. A session that is
+  already running keeps its old environment, so start a new desk session before its MCP server picks the value up. Names that
+  look secret (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`, `AUTH`, `PAT`) and names that change how sessions run (`PATH`,
+  `NODE_*`, `GIT_*`, proxies, `CLAUDE_*`, ...) are refused. The pane has no text field, so the desk asks you and makes the call.
+- **Secrets never go into `settings.json`** (a plain file, often synced or committed). For the **desk** and the app, sign in
+  through the server itself (OAuth): the Datadog plugin's server asks for a login, and the stored login needs no key. For
+  **threads**, put a command that prints the value in `~/.lean-agent/mcp-env.json` (`chmod 600`, your own file; edit it by hand,
+  no tool writes commands):
+
+  ```json
+  { "DD_API_KEY": { "command": "security find-generic-password -s dd-api-key -w" },
+    "GH_TOKEN": { "command": ["gh", "auth", "token"] } }
+  ```
+
+  A string runs as `/bin/sh -c <string>`, a list runs as an argv with no shell. At thread start the mod runs it (15 s limit, one
+  line of output expected) and writes the value into **that thread's** `.claude/settings.json` (made user-only first), never
+  anywhere else, never into a log, a report or the feedback export; the start reply names the variables only. Only names an MCP
+  config references are used, and a file that is not yours (owner) is ignored. Values are read at thread start (new, start,
+  reopen), not at a plain wake or resume. A `{ "value": "..." }` entry also works for threads. The desk and the app do not read
+  `mcp-env.json`.
+- **Which value wins.** Checked with Claude Code 2.1.328: a variable in the user `env` block and the same one in a project's
+  `.claude/settings.json` (a thread folder is one): the user's value is used. A thread's value only fills gaps, and lean-agent
+  never adds a name your user `env` block already sets, so nothing is shadowed.
+- **From 0.45.** `lean-agent mcp env NAME VALUE` kept values in `~/.lean-agent/mcp-env.json`. At the first session start after the
+  update the plain non-secret values are moved into the `env` block (the doctor names them), commands and secrets stay in the file.
+
 ## Troubleshooting
+
+- **An MCP server says `ENOTFOUND not-setup` (or another placeholder host)**: it needs a variable the desk does not have, see
+  "MCP servers that need a variable". `lean_doctor check` names it; ask the desk to set it.
 
 - **The desk did not open at login**: `doctor check` shows the last opener line. The opener only acts while the Claude
   app is running (it waits ten minutes and never launches it). `/lean-agent-setup` (or `doctor fix`) reinstalls it.

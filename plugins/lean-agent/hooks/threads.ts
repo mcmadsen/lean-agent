@@ -6,6 +6,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { ensureGitHooks, gitEnv } from './githooks'
+import { threadEnv, writeThreadSettings } from './mcpenv'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
 import { GAP_MS as CHECKPOINT_GAP_MS, TRY_GAP_MS, kTokens, readRequest, staleRequest, writeRequest } from './checkpoint'
@@ -136,8 +137,11 @@ export const attributionLine = (on: boolean) => (on ? 'attribution: on - end com
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
 // `plugins`: the installed plugins outside the project's profile, switched off for this thread (profile.ts disabledPlugins)
-export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}): Promise<string> {
+// `extraEnv`: the MCP variables this thread gets (mcpenv.ts threadEnv: only names the user's own settings env does not set, so the
+// two blocks never collide; the git hooks names are GIT_*, which mcpenv refuses). The settings env here MERGES with the user's.
+export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}, extraEnv: Record<string, string> = {}): Promise<string> {
   const lean = leanDir(await homeDir(h))
+  const env = { ...extraEnv, ...(hooks ? gitEnv(await homeDir(h)) : {}) }
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
   return JSON.stringify(
@@ -148,7 +152,7 @@ export async function threadSettings(h: Host, id: string, hooks = true, choice?:
       },
       // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
       // so the repo's own hooks keep running (the failure shows as a notice)
-      ...(hooks ? { env: gitEnv(await homeDir(h)) } : {}),
+      ...(Object.keys(env).length ? { env } : {}),
       ...(choice ? settingsKeys(choice) : {}), // a session opened in the folder from the app matches
       ...(Object.keys(plugins).length ? { enabledPlugins: plugins } : {}),
     },
@@ -259,7 +263,10 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // outside it are deferred by the thread's own mod, which reads loaded.json (profile.ts). No profile = nothing held back.
   const loaded = await resolveLoaded(h, home, t.project, t.needs ?? [])
   const off = await disabledPlugins(h, loaded.plugins).catch(() => ({}))
-  await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off))
+  // MCP variables from ~/.lean-agent/mcp-env.json (a command's output or a plain value), run now, kept only in this thread's settings
+  // (user-only file); a failure is a line in the reply (names only), never a failed start
+  const menv = await threadEnv(h, home).catch(() => ({ env: {} as Record<string, string>, lines: [] as string[] }))
+  await writeThreadSettings(h, `${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off, menv.env), Object.keys(menv.env).length > 0)
   await writeLoaded(h, home, t.id, loaded).catch(() => undefined)
   await startUsage(h, home, t.id).catch(() => undefined)
   const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
@@ -277,7 +284,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   await save(h, home, t)
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
-  const lt = restricted(loaded) ? ` · ${loadedText(loaded)}` : ''
+  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + menv.lines.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} started (${sid}) · ${how}${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
