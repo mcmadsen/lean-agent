@@ -13,11 +13,12 @@
 - **`lean_report` failed with "posix_spawn 'mkdir' ENOENT" and the report never reached the desk.** `$.process.run` defaults its working
   folder to the SESSION's, and a thread that had cd'ed into a worktree that was then removed made every spawn fail before the command
   started (Node names the command, not the folder). Now every process the mod runs has an existing folder: with no `cwd` given the
-  user's home is used (`hostOf`, the one place every call goes through), and a `cwd` that was given (a repo, a thread folder) is checked
-  first and answered as a failed run that says "folder <x> is gone". `lean_report` also never loses a report: a failed write is tried
-  once more with the home folder; when that fails too, the tool answers FAILED with the report text and the exact error, so the thread
-  can paste it, and `lean_doctor check` shows the failure (`report-failure.json`, cleared by that thread's next report). The thread
-  rules say: never remove the worktree you are in.
+  user's home is used (`hostOf`, the one place every call goes through), and when a spawn with a `cwd` that was given (a repo, a thread
+  folder) is refused with ENOENT the folder is looked at: gone = the call rejects with "folder <x> is gone" instead of a spawn error.
+  `lean_report` also never loses a report: a write refused by a spawn error is tried once more with the home folder; when that fails
+  too, the tool answers FAILED with the report text and the exact error, so the thread can paste it, and `lean_doctor check` shows the
+  failure (`report-failure.json`: one record per thread, cleared by that thread's next report, dropped after 24 h). The thread rules
+  say: never remove the worktree you are in.
 
 ### Added
 - **Done = session over.** When a thread's last report is `done` and its turn has ended, the desk's 10 s tick stops its process
@@ -32,7 +33,7 @@
   `lean_thread restart tN` (the desk, only when the user asks). `Restart desk` writes `desk/handover.md` now and opens a new desk
   session (`openDesk`): "New desk opened with the handover: close this one"; also the command `/lean-agent-restart-desk`.
 - **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters (config `toolResultChars`,
-  `0` = off, below 2000 ignored) keeps head and tail; the full text is saved under `~/.lean-agent/output/` (one folder, shared with the Bash line squeeze; pruned: files older than 7 days and all but the newest 400 go, at most once an hour) and one line says where. Edit and
+  `0` = off, below 2000 ignored) keeps head and tail; the full text is saved under `~/.lean-agent/output/` (one folder, shared with the Bash line squeeze; pruned: files older than 7 days and all but the newest 2000 go, at most once an hour) and one line says where. Edit and
   Write results, errors, a subagent's results, lean-agent's own tools and the desk are never touched. `lean_doctor stats` counts it
   ("saved 140.0k chars in 12 results"). The thread rules say: big reads and searches go to reader subagents, which return conclusions.
 

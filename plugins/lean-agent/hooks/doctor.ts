@@ -11,7 +11,7 @@ import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, skewText } from './skew'
 import { modelMismatches } from './stats'
 import { kTokens, lastCompaction } from './deskcompact'
-import { lastReportFailure } from './delivery'
+import { reportFailures } from './delivery'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -124,9 +124,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason
   const cmp = await lastCompaction(h).catch(() => null)
   if (cmp) row(cmp.result === 'compacted', `last desk compaction at ${new Date(cmp.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${cmp.result} (desk context ${kTokens(cmp.tokens)})${cmp.reason ? `: ${cmp.reason}` : ''}${cmp.result === 'compacted' ? '' : '; it is tried again when the desk turn ends (or type /compact, or start a new desk session)'}`)
-  // a lean_report that could not be written (the thread was given the text and the error): shown until that thread reports again
-  const rf = await lastReportFailure(h).catch(() => null)
-  if (rf) row(false, `a lean_report from ${rf.thread} could not be written at ${new Date(rf.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${rf.error} (the thread had to paste the text; cause: its session folder is usually gone, e.g. a removed worktree it had cd'ed into). Text: ${rf.text.replace(/\s+/g, ' ').slice(0, 120)}`)
+  // a lean_report that could not be written (the thread was given the text and the error): shown until that thread reports again (or 24 h)
+  for (const rf of await reportFailures(h).catch(() => [])) row(false,`a lean_report from ${rf.thread} could not be written at ${new Date(rf.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${rf.error} (the thread had to paste the text; cause: its session folder is usually gone, e.g. a removed worktree it had cd'ed into). Text: ${rf.text.replace(/\s+/g, ' ').slice(0, 120)}`)
   const odd = await modelMismatches(h).catch(() => [] as string[])
   for (const m of odd) row(false, m)
   if (!odd.length) out.push('ok   no session on an unexpected model today')

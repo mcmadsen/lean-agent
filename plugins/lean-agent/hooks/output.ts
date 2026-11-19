@@ -5,7 +5,7 @@ import { atomicWrite, homeDir, leanDir, mkdirp } from './state'
 import type { Host } from './state'
 
 export const KEEP_DAYS = 7
-export const MAX_FILES = 400
+export const MAX_FILES = 2000 // (a busy hour makes a few hundred; the age rule does most of the pruning)
 const PRUNE_EVERY_MS = 3_600_000
 export const outputDir = (home: string) => `${leanDir(home)}/output`
 

@@ -4,14 +4,21 @@ type Run = (argv: readonly string[], init?: any) => Promise<any>
 
 // Every process the mod runs has a folder that exists. `$.process.run` defaults its cwd to the SESSION's folder, and a thread that cd'ed
 // into a worktree that was removed (or whose folder vanished) makes EVERY spawn fail before the command starts ("posix_spawn 'mkdir'
-// ENOENT": Node names the command, not the folder). So: no cwd given = the user's home; a cwd that was given (a repo, a thread folder) is
-// checked first and answered as a failed run that says "folder <x> is gone", never a spawn error.
+// ENOENT": Node names the command, not the folder). So: no cwd given = the user's home; a cwd that was given (a repo, a thread folder)
+// runs as it did, and when that spawn is refused with ENOENT the folder is looked at: gone = the call REJECTS with "folder <x> is gone"
+// (a rejection, as the spawn error was, so every caller's catch and `.catch(() => null)` still reads it as "could not run", never as a
+// command's own exit code), anything else is rethrown as it was.
 export function safeRun(run: Run, home: () => Promise<string | undefined>, exists: (p: string) => Promise<boolean>): Run {
   return async (argv, init) => {
     const cwd = init?.cwd
     if (typeof cwd === 'string' && cwd) {
-      if (!(await Promise.resolve(exists(cwd)).catch(() => true))) return { exitCode: 1, stdout: '', stderr: `folder ${cwd} is gone` } // (a failing check lets the spawn decide)
-      return run(argv, init)
+      try {
+        return await run(argv, init)
+      } catch (e) {
+        const gone = /ENOENT/.test(String((e as Error)?.message ?? e)) && !(await Promise.resolve().then(() => exists(cwd)).catch(() => true))
+        if (gone) throw new Error(`folder ${cwd} is gone`)
+        throw e
+      }
     }
     const h = await home().catch(() => undefined)
     return run(argv, h ? { ...init, cwd: h } : init)

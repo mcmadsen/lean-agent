@@ -211,7 +211,7 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   opens a new desk session, which reads it; close the old one.
 - **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters keeps its head and tail;
   the full text is saved under `~/.lean-agent/output/` (the same folder as the Bash line squeeze; files older than 7 days, and all but
-  the newest 400, are pruned) and one line says where. Edit and Write results, errors, subagents and the desk are
+  the newest 2000, are pruned) and one line says where. Edit and Write results, errors, subagents and the desk are
   never touched. `lean_doctor stats` counts it ("saved 140.0k chars in 12 results"). Set `{ "toolResultChars": 30000 }` in
   `config.json` to change the limit (a value below 2000 is ignored; `0` turns the cut off).
 - The **desk**, when idle and over `deskTokens` (config.json, default 200000), compacts itself with fixed instructions (goals, open

@@ -230,6 +230,8 @@ async function writeReport(h: Host, home: string, rec: DeskRec): Promise<string 
     await appendJsonl(h, file, rec)
     return null
   } catch (e1) {
+    // only a spawn that was refused is tried again (with the home folder as cwd): any other failure may have written the line already
+    if (!/ENOENT|spawn|is gone/i.test(msgOf(e1))) return msgOf(e1)
     const homed: Host = { ...h, process: { run: (argv, init) => h.process.run(argv, { ...init, cwd: home }) } }
     try {
       await appendJsonl(homed, file, rec)
@@ -241,24 +243,36 @@ async function writeReport(h: Host, home: string, rec: DeskRec): Promise<string 
     }
   }
 }
+// one record per thread (a failure of one thread never hides another's), kept 24 h
+export const FAILURE_KEEP_MS = 24 * 3_600_000
+async function failures(h: Host, home: string): Promise<Record<string, ReportFailure>> {
+  const f = await readJson<Record<string, ReportFailure> | null>(h, FAILURE(home), null)
+  return f && typeof f === 'object' && !Array.isArray(f) ? f : {}
+}
 async function noteReportFailure(h: Host, home: string, f: ReportFailure): Promise<void> {
   try {
-    await h.fs.write(FAILURE(home), JSON.stringify({ ...f, text: f.text.slice(0, 500) }) + '\n')
+    await h.fs.write(FAILURE(home), JSON.stringify({ ...(await failures(h, home)), [f.thread]: { ...f, text: f.text.slice(0, 500) } }) + '\n')
   } catch {
     /* the thread has the text and the error either way */
   }
 }
 async function clearReportFailure(h: Host, home: string, thread: string): Promise<void> {
   try {
-    const f = await readJson<ReportFailure | null>(h, FAILURE(home), null)
-    if (f && f.thread === thread) await h.fs.write(FAILURE(home), '')
+    const all = await failures(h, home)
+    if (all[thread]) {
+      delete all[thread]
+      await h.fs.write(FAILURE(home), JSON.stringify(all) + '\n')
+    }
   } catch {
     /* best effort */
   }
 }
-export async function lastReportFailure(h: Host): Promise<ReportFailure | null> {
-  const f = await readJson<ReportFailure | null>(h, FAILURE(await homeDir(h)), null)
-  return f && typeof f === 'object' && typeof f.thread === 'string' && typeof f.error === 'string' ? f : null
+// the failures of the last 24 h, oldest first (the doctor shows them)
+export async function reportFailures(h: Host): Promise<ReportFailure[]> {
+  const now = await h.clock.now()
+  return Object.values(await failures(h, await homeDir(h)))
+    .filter(f => f && typeof f.thread === 'string' && typeof f.error === 'string' && typeof f.ts === 'number' && now - f.ts < FAILURE_KEEP_MS)
+    .sort((a, b) => a.ts - b.ts)
 }
 
 export async function threadTool(h: Host, id: string, name: string, i: any, send?: Send): Promise<{ ok: boolean; text: string }> {

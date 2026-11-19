@@ -4,7 +4,7 @@ import { fakeHost } from './fake'
 import { resetLocks } from './threads'
 import { DEFAULT_CAP, capChars, capResult, capStats, cutText } from './cap'
 import { statsText } from './stats'
-import { pruneOutput } from './output'
+import { MAX_FILES, pruneOutput } from './output'
 
 const L = '/h/.lean-agent'
 const OUT = `${L}/output` // the one output folder (the Bash line squeeze saves there too)
@@ -116,7 +116,7 @@ test('a result that cannot be saved in full is never cut', async () => {
   h.host.fs.write = w
 })
 
-test('the cap and the Bash line squeeze save into the same folder; old files are pruned by their name\'s time, then all but the newest 400', async () => {
+test('the cap and the Bash line squeeze save into the same folder; old files are pruned by their name\'s time, then all but the newest MAX_FILES', async () => {
   const h = fakeHost(null)
   const DAY = 86_400_000
   h.clock.t = 100 * DAY
@@ -133,12 +133,13 @@ test('the cap and the Bash line squeeze save into the same folder; old files are
   expect(names).toContain('notes.txt')
   expect(names.filter((n: string) => n.startsWith(`${100 * DAY}-t1-`)).length).toBe(1) // this thread's cut
   // past MAX_FILES the oldest go, whatever their age (deterministic: by the time in the name)
-  for (let i = 0; i < 450; i++) put(100 * DAY - 3 * DAY + i, 'a')
-  expect((await pruneOutput(h.host, 100 * DAY)).length).toBe(52) // 450 + 1 (6 days old) + 1 (this cut) - 400
+  const extra = MAX_FILES + 50
+  for (let i = 0; i < extra; i++) put(100 * DAY - 3 * DAY + i, 'a')
+  expect((await pruneOutput(h.host, 100 * DAY)).length).toBe(extra + 2 - MAX_FILES) // + 1 (6 days old) + 1 (this cut)
   const left = outFiles(h).filter((k: string) => /\/\d{10,}-/.test(k))
-  expect(left.length).toBe(400)
+  expect(left.length).toBe(MAX_FILES)
   expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY}-a`))).toBe(false) // the oldest of them went
-  expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY + 449}-a`))).toBe(true)
+  expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY + extra - 1}-a`))).toBe(true)
 })
 
 test('cutText keeps the head and the tail on line ends', () => {
