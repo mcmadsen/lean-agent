@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.9
 
 ### Fixed
 - **The desk retried a compaction after every turn and showed a red failure in Claude Desktop.** The desk there is an SDK
