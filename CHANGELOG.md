@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **The strict review of 0.45 is back** (the 1.0 port had cut it to "find bugs, list by severity"). `agents/reviewer.md` carries the
+  ordered passes 0-7 (completeness; correctness traced end to end; behaviour before -> after with intended/unintended, risks with one
+  concrete check each, removed side effects; reuse and duplication with a search per new symbol; scope and platform with siblings;
+  tests with a coverage table; defaults and state; style last), the severity rules, and a structured JSON block before the
+  `LEAN-FEEDBACK` line. `skills/review` runs it in up to 3 passes with a second pass that only sees the open findings, the declines and
+  the delta since the last reviewed sha.
+- **`lean_review` is now three actions.** `prepare` computes the review's inputs from the diff without a model (new symbols and files,
+  edited tests whose assertions change, new defaulted parameters, new module-level state, changed/moved/removed exports; TS/JS, Python,
+  Go, Rust, C#, Java, Kotlin, Swift), picks the reviewer model by risk (opus for security, concurrency, migrations/schema/storage, UI
+  strings, public API, config formats, removed public symbols, ~800+ lines; sonnet otherwise and on re-reviews; `config.json`
+  `review.model` wins) and says whether a search-only second opinion comes first. `record` (the default) now REFUSES green, with the
+  reason and recorded not green, when a new symbol has no `reuse` entry, an edited test no `coverage` entry, a second-opinion candidate
+  no answer, or a blocker/major finding is open; green without the reviewer's JSON (`review`) and `base` is refused. `decline`
+  records a finding the user decided not to fix (project, branch or all branches, kind + symbol, why); later reviews are told and
+  leave it out. The HMAC signing is unchanged.
+- Earlier rounds' reuse and coverage entries are kept in the mod's own store (not in a file a session can write), so a re-review
+  converges: a new major about code unchanged since the last review is a minor.
+- The reviewer's built-in command line now names the 1.0 read-only set (`git ls-files` too; no `git grep`).
+
 ## 1.0.10
 
 ### Fixed
