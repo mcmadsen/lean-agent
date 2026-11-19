@@ -18,12 +18,16 @@
     block of `~/.claude/settings.json` (other keys kept, atomic, written through a symlinked file), so every new session gets it
     (app, terminal, desk, threads); without arguments it lists what needs one. Names that look secret (`KEY`, `TOKEN`, `SECRET`,
     `PASSWORD`, `CREDENTIAL`, `AUTH`, `PAT`) and names that change how sessions run (`PATH`, `NODE_*`, `GIT_*`, proxies, `CLAUDE_*`...)
-    are refused; the reply never repeats the value. The pane has no text field, so the desk asks (AskUserQuestion) and makes the call.
+    are refused, as are values that look like a credential (URL with a password, token prefixes, long random strings); only a variable an
+    enabled MCP config references is written (an allowlist); the reply never repeats the value and says "replaced" when it overwrote
+    one. The pane has no text field, so the desk asks (AskUserQuestion) and makes the call.
   - **Secrets never go into `settings.json`.** `~/.lean-agent/mcp-env.json` (0.45's form, user-only) holds `{"NAME": {"command":
     "..."}}` (a string runs as `/bin/sh -c`, a list as an argv) or `{"value": "..."}`. At THREAD start the mod runs the command (15 s)
-    and writes the value into that thread's own `.claude/settings.json` (created empty and `chmod 600` before it is filled), only for
-    names an MCP config references and only when the user `env` block does not already set them; a file that is not the user's own is
-    ignored, and one readable by others is tightened to 600. Nothing writes a command (no tool, no model); the start reply names names
+    (the commands run side by side, at every thread session start: new, start, reopen, checkpoint, a resume of an older-version
+    thread) and writes the value into that thread's own `.claude/settings.json` (created empty and `chmod 600` before it is filled and
+    the mode checked after; if that fails the thread starts without the values and says so), only for names an MCP config references
+    and only when the user `env` block does not already set them; a file that is not the user's own (symlinks followed) is ignored,
+    and one readable by others is tightened to 600. Nothing writes a command (no tool, no model); the start reply names names
     only. For the desk and the app the way is OAuth sign-in through the server.
   - **Which value wins** (checked live with Claude Code 2.1.328): a user `env` value resolves `${VAR:-default}` in a user MCP server's
     URL; a project's (thread folder's) `env` value resolves it too when the user block lacks the name; with both set the user's value

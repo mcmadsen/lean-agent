@@ -53,9 +53,10 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'sleep') return ok()
       if (c === 'chmod') { const m = parseInt(a[0], 8); for (const x of a.slice(1)) perms.set(x, { uid: perms.get(x)?.uid ?? 501, mode: Number.isNaN(m) ? 0o600 : m }); return ok() }
       if (c === 'stat') { // GNU form only (a macOS `stat -f` is answered "illegal option", so the BSD try fails like it does on Linux)
-        if (a[0] !== '-c') return { exitCode: 1, stdout: '', stderr: 'illegal option' }
-        if (!files.has(a[2])) return { exitCode: 1, stdout: '', stderr: 'no such file' }
-        const p = perms.get(a[2]) ?? { uid: 501, mode: 0o600 }
+        const b = a[0] === '-L' ? a.slice(1) : a // -L follows a symlink: the fake's perms are per real file
+        if (b[0] !== '-c') return { exitCode: 1, stdout: '', stderr: 'illegal option' }
+        if (!files.has(res(b[2]))) return { exitCode: 1, stdout: '', stderr: 'no such file' }
+        const p = perms.get(res(b[2])) ?? perms.get(b[2]) ?? { uid: 501, mode: 0o600 }
         return ok(`${p.uid} ${p.mode.toString(8)}\n`)
       }
       if (c === 'systemctl' || c === 'launchctl') return ok()

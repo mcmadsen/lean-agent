@@ -26,10 +26,11 @@ const LEGACY_ENV = (home: string) => `${leanDir(home)}/legacy-0.45/mcp-env.json`
 // ---- names and values ------------------------------------------------------------------------------------------------
 export const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 // a name that looks like a credential: never written to a settings file (settings.json is plain text, often synced or committed)
-const SECRET_RE = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|(^|_)(PAT|PWD|PASS|PRIVATE)(_|$)/i
+const SECRET_RE = /KEY|TOKEN|SECRET|PASS|CRED|COOKIE|BEARER|JWT|DSN|SESSION|WEBHOOK|SIGNATURE|CONNECTION|AUTH|PRIVATE|_URL$|URI$|(^|_)(PAT|PWD)(_|\d|$)|PAT\d|PAT$/i
 export const looksSecret = (name: string) => SECRET_RE.test(name)
-// names that change how every session runs (search path, runtime, git, proxies, Claude's own): never written by this feature
-const RESERVED = /^(?:PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TERM|LANG|LANGUAGE|LC_[A-Z_]+|IFS|ENV|BASH_ENV|PS[1-4]|SHLVL|EDITOR|VISUAL|PAGER|NODE_[A-Z_]+|NPM_[A-Z_]*|LD_[A-Z_]+|DYLD_[A-Z_]+|PYTHON[A-Z_]*|RUBY[A-Z_]*|PERL[A-Z_0-9]*|GIT_[A-Z_0-9]+|ANTHROPIC_[A-Z_]+|CLAUDE[A-Z_]*|(?:HTTPS?|ALL|NO|FTP)_PROXY|SSL_CERT_[A-Z]+|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|OPENSSL_[A-Z_]+)$/i
+// names that change how every session runs (search path, runtime, git, proxies, tool options, Claude's own): never written by this
+// feature. (Defence in depth: setSettingsEnv also requires an MCP config to reference the name.)
+const RESERVED = /^(?:PATH|HOME|USER|LOGNAME|SHELL|PWD|OLDPWD|TMPDIR|TERM|LANG|LANGUAGE|LC_[A-Z0-9_]+|IFS|ENV|BASH_[A-Z0-9_]+|PS[1-4]|SHLVL|EDITOR|VISUAL|PAGER|MANPAGER|BROWSER|ZDOTDIR|LESS(?:OPEN|CLOSE|CHARSET|HISTFILE)?|PROMPT_COMMAND|NODE_[A-Z0-9_]+|NPM_[A-Z0-9_]*|YARN_[A-Z0-9_]*|PIP_[A-Z0-9_]*|UV_[A-Z0-9_]*|CARGO_[A-Z0-9_]*|GO(?:PATH|ROOT|FLAGS|PROXY|PRIVATE|SUMDB|NOSUMDB|INSECURE|TOOLCHAIN|MODCACHE)|JAVA_[A-Z0-9_]*|_JAVA_OPTIONS|LD_[A-Z0-9_]+|DYLD_[A-Z0-9_]+|PYTHON[A-Z0-9_]*|RUBY[A-Z0-9_]*|PERL[A-Z0-9_]*|GIT_[A-Z0-9_]+|SSH_[A-Z0-9_]+|XDG_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE[A-Z0-9_]*|MCP_TIMEOUT|MCP_TOOL_TIMEOUT|(?:DISABLE|ENABLE|USE)_[A-Z0-9_]+|(?:HTTPS?|ALL|NO|FTP|SOCKS)_PROXY|SSL_CERT_[A-Z0-9]+|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|OPENSSL_[A-Z0-9_]+)$/i
 // variables a session always has (or Claude Code itself fills in a plugin config): never reported as missing
 const PROVIDED = new Set(['HOME', 'USER', 'LOGNAME', 'PATH', 'SHELL', 'PWD', 'TMPDIR', 'LANG', 'CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'CLAUDE_PROJECT_DIR', 'CLAUDE_CONFIG_DIR'])
 
@@ -43,6 +44,11 @@ export function valueProblem(value: unknown): string | null {
   if (value.length > 500) return 'the value is longer than 500 characters'
   if (/[\x00-\x1f\x7f]/.test(value)) return 'the value has a line break or control character'
   return null
+}
+// a value that looks like a credential whatever its name: a URL with a password, a well-known token prefix, a long random string.
+// Only used for the settings file (plain text); a thread's own user-only file takes anything valueProblem accepts.
+export function secretValue(value: string): boolean {
+  return /:\/\/[^/\s@]*:[^/\s@]*@/.test(value) || /^(?:ghp_|gho_|ghs_|github_pat_|glpat-|xox[abprs]-|sk-|pk_live|sk_live|AKIA|ASIA|eyJ)/.test(value) || /^[A-Za-z0-9+/_=-]{32,}$/.test(value)
 }
 
 // ---- reading configs ---------------------------------------------------------------------------------------------------
@@ -89,7 +95,7 @@ export function refsOf(cfg: unknown): Ref[] {
     for (const m of s.matchAll(REF_RE)) {
       const name = m[1]!
       if (PROVIDED.has(name)) continue
-      const inHost = hostPart.includes(m[0])
+      const inHost = hostPart === m[0] || hostPart.startsWith(`${m[0]}:`) // the whole host (a part of it, like ${SUB:-api}.example.com, is not a bare host)
       const prev = byName.get(name)
       const dflt = m[2] ?? null
       if (!prev) byName.set(name, { name, dflt, host: inHost })
@@ -121,7 +127,7 @@ async function enabledPlugins(h: Host, home: string): Promise<Plugin[]> {
     for (const rec of Array.isArray(man?.plugins) ? man!.plugins : []) {
       if (!isObj(rec) || typeof rec.name !== 'string' || !rec.name || /[/\\]|\.\./.test(rec.name)) continue
       // a synced plugin lives in <bucket>/<name>~g<generation> (older layouts: <bucket>/<name>)
-      const dirs = [...(rec.generation !== undefined ? [`${rec.name}~g${rec.generation}`] : []), rec.name]
+      const dirs = [...((typeof rec.generation === 'number' || typeof rec.generation === 'string') && /^\w{1,12}$/.test(String(rec.generation)) ? [`${rec.name}~g${rec.generation}`] : []), rec.name]
       let root = ''
       for (const d of dirs) if (!root && (await h.fs.exists(`${syncedDir}/${b.name}/${d}`).catch(() => false))) root = `${syncedDir}/${b.name}/${d}`
       if (!root) continue
@@ -218,6 +224,10 @@ export async function setSettingsEnv(h: Host, home: string, name: unknown, value
   if (bad) return { ok: false, text: `mcp-env: ${bad}` }
   const n = name as string
   if (looksSecret(n)) return { ok: false, text: `mcp-env: ${n} looks like a secret (key, token, password...) and settings.json is plain text: not written. Sign in through the server (OAuth), or keep it out of files with a command in ~/.lean-agent/mcp-env.json (README: MCP servers that need a variable).` }
+  if (secretValue(value as string)) return { ok: false, text: `mcp-env: the value for ${n} looks like a credential (a URL with a password, a token, a long random string) and settings.json is plain text: not written. Use OAuth sign-in, or a command in ~/.lean-agent/mcp-env.json for threads.` }
+  // an allowlist, not only a denylist: only a variable an MCP server config really references (a prompt-injected caller cannot set
+  // PIP_INDEX_URL or any other name that changes how every later session behaves)
+  if (!(await scanServers(h, home)).some(s => s.refs.some(r => r.name === n))) return { ok: false, text: `mcp-env: no enabled MCP server config references ${n}: not written (lean_doctor mcp-env without arguments lists the names that are needed)` }
   const file = userSettingsPath(home)
   const lock = `${leanDir(home)}/.settings-lock`
   try {
@@ -246,9 +256,10 @@ export async function setSettingsEnv(h: Host, home: string, name: unknown, value
       const env = isObj(cur.env) ? cur.env : {}
       if (env[n] === value) return { ok: true, text: `${n} is already set in the env block of ~/.claude/settings.json (value not shown).` }
       const next = { ...cur, env: { ...env, [n]: value } }
+      const replaced = typeof env[n] === 'string' && env[n] !== ''
       await mkdirp(h, dirOf(real))
       await atomicWrite(h, real, JSON.stringify(next, null, 2) + '\n')
-      return { ok: true, text: `${n} set in the env block of ~/.claude/settings.json (value not shown). Sessions started from now on get it; a session already running keeps its old environment, so the desk needs a new session before its MCP server uses it.` }
+      return { ok: true, text: `${n} ${replaced ? 'replaced' : 'set'} in the env block of ~/.claude/settings.json (value not shown). Sessions started from now on get it; a session already running keeps its old environment, so the desk needs a new session before its MCP server uses it.` }
     })
   } catch (e) {
     return { ok: false, text: `mcp-env failed: ${String((e as Error)?.message ?? e).slice(0, 120)}` }
@@ -257,7 +268,7 @@ export async function setSettingsEnv(h: Host, home: string, name: unknown, value
 
 // ---- who owns a file (mcp-env.json holds commands and secrets: only the user's own, user-only file is used) --------------------
 async function facts(h: Host, path: string): Promise<{ uid: number; mode: number } | null> {
-  const tries = [['stat', '-c', '%u %a', path], ['stat', '-f', '%u %Lp', path]] // GNU, then BSD (macOS)
+  const tries = [['stat', '-L', '-c', '%u %a', path], ['stat', '-L', '-f', '%u %Lp', path]] // GNU, then BSD (macOS); -L: a symlinked file is judged by its target
   for (const argv of tries) {
     const r = await h.process.run(argv).catch(() => null)
     const m = r && r.exitCode === 0 ? /^(\d+) ([0-7]+)\s*$/.exec(r.stdout) : null
@@ -297,7 +308,7 @@ export async function threadEnv(h: Host, home: string): Promise<ThreadEnv> {
   const referenced = new Set((await scanServers(h, home)).flatMap(s => s.refs.map(r => r.name)))
   const env: Record<string, string> = {}
   const lines: string[] = []
-  let ran = 0
+  const pending: { name: string; argv: string[] }[] = []
   for (const [name, rec] of entries) {
     if (nameProblem(name) || userSet.has(name)) continue
     if (!referenced.has(name)) {
@@ -315,15 +326,20 @@ export async function threadEnv(h: Host, home: string): Promise<ThreadEnv> {
       lines.push(`mcp-env.json ${name}: command must be a string or a list of strings, skipped`)
       continue
     }
-    if (++ran > MAX_COMMANDS) {
+    if (pending.length >= MAX_COMMANDS) {
       lines.push(`mcp-env.json ${name}: more than ${MAX_COMMANDS} commands, skipped`)
       continue
     }
-    const r = await h.process.run(argv, { cwd: home, timeoutMs: COMMAND_MS, stdin: '' }).catch(() => null)
-    const out = r && r.exitCode === 0 ? String(r.stdout ?? '').trim() : ''
-    if (!out || out.length > MAX_VALUE || /[\x00-\x1f\x7f]/.test(out)) lines.push(`mcp-env.json ${name}: its command ${r ? (r.exitCode === 0 ? 'printed nothing usable (one line expected)' : `exited ${r.exitCode}`) : 'did not run or timed out'}, skipped`)
-    else env[name] = out
+    pending.push({ name, argv })
   }
+  // the commands run side by side (one slow keychain prompt costs 15 s, not 15 s each); results are applied in file order
+  const results = await Promise.all(pending.map(p => h.process.run(p.argv, { cwd: home, timeoutMs: COMMAND_MS, stdin: '' }).catch(() => null)))
+  pending.forEach((p, i) => {
+    const r = results[i]
+    const out = r && r.exitCode === 0 ? String(r.stdout ?? '').trim() : ''
+    if (!out || out.length > MAX_VALUE || /[\x00-\x1f\x7f]/.test(out)) lines.push(`mcp-env.json ${p.name}: its command ${r ? (r.exitCode === 0 ? 'printed nothing usable (one line expected)' : `exited ${r.exitCode}`) : 'did not run or timed out'}, skipped`)
+    else env[p.name] = out
+  })
   const names = Object.keys(env)
   if (names.length) lines.unshift(`mcp env for this thread (names only): ${names.join(', ')}`)
   return { env, lines }
@@ -335,12 +351,31 @@ function commandArgv(c: unknown): string[] | null {
   return null
 }
 
-// A thread's settings file: with secrets in it the file is created empty, tightened to user-only, and only then filled.
-export async function writeThreadSettings(h: Host, path: string, text: string, secret: boolean): Promise<void> {
-  if (!secret) return h.fs.write(path, text)
-  await h.fs.write(path, '')
-  await h.process.run(['chmod', '600', path])
-  await h.fs.write(path, text)
+// A thread's settings file. With secrets in it the file is created empty, tightened to user-only (the exit code is checked), filled, and
+// the mode checked again (a write that replaces the file instead of truncating it would lose the mode). If any step fails the secrets
+// are NOT left behind: `plain` (the same settings without them) is written instead. Returns whether the secrets are in the file; never
+// throws for a failed tightening (the caller says so in the start reply, names only).
+export async function writeThreadSettings(h: Host, path: string, text: string, secret: boolean, plain = text): Promise<boolean> {
+  if (!secret) {
+    await h.fs.write(path, text)
+    return false
+  }
+  const userOnlyNow = async () => {
+    const f = await facts(h, path)
+    return !!f && (f.mode & 0o077) === 0
+  }
+  try {
+    await h.fs.write(path, '')
+    if ((await h.process.run(['chmod', '600', path])).exitCode === 0) {
+      await h.fs.write(path, text)
+      if (!(await userOnlyNow())) await h.process.run(['chmod', '600', path]) // the write may have replaced the file
+      if (await userOnlyNow()) return true
+    }
+  } catch {
+    /* fall through to the plain file */
+  }
+  await h.fs.write(path, plain) // the secrets must not stay in a file others can read
+  return false
 }
 
 // ---- migration: 0.45's mcp-env.json ------------------------------------------------------------------------------------------
@@ -353,15 +388,18 @@ export async function importMcpEnv(h: Host, home: string): Promise<{ lines: stri
   for (const [k, v] of Object.entries(isObj(old) ? old : {})) if (!(k in all)) all[k] = v
   const names = Object.keys(all).filter(k => isObj(all[k]))
   if (!names.length) return { lines: [], retry: false }
-  if (await h.fs.exists(mcpEnvPath(home)).catch(() => false)) await userOnly(h, mcpEnvPath(home))
+  // a live file that is not the user's own (owner) is never trusted: nothing is imported from it or from the archive
+  if ((await h.fs.exists(mcpEnvPath(home)).catch(() => false)) && !(await userOnly(h, mcpEnvPath(home)))) return { lines: ['0.45 mcp-env.json: not your own user-only file (owner or permissions): not imported, chmod 600 it'], retry: false }
   const have = await setNames(h, home, [userSettingsPath(home)])
+  const referenced = new Set((await scanServers(h, home)).flatMap(s => s.refs.map(r => r.name)))
   const imported: string[] = []
   const kept: string[] = []
   let retry = false
   for (const name of names) {
     const rec = all[name]
     const plain = typeof rec.value === 'string' && rec.value !== ''
-    if (!plain || looksSecret(name) || nameProblem(name) || valueProblem(rec.value)) {
+    // kept in the file (no retry: nothing about the settings file is wrong): secret name or value, a command, reserved, or no config uses it
+    if (!plain || looksSecret(name) || nameProblem(name) || valueProblem(rec.value) || secretValue(rec.value) || !referenced.has(name)) {
       kept.push(name)
       continue
     }
@@ -375,7 +413,7 @@ export async function importMcpEnv(h: Host, home: string): Promise<{ lines: stri
   }
   const lines: string[] = []
   if (imported.length) lines.push(`0.45 mcp-env.json: moved into the env block of ~/.claude/settings.json (every session gets them): ${imported.join(', ')}`)
-  if (kept.length) lines.push(`0.45 mcp-env.json: kept in ~/.lean-agent/mcp-env.json (secret, a command, or not writable): ${kept.join(', ')}; threads read them at start`)
+  if (kept.length) lines.push(`0.45 mcp-env.json: kept in ~/.lean-agent/mcp-env.json (a secret, a command, or no MCP server config uses the name): ${kept.join(', ')}; threads read them at start`)
   if (retry) lines.push('0.45 mcp-env.json: ~/.claude/settings.json could not be updated (does not parse?): fix it, then run lean_doctor migrate')
   if (imported.length || kept.length) await writeJson(h, `${leanDir(home)}/mcp-env-import.json`, { imported, kept }).catch(() => undefined)
   return { lines, retry }

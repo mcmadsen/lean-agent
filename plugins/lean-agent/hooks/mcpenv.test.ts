@@ -35,6 +35,11 @@ function synced(j: (p: string, v: unknown) => void, mcp: unknown = DD) {
   j(`${SYNC}/16a0~g2/.dd_claude-code_mcp.json`, mcp)
 }
 
+// a user MCP server whose URL references the given variables (writing a name needs a config that uses it)
+function uses(j: (p: string, v: unknown) => void, ...names: string[]) {
+  j('/h/.claude.json', { mcpServers: { s: { url: `https://x.example.com/${names.map(n => '${' + n + ':-}').join('/')}` } } })
+}
+
 // ---- detect -------------------------------------------------------------------------------------------------------------
 test('a synced plugin\'s ${DD_MCP_DOMAIN:-not-setup} is reported by name; empty and usable defaults are not', async () => {
   const { h, j } = home()
@@ -123,6 +128,7 @@ test('check: MCP rows are not FIX rows (not a setup problem); setupText lists th
 // ---- fix: the settings env block -----------------------------------------------------------------------------------------
 test('mcp-env writes the env block: merge, keep every user key, atomic, idempotent, the value is not echoed', async () => {
   const { h, j } = home()
+  uses(j, 'DD_MCP_DOMAIN')
   j(SETTINGS, { permissions: { allow: ['Bash'] }, model: 'opus', env: { KEEP: '1' } })
   const r = await setSettingsEnv(h.host, H, 'DD_MCP_DOMAIN', S1)
   expect(r.ok).toBe(true)
@@ -135,14 +141,18 @@ test('mcp-env writes the env block: merge, keep every user key, atomic, idempote
   expect(again.text).not.toContain(S1)
   const change = await setSettingsEnv(h.host, H, 'DD_MCP_DOMAIN', S4)
   expect(change.ok).toBe(true)
+  expect(change.text).toContain('replaced') // the user's earlier value was overwritten: said, not hidden
+  expect(change.text).not.toContain(S4)
   expect(JSON.parse(h.files.get(SETTINGS)!).env).toEqual({ KEEP: '1', DD_MCP_DOMAIN: S4 })
 })
 
 test('mcp-env creates ~/.claude/settings.json when there is none, and writes through a symlinked one', async () => {
   const a = home()
+  uses(a.j, 'MY_SITE')
   expect((await setSettingsEnv(a.h.host, H, 'MY_SITE', 'x.example')).ok).toBe(true)
   expect(JSON.parse(a.h.files.get(SETTINGS)!)).toEqual({ env: { MY_SITE: 'x.example' } })
   const b = home()
+  uses(b.j, 'MY_SITE')
   b.h.links.set(SETTINGS, '/dot/settings.json')
   b.j('/dot/settings.json', { theme: 'dark' })
   expect((await setSettingsEnv(b.h.host, H, 'MY_SITE', 'x.example')).ok).toBe(true)
@@ -153,15 +163,27 @@ test('mcp-env creates ~/.claude/settings.json when there is none, and writes thr
 test('mcp-env refuses secret-looking names, reserved names, bad names and bad values; nothing is written', async () => {
   const { h, j } = home()
   j(SETTINGS, { env: { KEEP: '1' } })
+  const secrets = ['DD_API_KEY', 'DD_APPLICATION_KEY', 'GITHUB_TOKEN', 'MY_SECRET', 'DB_PASSWORD', 'AWS_CREDENTIALS', 'AUTH_HEADER', 'GH_PAT', 'github_pat', 'API_KEY_2', 'DD_PASSPHRASE', 'PASSCODE', 'AWS_CREDS', 'SESSION_ID', 'SLACK_WEBHOOK', 'SENTRY_DSN', 'DATABASE_URL', 'REDIS_URL', 'JWT', 'BEARER', 'COOKIE', 'GITHUBPAT', 'PAT1', 'CONNECTION_STRING', 'SIGNATURE']
+  uses(j, ...secrets, 'MY_SITE', 'PIP_INDEX_URL', 'NODE_V8_COVERAGE', 'CLAUDE_CODE_DISABLE_1M_CONTEXT') // referenced by a config: the NAME is what refuses
   const before = h.files.get(SETTINGS)
-  for (const n of ['DD_API_KEY', 'DD_APPLICATION_KEY', 'GITHUB_TOKEN', 'MY_SECRET', 'DB_PASSWORD', 'AWS_CREDENTIALS', 'AUTH_HEADER', 'GH_PAT', 'github_pat', 'API_KEY_2']) {
+  for (const n of secrets) {
     const r = await setSettingsEnv(h.host, H, n, 'v')
     expect([n, r.ok]).toEqual([n, false])
     expect(r.text).toContain('looks like a secret')
   }
-  for (const n of ['PATH', 'HOME', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'GIT_CONFIG_COUNT', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR', 'HTTPS_PROXY', 'https_proxy']) expect([n, (await setSettingsEnv(h.host, H, n, 'v')).ok]).toEqual([n, false])
+  const reserved = ['PATH', 'HOME', 'NODE_OPTIONS', 'NODE_V8_COVERAGE', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'GIT_CONFIG_COUNT', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_DISABLE_1M_CONTEXT', 'HTTPS_PROXY', 'https_proxy', 'PIP_INDEX_URL', 'JAVA_TOOL_OPTIONS', 'PROMPT_COMMAND', 'ZDOTDIR', 'SSH_AUTH_SOCK', 'XDG_CONFIG_HOME', 'DISABLE_TELEMETRY', 'MCP_TIMEOUT', 'GOFLAGS']
+  for (const n of reserved) expect([n, (await setSettingsEnv(h.host, H, n, 'v')).ok]).toEqual([n, false])
   for (const n of ['', '1ABC', 'A-B', 'A B', 'a'.repeat(65), 42, undefined]) expect((await setSettingsEnv(h.host, H, n, 'v')).ok).toBe(false)
   for (const v of ['', '   ', 'a\nb', 'a\x00b', 'x'.repeat(501), 5, undefined]) expect((await setSettingsEnv(h.host, H, 'MY_SITE', v)).ok).toBe(false)
+  // a value that is a credential under an innocent name
+  for (const v of ['postgres://u:p@h/db', 'https://user:pw@host.example', 'ghp_abcdefghijklmnop', 'sk-abc123', 'AKIAABCDEFGHIJKLMNOP', 'a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8']) {
+    const r = await setSettingsEnv(h.host, H, 'MY_SITE', v)
+    expect([v, r.ok, r.text.includes('looks like a credential'), r.text.includes(v)]).toEqual([v, false, true, false])
+  }
+  // an allowlist: a name no enabled MCP config references is not written, whatever it is called
+  const none = await setSettingsEnv(h.host, H, 'SOME_SITE', 'x.example')
+  expect(none.ok).toBe(false)
+  expect(none.text).toContain('no enabled MCP server config references SOME_SITE')
   expect(h.files.get(SETTINGS)).toBe(before)
   expect(h.calls.some(c => c.argv[0] === 'mv')).toBe(false)
   expect([nameProblem('MY_SITE'), valueProblem('x.example'), looksSecret('DD_MCP_DOMAIN'), looksSecret('PATTERN')]).toEqual([null, null, false, false])
@@ -169,6 +191,7 @@ test('mcp-env refuses secret-looking names, reserved names, bad names and bad va
 
 test('mcp-env leaves a settings.json that does not parse (or whose env is not an object) alone', async () => {
   const { h, j } = home()
+  uses(j, 'MY_SITE')
   j(SETTINGS, '{ not json')
   const r = await setSettingsEnv(h.host, H, 'MY_SITE', 'x.example')
   expect(r.ok).toBe(false)
@@ -273,12 +296,85 @@ test('writeThreadSettings with secrets: the file exists empty and user-only BEFO
   const { h } = home()
   const seen: unknown[] = []
   const host = { ...h.host, fs: { ...h.host.fs, write: async (p: string, t: string) => { seen.push([t === '' ? 'empty' : 'content', h.perms.get(p)?.mode]); return h.host.fs.write(p, t) } } }
-  await writeThreadSettings(host as any, '/h/t/.claude/settings.json', '{"env":{}}', true)
+  expect(await writeThreadSettings(host as any, '/h/t/.claude/settings.json', '{"env":{}}', true)).toBe(true)
   expect(seen).toEqual([['empty', undefined], ['content', 0o600]])
   expect(h.files.get('/h/t/.claude/settings.json')).toBe('{"env":{}}')
   const plain = home()
   await writeThreadSettings(plain.h.host, '/h/t/.claude/settings.json', '{}', false)
   expect(plain.h.calls.some(c => c.argv[0] === 'chmod')).toBe(false)
+})
+
+test('writeThreadSettings: a failing chmod, a throwing run, or a mode that stays loose never leave the secret in a loose file', async () => {
+  const f = '/h/t/.claude/settings.json'
+  const WITH = `{"env":{"X":"${S2}"}}`
+  const PLAIN = '{"env":{}}'
+  const failing = home()
+  const a = { ...failing.h.host, process: { run: async (argv: string[], init?: any) => (argv[0] === 'chmod' ? { exitCode: 1, stdout: '', stderr: 'no' } : failing.h.host.process.run(argv, init)) } }
+  expect(await writeThreadSettings(a as any, f, WITH, true, PLAIN)).toBe(false)
+  expect(failing.h.files.get(f)).toBe(PLAIN)
+  const throwing = home()
+  const b = { ...throwing.h.host, process: { run: async (argv: string[], init?: any) => { if (argv[0] === 'chmod') throw new Error('boom'); return throwing.h.host.process.run(argv, init) } } }
+  expect(await writeThreadSettings(b as any, f, WITH, true, PLAIN)).toBe(false)
+  expect(throwing.h.files.get(f)).toBe(PLAIN)
+  // an engine whose write replaces the file: the mode is lost after the content write, the second chmod restores it
+  const replacing = home()
+  const c = { ...replacing.h.host, fs: { ...replacing.h.host.fs, write: async (p: string, t: string) => { await replacing.h.host.fs.write(p, t); if (t !== '') replacing.h.perms.set(p, { uid: 501, mode: 0o644 }) } } }
+  expect(await writeThreadSettings(c as any, f, WITH, true, PLAIN)).toBe(true)
+  expect(replacing.h.perms.get(f)!.mode).toBe(0o600)
+  expect(replacing.h.files.get(f)).toBe(WITH)
+  // ... and when it stays loose whatever is done
+  const loose = home()
+  const d = { ...loose.h.host, process: { run: async (argv: string[], init?: any) => (argv[0] === 'chmod' ? { exitCode: 0, stdout: '', stderr: '' } : loose.h.host.process.run(argv, init)) }, fs: { ...loose.h.host.fs, write: async (p: string, t: string) => { await loose.h.host.fs.write(p, t); loose.h.perms.set(p, { uid: 501, mode: 0o644 }) } } }
+  expect(await writeThreadSettings(d as any, f, WITH, true, PLAIN)).toBe(false)
+  expect(loose.h.files.get(f)).toBe(PLAIN)
+})
+
+test('threadEnv judges a symlinked mcp-env.json by its target (stat -L), not by the link', async () => {
+  const { h, j } = home()
+  withKeyServer(j)
+  j('/dot/mcp-env.json', { DD_API_KEY: { command: 'pass show dd' } })
+  h.links.set(MCPENV, '/dot/mcp-env.json')
+  h.perms.set('/dot/mcp-env.json', { uid: 0, mode: 0o666 }) // somebody else's, world-writable
+  let ran = 0
+  h.exec.handler = () => {
+    ran++
+    return { exitCode: 0, stdout: S2 }
+  }
+  const t = await threadEnv(h.host, H)
+  expect(t.env).toEqual({})
+  expect(ran).toBe(0)
+  expect(h.calls.some(c => c.argv[0] === 'stat' && c.argv[1] === '-L')).toBe(true)
+})
+
+test('a part of a host is not a placeholder host; the whole host (with a port) is', async () => {
+  const { h, j } = home()
+  j('/h/.claude.json', { mcpServers: { a: { url: 'https://${SUB:-api}.example.com/x' }, b: { url: 'https://${HOSTV:-prod}:8443/x' } } })
+  expect((await mcpNeeds(h.host, H)).map(n => n.server)).toEqual(['user:b'])
+})
+
+test('a synced plugin\'s generation that is not a plain word is never put into a path', async () => {
+  const { h, j } = home()
+  synced(j)
+  j(`${SYNC}/manifest.json`, { plugins: [{ name: '16a0', generation: '../x' }] })
+  expect(await mcpRows(h.host, H)).toEqual([])
+  j(`${SYNC}/manifest.json`, { plugins: [{ name: '16a0', generation: { a: 1 } }] })
+  expect(await mcpRows(h.host, H)).toEqual([])
+})
+
+test('a thread start whose settings file cannot be made user-only still starts, without the variables, and says so', async () => {
+  const { h, j } = home()
+  threads(j, h)
+  withKeyServer(j)
+  j(MCPENV, { DD_API_KEY: { command: 'pass show dd' } })
+  h.exec.handler = () => ({ exitCode: 0, stdout: `${S2}\n` })
+  const host = { ...h.host, process: { run: async (argv: string[], init?: any) => (argv[0] === 'chmod' && argv[1] === '600' && String(argv[2]).endsWith('.claude/settings.json') ? { exitCode: 1, stdout: '', stderr: 'no' } : h.host.process.run(argv, init)) } }
+  const r = await leanThread(host as any, '/p', { action: 'new', title: 'x', text: 'do it' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('could not be made user-only')
+  expect(r.text).not.toContain(S2)
+  const f = '/h/.lean-agent/threads/t1/.claude/settings.json'
+  expect(h.files.get(f)).not.toContain(S2)
+  expect(Object.keys(JSON.parse(h.files.get(f)!).env).sort()).toEqual(['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'])
 })
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -326,14 +422,15 @@ test('a thread start with the name in the user settings env leaves it out of the
 test('0.45 import: plain non-secret values go into the settings env block once (names told); commands and secrets stay in mcp-env.json', async () => {
   const { h, j } = home()
   j(SETTINGS, { env: { OLD_THEIRS: 'mine' }, model: 'opus' })
-  j(MCPENV, { SITE: { value: S1 }, OLD_THEIRS: { value: 'from-045' }, API_KEY: { value: S2 }, GH: { command: 'gh auth token' }, JUNK: 5 })
+  uses(j, 'SITE', 'OLD_THEIRS', 'LEG_SITE', 'API_KEY', 'GH')
+  j(MCPENV, { SITE: { value: S1 }, OLD_THEIRS: { value: 'from-045' }, API_KEY: { value: S2 }, GH: { command: 'gh auth token' }, UNUSED_SITE: { value: 'u.example' }, TOKEN_LIKE: { value: 'ghp_abcdefghijklmnop' }, JUNK: 5 })
   j('/h/.lean-agent/legacy-0.45/mcp-env.json', { LEG_SITE: { value: S4 }, SITE: { value: 'old.example' } })
   const lines = await tidyLegacy(h.host)
   expect(JSON.parse(h.files.get(SETTINGS)!)).toEqual({ env: { OLD_THEIRS: 'mine', SITE: S1, LEG_SITE: S4 }, model: 'opus' }) // the user's own value kept, mcp-env.json wins over legacy
   const text = lines.join('\n')
   expect(text).toContain('moved into the env block of ~/.claude/settings.json (every session gets them): SITE, LEG_SITE')
-  expect(text).toContain('kept in ~/.lean-agent/mcp-env.json (secret, a command, or not writable): API_KEY, GH')
-  expect(text).not.toMatch(new RegExp(`${S1}|${S2}|${S4}|from-045|gh auth`))
+  expect(text).toContain('kept in ~/.lean-agent/mcp-env.json (a secret, a command, or no MCP server config uses the name): API_KEY, GH, UNUSED_SITE, TOKEN_LIKE')
+  expect(text).not.toMatch(new RegExp(`${S1}|${S2}|${S4}|from-045|gh auth|ghp_abc|u\\.example`))
   expect(JSON.parse(h.files.get(MCPENV)!).API_KEY).toEqual({ value: S2 }) // untouched
   expect(JSON.parse(h.files.get(MCPENV)!).GH).toEqual({ command: 'gh auth token' })
   expect(JSON.stringify(h.calls)).not.toMatch(new RegExp(`${S1}|${S2}|${S4}`))
@@ -341,13 +438,14 @@ test('0.45 import: plain non-secret values go into the settings env block once (
   expect(await tidyLegacy(h.host)).toEqual([])
   // the doctor says what happened, names only
   const note = (await check(h.host, '/plug')).find(l => l.includes('0.45 mcp-env.json'))!
-  expect(note).toBe('ok   0.45 mcp-env.json: moved to settings env: SITE, LEG_SITE; kept in mcp-env.json: API_KEY, GH')
+  expect(note).toBe('ok   0.45 mcp-env.json: moved to settings env: SITE, LEG_SITE; kept in mcp-env.json: API_KEY, GH, UNUSED_SITE, TOKEN_LIKE')
 })
 
 test('0.45 import: nothing to import is silent; an unparsable settings.json keeps the import pending and says what to do', async () => {
   const quiet = home()
   expect(await tidyLegacy(quiet.h.host)).toEqual([])
   const { h, j } = home()
+  uses(j, 'SITE')
   j(SETTINGS, '{ broken')
   j(MCPENV, { SITE: { value: S1 } })
   const lines = (await tidyLegacy(h.host)).join('\n')

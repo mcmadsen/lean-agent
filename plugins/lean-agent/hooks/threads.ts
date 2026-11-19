@@ -266,7 +266,12 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // MCP variables from ~/.lean-agent/mcp-env.json (a command's output or a plain value), run now, kept only in this thread's settings
   // (user-only file); a failure is a line in the reply (names only), never a failed start
   const menv = await threadEnv(h, home).catch(() => ({ env: {} as Record<string, string>, lines: [] as string[] }))
-  await writeThreadSettings(h, `${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off, menv.env), Object.keys(menv.env).length > 0)
+  const hasEnv = Object.keys(menv.env).length > 0
+  const kept = await writeThreadSettings(h, `${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off, menv.env), hasEnv, hasEnv ? await threadSettings(h, t.id, hooks, choice, off) : undefined).catch(async () => {
+    await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off)) // never a failed start, never a secret left in a loose file
+    return false
+  })
+  if (hasEnv && !kept) menv.lines = ["mcp env: the thread's settings file could not be made user-only, so its variables were left out"]
   await writeLoaded(h, home, t.id, loaded).catch(() => undefined)
   await startUsage(h, home, t.id).catch(() => undefined)
   const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
