@@ -821,7 +821,7 @@ export const register: Register = on => {
     // whose `paths:` match the files this call touches, once per context (ruleload.ts)
     if (role.kind === 'thread' && r?.deny === undefined) {
       try {
-        const text = await ruleContext(host, { session: lastSid, agent: typeof e.agentId === 'string' ? e.agentId : '', thread: role.id }, String(e.tool ?? ''), e, { threadProject: await threadProject(host), engineRoot: seenRoot })
+        const text = await ruleContext(host, { session: lastSid, agent: typeof e.agentId === 'string' ? e.agentId : '', thread: role.id }, String(e.tool ?? ''), e, { threadProject: await threadProject(host), engineRoot: seenRoot, cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : cwd, repoCounts: /^(lean-agent:)?reviewer$/.test(atype ?? '') })
         if (text) r = { ...r, context: [...(r?.context ?? []), text] }
       } catch {
         /* rules are optional: the tool result goes through unchanged */

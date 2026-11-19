@@ -2,7 +2,7 @@
 // (root = its own folder, project read by absolute path) gets them from the store through the tool results.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { MAX_COMPILED, MAX_INJECT_RULE, compiledCount, markNative, pathsOfCall, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
+import { MAX_COMPILED, MAX_INJECT_RULE, compiledCount, gitReads, markNative, pathsOfCall, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
 
 const L = '/h/.lean-agent'
 const rule = (paths: string[], body: string) => `${paths.length ? `---\npaths:\n${paths.map(p => `  - "${p}"`).join('\n')}\n---\n` : ''}${body}\n<!-- lean-agent: learned abc 2026-01-01 -->\n`
@@ -232,4 +232,76 @@ test('a thread session: a rule over the cap is named in the first context line a
   expect(text).toContain('rules: 0 skipped (over cap), 1 over the cap but loaded anyway (fat.md); run learn --trim or lean_rules check')
   expect(s.h.files.has('/repo/.claude/rules/lean-agent/fat.md')).toBe(true)
   expect(s.h.files.has('/repo/.claude/rules/lean-agent/old-only.md')).toBe(false)
+})
+
+// ---- read-only git commands: repo-relative paths ------------------------------------------------------------------------------------
+test('gitReads: -C <repo> show|grep|diff|log -p|blame with <rev>:<path>, `--` paths and bare file names; the repo of a plain command is the cwd', () => {
+  const g = (c: string, cwd?: string) => gitReads(c, cwd)
+  expect(g('git -C /repo show abc123:services/billing/a.ts')).toEqual({ paths: ['/repo/services/billing/a.ts'], repos: ['/repo'] })
+  expect(g('git -C /repo --no-pager grep -n LedgerRow -- services/billing apps/web').paths).toEqual(['/repo/services/billing', '/repo/apps/web'])
+  expect(g('git -C /repo grep LedgerRow services/billing/a.ts').paths).toEqual(['/repo/services/billing/a.ts']) // the first argument is the pattern
+  expect(g('git -C /repo diff main...HEAD -- apps/web/src/x.ts').paths).toEqual(['/repo/apps/web/src/x.ts'])
+  expect(g('git -C /repo diff main...HEAD apps/web/src/x.ts').paths).toEqual(['/repo/apps/web/src/x.ts']) // a range is no path
+  expect(g('git -C /repo log -p -- "services/billing/a.ts"').paths).toEqual(['/repo/services/billing/a.ts'])
+  expect(g('git -C /repo blame -L1,5 services/billing/a.ts').paths).toEqual(['/repo/services/billing/a.ts'])
+  expect(g('git show abc123:apps/web/package.json', '/repo')).toEqual({ paths: ['/repo/apps/web/package.json'], repos: ['/repo'] })
+  expect(g('git show abc123:apps/web/package.json')).toEqual({ paths: [], repos: [] }) // no -C, no cwd: no repo to resolve against
+  expect(g('cd /repo && git show HEAD:services/billing/a.ts | head').paths).toEqual(['/repo/services/billing/a.ts'])
+  expect(g('git -C /repo -c core.pager=cat show HEAD:a/b.ts').paths).toEqual(['/repo/a/b.ts'])
+  expect(g('git -C /repo/sub show HEAD:a/b.ts').paths).toEqual(['/repo/sub/a/b.ts'])
+  // not reads, and `..` is never placed inside a project
+  for (const c of ['git -C /repo status', 'git -C /repo commit -m x -- a/b.ts', 'git -C /repo push origin HEAD:main', 'git -C /repo add a/b.ts', 'echo git show a:b/c.ts']) expect(g(c).paths).toEqual([])
+  expect(g('git -C /repo show HEAD:../etc/passwd').paths).toEqual([])
+  expect(g('git -C /repo/../etc show HEAD:a/b.ts')).toEqual({ paths: [], repos: [] })
+  expect(g('git -C ../x show HEAD:a/b.ts', '/repo').paths).toEqual([])
+  expect(g(Array.from({ length: 12 }, (_, n) => `git -C /repo show HEAD:f${n}/a.ts`).join(' ; ')).paths.length).toBe(8) // capped like the absolute scan
+  // the old absolute-path scan is unchanged for other commands
+  expect(pathsOfCall('Bash', { command: 'cat /repo/a' }).paths).toEqual(['/repo/a'])
+  expect(pathsOfCall('Bash', { command: 'echo /repo/a' })).toEqual({ paths: [], loose: true, repos: [] })
+})
+
+test('a git show / grep / diff / log -p of a project file loads the rules of its area once, a plain `git show` from the worktree too', async () => {
+  const h = setup()
+  const a = await ruleContext(h.host, who, 'Bash', { command: 'git -C /repo show abc123:services/billing/a.ts' })
+  expect(a).toContain('rule proj/billing.md')
+  expect(a).toContain('_project.md')
+  expect(a).not.toContain('# web')
+  expect(await ruleContext(h.host, who, 'Bash', { command: 'git -C /repo show def456:services/billing/b.ts' })).toBeNull() // once
+  const w = await ruleContext(h.host, who, 'Bash', { command: 'git -C /repo grep -n x -- apps/web' }) // a folder of the area (loose)
+  expect(w).toContain('rule proj/web.md')
+  const h2 = setup()
+  expect(await ruleContext(h2.host, who, 'Bash', { command: 'git -C /repo diff main...HEAD -- services/billing/a.ts' })).toContain('billing.md')
+  const h3 = setup()
+  expect(await ruleContext(h3.host, who, 'Bash', { command: 'git -C /repo log -p -- apps/web/src/x.ts' })).toContain('web.md')
+  const h4 = setup()
+  const plain = await ruleContext(h4.host, who, 'Bash', { command: 'git show abc123:services/billing/a.ts' }, { cwd: '/wt/feat' }) // in a worktree of the project
+  expect(plain).toContain('billing.md')
+  expect(logRows(h4).map(r => r.trigger)).toContain('Bash')
+  // a worktree path is placed in its project by the checkouts list, the same as for a Read
+  expect(await ruleContext(setup().host, who, 'Bash', { command: 'git show abc123:services/billing/a.ts' }, { cwd: '/elsewhere' })).toBeNull()
+  expect(await ruleContext(setup().host, who, 'Bash', { command: 'git show abc123:services/billing/a.ts' })).toBeNull() // no cwd, no -C
+})
+
+test('git commands that are not reads, or that leave every project, load nothing', async () => {
+  const h = setup()
+  for (const command of ['git -C /repo status', 'git -C /repo commit -m x', 'git -C /repo push origin HEAD:services/billing', 'git -C /repo add services/billing/a.ts', 'git -C /elsewhere show abc:services/billing/a.ts', 'git -C /repo show HEAD:../services/billing/a.ts'])
+    expect(await ruleContext(h.host, who, 'Bash', { command })).toBeNull()
+})
+
+test('the reviewer role: the checkout itself counts, so a path-less `git diff`/`git show` gets _project and the repo-wide rules once; others do not', async () => {
+  const h = setup()
+  h.files.set(`${L}/proj/rules/all.md`, rule(['**'], '# all\n- every change needs a changelog line'))
+  const sub = { ...who, agent: 'rev1' }
+  const t = await ruleContext(h.host, sub, 'Bash', { command: 'git -C /repo show abc123' }, { repoCounts: true })
+  expect(t).toContain('rule proj/_project.md')
+  expect(t).toContain('rule proj/all.md')
+  expect(t).not.toContain('billing.md')
+  expect(await ruleContext(h.host, sub, 'Bash', { command: 'git -C /repo log --oneline' }, { repoCounts: true })).toBeNull() // once per context
+  // a path-scoped rule still needs its path
+  expect(await ruleContext(h.host, sub, 'Bash', { command: 'git -C /repo diff main...HEAD -- services/billing/a.ts' }, { repoCounts: true })).toContain('billing.md')
+  // not the reviewer: a `git show` with no path touches nothing (the repo is not counted)
+  const o = setup()
+  o.files.set(`${L}/proj/rules/all.md`, rule(['**'], '# all\n- x'))
+  expect(await ruleContext(o.host, { ...who, agent: 'wk1' }, 'Bash', { command: 'git -C /repo show abc123' })).toBeNull()
+  expect(await ruleContext(o.host, { ...who, agent: 'wk1' }, 'Bash', { command: 'git -C /repo log --oneline' })).toBeNull()
 })

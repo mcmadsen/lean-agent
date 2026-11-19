@@ -97,22 +97,70 @@ const prefixOf = (g: string) => g.replace(/[*?[{].*$/, '')
 // loose: a directory (or a shell argument) inside the rule's area counts, not only a file that matches
 const insideArea = (globs: string[], rel: string) => globs.some(g => { const p = prefixOf(g); return p !== '' && (rel === p.replace(/\/$/, '') || rel.startsWith(p)) })
 
-// absolute paths a tool call touches; `loose` = may be a directory or a shell argument
-export function pathsOfCall(tool: string, e: any): { paths: string[]; loose: boolean } {
+// A git command that only reads (a reviewer's `git -C <repo> show <sha>:<path>`, `git grep`, `git diff`, `git log -p`) names its files
+// RELATIVE to the repo, never by absolute path, so the scan below sees nothing. gitReads() resolves them: the repo is the `-C` argument
+// (or a `cd <abs>` before it, or the session's cwd for a plain `git show <rev>:<path>`), and every path argument is joined to it.
+const GIT_READS = new Set(['show', 'grep', 'diff', 'log', 'blame', 'ls-tree', 'cat-file'])
+const MAX_CALL_PATHS = 8
+const unq = (t: string) => t.replace(/^['"`]+|['"`]+$/g, '')
+const safeAbs = (p: string) => p.startsWith('/') && p.length > 1 && !p.split('/').includes('..')
+export function gitReads(cmd: string, cwd = ''): { paths: string[]; repos: string[] } {
+  const paths: string[] = []
+  const repos: string[] = []
+  let dir = cwd.replace(/\/+$/, '')
+  for (const seg of cmd.split(/&&|\|\||[|;&\n]/)) {
+    const t = seg.trim().split(/\s+/).map(unq).filter(Boolean)
+    if (t[0] === 'cd' && t[1]) { dir = t[1].startsWith('/') ? t[1].replace(/\/+$/, '') : dir && t[1] !== '-' ? `${dir}/${t[1]}` : ''; continue }
+    if (t[0] !== 'git') continue
+    let repo = dir
+    let i = 1
+    for (; i < t.length && t[i]!.startsWith('-'); i++) {
+      if (t[i] === '-C' && t[i + 1]) { const p = t[++i]!; repo = p.startsWith('/') ? p : repo ? `${repo}/${p}` : '' } else if (t[i] === '-c') i++
+    }
+    const sub = t[i++]
+    repo = repo.replace(/\/+$/, '')
+    if (!sub || !GIT_READS.has(sub) || !safeAbs(repo)) continue
+    repos.push(repo)
+    const add = (a: string) => {
+      const rel = a.replace(/[*?[{].*$/, '').replace(/^\.\//, '').replace(/\/+$/, '')
+      const abs = rel.startsWith('/') ? rel : rel ? `${repo}/${rel}` : ''
+      if (abs && !a.startsWith(':') && safeAbs(abs)) paths.push(abs)
+    }
+    let dd = false
+    let positional = 0
+    for (let k = i; k < t.length; k++) {
+      const a = t[k]!
+      if (dd) { add(a); continue }
+      if (a === '--') { dd = true; continue }
+      if (a === '-e' || a === '-f') { k++; positional += a === '-e' ? 1 : 0; continue } // grep -e <pattern>: the pattern is given
+      if (a.startsWith('-')) continue
+      positional++
+      const colon = a.indexOf(':')
+      if (sub === 'grep' || sub === 'ls-tree') { if (positional > 1 && colon < 0) add(a) } // the first one is the pattern (the tree-ish)
+      else if (colon > 0 && !a.startsWith('/')) add(a.slice(colon + 1)) // <rev>:<path>
+      else if (!a.includes('..') && colon < 0 && /\.[A-Za-z0-9]{1,6}$/.test(a)) add(a) // a bare file name
+    }
+  }
+  return { paths: [...new Set(paths)].slice(0, MAX_CALL_PATHS), repos: [...new Set(repos)] }
+}
+
+// absolute paths a tool call touches; `loose` = may be a directory or a shell argument; `repos` = the checkouts a read-only git command ran in
+export function pathsOfCall(tool: string, e: any, o: { cwd?: string } = {}): { paths: string[]; loose: boolean; repos: string[] } {
   const one = (v: unknown) => (typeof v === 'string' && v.startsWith('/') && !v.split('/').includes('..') ? [v.replace(/\/+$/, '') || '/'] : []) // a `..` path is never placed inside a project by its spelling
   if (tool === 'Bash') {
     const cmd = typeof e?.command === 'string' ? e.command : ''
-    if (!READS.test(cmd)) return { paths: [], loose: true }
-    const out = new Set<string>()
+    const g = gitReads(cmd, o.cwd)
+    if (!READS.test(cmd)) return { paths: g.paths, loose: true, repos: g.repos }
+    const out = new Set<string>(g.paths)
     for (const raw of cmd.split(/[\s|;&<>()=]+/)) {
       const t = raw.replace(/^['"`]+|['"`]+$/g, '').replace(/[*?[{].*$/, '').replace(/\/+$/, '')
       if (t.startsWith('/') && t.length > 1 && !t.split('/').includes('..')) out.add(t)
-      if (out.size >= 8) break
+      if (out.size >= MAX_CALL_PATHS) break
     }
-    return { paths: [...out], loose: true }
+    return { paths: [...out], loose: true, repos: g.repos }
   }
-  if (tool === 'Grep' || tool === 'Glob') return { paths: one(e?.path), loose: true }
-  return { paths: [...one(e?.file_path), ...one(e?.notebook_path)], loose: false }
+  if (tool === 'Grep' || tool === 'Glob') return { paths: one(e?.path), loose: true, repos: [] }
+  return { paths: [...one(e?.file_path), ...one(e?.notebook_path)], loose: false, repos: [] }
 }
 
 const textOf = (project: string, r: Rule) => {
@@ -141,7 +189,7 @@ export async function projectRule(h: Host, who: Who, project: string, trigger: s
 
 // The text to append to the result of one tool call of a thread (or of its subagent), or null. `engineRoot` = the session's root: paths
 // beneath it are left to the engine when that root is itself a project checkout.
-export async function ruleContext(h: Host, who: Who, tool: string, e: any, opts: { threadProject?: string; engineRoot?: string } = {}): Promise<string | null> {
+export async function ruleContext(h: Host, who: Who, tool: string, e: any, opts: { threadProject?: string; engineRoot?: string; cwd?: string; repoCounts?: boolean } = {}): Promise<string | null> {
   const first = who.agent !== '' && !agents.has(who.agent) // a subagent's first tool call: it never saw the session start's context
   if (who.agent) agents.add(who.agent)
   if (!WATCHED.has(tool) && !first) return null
@@ -152,7 +200,9 @@ export async function ruleContext(h: Host, who: Who, tool: string, e: any, opts:
   const cand: { project: string; r: Rule }[] = []
   const has = (project: string, r: Rule) => cand.some(c => c.project === project && c.r.name === r.name) || (given.get(who.agent) ?? new Set()).has(`${project}/${r.name}\0${r.sha}`)
   if (WATCHED.has(tool)) {
-    const { paths, loose } = pathsOfCall(tool, e)
+    const { paths: named, loose, repos } = pathsOfCall(tool, e, { cwd: opts.cwd })
+    // the reviewer role: the checkout a git command ran in counts as touched, whatever the command names (a `git diff` has no path)
+    const paths = opts.repoCounts ? [...new Set([...named, ...repos])] : named
     const engineHit = paths.length && opts.engineRoot ? await resolve(h, opts.engineRoot) : null // (no path: nothing to resolve, no refresh)
     for (const abs of paths) {
       if (engineHit && opts.engineRoot && (abs === opts.engineRoot || abs.startsWith(`${opts.engineRoot}/`))) continue
@@ -160,6 +210,7 @@ export async function ruleContext(h: Host, who: Who, tool: string, e: any, opts:
       if (!at) continue
       for (const r of await rulesOf(h, at.project)) {
         const c = r.name === '_project.md' || r.globs.length === 0 ? null : compiledOf(r)
+        // (a rule for the whole repo, `**`, matches the repo itself, rel '': a reviewer that touches the checkout gets it)
         const wanted = !c ? true : c.res.some(re => re.test(at.rel)) || (loose && insideArea(c.usable, at.rel))
         if (wanted && !has(at.project, r)) cand.push({ project: at.project, r })
       }
