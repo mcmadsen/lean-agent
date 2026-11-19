@@ -21,6 +21,24 @@
   (`chars`, `tokens`, `k`, `ms`, `s`, `%`, `lines`, `rows`, `files`, `tests`) stay, and so do thread ids `tN`. The final check also
   refuses to write the file when a word-plus-id survived.
 
+- **The desk ran opus although lean-agent pins sonnet.** The pin is in the desk folder's `settings.json`, but a session the Claude app
+  starts (by hand or through the new-session deep link) can take the app's own model menu instead. The engine has no model setter
+  (`$.session.model()` only reads), but it has the `/config` rows (`$.config.list()` / `$.config.set()`, "as if the person did in the
+  menu") and a `turn.step` hook that rewrites one request's model (not used: it would override the user's own choice at every step).
+  So, once per desk session (at `session.start` when the model is known then, else at the first request), when the session's model or
+  the effort row differs from the pin (`config.json` `desk`, default sonnet / high), the Model and Effort rows are set through
+  `$.config.set` and a notice says so (`the desk was on <model> (the app chose it); lean-agent set sonnet / high for this session`; the
+  desk's next prompt says it too). Nothing is forced when that is not possible (no such row, no option of that family, locked, denied,
+  throws, or the model did not move): `~/.lean-agent/desk/model.json` holds the state, the pane shows one top row `the desk runs
+  <model>; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)` and a notice, and a later request on the pin clears both.
+  After the one attempt a changed model is only noted, never written again (no fight with the user's menu). A model of no known family
+  (a gateway's) claims nothing. Threads are not touched: they are started with `--model` / `--effort`. Whether this build's
+  `/config` has a Model row could not be checked from the types alone; the fallback row covers a build that has none.
+- **Doctor text for a desk that spent on another model.** It no longer claims "started before setup pinned the model" unless that is
+  known: setup now records when the pin changed (`desk/pinned.json`), and the claim is made only when the live desk session started
+  before that. Otherwise it says `the app chose another model for this session: pick Sonnet in its model menu` (and, when the live desk
+  session runs the pin now, `the live desk session runs sonnet now`).
+
 ### Added
 - **A thread blocked on a permission denial can be answered where Claude Code judges it.** Claude Code's permission check judges a command
   in the session that runs it, and the user's yes was given to the desk. `lean_report` has an optional `approval` (state `blocked` only:

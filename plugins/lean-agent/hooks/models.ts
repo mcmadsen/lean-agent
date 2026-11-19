@@ -9,6 +9,9 @@ export type Choice = { model: string; effort: string }
 export const DESK_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
 export const THREAD_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
 
+// `claude-sonnet-5-5` and `sonnet` are the same family; a name of no known family is returned as it is
+export const modelFamily = (m: string): string => (/haiku/i.test(m) ? 'haiku' : /sonnet/i.test(m) ? 'sonnet' : /opus/i.test(m) ? 'opus' : m)
+
 const okModel = (m: unknown): m is string => typeof m === 'string' && (MODELS as readonly string[]).includes(m)
 const okEffort = (e: unknown): e is string => typeof e === 'string' && (EFFORTS as readonly string[]).includes(e)
 

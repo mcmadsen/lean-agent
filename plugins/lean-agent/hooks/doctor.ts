@@ -80,7 +80,13 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
     } else lines.push('login opener already in place')
   } else lines.push('not macOS: no login opener (Claude Desktop is macOS/Windows only)')
   const want = await deskChoice(h, home)
+  const before = await readModelSettings(h, `${deskDir(home)}/.claude/settings.json`)
   const pinned = await mergeModelSettings(h, `${deskDir(home)}/.claude/settings.json`, want)
+  // when the pin was written (only when it changed): the doctor says "started before setup pinned the model" only when that is known
+  if (pinned && (before?.model !== want.model || before?.effort !== want.effort)) {
+    await mkdirp(h, `${leanDir(home)}/desk`)
+    await writeJson(h, `${leanDir(home)}/desk/pinned.json`, { at: await h.clock.now(), model: want.model, effort: want.effort })
+  }
   lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   lines.push(opened ? 'desk can open files in ~/.lean-agent' : 'desk .claude/settings.json does not parse: ~/.lean-agent not added to the desk\'s folders, fix the file by hand')

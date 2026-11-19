@@ -5,6 +5,7 @@ import { approvalOf, deskState, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { readNotices } from './notices'
+import { deskModelText, readDeskModel } from './deskmodel'
 import { spendLine } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { isLimitRow, pausedRec, readLimit } from './limits'
@@ -22,7 +23,7 @@ import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
 import { scriptCounts, waitingScripts } from './scripts'
 import type { Waiting } from './scripts'
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; errors: string[]; deskModel?: string }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 
@@ -173,7 +174,16 @@ export async function loadView(h: Host): Promise<View> {
   await guard('budget', async () => {
     v.budget = (await loadBudget(h, home)) ?? 'n/a'
   })
-  v.errors.push(...(await readNotices(h)))
+  // the desk runs a model other than its pin and the mod could not change it: one top row says what to pick (not also a red notice line)
+  let deskModelNote = ''
+  await guard('desk model', async () => {
+    const m = await readDeskModel(h)
+    if (m) {
+      v.deskModel = deskModelText(m)
+      deskModelNote = v.deskModel
+    }
+  })
+  v.errors.push(...(await readNotices(h)).filter(n => n !== deskModelNote))
   return v
 }
 

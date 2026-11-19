@@ -6,7 +6,7 @@ import type { Agg, Dim } from './ledger'
 import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { deskChoice, threadChoice } from './models'
+import { deskChoice, modelFamily, threadChoice } from './models'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
 
@@ -171,7 +171,7 @@ export async function spendLine(h: Host): Promise<string | null> {
 // Sessions on a model lean-agent did not configure: spend today per role x model against the desk's pinned model and the
 // threads' recorded ones (a desk started before setup pinned it, a thread from before 1.0.2), and live sessions whose listed
 // model differs (`claude agents --json`, when it reports one). Returns one sentence each.
-const family = (m: string) => /haiku/i.test(m) ? 'haiku' : /sonnet/i.test(m) ? 'sonnet' : /opus/i.test(m) ? 'opus' : m
+const family = modelFamily
 export async function modelMismatches(h: Host): Promise<string[]> {
   const home = await homeDir(h)
   const now = await h.clock.now()
@@ -186,25 +186,31 @@ export async function modelMismatches(h: Host): Promise<string[]> {
     if (t?.model) allowed.add(family(t.model))
     if (t?.sid) sids.set(t.sid, { id: e.name, model: t.model })
   }
+  let listing: ReturnType<typeof parseAgents> | null = null
+  try {
+    const r = await h.process.run(['claude', 'agents', '--json', '--all'])
+    if (r.exitCode === 0) listing = parseAgents(r.stdout)
+  } catch {
+    /* no listing: the ledger below is what there is */
+  }
+  // "started before setup pinned the model" is said only when it is KNOWN: the live desk session started before the pin was written
+  // (desk/pinned.json, written by setup when the pin changed). Otherwise the app chose the model for that session.
+  const deskLive = (listing ?? []).find(a => isRunning(a) && !sids.has(a.sid) && a.cwd.replace(/\/$/, '') === deskDir(home))
+  const pinRec = await readJson<{ at?: number; model?: string } | null>(h, `${leanDir(home)}/desk/pinned.json`, null)
+  const beforePin = !!deskLive && deskLive.startedAt > 0 && typeof pinRec?.at === 'number' && pinRec.at > 0 && pinRec.model === desk && deskLive.startedAt < pinRec.at
+  const deskWhy = beforePin ? 'that session started before setup pinned the model; close it and open the desk again' : `the app chose another model for this session: pick ${desk.charAt(0).toUpperCase() + desk.slice(1)} in its model menu${deskLive?.model && family(deskLive.model) === desk ? ` (the live desk session runs ${desk} now)` : ''}`
   const ro = await syncRollup(h, now)
   const rm = ro.days[dayOf(now)]?.rmm ?? {} // the sessions' own requests: a worker's model is chosen per call and is no mismatch
   for (const [k, a] of Object.entries(rm)) {
     const [role, model = ''] = k.split('|')
-    if (role === 'desk' && family(model) !== desk) out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: that session started before setup pinned the model; close it and open the desk again`)
+    if (role === 'desk' && family(model) !== desk) out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: ${deskWhy}`)
     if (role === 'thread' && allowed.size && !allowed.has(family(model))) out.push(`threads spent ${usd(a[0])} today on ${model}, but none was started on ${[...allowed].join('/')} only: a thread from before 1.0.2 or a model given by hand; close it and Start again`)
   }
-  try {
-    const r = await h.process.run(['claude', 'agents', '--json', '--all'])
-    if (r.exitCode === 0) {
-      for (const a of parseAgents(r.stdout)) {
-        if (!a.model || !isRunning(a)) continue
-        const t = sids.get(a.sid)
-        if (t?.model && family(a.model) !== family(t.model)) out.push(`live session ${t.id} runs ${a.model}, lean-agent started it on ${t.model}`)
-        else if (!t && a.cwd.replace(/\/$/, '') === deskDir(home) && family(a.model) !== desk) out.push(`the live desk session runs ${a.model}, lean-agent pins ${desk}`)
-      }
-    }
-  } catch {
-    /* no listing: the ledger above is what there is */
+  for (const a of listing ?? []) {
+    if (!a.model || !isRunning(a)) continue
+    const t = sids.get(a.sid)
+    if (t?.model && family(a.model) !== family(t.model)) out.push(`live session ${t.id} runs ${a.model}, lean-agent started it on ${t.model}`)
+    else if (!t && a.cwd.replace(/\/$/, '') === deskDir(home) && family(a.model) !== desk) out.push(`the live desk session runs ${a.model}, lean-agent pins ${desk}`)
   }
   return out
 }

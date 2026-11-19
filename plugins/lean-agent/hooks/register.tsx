@@ -19,6 +19,8 @@ import { chase } from './chaser'
 import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
+import { checkDeskModel } from './deskmodel'
+import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
@@ -47,7 +49,11 @@ let notified = 0
 let grantSeq = 0
 let busySince = 0 // ms the desk's main turn started (0 = idle): the report relay never starts a turn over a running one
 let lastRelay = 0
+let deskModelTried = false // the desk's model / effort pin is applied at most once per session (deskmodel.ts)
+let deskModelSeen = '' // the model last judged: a check runs again only when it changes
 export const resetModState = () => {
+  deskModelTried = false
+  deskModelSeen = ''
   notified = 0
   busySince = 0
   lastRelay = 0
@@ -476,6 +482,27 @@ function redetect($: any, hint?: string, force = false): Promise<unknown> {
   }).catch(() => undefined)
 }
 
+// The desk runs on `running`: the pin is applied once per session (session.start when the model is known, else the first request), and
+// a later change of model is only noted (state for the pane's top row). Never throws; the text, when there is one, goes to the next prompt.
+const engineOf = ($: any): Engine => ({
+  configList: () => bounded($, Promise.resolve($.config.list()), 'config.list'),
+  configSet: a => bounded($, Promise.resolve($.config.set(a)), 'config.set'),
+  model: () => bounded($, Promise.resolve($.session.model()), 'session.model'),
+})
+async function deskModelCheck($: any, running: string): Promise<void> {
+  try {
+    if (!running) return
+    const apply = !deskModelTried
+    if (!apply && running === deskModelSeen) return
+    deskModelTried = true
+    deskModelSeen = running
+    const r = await checkDeskModel(hostOf($), engineOf($), running, apply)
+    if (r.text) pending.push(`[lean-agent] ${r.text}`)
+  } catch {
+    /* a model check that fails changes nothing */
+  }
+}
+
 // the tool pool for a role, the CURRENT one unless given (a test's `$` cannot raise tool.list)
 export async function poolFor<T extends { name: string }>(host: Host, tools: T[], kind: Role['kind'] = role.kind): Promise<T[]> {
   const cfg: any = await readConfig(host, await homeDir(host))
@@ -515,6 +542,8 @@ export const register: Register = on => {
         if (served) pending.push(`[lean-agent] ${served}`)
       })
     }
+    // the desk's model and effort pin, when the session's model is already known (else the first request does it)
+    if (role.kind === 'desk') await deskModelCheck($, String(await engineOf($).model().catch(() => '') ?? ''))
     // once per plugin version (desk): learned rules past a size cap, and the 0.45 `rules: off` key nothing reads
     if (role.kind === 'desk') {
       await soft($, 'rules check', async () => {
@@ -567,6 +596,7 @@ export const register: Register = on => {
     const type = e.agentId ? await agentType($, e.agentId, e) : undefined
     const why = await overBudget(host, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
     if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
+    if (!e.agentId && role.kind === 'desk' && typeof e.model === 'string') await deskModelCheck($, e.model) // the pin: once per session, then only a change is noted
     const r: any = yield* next(e)
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
