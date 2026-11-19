@@ -12,6 +12,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
   const os = { name: 'Darwin' } // what `uname` answers
   const app = { running: true, pgrep: null as null | ((a: string[]) => any) } // is the Claude app running (pgrep)
+  const opener = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) } // the system opener (open, xdg-open, rundll32): opens a URL
   const claude = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) }
   const res = (p: string): string => { for (const [k, v] of links) if (p === k || p.startsWith(k + '/')) return v + p.slice(k.length); return p } // a symlink anywhere in the path, as the OS follows it
   const perms = new Map<string, { uid: number; mode: number }>() // owner and mode per file (default: uid 501 = what `id -u` answers, mode 600); chmod changes it
@@ -74,6 +75,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
       if (c === 'head' && a[0] === '-n' && a[1] === '1') { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(t.split('\n')[0] + '\n') }
       if (c === 'head' && a[0] === '-c' && /^\d+$/.test(a[1] ?? '')) { const t = files.get(a[2]); return t === undefined ? { exitCode: 1, stdout: '', stderr: 'no such file' } : ok(new TextDecoder().decode(new TextEncoder().encode(t).subarray(0, Number(a[1])))) }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
+      if (c === 'open' || c === 'xdg-open' || c === 'rundll32') { const r = opener.handler([...argv], call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (exec.handler) { const r = exec.handler([...argv], call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
@@ -99,7 +101,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, claude, opener, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
 // An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the

@@ -14,6 +14,13 @@
   `Restart desk` button next to it (same two-step press as the one at the bottom); it replaces the footer line.
 - **Doctor:** the `last desk compaction` row for that case is a `note` row with the advice, not `FIX`. A `failed` record that
   holds the headless text (written by 1.0.8) reads as the same note.
+- **Restart desk and Open desk opened nothing.** Both ran `claude --desktop`, which refuses when its output is captured ("can't run
+  non-interactively"), as it always is from the mod. They now open the app's own deep link
+  `claude://code/new?folder=<percent-encoded real path of ~/lean-agent-desk>` with the system opener, as argv without a shell:
+  `open` on macOS, `xdg-open` on Linux, `rundll32 url.dll,FileProtocolHandler` on Windows (`explorer.exe` exits 1 on success). A
+  failing opener answers "Could not open the Claude app: <first line>; start a new session in ~/lean-agent-desk by hand" (Restart
+  desk keeps the handover either way and says where it is). `claude --desktop` is only tried when the opener cannot be started
+  at all. The "app is not running" check is macOS only.
 - Not done: the mod does not start `/compact` itself in a headless session. The engine types document `$.command.run`,
   `$.prompt.submit` and `$.skill.prompt`, but none of them says it works headless (reasons in the header of `deskcompact.ts`).
 

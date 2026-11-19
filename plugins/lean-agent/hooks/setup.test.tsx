@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { resetViewCache } from './view'
 import { resetLocks } from './threads'
+import { newSessionLink, openDesk, openerArgv, platformOf } from './setup'
 
 const PANE = {
   plugin: 'lean-agent',
@@ -47,21 +48,52 @@ test('a plain session on a fresh home shows Set up; pressing it runs fix once, t
   await ui.unmount()
 })
 
-test('Open desk runs claude --desktop in the desk folder, never when the Claude app is not running', async ($, on) => {
+// the system opener's calls (a URL is opened with `open`, `xdg-open` or rundll32, never with `claude --desktop`, which refuses to run
+// when its output is captured)
+const opens = (h: any) => h.calls.filter((c: any) => ['open', 'xdg-open', 'rundll32'].includes(c.argv[0]))
+const desktopCalls = (h: any) => h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')
+
+test('Open desk opens the new-session deep link for the desk folder with the system opener, never when the Claude app is not running', async ($, on) => {
   const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
   await start($)
   const ui = await $.ui.mount(PANE as any)
   await ui.press({ key: 'setup' })
   h.app.running = false
   await ui.press({ key: 'open-desk' })
-  expect(h.claudeCalls().filter((a: string[]) => a[0] === '--desktop')).toHaveLength(0)
+  expect(opens(h)).toHaveLength(0)
   expect(await ui.find({ type: 'Text', text: /app is not running/ })).toBeTruthy()
   h.app.running = true
   await ui.press({ key: 'open-desk' })
-  const opened = h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')
-  expect(opened).toHaveLength(1)
-  expect(opened[0]?.cwd).toBe('/h/lean-agent-desk')
+  expect(opens(h).map((c: any) => c.argv)).toEqual([['open', 'claude://code/new?folder=%2Fh%2Flean-agent-desk']])
+  expect(desktopCalls(h)).toHaveLength(0)
   await ui.unmount()
+})
+
+test('the opener per platform, as argv without a shell; the folder is the real path, percent-encoded (spaces, non-ASCII)', async ($, on) => {
+  expect(newSessionLink('/Users/a b/lean-agent-desk')).toBe('claude://code/new?folder=%2FUsers%2Fa%20b%2Flean-agent-desk')
+  expect(newSessionLink('/h/ü&x=1/d')).toBe('claude://code/new?folder=%2Fh%2F%C3%BC%26x%3D1%2Fd')
+  const url = 'claude://code/new?folder=%2Fh%2Fd'
+  expect(openerArgv('mac', url)).toEqual(['open', url])
+  expect(openerArgv('linux', url)).toEqual(['xdg-open', url])
+  expect(openerArgv('windows', url)).toEqual(['rundll32', 'url.dll,FileProtocolHandler', url])
+  const { h } = fresh(on, '/h/lean-agent-desk')
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  expect(await platformOf(h.host)).toBe('mac')
+  h.os.name = 'Linux'
+  expect(await platformOf(h.host)).toBe('linux')
+  expect((await openDesk(h.host, 'desktop')).ok).toBe(true)
+  expect(opens(h).pop().argv).toEqual(['xdg-open', 'claude://code/new?folder=%2Fh%2Flean-agent-desk'])
+  h.os.name = 'MINGW64_NT-10.0'
+  expect(await platformOf(h.host)).toBe('windows')
+  expect((await openDesk(h.host)).ok).toBe(true) // (the app check is a macOS one)
+  expect(opens(h).pop().argv).toEqual(['rundll32', 'url.dll,FileProtocolHandler', 'claude://code/new?folder=%2Fh%2Flean-agent-desk'])
+  // the desk folder behind a symlink: the link carries the real path
+  h.os.name = 'Darwin'
+  h.links.set('/h/lean-agent-desk', '/Volumes/data/my desk')
+  h.files.set('/Volumes/data/my desk/CLAUDE.md', 'desk')
+  expect((await openDesk(h.host, 'desktop')).ok).toBe(true)
+  expect(opens(h).pop().argv).toEqual(['open', 'claude://code/new?folder=%2FVolumes%2Fdata%2Fmy%20desk'])
+  expect(desktopCalls(h)).toHaveLength(0)
 })
 
 test('/lean-agent-setup prints the fix lines in a session that is not the desk, and is repeatable', async ($, on) => {
@@ -111,16 +143,43 @@ test('two setup runs that overlap share one fix', async ($, on) => {
   expect(h.calls.filter((c: any) => c.argv[0] === 'mkdir' && c.argv.includes('/h/lean-agent-desk')).length).toBe(1)
 })
 
-test('claude --desktop failing says what to do instead', async ($, on) => {
+test('an opener that fails says what to do instead (its first line, then the by-hand advice); claude --desktop is not tried', async ($, on) => {
   const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
-  const base = h.claude.handler
-  h.claude.handler = (a: string[], c: any) => (a[0] === '--desktop' ? { exitCode: 2, stdout: '' } : base(a, c))
+  h.opener.handler = () => ({ exitCode: 1, stdout: '', stderr: '\nThe application cannot be opened\nsecond line' })
   await start($)
   const ui = await $.ui.mount(PANE as any)
   await ui.press({ key: 'setup' })
   await ui.press({ key: 'open-desk' })
-  expect(await ui.find({ type: 'Text', text: /exited 2/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Could not open the Claude app: The application cannot be opened; start a new session in ~\/lean-agent-desk by hand$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /second line/ })).toBeFalsy()
+  expect(desktopCalls(h)).toHaveLength(0)
+  // no output at all: the exit code says it
+  h.opener.handler = () => ({ exitCode: 2, stdout: '' })
+  await ui.press({ key: 'open-desk' })
+  expect(await ui.find({ type: 'Text', text: /Could not open the Claude app: open exited 2; start a new session/ })).toBeTruthy()
   await ui.unmount()
+})
+
+test('an opener that cannot be started falls back to claude --desktop, and says both when both fail', async ($, on) => {
+  const { h } = fresh(on, '/h/lean-agent-desk')
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  h.os.name = 'Linux'
+  h.opener.handler = () => { throw new Error('spawn xdg-open ENOENT') }
+  const r = await openDesk(h.host, 'desktop')
+  expect(r.ok).toBe(true) // claude --desktop answered 0
+  expect(desktopCalls(h).map((c: any) => c.cwd)).toEqual(['/h/lean-agent-desk'])
+  h.claude.handler = (a: string[]) => (a[0] === '--desktop' ? { exitCode: 1, stdout: '', stderr: "--desktop opens the Claude Desktop app and can't run non-interactively" } : { exitCode: 0, stdout: '' })
+  const bad = await openDesk(h.host, 'desktop')
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('Could not open the Claude app: spawn xdg-open ENOENT; claude --desktop: --desktop opens the Claude Desktop app')
+  expect(bad.text).toContain('start a new session in ~/lean-agent-desk by hand')
+  // an opener that started and then timed out is not retried with the CLI (a second window); a trailing period is dropped
+  const before = desktopCalls(h).length
+  h.opener.handler = () => { throw new Error('process timed out after 15000ms.') }
+  const slow = await openDesk(h.host, 'desktop')
+  expect(slow.text).toBe('Could not open the Claude app: process timed out after 15000ms; start a new session in ~/lean-agent-desk by hand')
+  expect(desktopCalls(h)).toHaveLength(before)
+  expect(opens(h).pop().timeoutMs).toBe(15_000)
 })
 
 test('Open desk from a pane on the desktop surface skips pgrep (the app is running)', async ($, on) => {
@@ -131,35 +190,35 @@ test('Open desk from a pane on the desktop surface skips pgrep (the app is runni
   h.app.running = false
   await ui.press({ key: 'open-desk' })
   expect(h.calls.filter((c: any) => c.argv[0].endsWith('pgrep'))).toHaveLength(0)
-  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  expect(opens(h)).toHaveLength(1)
   await ui.unmount()
 })
 
-test('Open desk elsewhere: second pgrep form finds the app; a pgrep that errors still tries claude --desktop and shows its real error', async ($, on) => {
+test('Open desk elsewhere: second pgrep form finds the app; a pgrep that errors still opens the link and shows the opener\'s real error', async ($, on) => {
   const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
   await start($)
   const ui = await $.ui.mount(PANE as any)
   await ui.press({ key: 'setup' })
   h.app.pgrep = (a: string[]) => (a[0] === '-f' ? { exitCode: 0, stdout: '1', stderr: '' } : { exitCode: 1, stdout: '', stderr: '' })
   await ui.press({ key: 'open-desk' })
-  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  expect(opens(h)).toHaveLength(1)
   h.app.pgrep = () => { throw new Error('spawn pgrep ENOENT') }
-  h.claude.handler = (a: string[]) => (a[0] === '--desktop' ? { exitCode: 3, stdout: '', stderr: 'no app window' } : { exitCode: 0, stdout: a[0] === 'agents' ? '[]' : '' })
+  h.opener.handler = () => ({ exitCode: 3, stdout: '', stderr: 'no app window' })
   await ui.press({ key: 'open-desk' })
-  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(2)
+  expect(opens(h)).toHaveLength(2)
   expect(await ui.find({ type: 'Text', text: /no app window/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /not running/ })).toBeFalsy()
   await ui.unmount()
 })
 
-test('a pgrep that fails with a code other than 1 is not "app not running": claude --desktop is still tried', async ($, on) => {
+test('a pgrep that fails with a code other than 1 is not "app not running": the link is still opened', async ($, on) => {
   const { h, start } = fresh(on, '/h/.claude/spares/spare-abc')
   await start($)
   const ui = await $.ui.mount(PANE as any)
   await ui.press({ key: 'setup' })
   h.app.pgrep = () => ({ exitCode: 2, stdout: '', stderr: 'syntax error' })
   await ui.press({ key: 'open-desk' })
-  expect(h.calls.filter((c: any) => c.argv[0] === 'claude' && c.argv[1] === '--desktop')).toHaveLength(1)
+  expect(opens(h)).toHaveLength(1)
   await ui.unmount()
 })
 

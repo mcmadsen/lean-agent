@@ -1,7 +1,7 @@
 // Setup without a model turn: the pane's button, the /lean-agent-setup command and lean_doctor `fix` all go through
 // setupFix, so there is one code path. doctor.fix is idempotent, so running it again is safe.
 import { check, fix } from './doctor'
-import { deskDir, homeDir } from './state'
+import { deskDir, homeDir, realPath } from './state'
 import type { Host } from './state'
 
 // `mcp`: what the doctor's `MCP ` rows say (an MCP server needs a variable the desk and threads do not have): not a repair a press
@@ -82,20 +82,57 @@ async function appRunning(h: Host): Promise<boolean | null> {
   }
 }
 
-// Opens the desk the way the login agent does (`claude --desktop` in the desk folder), and never launches the Claude app
-// itself: without a running app there is nothing to open it in. A pane drawn on the 'desktop' surface is inside the app,
-// so the app is running and the check is skipped; if the check itself errors, `claude --desktop` is tried anyway.
+// The deep link the Claude app opens a new session in a folder with (what `claude --desktop` does itself: the CLI refuses to run
+// it when its output is captured, as it is from the mod, so the mod opens the link with the system opener instead).
+export const newSessionLink = (folder: string): string => `claude://code/new?folder=${encodeURIComponent(folder)}`
+
+// the system opener for a URL, as argv (no shell): `open` on macOS, xdg-open on Linux, and on Windows rundll32's URL handler
+// (explorer.exe exits 1 on success, and `cmd /c start` would need the URL parsed by cmd)
+export type Platform = 'mac' | 'windows' | 'linux'
+export async function platformOf(h: Host): Promise<Platform> {
+  try {
+    const r = await h.process.run(['uname', '-s'])
+    const n = (r.stdout || '').trim()
+    if (r.exitCode === 0 && n) return n === 'Darwin' ? 'mac' : /^(MINGW|MSYS|CYGWIN|Windows)/i.test(n) ? 'windows' : 'linux'
+  } catch {
+    /* no uname: Windows has none */
+  }
+  return (await h.env.get('OS').catch(() => undefined)) === 'Windows_NT' ? 'windows' : 'linux'
+}
+export const openerArgv = (p: Platform, url: string): string[] => (p === 'mac' ? ['open', url] : p === 'windows' ? ['rundll32', 'url.dll,FileProtocolHandler', url] : ['xdg-open', url])
+
+const firstLine = (s: string | undefined): string => ((s ?? '').split('\n').map(x => x.trim()).find(Boolean) ?? '').slice(0, 200).replace(/\.+$/, '')
+// a process that could not be started at all (not installed), as opposed to one that started and then timed out or failed
+const NOT_STARTED = /ENOENT|not found|spawn|no such file/i
+
+// Opens the desk in the Claude app: a new session in the desk folder through the app's deep link, and never launches the app
+// itself: without a running app there is nothing to open it in (checked on macOS; a pane drawn on the 'desktop' surface is inside
+// the app, so the check is skipped; if the check itself errors the link is opened anyway). `claude --desktop` is only the last
+// fallback, for a system whose opener cannot be started at all.
 export async function openDesk(h: Host, surface?: string): Promise<{ ok: boolean; text: string }> {
   const dir = deskDir(await homeDir(h))
   if (!(await h.fs.exists(dir))) return { ok: false, text: 'The desk folder is missing: press Set up first.' }
-  if (surface !== 'desktop' && (await appRunning(h)) === false) return { ok: false, text: 'The Claude app is not running: open it, then press Open desk again.' }
-  let r: { exitCode: number; stdout?: string; stderr?: string }
+  const plat = await platformOf(h)
+  if (plat === 'mac' && surface !== 'desktop' && (await appRunning(h)) === false) return { ok: false, text: 'The Claude app is not running: open it, then press Open desk again.' }
+  const argv = openerArgv(plat, newSessionLink(await realPath(h, dir)))
+  const by = 'start a new session in ~/lean-agent-desk by hand'
+  let spawnError = ''
   try {
-    r = await h.process.run(['claude', '--desktop'], { cwd: dir })
+    // (bounded: xdg-open can block on some desktops; rundll32 exits 0 even when no handler is registered, which cannot be told apart)
+    const r = await h.process.run(argv, { timeoutMs: 15_000 })
+    if (r.exitCode === 0) return { ok: true, text: 'Desk opened in the Claude app.' }
+    return { ok: false, text: `Could not open the Claude app: ${firstLine(r.stderr) || firstLine(r.stdout) || `${argv[0]} exited ${r.exitCode}`}; ${by}` }
   } catch (e) {
-    return { ok: false, text: `claude --desktop failed: ${String((e as Error)?.message ?? e).slice(0, 200)}` }
+    spawnError = firstLine(String((e as Error)?.message ?? e))
+    // started but failed (a timeout): the CLI fallback could open a second window, so it is not tried
+    if (!NOT_STARTED.test(spawnError)) return { ok: false, text: `Could not open the Claude app: ${spawnError || `${argv[0]} failed`}; ${by}` }
   }
-  if (r.exitCode === 0) return { ok: true, text: 'Desk opened in the Claude app.' }
-  const why = (r.stderr || r.stdout || '').trim().slice(0, 200)
-  return { ok: false, text: `claude --desktop exited ${r.exitCode}${why ? `: ${why}` : ''}. Start a new session in ~/lean-agent-desk instead.` }
+  // the opener could not be started (not installed): the CLI's own way, which works only where its output is not captured
+  try {
+    const r = await h.process.run(['claude', '--desktop'], { cwd: dir })
+    if (r.exitCode === 0) return { ok: true, text: 'Desk opened in the Claude app.' }
+    return { ok: false, text: `Could not open the Claude app: ${spawnError || `${argv[0]} could not be started`}; claude --desktop: ${firstLine(r.stderr) || firstLine(r.stdout) || `exited ${r.exitCode}`}; ${by}` }
+  } catch (e) {
+    return { ok: false, text: `Could not open the Claude app: ${spawnError || `${argv[0]} could not be started`}; claude --desktop: ${firstLine(String((e as Error)?.message ?? e))}; ${by}` }
+  }
 }

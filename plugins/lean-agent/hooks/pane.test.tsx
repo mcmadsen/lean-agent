@@ -420,19 +420,24 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   await ui.press({ key: 'restart-desk' })
   expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy()
   expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
-  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
+  const opened = () => h.calls.filter((c: any) => c.argv[0] === 'open')
+  expect(opened()).toHaveLength(0)
+  let handoverWhenOpened = false
+  h.opener.handler = () => { handoverWhenOpened = h.files.has('/h/.lean-agent/desk/handover.md'); return { exitCode: 0, stdout: '' } }
   await ui.press({ key: 'restart-desk' })
   const md = h.files.get('/h/.lean-agent/desk/handover.md')!
   expect(md).toContain('# Desk handover')
   expect(md).toContain('ship it') // the goals
-  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(true)
+  expect(opened().map((c: any) => c.argv)).toEqual([['open', 'claude://code/new?folder=%2Fh%2Flean-agent-desk']]) // the deep link, not `claude --desktop`
+  expect(handoverWhenOpened).toBe(true) // the handover first, then the link
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
   expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
   // the open fails: the handover is there and the notice says where
-  const base = h.claude.handler!
-  h.claude.handler = (a: string[], c?: any) => (a[0] === '--desktop' ? { exitCode: 1, stdout: '', stderr: 'no app' } : (base as any)(a, c))
+  h.opener.handler = () => ({ exitCode: 1, stdout: '', stderr: 'no app' })
   await ui.press({ key: 'restart-desk' })
   await ui.press({ key: 'restart-desk' })
   expect(await ui.find({ type: 'Text', text: /handover\.md/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Could not open the Claude app: no app; start a new session in ~\/lean-agent-desk by hand/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -457,7 +462,8 @@ test('the /lean-agent-restart-desk command does the same in the desk, and refuse
   const r: any = await $.command.run({ command: 'lean-agent-restart-desk', surface: 'desktop' } as any)
   expect(JSON.stringify(r)).toContain('New desk opened with the handover: close this one')
   expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(true)
-  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(true)
+  expect(h.calls.some((c: any) => c.argv[0] === 'open' && c.argv[1] === 'claude://code/new?folder=%2Fh%2Flean-agent-desk')).toBe(true)
+  expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
 })
 
 test('a new desk session start serves the handover: it is renamed, so a later desk does not find a stale one', async ($, on) => {
