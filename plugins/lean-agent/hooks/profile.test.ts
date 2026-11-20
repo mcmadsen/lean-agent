@@ -16,6 +16,7 @@ function setup() {
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}\n<!-- profile -->\nLoaded for you: {{loaded}}\n<!-- /profile -->\nrest')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' }, other: { path: '/r/other' } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { plugins: 'all', skills: 'all' } })) // the pre-1.0.20 behaviour; the lean defaults are specced in threadlean.test.ts
   h.claude.handler = (a: string[]) => (a[0] === '--bg' ? { exitCode: 0, stdout: `started ${SID}\n` } : { exitCode: 0, stdout: '[]' })
   const call = (i: any) => leanThread(h.host, ROOT, i)
   return { h, call }

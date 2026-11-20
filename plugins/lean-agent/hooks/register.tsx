@@ -22,8 +22,9 @@ import { chase } from './chaser'
 import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
-import { checkDeskModel } from './deskmodel'
-import { DESK_FAMILIES, modelFamily } from './models'
+import { checkDeskModel, decideSwitch, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
+import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
+import { isExpensiveModel } from './expensive'
 import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -32,6 +33,8 @@ import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, n
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
+import { threadSkillsLean } from './threadlean'
+import { overheadProbe } from './probe'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
@@ -79,9 +82,14 @@ let busySince = 0 // ms the desk's main turn started (0 = idle): the report rela
 let lastRelay = 0
 let deskModelTried = false // the desk's model / effort pin is applied at most once per session (deskmodel.ts)
 let deskModelSeen = '' // the model last judged: a check runs again only when it changes
+let switchState = newSwitchState() // this session's PreModelSwitch decisions (deskmodel.ts decideSwitch)
+let modSession = String(Date.now()) // a session key when the engine gave no session id
+const deskSession = () => lastSid || modSession
 export const resetModState = () => {
   deskModelTried = false
   deskModelSeen = ''
+  switchState = newSwitchState()
+  modSession = String(Date.now())
   notified = 0
   busySince = 0
   lastRelay = 0
@@ -158,7 +166,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); "probe" or "probe tN": a few one-word haiku calls (about 5 cents) that switch MCP, skills, other plugins and your user CLAUDE.md off one at a time and name the biggest part of the base; context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' } }, required: ['command'] } }
@@ -656,17 +664,19 @@ const engineOf = ($: any): Engine => ({
 })
 // The session's own model is what is judged (a request may be a side request on a small model, a title or a summary); the request's
 // model only stands in when the session cannot say.
-async function deskModelCheck($: any, fromRequest = ''): Promise<void> {
+async function deskModelCheck($: any, fromRequest = '', again = false): Promise<void> {
   try {
     const sm = String((await engineOf($).model().catch(() => '')) ?? '')
     const running = DESK_FAMILIES.includes(modelFamily(sm)) ? sm : fromRequest
     if (!running) return
-    const apply = !deskModelTried
+    // a later prompt whose session model is not the pin again (the app chose it once more) puts the pin back BEFORE the turn runs
+    const host = hostOf($)
+    const apply = !deskModelTried || (again && modelFamily(running) !== (await deskChoice(host, await homeDir(host))).model)
     if (!apply && running === deskModelSeen) return
     deskModelTried = true
     deskModelSeen = running
-    const r = await checkDeskModel(hostOf($), engineOf($), running, apply)
-    if (r.text) pending.push(`[lean-agent] ${r.text}`)
+    const r = await checkDeskModel(host, engineOf($), running, apply, deskSession())
+    if (r.text && !r.repeat) pending.push(`[lean-agent] ${r.text}`) // said once per session; the pane notice carries the count
   } catch {
     /* a model check that fails changes nothing */
   }
@@ -771,6 +781,24 @@ export const register: Register = on => {
   // result whose text says the permission check / auto mode classifier denied it. From then on the thread's own edit of the paths that call
   // named in its brief is allowed (orchestrate.ts; the engine's permission check still judges each edit). Never `retry`, no permission changed.
   const deniedSeen = new Set<string>()
+  // The desk's model pin against the app choosing again (deskmodel.ts decideSwitch): the app's choice of an expensive model is asked about once per
+  // session and then refused, a switch the person made by hand (/model, the picker) is never touched. The decision is the engine's documented
+  // PreModelSwitch answer; the engine's `source` cannot tell the app's default from its model menu (both "sdk"), hence the one question.
+  on('classic.PreModelSwitch', async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'desk') return r
+    const host = hostOf($)
+    const d = decideSwitch(e, await deskChoice(host, await homeDir(host)), switchState, isExpensiveModel)
+    if (d.user) await noteUserChoice(host, d.user, deskSession())
+    if (d.user) switchState.user = d.user
+    if (!d.decision) return r
+    await noteSdkSwitch(host, String(e?.to_model ?? ''), deskSession(), d.decision === 'deny')
+    return { ...r, permissionDecision: d.decision, permissionDecisionReason: d.reason }
+  }).catch(($, e: any, next) => next(e))
+  on('classic.PostModelSwitch', async ($, e: any, next) => {
+    if (role.kind === 'desk') noteSwitched(e, switchState)
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
   on('classic.PermissionDenied', async ($, e: any, next) => {
     await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied').catch(() => undefined)
     return next(e) // never `retry`
@@ -862,8 +890,8 @@ export const register: Register = on => {
     const r: any = yield* next(e)
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
-      if (role.kind === 'thread' && !e.agentId && lastSid) await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '') // the first request of the session: its real base
-      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}) }, r?.usage?.model ?? e.model, r?.usage)
+      const fresh = role.kind === 'thread' && !e.agentId && !!lastSid && (await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '')) // the first request of the session: its real base, and its cost is the session's start (a restart's price)
+      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}), ...(fresh ? { fresh: true as const } : {}) }, r?.usage?.model ?? e.model, r?.usage)
       if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
     } catch {
       /* a ledger write that fails never stops the turn */
@@ -902,7 +930,7 @@ export const register: Register = on => {
       return { ...r, text: null } // (not the skill stat: that one is the listing's alone)
     }
     if (!isSkillAttachment(type)) return r
-    if (role.kind !== 'desk') {
+    if (role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) {
       skillsSeen(type, `not the desk (role ${role.kind}): untouched`)
       return r
     }
@@ -914,7 +942,7 @@ export const register: Register = on => {
   // a build may list skills in the Skill tool's description instead: same filter, same safety rule
   on('tool.describe', { tool: 'Skill' }, async ($, e: any, next) => {
     const r: any = await next(e)
-    if (role.kind !== 'desk' || typeof r?.description !== 'string') return r
+    if ((role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) || typeof r?.description !== 'string') return r
     const t = trimListing(r.description)
     if (t.text === null) return r
     skillsSeen('Skill tool description', t.reason)
@@ -1077,6 +1105,7 @@ export const register: Register = on => {
         if (o.ok) dropSetupCheck()
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
       }
+      if (e.action === 'overhead' && /^probe\b/.test(String(e.session ?? ''))) return { result: await overheadProbe(host, String($.plugin.root), String(e.session)) } as any
       if (e.action === 'overhead') return { result: await overheadReport(host, String($.plugin.root), { session: typeof e.session === 'string' && e.session ? e.session : undefined, home: await homeDir(host), tools: { desk: [...seenSpecs.values()], thread: [...THREAD_TOOLS, SCRIPT_SPEC, RUN_SPEC] } }) } as any
       if (e.action === 'context') return { result: await contextReport(host, await homeDir(host), typeof e.session === 'string' && e.session ? e.session : undefined) } as any
       if (e.action === 'dismiss-old-desk') {
@@ -1273,6 +1302,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
     await redetect($)
+    if (role.kind === 'desk') await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
       let more: string | null = null

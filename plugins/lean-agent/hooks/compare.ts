@@ -327,7 +327,7 @@ const TEMP = /^t9\d{16}$/
 const TEMP_DIR = /\/threads\/t9\d{16}$/
 // It gets the project's profile like a real thread (plugins outside it off in its settings, loaded.json for the mod's deferral), so the
 // column shows what a thread of this project really starts with.
-async function tempThread(h: Host, root: string, home: string, project: string): Promise<{ dir: string; loaded: Loaded }> {
+export async function tempThread(h: Host, root: string, home: string, project: string): Promise<{ dir: string; loaded: Loaded }> {
   const now = await h.clock.now()
   for (const e of await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])) {
     if (TEMP.test(e.name) && Number(e.name.slice(2, 15)) < now - 3_600_000) await h.process.run(['rm', '-rf', `${threadsDir(home)}/${e.name}`]).catch(() => undefined)
@@ -341,7 +341,7 @@ async function tempThread(h: Host, root: string, home: string, project: string):
   await writeLoaded(h, home, id, loaded).catch(() => undefined)
   return { dir, loaded }
 }
-const dropDir = async (h: Host, dir: string) => {
+export const dropDir = async (h: Host, dir: string) => {
   if (TEMP_DIR.test(dir)) await h.process.run(['rm', '-rf', dir]).catch(() => undefined)
 }
 const THREAD_NOTE = 'the thread folder does not load the project\'s CLAUDE.md or .claude/rules at start (a real thread reads the project by absolute paths: its rules load when files are read), so this column omits them'

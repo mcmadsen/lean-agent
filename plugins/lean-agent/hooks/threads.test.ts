@@ -473,6 +473,7 @@ test('a failed claude stop runs no rm; a guide built without a choice (compare\'
 
 test('start, new and reopen say the model and effort the session got; the thread guide carries the same line', async () => {
   const { h, state, call } = setup()
+  h.files.set('/h/.lean-agent/config.json', '{"threads":{"plugins":"all","skills":"all"}}') // the pre-1.0.20 behaviour (the lean defaults: threadlean.test.ts)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}}\nmodel: {{model}}, effort: {{effort}} (from thread.json)')
   const r = await call({ action: 'new', title: 'a', text: 'brief' })
   expect(r.text).toBe(`t1 started (${SID}) · sonnet/high`)

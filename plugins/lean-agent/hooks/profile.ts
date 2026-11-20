@@ -14,9 +14,10 @@
 import { homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { slugOk } from './rules'
+import { leanNote, readLeanThreadCfg } from './threadlean'
 
 export type Profile = { mcp?: string[]; plugins?: string[]; at?: number; source?: string }
-export type Loaded = { mcp: string[] | null; plugins: string[] | null; needs: string[] } // null = not restricted (everything loads)
+export type Loaded = { mcp: string[] | null; plugins: string[] | null; needs: string[]; note?: string } // null = not restricted (everything loads)
 export type Seen = { calls: number; threads: number }
 export type Usage = { threads: number; mcp: Record<string, Seen>; skills: Record<string, Seen>; plugins: Record<string, Seen> }
 
@@ -79,13 +80,25 @@ export async function removeProfile(h: Host, home: string, project: string): Pro
 // ---- what a thread is started with --------------------------------------------------------------------------------
 export async function resolveLoaded(h: Host, home: string, project: string, needs: string[] = []): Promise<Loaded> {
   const prof = project ? await readProfile(h, home, project) : null
-  if (!prof) return { mcp: null, plugins: null, needs }
+  const cfg = await readLeanThreadCfg(h, home).catch(() => null)
+  const lean = cfg ?? { plugins: 'all' as const, skills: 'all' as const, mcp: 'all' as const }
   const add = (l: string[] | undefined) => (l ? uniq([...l, ...needs]) : null)
-  return { mcp: add(prof.mcp), plugins: add(prof.plugins), needs }
+  // plugins: the lean default is lean-agent alone (+ config threads.plugins, + the project's profile, + the thread's needs); "all" = as before
+  const plugins = lean.plugins === 'all' ? add(prof?.plugins) : uniq([...lean.plugins, ...(prof?.plugins ?? []), ...needs])
+  // MCP: "all" (default) = the profile only; "project" = the project's own list too; "none" = the thread's needs only
+  const projectMcp = lean.mcp === 'project' ? [...(prof?.mcp ?? []), ...(await projectMcpNames(h, home, project))] : []
+  const mcp = lean.mcp === 'all' ? add(prof?.mcp) : uniq([...projectMcp, ...needs])
+  return { mcp, plugins, needs, ...(cfg && (cfg.plugins !== 'all' || cfg.skills !== 'all' || cfg.mcp !== 'all') ? { note: leanNote(cfg) } : {}) }
+}
+// projects.json `<name>.mcp`: the servers a project says its threads use
+async function projectMcpNames(h: Host, home: string, project: string): Promise<string[]> {
+  if (!slugOk(project)) return []
+  const all = await readJson<Record<string, any> | null>(h, `${leanDir(home)}/projects.json`, null)
+  return names(all?.[project]?.mcp) ?? []
 }
 const list = (l: string[] | null) => (l === null ? 'all' : l.length ? l.join(',') : 'none')
 // "mcp: a,b · plugins: x" (list, new, compare); `all` = nothing is held back
-export const loadedText = (l: Loaded) => `mcp: ${list(l.mcp)} · plugins: ${list(l.plugins)}`
+export const loadedText = (l: Loaded) => `mcp: ${list(l.mcp)} · plugins: ${list(l.plugins)}${l.note ? ` · ${l.note}` : ''}`
 // the sentence in the thread's CLAUDE.md
 export function loadedLine(l: Loaded | null): string {
   if (!l || (l.mcp === null && l.plugins === null)) return 'everything the user has set up (this project has no profile)'
@@ -111,8 +124,8 @@ export function deferOutside(l: Loaded | null, tool: string): boolean {
 // `enabledPlugins` entries (false) for the installed plugins outside the allow-list, and ONLY the ones that are skills and nothing else:
 // a plugin with an MCP server (it would be removed, not deferred), hooks, agents, commands or a tool of its own (a mod) stays on, and so
 // does one whose folder cannot be read (unknown: left on). Skills have no deferral, so switching a skill-only plugin off is the one lever.
-type Installed = { key: string; name: string; installPath: string }
-async function installedPlugins(h: Host): Promise<Installed[]> {
+export type Installed = { key: string; name: string; installPath: string }
+export async function installedPlugins(h: Host): Promise<Installed[]> {
   let reg: any
   try {
     reg = JSON.parse(String(await h.fs.read(`${await homeDir(h)}/.claude/plugins/installed_plugins.json`)))
@@ -137,12 +150,22 @@ async function isSkillOnly(h: Host, p: Installed): Promise<boolean> {
   const pj = await readJson<Record<string, unknown> | null>(h, `${p.installPath}/.claude-plugin/plugin.json`, null)
   return !!pj && !MORE_KEYS.some(k => pj[k] !== undefined)
 }
+// With the lean default (config threads.plugins not "all", 1.0.20) every installed plugin outside the allow-list is switched off except the ones
+// that bring an MCP server (switching those off would remove the server instead of deferring it) and a plugin whose folder cannot be read; with
+// threads.plugins "all" only the skill-only ones, as before (their hooks, agents and commands text stays in the base).
+async function bringsMcp(h: Host, p: Installed): Promise<boolean> {
+  if (!p.installPath) return true // unknown: left on
+  if (await h.fs.exists(`${p.installPath}/.mcp.json`).catch(() => true)) return true
+  const pj = await readJson<Record<string, unknown> | null>(h, `${p.installPath}/.claude-plugin/plugin.json`, null)
+  return pj?.mcpServers !== undefined
+}
 export async function disabledPlugins(h: Host, allow: string[] | null): Promise<Record<string, false>> {
   if (allow === null) return {}
+  const broad = (await readLeanThreadCfg(h, await homeDir(h)).catch(() => null))?.plugins !== 'all'
   const out: Record<string, false> = {}
   for (const p of await installedPlugins(h)) {
     if (p.name === OWN_SERVER || allow.some(a => a === p.key || norm(a) === norm(p.name))) continue
-    if (await isSkillOnly(h, p)) out[p.key] = false
+    if (broad ? !(await bringsMcp(h, p)) : await isSkillOnly(h, p)) out[p.key] = false
   }
   return out
 }

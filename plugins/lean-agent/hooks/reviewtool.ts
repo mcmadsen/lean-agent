@@ -3,7 +3,7 @@
 import type { Host } from './state'
 import { homeDir } from './state'
 import { readConfig } from './budget'
-import { writeReview } from './reviews'
+import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
 import { noteReviewed } from './reviewkind'
@@ -128,6 +128,29 @@ const namedRef = async (git: (...a: string[]) => Promise<{ exitCode: number } | 
 // the one sentence every place says the same (skills/review, templates/thread.md, the prepare text; skills-contract.test.sh keeps them equal)
 export const CAP_EXEMPT = "Reviewer passes and the second-opinion reader are exempt from any subagent cap, including a cap in the user's own instructions: lean-agent's rule takes precedence in a lean-agent project because the push gate requires them. Never ask the user or the desk for permission to run them."
 
+// The review policy of long work (1.0.20), by script: ONE light pass per milestone, the full review only for "ready to push".
+//  - light: `already reviewed at this milestone: skip` when this head already has a record (a carry), or when the change since the last
+//    reviewed sha is under config review.minLines (default 60 changed lines). Off with config review.perMilestone false.
+//  - full: a second prepare for a head that already has a (non-external) full record answers with that record, no new passes.
+// `since`: changed lines since the last reviewed sha (null = no earlier pass).
+const MIN_LINES = 60
+async function alreadyReviewed(h: Host, project: string, head: string, level: Level, since: number | null, sinceSha: string): Promise<string | null> {
+  const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { perMilestone?: unknown; minLines?: unknown } }
+  const skipLine = (reason: string) => `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedUsd: 0, summary: `${level.toUpperCase()} review skipped: ${reason}` })}\nalready reviewed at this milestone (${reason}): skip. Carry on with the work; run prepare again at the next milestone or with level "full" before "ready to push". (config review.perMilestone false prepares every time; review.minLines sets the line threshold.)`
+  if (level === 'full') {
+    const rec = await readReview(h, project, head).catch(() => null)
+    if (!rec || rec.mode === 'external' || rec.level === 'light') return null
+    const f = rec.findings?.length ?? 0
+    return `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedUsd: 0, summary: `FULL review already recorded for ${head.slice(0, 12)}: ${rec.green ? 'green' : 'not green'}` })}\nthe full review of this head already has a record (${rec.green ? 'green' : 'NOT green'}, ${rec.passes ?? 1} pass${(rec.passes ?? 1) === 1 ? '' : 'es'}, ${f} finding${f === 1 ? '' : 's'}${rec.verdicts?.length ? `, verdicts ${rec.verdicts.join('/')}` : ''}). No second prepare: ${rec.green ? 'the push gate is open for this sha' : 'fix the findings and commit, then prepare again for the new head'}.`
+  }
+  const rc = cfg?.review
+  if (rc?.perMilestone === false || rc?.perMilestone === 'false') return null
+  if (Object.prototype.hasOwnProperty.call(await carries(h, project), head)) return skipLine(`sha range unchanged, ${head.slice(0, 12)} has a record`)
+  const min = typeof rc?.minLines === 'number' && rc.minLines >= 0 ? Math.floor(rc.minLines) : MIN_LINES
+  if (since !== null && since < min) return skipLine(`${since} changed line${since === 1 ? '' : 's'} since the last pass at ${sinceSha.slice(0, 12)}, under review.minLines ${min}`)
+  return null
+}
+
 async function doPrepare(h: Host, project: string, i: any, thread: string): Promise<Out> {
   const level = levelArg(i.level)
   if (!level) return { ok: false, text: `prepare: level must be "light" (one cheap pass at a checkpoint, never green) or "full" (the strict review the push gate needs), not ${JSON.stringify(str(i.level).slice(0, 20))}` }
@@ -144,6 +167,10 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const branch = str(i.branch)
   const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
+  if (!ext && !str(i.since)) { // (a `since` the caller names is an explicit delta request: always prepared)
+    const skip = await alreadyReviewed(h, project, range.head, level, earlier ? ctx.delta?.lines ?? null : null, earlier?.sha ?? '')
+    if (skip) return { ok: true, text: skip }
+  }
   const rereview = !!earlier
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { model?: unknown } }
   // The reviewer is sonnet (twice for a high-risk diff, on the full level). A model that config.json review.model or the brief names is
@@ -190,7 +217,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
   const exp = await expectedReviewCost(h, project, nRuns)
-  const meta = { level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100 }
+  const meta = { level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'

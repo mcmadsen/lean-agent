@@ -7,7 +7,7 @@ import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskChoice, modelFamily, threadChoice } from './models'
-import { readDeskModel, readDeskSwitch } from './deskmodel'
+import { appChoseText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
 import { windowLine } from './windows'
@@ -213,22 +213,70 @@ export async function spendNumbers(h: Host): Promise<Spend | null> {
 // What each thread has spent TODAY, live: the numbers for a pane card (the view reads this; it is the one function to wire). `model` and
 // `effort` are the thread's own choice (thread.json); `over` is set when it passed the per-thread daily alert (config budget.threadDaily,
 // default 20 USD, "off" = never). Threads that spent nothing today are not listed; an empty object when there is no ledger.
-export type ThreadCost = { id: string; usd: number; model: string; effort: string; over: boolean }
+// `reviews`, `restarts`: of that usd, what the reviewer agents cost and what the first request of each fresh session (a restart, before any work) cost
+export type ThreadCost = { id: string; usd: number; model: string; effort: string; over: boolean; reviews?: number; restarts?: number }
 export async function threadCostsToday(h: Host, spend?: Spend | null): Promise<Record<string, ThreadCost>> {
   const s = spend === undefined ? await spendNumbers(h) : spend
   if (!s) return {}
   const home = await homeDir(h)
   const { thread } = await budgetLimits(h)
+  const parts = await threadSpendParts(h).catch(() => ({}) as Record<string, SpendParts>)
   const out: Record<string, ThreadCost> = {}
   for (const [id, usdToday] of Object.entries(s.byThread)) {
     if (!/^t\d+$/.test(id) || !(usdToday > 0)) continue
     const t = await readJson<{ model?: unknown; effort?: unknown } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
-    out[id] = { id, usd: usdToday, model: typeof t?.model === 'string' ? t.model : '', effort: typeof t?.effort === 'string' ? t.effort : '', over: thread !== null && usdToday >= thread }
+    const p = parts[id]
+    out[id] = { id, usd: usdToday, model: typeof t?.model === 'string' ? t.model : '', effort: typeof t?.effort === 'string' ? t.effort : '', over: thread !== null && usdToday >= thread, ...(p?.reviews ? { reviews: Math.min(p.reviews, usdToday) } : {}), ...(p?.restarts ? { restarts: Math.min(p.restarts, usdToday) } : {}) }
   }
   return out
 }
 // "$6.20" for a card, "$21.30!" when it is over the alert
 export const costBadge = (c: Pick<ThreadCost, 'usd' | 'over'>): string => `$${c.usd.toFixed(2)}${c.over ? '!' : ''}`
+// "today $12.40 (reviews $5.10, restarts $0.90)": the card, the thread pane and `lean_thread list` say the same line; a part at zero is left out
+export function costLine(c: Pick<ThreadCost, 'usd' | 'over' | 'reviews' | 'restarts'>): string {
+  const p = [c.reviews ? `reviews $${c.reviews.toFixed(2)}` : '', c.restarts ? `restarts $${c.restarts.toFixed(2)}` : ''].filter(Boolean)
+  return `today ${costBadge(c)}${p.length ? ` (${p.join(', ')})` : ''}`
+}
+// One thread's line for a list: null when it spent nothing today
+export async function threadSpendLine(h: Host, id: string): Promise<string | null> {
+  const c = (await threadCostsToday(h).catch(() => ({}) as Record<string, ThreadCost>))[id]
+  return c ? costLine(c) : null
+}
+
+// today's reviewer cost and restart cost per thread, from the ledger's tail (the rollup keeps no agent or session split): `agent` reviewer rows, and
+// the `fresh` row (the first request of a session) of a session that began more than 10 minutes after the thread was created. Remembered per ledger size.
+export type SpendParts = { reviews: number; restarts: number }
+const partsMemo = new WeakMap<Host, { key: string; v: Record<string, SpendParts> }>() // per host object: a list of threads scans the ledger once
+export async function threadSpendParts(h: Host): Promise<Record<string, SpendParts>> {
+  const home = await homeDir(h)
+  const file = `${leanDir(home)}/${LEDGER}`
+  const size = await fileSize(h, file)
+  if (size === null) return {}
+  const now = await h.clock.now()
+  const key = `${home}|${size}|${dayOf(now)}`
+  const memo = partsMemo.get(h)
+  if (memo?.key === key) return memo.v
+  const out: Record<string, SpendParts> = {}
+  const created = new Map<string, number>()
+  for (const line of (await readFrom(h, file, Math.max(0, size - 4_000_000))).split('\n')) {
+    if (!line.includes('"tN"') || !(line.includes('reviewer') || line.includes('"fresh"'))) continue
+    let r: ReturnType<typeof normalizeRow> = null
+    try {
+      r = normalizeRow(JSON.parse(line))
+    } catch {
+      continue
+    }
+    if (!r || r.role !== 'thread' || !/^t\d+$/.test(r.tN) || dayOf(r.ts) !== dayOf(now)) continue
+    const p = (out[r.tN] ??= { reviews: 0, restarts: 0 })
+    if (r.agent === 'reviewer') p.reviews += r.usd
+    else if (r.fresh && r.agent === 'main') {
+      if (!created.has(r.tN)) created.set(r.tN, Number((await readJson<{ created?: unknown } | null>(h, `${threadsDir(home)}/${r.tN}/thread.json`, null))?.created) || 0)
+      if (r.ts - created.get(r.tN)! > 10 * 60_000) p.restarts += r.usd
+    }
+  }
+  partsMemo.set(h, { key, v: out })
+  return out
+}
 
 export const spendText = (s: Spend): string => `$${s.today.toFixed(2)} · 7d $${s.week.toFixed(2)}`
 export async function spendLine(h: Host): Promise<string | null> {
@@ -279,6 +327,9 @@ export async function modelRows(h: Host): Promise<{ fix: string[]; info: string[
   // switched today, and the switch is not undone by a later session that could not be set (deskmodel.ts keeps model.json for that)
   const sw = await readDeskSwitch(h)
   const switched = sw && family(sw.to) === desk && dayOf(sw.at) === dayOf(now) && !(await readDeskModel(h)) ? sw : null
+  // the app choosing again: ONE line with the count; the engine's switch event (source "sdk") does not tell the app's default from its model menu
+  if (sw && sw.count && sw.count > 1 && dayOf(sw.at) === dayOf(now)) info.push(`${appChoseText(sw.from, sw.count, desk)} (today, last session)${sw.blind ? "; the engine cannot tell the app's choice from its model menu, so lean-agent asks once per session and reapplies the pin: pick " + desk.charAt(0).toUpperCase() + desk.slice(1) + " in the app's model menu to stop it" : ''}`)
+  else if (sw?.blind && dayOf(sw.at) === dayOf(now)) info.push(`the desk's model switch is asked once per session: the engine cannot tell the app's choice from its model menu (source "sdk" for both)`)
   const allowed = new Set<string>()
   const def = await threadChoice(h, home, {})
   if (typeof def !== 'string') allowed.add(family(def.model))

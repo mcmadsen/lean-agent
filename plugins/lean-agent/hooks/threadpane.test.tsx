@@ -183,7 +183,7 @@ test('draw, full: every section, the buttons, and only the 10 newest reports (ol
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
   expect(await text(ui, /t1 · add the widget/)).toBe(true)
-  expect(await text(ui, /open · idle · sonnet\/high · \$1\.25 today · project: app/)).toBe(true) // the status line carries today's cost badge
+  expect(await text(ui, /open · idle · sonnet\/high · today \$1\.25 · project: app/)).toBe(true) // the status line carries today's cost badge
   expect(await text(ui, /widget merged/)).toBe(true)
   expect(await text(ui, /Keep the old layout\./)).toBe(true)
   expect(await text(ui, /Line four/)).toBe(true)

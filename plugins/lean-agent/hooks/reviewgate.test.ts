@@ -500,6 +500,7 @@ test('lean_review: a light pass is the "last reviewed sha" of the next light pas
   await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // (head H2 prepared light)
   const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries' })], verdict: 'changes-requested' } })
   expect(r1.ok).toBe(true)
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { minLines: 0 } })) // (a one-line delta is under the default 60: specced below)
   const light = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
   expect(light.text).toContain('RE-REVIEW')
   expect(light.text).toContain('the cache never expires entries')
@@ -633,5 +634,53 @@ test('lean_review prepare: the reviewer prompt carries the thread\'s own worktre
   expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[2] === '/r/app' && c.argv.includes('merge-base'))).toBe(false)
   // a worktree that is gone, or a thread without one: the project's registered path
   h.files.delete('/w/app-t1/.keep')
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { perMilestone: false } })) // (this head has a record now: the milestone skip is specced below)
   expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('git -C /r/app diff')
+})
+
+test('lean_review prepare names the level, the passes and the expected cost in its first line', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).summary).toMatch(/^LIGHT review, 1 pass \(sonnet\), expected ~\$\d+\.\d\d$/)
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).summary).toMatch(/^FULL review, 1 pass \(sonnet\), expected ~\$/)
+})
+
+test('lean_review prepare, light: a head that already has a record, or under review.minLines changed lines since the last pass, is skipped; perMilestone false prepares every time', async () => {
+  const first = newFileDiff('src/cache.ts', 'export class Cache {}')
+  const delta = ['diff --git a/src/cache.ts b/src/cache.ts', '--- a/src/cache.ts', '+++ b/src/cache.ts', '@@ -1 +1,2 @@', ' export class Cache {}', '+// fixed'].join('\n') + '\n'
+  const h = setup({ '*': first, [H1]: delta }, { '*': 'A\tsrc/cache.ts\n', [H1]: '' })
+  const light = { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }] }
+  await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // nothing reviewed yet: prepared
+  await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: light })
+  const small = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // one changed line since H1, default minLines 60
+  expect(small.ok).toBe(true)
+  expect(prepMeta(small)).toMatchObject({ skip: true, level: 'light', runs: 0, expectedUsd: 0 })
+  expect(small.text).toContain('already reviewed at this milestone (1 changed line since the last pass at aaaaaaaaaaaa, under review.minLines 60): skip')
+  expect(small.text).not.toContain('LIGHT REVIEW')
+  // a bigger change than the threshold is prepared; so is a named `since`
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { minLines: 1 } }))
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })).skip).toBeUndefined()
+  h.files.set(`${L}/config.json`, '{}')
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', branch: 'feat', since: H1 })).skip).toBeUndefined()
+  // the head itself has a record: the sha range is unchanged
+  await tool(h, { sha: H2, base: 'main', branch: 'feat', level: 'light', review: light })
+  const same = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
+  expect(same.text).toContain('sha range unchanged')
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { perMilestone: false } }))
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })).skip).toBeUndefined()
+})
+
+test('lean_review prepare, full: a second prepare for a head with a full record answers with that record, no new passes', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const ok = { ...base, reuse: reuseOf('plain1'), searches: [{ for: 'plain', found: 'none' }] }
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).skip).toBeUndefined()
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: ok })).ok).toBe(true)
+  const again = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  expect(prepMeta(again)).toMatchObject({ skip: true, level: 'full', runs: 0 })
+  expect(again.text).toContain('already has a record (green')
+  expect(again.text).toContain('the push gate is open for this sha')
+  // a light record is not a full one: the full prepare still runs
+  const l = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  await tool(l, { action: 'prepare', base: 'main' })
+  await tool(l, { sha: H2, base: 'main', review: ok })
+  expect(prepMeta(await tool(l, { action: 'prepare', base: 'main', level: 'full' })).skip).toBeUndefined()
 })

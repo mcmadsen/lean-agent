@@ -5,12 +5,12 @@
 ### Fixed
 - **Automatic context restart no longer fails while the thread is running** (1.0.19 field: three times "tN is running: no new session started" at 124k of 120k, a manual `restart` right after worked). The timer now stops a session that still shows as working exactly as the manual restart does (the hard stop already refuses its tool calls), under the same grace rule (idle 20 s, or `threads.stopGraceMinutes` after the record). A failed automatic restart is retried at every timer tick (at most 5 tries), then ONE desk notice names the reason and offers `restart`.
 - **Hard stop**: a spec pins that the 2nd, 3rd... turn end over the limit writes no further record and that every tool call but `lean_report` is refused; a turn end without an engine session id no longer writes a record every turn (it falls back to the thread's recorded session).
-
 - **"Done" before the output existed.** A done report is checked by script before it counts: every path in its text that looks like an output file (absolute or `~/...`, with an extension, after words like saved / written / created / at / in, or in backticks) must exist. A missing one makes `lean_report` refuse the done state ("not done: <path> does not exist; write it (a worker's 'written' is not proof) or drop the claim"), recorded in the refusal record (rule `done-output-missing`); nothing reaches the desk, so the auto-close never sees a done report that failed. URLs, paths next to "deleted / removed / renamed" and files git tracks as deleted are not claims.
 - **Doctor `fix` named a cause it never showed** ("thread tX running 1.0.13, installed 1.0.18: ... restart it once the cause below is fixed", no cause listed: `fix` prints FIX rows only). The version-skew row now holds the cause and what you can do itself, and "below" is gone.
 
 ### Added
 - **Stall watchdog.** A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued messages stayed unread that long, is `stalled`: red in the pane and in `lean_thread list` (which names the last activity time), ONE desk notice + toast per stall ("t7 has done nothing for 25 min, 3 messages unread: wake or restart it"), and a reminder line in the desk's context once per desk turn while it lasts. The thread's own hooks write `activity.json` in its folder (tool calls of the thread or of its workers, reports, prompts), so a thread waiting on a worker that still works is not stalled; a session waiting for your answer never is. `threads.stallRestart` (default false): when true the mod restarts a stalled thread itself (same path as the context restart) and says so.
+
 
 ## 1.0.19
 
@@ -36,7 +36,7 @@
   10,230 · `--tools ''` 3,730 · thread folder as is 47,133 · thread folder `--tools Agent,Bash,Read` 19,779. `config threads.tools` (array) adds `--tools` to a
   thread's fresh start, automatic restart and resume (ignored with `lean.orchestrate: false`). A subagent can only use the tools its parent
   has (measured: a worker under `Agent,Bash,Read,Skill,SendMessage,TaskStop` has no Write), so threads now start with a default list that keeps workers
-  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a real thread folder: 47.1k -> 31.0k,
+  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a bare environment: 47.1k -> 31.0k, your base depends on your plugins, skills and connectors: run the probe (see Unreleased),
   about 16k less on every request); `threads.tools: []` or `"all"` brings the full set back. `permissions.deny` does not remove a tool from the request.
 - `lean_doctor overhead [tN]` shows the REAL base (the first request of a session transcript) next to the text estimate; a thread session's mod records its
   first request (`base.json`) and the start reply of a thread says the measured base.
