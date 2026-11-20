@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Investigated: can the desk carry the user's yes for a thread's denied action? No.
+The question: a thread reports `blocked` with an `approval` (an action Claude Code's permission check denied in the thread's session);
+could the user answer at the desk (AskUserQuestion) and a plugin hook carry that decision into the thread, so nobody has to press
+"Open tN"? Read from the engine's own plugin-authoring typings (`claude-code.d.ts`, Claude Code 2.1.328); nothing here was checked
+against a live auto-mode session.
+- **(a) Fails: no hook can carry a decision past a classifier denial.** `classic.PermissionRequest` answers an *ask* that goes to a
+  person (the dialog, a host's callback, a hook's own ask: `ToolCheckResult.plugin`); its result (`PermissionRequestDecision`) is
+  allow or deny. In auto mode the classifier settles the ordinary asks, and what it refuses is a verdict, not an ask: the typings say
+  "its block still refuses" even on a call a hook asked about, and `tool.judge` runs *after* every check only a person may answer, so
+  a PermissionRequest hook is not consulted for it. `classic.PermissionDenied` (input: `tool_name`, `tool_input`, `tool_use_id`,
+  `reason`) does fire for a denial, but its only result is `retry: true`: it lets the model try the same call again, through the same
+  check, so the classifier judges it again and no decision travels. A desk "send yes" is not one either (the classifier reads a relayed
+  approval as the model undermining oversight). The actions threads report as `approval` are exactly these denials.
+- **(b) A hook can wait, but it does not help.** A hook's budget is 10 s of its *own* time; the clock stops while a `$` call it made is in
+  flight, except `$.clock` waits, which count. So a hook can wait minutes by polling with `$.process.run` (a call may run up to ten
+  minutes) and reading the mod store between polls. Nothing documents a longer ceiling; none was measured.
+- **(c) The desk's mod can read the human's answer to an AskUserQuestion.** `classic.PostToolUse` for `AskUserQuestion` carries
+  `tool_input.questions` and `tool_response.answers` (question text to the chosen label; multi-select comma-joined; `response` and
+  `annotations` for typed text), plus `tool_use_id`. Only a human can produce that tool result.
+- **Decision:** because (a) fails, the grant part (a PermissionRequest hook in the thread, `approve-action`, signed single-use grants) is
+  not built: it would be a flow that cannot work. Approvals stay in the thread's own session (the pane's **Open tN**), and the desk says
+  where the user answers instead of asking them with AskUserQuestion. An expensive model (the pane's Approve) and a push
+  (`approve-push`) are unchanged.
+
+### Fixed
+- **A stale "needs your yes" card no longer stays after the thread carried on.** The card existed for as long as the blocked report was
+  the thread's last record, so a thread that went on after the user answered in its session (or that decided the matter itself) still
+  showed "tN needs your yes in its own session ... (it is working: wait)". It now exists only while the thread is really blocked: the
+  session is not working, and it has made no tool call since it reported (the mod notes the first one, `approvals.ts`).
+
+### Changed
+- The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with
+  AskUserQuestion and never relayed with `send` (a relayed yes does not satisfy the permission check). A thread no longer reports
+  `blocked` with an `approval` for something it decides itself (a subagent cap, a model choice).
+
 ## 1.0.13
 
 ### Fixed
