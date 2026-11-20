@@ -60,6 +60,24 @@ async function ensureReportFiles(h: Host, home: string, recs: DeskRec[]): Promis
 
 export type Handover = { prompt: string; worktree?: string; branch?: string }
 
+// The first words of a restart, wake or handover prompt are the task: a model that reads "continue" plus a status check answers the
+// status check and ends its turn. A status request is answered as a side effect (one short lean_report), never as the whole turn.
+export const STATUS_RULE = 'Answer status requests with a short lean_report as a side effect, never as the whole turn.'
+export const TASK_MAX = 200
+export const resumeLead = (task: string) => `Resume the work now (task: ${task}). ${STATUS_RULE}`
+// the one-line task of a thread: its goal, else the first line of its brief, else its title
+export const taskLine = (goal: string, brief: string, title: string): string => {
+  const first = (s: string) => s.split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) ?? ''
+  const t = first(goal) || first(brief) || title
+  return t.length > TASK_MAX ? t.slice(0, TASK_MAX) + '…' : t
+}
+export async function taskOf(h: Host, home: string, t: Thread): Promise<string> {
+  const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
+  const goal = typeof goals?.[t.id]?.text === 'string' ? goals[t.id]!.text! : t.lastGoal ?? ''
+  const brief = await h.fs.read(`${threadsDir(home)}/${t.id}/brief.md`).catch(() => '')
+  return taskLine(goal, typeof brief === 'string' ? brief : '', t.title)
+}
+
 export async function buildHandover(h: Host, home: string, t: Thread, why: string, queued: Inbox[]): Promise<Handover> {
   const dir = `${threadsDir(home)}/${t.id}`
   const text = async (p: string) => {
@@ -80,6 +98,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const parts = [
+    resumeLead(taskLine(goal, brief, t.title)),
     `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`,
     `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`,
     `## Brief\n${cut(brief, BRIEF_MAX)}`,

@@ -175,7 +175,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
     tell()
   }
 
-  const runLabel = d.run === 'unknown' ? 'session unknown (claude agents failed)' : d.run
+  const runLabel = d.run === 'unknown' ? 'session unknown (claude agents failed)' : d.live === 'stuck' ? 'stuck' : d.run
   const briefLines = d.brief.split('\n').map(l => l.trimEnd())
   const cut = d.brief.length >= BRIEF_MAX // the data keeps the first BRIEF_MAX characters of brief.md
   const briefMore = briefLines.length > BRIEF_LINES || cut
@@ -198,6 +198,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
         {d.state} · {runLabel}
         {d.finished ? ' · finished (the next message starts a new session)' : ''} · {d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'} · project: {d.project || 'none'}
       </Text>
+      {!!d.liveNote && <Text color={d.live === 'stuck' ? 'red' : 'yellow'}>{d.liveNote}</Text>}
       {d.needsYou && <Text color="yellow">It waits for you in its own session: press Open session.</Text>}
       {!!d.approval && <Text color="yellow">{`needs your yes: ${short(d.approval, 160)}`}</Text>}
       <Text bold>Goal</Text>

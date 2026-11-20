@@ -115,6 +115,49 @@ Two more panes open beside the desk pane (the desk pane's buttons call them; `op
   is no longer registered are said inline, before any folder exists; a failed start keeps what you typed.
 - Both are desk-only (elsewhere they say so). The pane's open/fold state is kept in the mod, not in `$.state`, so a mod reload folds it again.
 
+### Thread sessions: what "running" means, wake, names, leftovers
+
+`claude agents --json --all` (its `state` working / idle / done, and the process) is the source; the thread's own queue says whether
+anything is read. `lean_thread list`, the pane cards, the thread pane and the send / wake replies show one of:
+
+| shown | meaning |
+|---|---|
+| running | the process is alive and the turn is going |
+| idle, N unread queued | the process may be alive but the turn ended (a listed `status` that still says busy does not make it running) |
+| stuck | a queued message has been unread for `threads.stuckMinutes` (config.json, default 10): no tool call and no inbox read (a working session reads its queue at every tool call) |
+| done / parked | the session ended or finished, or you parked the thread |
+
+- **send** to an idle session wakes it (stops a lingering process, resumes with the batch); a send within 30 s of the last wake, or to a
+  stuck session, only queues and says so ("queued, session idle: wake or restart it", or the stuck line), and the list shows the unread
+  count. A reply never says "running" for an idle or stuck session.
+- **wake** (and **resume**) wakes an **idle** session even when nothing is queued (the prompt is the task) and replaces a **stuck**
+  session whose turn ended (stops it, starts a new session with the handover, queued messages included). A plain `send` never
+  replaces a stuck session. A session that is still **working** is never stopped by send, wake or resume, even when it looks stuck
+  (one tool call that runs longer than `threads.stuckMinutes`, or a subagent wait, reads no queue: raise the setting for long builds);
+  only `restart` replaces it (its current step is lost). A session that waits on a prompt for you is never "stuck".
+- A `[working]` report of a session that is not running is marked stale in the list, the card and the thread pane. A start whose
+  session ended its turn without a tool call (idle moments after the start; later, the ledger shows no request beyond the first and the
+  thread reported nothing since the start) is reported loudly: "started, but it ended its turn at once: wake it with the task".
+  Nothing here has been checked against a live session's real `state` values yet.
+- **The prompt starts with the task**: "Resume the work now (task: ...). Answer status requests with a short lean_report as a side
+  effect, never as the whole turn." (the task is the goal, else the first line of the brief). Restart, wake and the handover all start
+  that way, and the thread guide says the same: a status request arriving mid-work gets one short report and the work goes on.
+- **Names.** Every fresh start and restart passes `-n "tN · title"`, then `"tN · title (2)"`, `"(3)"` for each session that replaces an
+  older one. After a start or wake the name is read back from `claude agents`; when the app lists another one, the reply says so.
+  Claude Code 2.1 names a background session only when it starts (`claude --bg -n`; `claude --bg --resume <id>` takes no flags) and
+  has no command or flag to rename one, so lean-agent leaves the name as it is (it does not edit the app's files); the doctor
+  row says which sessions show another name, and a restart gives the right one.
+- **Superseded sessions.** After a fresh session replaces an old one, the old one is removed from the app's list with `claude rm <id>`
+  (its conversation is kept; never `--discard-unpushed`, never `--force-remove-worktree`; never a session whose process is alive or
+  working, never the one just started, never one outside the thread's folder). A refusal ("not safe") is logged in the thread's
+  `history.jsonl`, said in the reply and left. `{ "threads": { "removeOld": false } }` keeps them all. The doctor row **stale thread
+  sessions** lists stopped sessions of threads that have a newer session; `doctor fix` removes them the same way.
+- **A restart or fresh start says what it costs**: "new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old
+  session's conversation is not resumed" (the handover at about four characters a token, as uncached input of the model's list price;
+  the guide and tool listing are not counted).
+- The thread's `CLAUDE.md` is regenerated from `thread.json` at every fresh start (no stale `model:` line after a model change), and
+  says that tools which start the shell in the worktree are fine while the thread itself never `cd`s (absolute paths, `git -C`).
+
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
 
