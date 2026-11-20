@@ -45,5 +45,6 @@ export function hostOf($: any): Host {
     env: { get: () => $.env.get('HOME') }, // the only variable the mod reads (the engine wants it as a literal)
     clock: { now: () => $.clock.now() },
     store: { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) },
+    ui: { open: (pane: { id: string; title?: string }) => $.ui.open(pane) }, // only openThreadPane / openNewThread use it
   }
 }

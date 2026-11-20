@@ -14,6 +14,7 @@ export type Host = {
   env: { get: (n: string) => Promise<string | undefined> }
   clock: { now: () => Promise<number> }
   store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } // the mod's own key-value store (not a file)
+  ui?: { open: (pane: { id: string; title?: string }) => Promise<unknown> } // set by hostOf($) only (the fake host in the specs has none)
 }
 
 let seq = 0

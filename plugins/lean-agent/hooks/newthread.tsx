@@ -1,0 +1,130 @@
+// The new-thread form: one pane (`lean-agent-new-thread`) with a title field, the registered projects (or none), model and effort
+// choices, a multi-line brief and a Start button. Start runs the lean_thread tool's own `new` code (leanThread: no model is involved),
+// then opens the new thread's detail pane. Mistakes are said inline, next to the button, before anything is created.
+import { ensureGitHooks } from './githooks'
+import { guardParents } from './doctor'
+import { hostOf } from './host'
+import { listProjects, unknownProject } from './projects'
+import type { Role } from './role'
+import { bounded } from './setup'
+import { leanThread } from './threads'
+import type { Thread } from './threads'
+import { openThreadPane } from './threadpane'
+
+export const NEW_THREAD_PANE = 'lean-agent-new-thread'
+export const MODEL_CHOICES = ['sonnet', 'haiku', 'opus'] as const // the first is the default
+export const EFFORT_CHOICES = ['high', 'medium', 'low'] as const
+export const NO_PROJECT = '(none)' // a Select value that no project name can have (names are letters, digits, . _ -)
+export const BRIEF_ROWS = 8
+const TITLE_MAX = 80
+const BRIEF_MAX = 20_000
+
+type Form = { title: string; project: string; model: string; effort: string; brief: string; errors: string[]; notice: string; busy: boolean; surface?: string }
+const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: MODEL_CHOICES[0], effort: EFFORT_CHOICES[0], brief: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+let form: Form = fresh()
+export const resetNewThread = () => {
+  form = fresh()
+}
+const msg = (err: unknown, n = 160) => String((err as Error)?.message ?? err).slice(0, n)
+
+// The first argument is the engine `$` or the thin host `hostOf($)` (both answer `ui.open`; named `$` as the engine wants).
+export async function openNewThread($: any, surface: string | undefined): Promise<{ ok: boolean; text: string; pane: string }> {
+  if (surface) form.surface = surface
+  try {
+    await $.ui.open({ id: NEW_THREAD_PANE, title: 'New thread' })
+    return { ok: true, text: 'new thread form opened', pane: NEW_THREAD_PANE }
+  } catch (err) {
+    return { ok: false, text: `could not open the new thread form: ${msg(err)}`, pane: NEW_THREAD_PANE }
+  }
+}
+
+// What is wrong with the form, in the order the fields are drawn (an unknown project is looked up by the caller)
+export function validate(f: Pick<Form, 'title' | 'brief' | 'model' | 'effort'>): string[] {
+  const out: string[] = []
+  if (!f.title.trim()) out.push('Title is empty: give the thread a short title.')
+  else if (f.title.trim().length > TITLE_MAX) out.push(`Title is too long (${f.title.trim().length} characters, at most ${TITLE_MAX}).`)
+  if (!f.brief.trim()) out.push('Brief is empty: say what the thread should do.')
+  else if (f.brief.length > BRIEF_MAX) out.push(`Brief is too long (${f.brief.length} characters, at most ${BRIEF_MAX}).`)
+  if (!(MODEL_CHOICES as readonly string[]).includes(f.model)) out.push(`Unknown model ${f.model}.`)
+  if (!(EFFORT_CHOICES as readonly string[]).includes(f.effort)) out.push(`Unknown effort ${f.effort}.`)
+  return out
+}
+
+export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise<any> {
+  const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
+  const host = hostOf($)
+  const tell = () => $.ui.invalidate('ui.render')
+  if (roleOf().kind !== 'desk') {
+    return (
+      <Box flexDirection="column">
+        <Text bold>New thread</Text>
+        <Text>Threads are started from the desk: open this form from the desk session&apos;s pane.</Text>
+      </Box>
+    )
+  }
+  const surface = typeof e?.surface === 'string' && e.surface ? e.surface : form.surface
+  let names: string[] = []
+  let listError = ''
+  try {
+    names = (await listProjects(host)).rows.map(r => r.name)
+  } catch (err) {
+    listError = `could not list the projects: ${msg(err)}`
+  }
+  // (the surface keeps what is typed or picked until the next draw; these handlers keep it here too, so a redraw never loses it)
+  const start = async () => {
+    if (form.busy) return
+    const f = form
+    f.notice = ''
+    const project = f.project === NO_PROJECT ? '' : f.project
+    const errors = validate(f)
+    if (project) {
+      const bad = await unknownProject(host, project).catch(err => `could not check the project: ${msg(err)}`)
+      if (bad) errors.push(bad.replace(/ No thread was created\.$/, '') + ' Pick one from the list.')
+    }
+    f.errors = errors
+    if (errors.length) return tell()
+    f.busy = true
+    tell()
+    try {
+      // the same steps as the tool's handler for `new` (register.tsx): a stale parent guide is cleared first, the git hooks refreshed after
+      await guardParents(host).catch(() => [])
+      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), model: f.model, effort: f.effort }), 'start thread', 130_000)
+      await ensureGitHooks(host).catch(() => undefined)
+      const id = out.ok ? (out.data as Thread | undefined)?.id : undefined
+      if (!out.ok || !id) {
+        f.errors = [out.ok ? 'The thread was started but its number is unknown: see the desk pane.' : out.text]
+      } else {
+        const opened = await openThreadPane($, surface, id)
+        const text = `${out.text}${opened.ok ? '' : ` (${opened.text})`}`
+        Object.assign(form, fresh(surface), { notice: text }) // an empty form again; the new thread has its own pane now
+      }
+    } catch (err) {
+      f.errors = [`start failed: ${msg(err)}`]
+    } finally {
+      f.busy = false
+    }
+    tell()
+  }
+  const projectOptions = [{ value: NO_PROJECT, label: 'none' }, ...names.map(n => ({ value: n, label: n }))]
+  const known = projectOptions.some(o => o.value === form.project)
+  const modelOptions = MODEL_CHOICES.map(m => ({ value: m, label: m === MODEL_CHOICES[0] ? `${m} (default)` : m }))
+  const effortOptions = EFFORT_CHOICES.map(x => ({ value: x, label: x === EFFORT_CHOICES[0] ? `${x} (default)` : x }))
+  return (
+    <Box flexDirection="column">
+      <Text bold>New thread</Text>
+      <Input key="title" label="Title" placeholder="short title" value={form.title} onInput={(v: string) => void (form.title = v)} onSubmit={(v: string) => void (form.title = v)} />
+      {!!listError && <Text color="red">{listError}</Text>}
+      <Select key="project" label={names.length ? 'Project' : 'Project (none registered: ask the desk to add one)'} options={projectOptions} value={known ? form.project : NO_PROJECT} onSelect={(v: string) => void (form.project = v)} />
+      <Select key="model" label="Model" options={modelOptions} value={form.model} onSelect={(v: string) => void (form.model = v)} />
+      <Select key="effort" label="Effort" options={effortOptions} value={form.effort} onSelect={(v: string) => void (form.effort = v)} />
+      <Input key="brief" label="Brief" placeholder="what the thread should do" rows={BRIEF_ROWS} value={form.brief} onInput={(v: string) => void (form.brief = v)} onSubmit={(v: string) => void (form.brief = v)} />
+      {form.errors.map((m, i) => (
+        <Text key={`e-${i}`} color="red">
+          {m}
+        </Text>
+      ))}
+      <Button key="start" variant="primary" label={form.busy ? 'Starting…' : 'Start'} onPress={start} />
+      {!!form.notice && <Text color="green">{form.notice}</Text>}
+    </Box>
+  )
+}

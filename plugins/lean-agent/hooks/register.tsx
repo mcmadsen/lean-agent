@@ -41,6 +41,8 @@ import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
+import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
+import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -80,6 +82,8 @@ export const resetModState = () => {
   rulesSection = null
   resetRuleLoader()
   resetPaneState()
+  resetThreadPanes()
+  resetNewThread()
   resetSkillStat()
   resetSkew()
   skew = null
@@ -615,6 +619,15 @@ export const register: Register = on => {
   })
 
   registerPane(on, () => role)
+
+  // the desk pane's two companions, opened by its buttons (threadpane.tsx, newthread.tsx): one pane per thread and the new-thread form;
+  // any other pane id goes on to the hook that draws it
+  on('ui.render', { component: 'Pane' }, async ($, e: any, next) => {
+    const tid = threadOfPane(e?.requestId)
+    if (tid) return drawThreadPane($, e, tid, () => role)
+    if (e?.requestId === NEW_THREAD_PANE) return drawNewThread($, e, () => role)
+    return next(e)
+  })
 
   // the tool pool per role: the desk's is cut to what strict mode can allow; config.json `tools.<role>.drop` (globs) on top;
   // lean-agent's own tools stay. Reads the CURRENT role, so a session that becomes the desk later is trimmed from then on.
