@@ -93,6 +93,25 @@ Talk to the desk in plain language. It starts a thread for anything that touches
 - A thread stopped by the usage limit shows "paused until 16:00" and is resumed by the desk two minutes after the reset, once per
   reset and never when you parked or closed it (`{ "desk": { "autoResume": false } }` turns it off; [spec](docs/usage-limit-resume.md)).
 
+### Thread detail pane and the new-thread form
+
+Two more panes open beside the desk pane (the desk pane's buttons call them; `openThreadPane(host, surface, id)` and
+`openNewThread(host, surface)` in `hooks/threadpane.tsx` and `hooks/newthread.tsx`).
+
+- **Thread pane** (`lean-agent-thread-<tN>`, titled "tN · title"; one per thread, several may be open and each redraws from its own
+  thread's files): the brief (first four lines, expandable), goal, project, model/effort, state, branch and worktree path (from
+  `worktrees.json`), the diff stat against the base (`git -C <worktree> diff --stat <base>...HEAD`, bounded to 12 files; the base is the
+  review record's, else the project's default branch), the review record for HEAD (green only when its signature verifies, passes, open
+  findings), cost today and total (the ledger's rollup, 120 days), the last 10 reports newest first (a row expands), the queued messages
+  and the buttons **Open session** (stops an idle process, then the `claude://resume` link, the same path as "Open tN"), **Restart** and
+  **Close** (press twice; Close never touches a working thread) and **Refresh**. A closed or missing thread shows one short line. Data is
+  read through short caches (session listing 8 s, git 15 s, cost 30 s), so many open panes do not multiply the work.
+- **New thread** (`lean-agent-new-thread`): a title field, a project (the registered ones or none), model (sonnet default, haiku, opus),
+  effort (high default, medium, low), a multi-line brief (the engine's `Input` takes `rows`) and **Start**. Start runs the tool's own `new`
+  code, no model turn, then opens the new thread's pane. An empty title or brief, a title or brief that is too long and a project that
+  is no longer registered are said inline, before any folder exists; a failed start keeps what you typed.
+- Both are desk-only (elsewhere they say so). The pane's open/fold state is kept in the mod, not in `$.state`, so a mod reload folds it again.
+
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
 

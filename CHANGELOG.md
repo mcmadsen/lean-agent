@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+- **A detail pane per thread** (`lean-agent-thread-<tN>`, `hooks/threadpane.tsx` + `hooks/threaddetail.ts`): brief, goal, project,
+  model/effort, state, branch and worktree, the diff stat against the base, the review record for HEAD (green only when its HMAC
+  verifies, passes, open findings), cost today and total, the last 10 reports (expandable), queued messages, and Open session / Restart /
+  Close (two presses) / Refresh. Several panes may be open at once; a closed or missing thread shows one line. Exported for the desk pane's
+  buttons: `openThreadPane($ | hostOf($), surface, tN)`.
+- **A new-thread form** (`lean-agent-new-thread`, `hooks/newthread.tsx`): title, project (registered or none), model, effort, a multi-line
+  brief and Start, which runs the `lean_thread new` code (no model turn) and opens the new thread's pane. Empty or too long title and brief
+  and an unregistered project are said inline before anything is created. Exported: `openNewThread($ | hostOf($), surface)`.
+- `hostOf($)` now carries `ui.open` (the two functions above open their panes through it).
+
 ### Changed
 - **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
   budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the
