@@ -196,6 +196,12 @@ is there. `config.json`: `{ "notify": { "toast": true, "sound": false } }`; `toa
 engine plays only an audio file the plugin bundles, and lean-agent ships none (speech would read thread titles aloud, so it is not
 used either).
 
+**Header, Dismiss, tips.** "lean-agent is not set up" and the Set up button show only while the setup itself is missing; other doctor
+findings read "Doctor: N findings (F fix, I info)". A blocked card has a two-press **Dismiss** (`lean_thread dismiss tN`): it records that
+you acknowledged that report; the notice and badge stay away until a newer blocked report. `/lean-agent:list` lists threads
+(`/lean-agent:threads` is the old name). When you ask the desk for something a direct command does, it adds one line "Tip: do this directly
+with /lean-agent:review <pr>" (once per command per day, quiet for a week after you used the command; `config.json` `"tips": false` turns it off).
+
 ### Approvals of a thread's denied action
 
 When Claude Code's permission check denies an action in a thread (a PR reply, a work item update), the thread reports `blocked` with the
@@ -218,7 +224,7 @@ is the pane's Approve, a push the desk's `approve-push`.
 | `worktree` | create, list, remove worktrees under `~/.lean-agent/worktrees` and sync learned rules into them |
 | `branch` | branch names the way the project wants them (no `lean/` prefix, optional type and task id) |
 | `pr` | pull requests on GitHub (`gh`) or Azure DevOps (`az`), by the origin URL: a thread opens and updates them, the desk only reads status |
-| `review` | review the branch diff in passes and record the verdict for HEAD |
+| `review` | every review: `/lean-agent:review <pr\|branch\|sha\|url> [base]` on the desk starts a review thread; in a thread it reviews the worktree (or someone else's ref, read-only) in passes and records the verdict |
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
 | `rules-pr` | draft PR with optimised Claude files (CLAUDE.md, `.claude/rules`) for a project; needs the user's yes to push like any push |
@@ -342,6 +348,12 @@ the answers; a private project is never compared. `lean_doctor` `compare` with `
 `~/.lean-agent/<project>/reviews/<sha>.json`. A green record unlocks `git push` and PR publishing for that commit
 only; a new commit needs a new review. `review-learn` turns repeated reviewer comments into lessons (below) and, for one area's
 commands and layout, into rules: it learns from every author except the lean-agent owner's own comments.
+
+**Every review goes through the skill.** `/lean-agent:review <pr|branch|sha|url> [base]` on the desk (or `lean_thread new` with
+`review: {pr | branch | sha, base?}` and `project`) starts a review thread on sonnet / high; its brief comes from
+`templates/review-brief.md`. It reads the ref read-only into a scratch repository (never your tree), runs the passes and records with
+`mode: "external"`: such a record is never green and never counts for the push gate. The thread cannot report done without a full-level
+record for the reviewed sha; the mod appends the evidence (sha, level, passes, verdicts, findings by severity) to the report itself.
 
 **Review lessons.** What human reviewers caught that an automated review missed ("before adding a date parser, check
 `parseDate` in `src/lib/dates.ts`") and the shared helpers that already exist are kept per project in
