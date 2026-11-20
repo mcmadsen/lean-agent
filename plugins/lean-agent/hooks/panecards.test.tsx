@@ -1,0 +1,261 @@
+// The desk pane's sections: Needs you, thread cards (state, branch, review verdict, cost), the widget glance, a narrow body, and every
+// section empty. Everything is synthetic: thread titles, branches, shas and numbers are made up.
+import { expect, test } from 'claude-code/testing'
+import { fakeHost } from './fake'
+import { branchIn, claimsPushed, loadView, resetViewCache, shasIn, stateOf } from './view'
+import type { ThreadRow } from './view'
+import { writeReview } from './reviews'
+import { resetLocks } from './threads'
+
+const L = '/h/.lean-agent'
+const SHA = 'abcdef1' + '0'.repeat(33)
+const SID = (n: number) => `0000000${n}-2222-3333-4444-555555555555`
+const line = (o: unknown) => JSON.stringify(o) + '\n'
+const thr = (h: any, id: string, o: Record<string, unknown> = {}) => h.files.set(`${L}/threads/${id}/thread.json`, JSON.stringify({ id, title: `synthetic ${id}`, project: 'proj', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, ...o }))
+const inbox = (h: any, ...recs: unknown[]) => h.files.set(`${L}/desk/inbox.jsonl`, (h.files.get(`${L}/desk/inbox.jsonl`) ?? '') + recs.map(line).join(''))
+const PANE = { plugin: 'lean-agent', component: 'Pane', requestId: 'lean-agent', surface: 'desktop', props: { title: 'lean-agent', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
+const withProps = (props: Record<string, unknown>, surface = 'desktop') => ({ ...PANE, surface, props: { ...PANE.props, ...props } }) as any
+
+function world(on: any = null, agents: any[] = []) {
+  resetLocks()
+  resetViewCache()
+  const h = fakeHost(on)
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? { exitCode: 0, stdout: JSON.stringify(agents) } : { exitCode: 0, stdout: '' })
+  if (on) {
+    on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+    // the mod's own store beneath the pane: the review key is the one the spec signs with (see `review`), nothing else is kept
+    on('store.get', (_: any, e: any) => ({ value: e.key === 'review.key' ? KEY : undefined }))
+    on('store.set', () => ({ value: undefined }))
+  }
+  return h
+}
+const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+const texts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
+// A review record is signed with a key in the mod's own store. The pane runs in the engine's instance of the plugin (its own store, which
+// `world` answers with KEY), the spec's host has another: the same key in both lets the spec write a record the pane verifies.
+const KEY = 'k'.repeat(64)
+async function review(h: any, r: { green: boolean; sha: string; project: string; branch?: string }) {
+  await h.host.store.set('review.key', KEY)
+  await writeReview(h.host, r)
+}
+
+// ---- what the pane reads out of the reports ----------------------------------------------------------------------------
+test('branchIn and shasIn read what a report says; claimsPushed knows "not pushed"', () => {
+  expect(branchIn('Done. Branch: feat/synthetic-x, worktree /w')).toBe('feat/synthetic-x')
+  expect(branchIn('on branch `fix/thing.` and more')).toBe('fix/thing')
+  expect(branchIn('the branch name is feat/y-2')).toBeUndefined()
+  expect(branchIn('branch feat/a-b merged later')).toBe('feat/a-b')
+  expect(branchIn('branch is ready, nothing else')).toBeUndefined()
+  expect(shasIn('commit abcdef1 and 1234567890abcdef1234567890abcdef12345678')).toEqual(['abcdef1', '1234567890abcdef1234567890abcdef12345678'])
+  expect(shasIn('deadbeef is a word of hex letters only')).toEqual([])
+  expect(claimsPushed('pushed to origin')).toBe(true)
+  expect(claimsPushed('not pushed yet')).toBe(false)
+  expect(claimsPushed('unpushed commit')).toBe(false)
+  expect(claimsPushed('pushed: no')).toBe(false)
+  expect(claimsPushed('commit is local only')).toBe(false)
+})
+
+test('stateOf: one word per thread, the colour a theme key', () => {
+  const t = (o: Partial<ThreadRow>): ThreadRow => ({ id: 't1', title: 'x', state: 'open', run: 'idle', last: '', resumable: false, working: false, done: false, asking: false, blocked: false, needsYou: false, lastReport: '', review: 'none', cost: 0, ready: false, recTs: 0, ...o })
+  expect([t({ working: true, run: 'running' }), t({ done: true }), t({ blocked: true }), t({ asking: true }), t({ approval: 'x', blocked: true }), t({ needsYou: true, working: true }), t({ run: 'parked' }), t({ pausedUntil: 5 }), t({})].map(x => stateOf(x))).toEqual([
+    { word: 'working', color: 'success' },
+    { word: 'done', color: 'inactive' },
+    { word: 'blocked', color: 'error' },
+    { word: 'asking', color: 'warning' },
+    { word: 'approval', color: 'warning' },
+    { word: 'waiting', color: 'warning' },
+    { word: 'parked', color: 'inactive' },
+    { word: 'paused', color: 'warning' },
+    { word: 'idle', color: 'inactive' },
+  ])
+})
+
+test('view: a thread\'s branch, commit, review verdict, cost today and "ready to push" come from its reports, the review record and the ledger', async () => {
+  const h = world()
+  thr(h, 't1')
+  thr(h, 't2')
+  thr(h, 't3')
+  inbox(
+    h,
+    { ts: 100, from: 't1', kind: 'report', text: `Done. Branch: feat/synthetic-x, commit ${SHA.slice(0, 7)}, not pushed.`, state: 'done' },
+    { ts: 110, from: 't2', kind: 'report', text: `Done. branch feat/other-y commit ${'1234567'}, pushed to origin.`, state: 'done' },
+    { ts: 120, from: 't3', kind: 'report', text: 'Working on it, no commit yet', state: 'working' },
+  )
+  await writeReview(h.host, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
+  await writeReview(h.host, { green: false, sha: '1234567' + 'f'.repeat(33), project: 'proj', branch: 'feat/other-y' })
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.42 }) + line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.1 }))
+  const v = await loadView(h.host)
+  expect(v.errors).toEqual([])
+  const row = (id: string) => v.threads.find(t => t.id === id)!
+  expect([row('t1').branch, row('t1').sha, row('t1').review, row('t1').ready]).toEqual(['feat/synthetic-x', 'abcdef1', 'green', true])
+  expect(Math.round(row('t1').cost * 100)).toBe(52)
+  expect([row('t2').branch, row('t2').review, row('t2').ready]).toEqual(['feat/other-y', 'red', false]) // a record that is not green, and it says pushed
+  expect([row('t3').branch, row('t3').sha, row('t3').review, row('t3').ready, row('t3').cost]).toEqual([undefined, undefined, 'none', false, 0])
+  expect(v.needs.map(n => [n.kind, n.thread])).toEqual([['push', 't1']])
+  expect(v.needs[0]!.text).toBe('t1 synthetic t1 is ready to push (abcdef1 on feat/synthetic-x, review green): ask the desk to push')
+  expect(v.needs[0]!.notify).toBe(true)
+})
+
+test('view: a record whose signature does not verify is "not green", whatever it says', async () => {
+  const h = world()
+  thr(h, 't1')
+  inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Done, commit ${SHA.slice(0, 7)}`, state: 'done' })
+  await writeReview(h.host, { green: true, sha: SHA, project: 'proj' })
+  const f = `${L}/proj/reviews/${SHA}.json`
+  const forged = h.files.get(f)!.replace(/"sig":\s*"[0-9a-f]+"/, `"sig":"${'0'.repeat(64)}"`) // a copied or forged record
+  expect(forged).not.toBe(h.files.get(f))
+  h.files.set(f, forged)
+  const v = await loadView(h.host)
+  expect(v.threads[0]!.review).toBe('red')
+  expect(v.threads[0]!.ready).toBe(false)
+})
+
+// ---- Needs you ---------------------------------------------------------------------------------------------------------
+test('Needs you: absent when nothing waits; otherwise approvals, questions, ready reports, blocked threads and scripts, each with its button on its card', async ($, on) => {
+  const h = world(on, [{ sessionId: SID(4), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
+  await inDesk($)
+  let ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
+  await ui.unmount()
+  thr(h, 't1', { sid: SID(1) })
+  thr(h, 't2')
+  thr(h, 't3')
+  thr(h, 't4', { sid: SID(4) })
+  inbox(
+    h,
+    { ts: 100, from: 't1', kind: 'report', text: 'cannot run it', state: 'blocked', approval: 'git push origin synthetic-branch' },
+    { ts: 110, from: 't3', kind: 'report', text: 'waiting for a credential', state: 'blocked' },
+    { ts: 120, from: 't4', kind: 'report', text: `Done. Branch: feat/synthetic-x, commit ${SHA.slice(0, 7)}, not pushed.`, state: 'done' },
+  )
+  await review(h, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
+  h.files.set(`${L}/questions.jsonl`, line({ ts: 130, from: 't2', question: 'which cache?' }))
+  resetViewCache()
+  ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  expect(await ui.find({ type: 'Text', text: /Needs you \(4\)/ })).toBeTruthy()
+  const at = (re: RegExp) => all.findIndex(t => re.test(t))
+  // the order: approvals, questions, ready reports, blocked
+  expect([at(/t1 needs your yes in its own session: git push origin synthetic-branch/), at(/t2 asks: which cache\?/), at(/t4 synthetic t4 is ready to push \(abcdef1 on feat\/synthetic-x, review green\): ask the desk to push/), at(/t3 is blocked: waiting for a credential/)].every(i => i >= 0)).toBe(true)
+  expect(at(/t1 needs your yes/)).toBeLessThan(at(/t2 asks/))
+  expect(at(/t2 asks/)).toBeLessThan(at(/is ready to push/))
+  expect(at(/is ready to push/)).toBeLessThan(at(/t3 is blocked/))
+  expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeTruthy() // the approval's own button (the session, not the pane)
+  for (const id of ['t2', 't3', 't4']) expect(await ui.find({ type: 'Button', key: `pane-${id}` })).toBeTruthy() // question, blocked, ready: the thread's pane
+  expect((await ui.findAll({ type: 'Button', text: /^(confirm )?push/i })).length).toBe(0) // a ready report has no push button: the desk pushes
+  expect((await ui.findAll({ type: 'Button' })).filter((b: any) => /push/i.test(String(b.key))).length).toBe(0)
+  await ui.press({ key: 'pane-t2' })
+  expect(await ui.find({ type: 'Text', text: /t2: the thread detail pane comes in this release/ })).toBeTruthy() // the stub says so until the pane is merged
+  await ui.unmount()
+})
+
+// ---- thread cards ------------------------------------------------------------------------------------------------------
+test('a thread card: id and the whole title, one state word, model, branch, verdict, cost, the last report on one line, its buttons', async ($, on) => {
+  const title = 'Make the hub understand every extension point that the synthetic plugin exposes, then document each of them in the guide'
+  const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
+  thr(h, 't1', { sid: SID(1), title, model: 'sonnet', effort: 'high' })
+  thr(h, 't2', { state: 'open' })
+  inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Halfway. Branch: feat/synthetic-x, commit ${SHA.slice(0, 7)}.\nSecond line.`, state: 'working' })
+  await review(h, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.42 }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  expect(all).toContain(`t1 ${title}`) // not cut
+  expect(all).toContain('sonnet/high · working · feat/synthetic-x · review green · $0.42 today') // ONE word for the state
+  expect(all.some(t => /^busy$|\[running\]/.test(t))).toBe(false)
+  expect(all).toContain('Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.') // the last report, one line
+  expect(all.some(t => /^idle · no review$/.test(t) || /idle · no review/.test(t))).toBe(true) // t2: no report, no model recorded
+  for (const k of ['view-t1', 'restart-t1', 'view-t2', 'restart-t2', 'close-t2', 'resume-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // working: no Close
+  expect(await ui.find({ type: 'Button', key: 'resume-t1' })).toBeFalsy()
+  await ui.press({ key: 'view-t1' })
+  expect(await ui.find({ type: 'Text', text: /t1: the thread detail pane comes in this release/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+// ---- the widget --------------------------------------------------------------------------------------------------------
+test('widget placement: a glance (running, blocked, needs you, desk context, budget today) and no button at all', async ($, on) => {
+  const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
+  thr(h, 't1', { sid: SID(1) })
+  thr(h, 't2')
+  inbox(h, { ts: 100, from: 't2', kind: 'report', text: 'stuck', state: 'blocked' })
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, usd: 1.5 }))
+  await inDesk($)
+  const ui = await $.ui.mount(withProps({ placement: 'widget', bodyColumns: 24 }))
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(0) // clicks may not reach a widget
+  const all = await texts(ui)
+  expect(all).toContain('1 running · 1 blocked')
+  expect(all).toContain('1 need you')
+  expect(all).toContain('desk context n/a · today $1.50')
+  expect(all.some(t => /Threads|Inbox|Goals/.test(t))).toBe(false) // a glance, not the pane
+  await ui.unmount()
+})
+
+test('widget placement outside the desk says so and has no button', async ($, on) => {
+  world(on)
+  const ui = await $.ui.mount(withProps({ placement: 'widget' }))
+  expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
+  expect(await ui.find({ type: 'Text', text: /not the desk/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+// ---- narrow body, every section empty ------------------------------------------------------------------------------------
+test('a narrow body (24 columns) draws the same tree with the short forms: buttons still there, the title whole', async ($, on) => {
+  const title = 'A long synthetic title that has to wrap on a narrow pane and never be cut'
+  const h = world(on)
+  thr(h, 't1', { title })
+  inbox(h, { ts: h.clock.t - 1000, from: 't1', kind: 'report', text: 'x'.repeat(100) + ' TAIL', state: 'working' })
+  await inDesk($)
+  for (const surface of ['terminal', 'desktop', 'vscode', 'mobile']) {
+    const ui = await $.ui.mount(withProps({ bodyColumns: 24, placement: 'inline' }, surface))
+    expect(await texts(ui)).toContain(`t1 ${title}`)
+    expect(await ui.find({ type: 'Button', key: 'restart-t1' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'repair' })).toBeTruthy()
+    const row = await ui.find({ type: 'Button', key: 'row-0' })
+    expect(String(row?.text).length).toBeLessThan(40) // an inbox row is cut shorter
+    expect(await ui.find({ type: 'Button', text: /TAIL/ })).toBeFalsy()
+    await ui.unmount()
+  }
+})
+
+test('every section empty: no Needs you, no Goals, an empty-state line for threads and inbox, Closed and More folded, the header and the footer actions', async ($, on) => {
+  const h = world(on)
+  void h
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  expect(all.some(t => /Needs you/.test(t))).toBe(false)
+  expect(await ui.find({ type: 'Button', text: /Goals/ })).toBeFalsy()
+  expect(all).toContain('No open threads.')
+  expect(all).toContain('Nothing from the threads yet.')
+  expect(await ui.find({ type: 'Button', text: /▾ Threads \(0\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(all read\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▸ Closed \(0\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▸ More \(0 projects, 0 scripts\)/ })).toBeTruthy()
+  expect(all.some(t => /^lean-agent$/.test(t))).toBe(true)
+  expect(all.some(t => /lean-agent 1\.0\.\d+ · refreshed \d\d:\d\d:\d\d/.test(t))).toBe(true)
+  for (const k of ['new-thread', 'feedback', 'repair']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // under 80 %: not offered
+  await ui.unmount()
+})
+
+test('every section full: needs, cards, inbox, goals, closed and More all draw, and the buttons of each work', async ($, on) => {
+  const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
+  thr(h, 't1', { sid: SID(1) })
+  thr(h, 't2')
+  thr(h, 't3', { state: 'closed' })
+  inbox(h, { ts: h.clock.t - 1000, from: 't1', kind: 'report', text: 'first', state: 'working' }, { ts: h.clock.t - 900, from: 't2', kind: 'ask', text: 'which db?' })
+  h.files.set(`${L}/questions.jsonl`, line({ ts: 130, from: 't2', question: 'which db?' }))
+  h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship it', ts: h.clock.t } }))
+  h.files.set(`${L}/projects.json`, JSON.stringify({ proj: { path: '/w/p' } }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  for (const re of [/Needs you \(1\)/, /▾ Threads \(2\)/, /▾ Inbox \(2 unread\)/, /▾ Goals \(1\)/, /▸ Closed \(1\)/, /▸ More \(1 projects, 0 scripts\)/]) expect(await ui.find({ type: 'Button', text: re }) ?? (await ui.find({ type: 'Text', text: re }))).toBeTruthy()
+  await ui.press({ key: 'sec-closed' })
+  expect(await ui.find({ type: 'Button', key: 'reopen-t3' })).toBeTruthy()
+  await ui.press({ key: 'sec-more' })
+  expect(await ui.find({ type: 'Text', text: /proj · open/ })).toBeTruthy()
+  await ui.press({ key: 'new-thread' })
+  expect(await ui.find({ type: 'Text', text: /The new-thread form comes in this release/ })).toBeTruthy()
+  await ui.unmount()
+})
