@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.19
 
 ### Fixed
 
@@ -22,9 +22,10 @@
   that costs per request. Not changed: a BACKGROUND worker's result notification is not cut to the job schema (no hook sees it; only a foreground result is).
 - Measured base of a session (haiku, one word, input + cache read + cache creation): plain folder, all built-in tools 42,044 · `--tools Agent,Bash,Read`
   10,230 · `--tools ''` 3,730 · thread folder as is 47,133 · thread folder `--tools Agent,Bash,Read` 19,779. `config threads.tools` (array) adds `--tools` to a
-  thread's fresh start, automatic restart and resume (ignored with `lean.orchestrate: false`). No default list: a subagent can only use the tools its parent
-  has (measured: a worker under `Agent,Bash,Read,Skill,SendMessage,TaskStop` has no Write), so the full set stays unless configured; the README lists a
-  list that keeps workers working and saves about 17k per request. `permissions.deny` does not remove a tool from the request.
+  thread's fresh start, automatic restart and resume (ignored with `lean.orchestrate: false`). A subagent can only use the tools its parent
+  has (measured: a worker under `Agent,Bash,Read,Skill,SendMessage,TaskStop` has no Write), so threads now start with a default list that keeps workers
+  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a real thread folder: 47.1k -> 31.0k,
+  about 16k less on every request); `threads.tools: []` or `"all"` brings the full set back. `permissions.deny` does not remove a tool from the request.
 - `lean_doctor overhead [tN]` shows the REAL base (the first request of a session transcript) next to the text estimate; a thread session's mod records its
   first request (`base.json`) and the start reply of a thread says the measured base.
 

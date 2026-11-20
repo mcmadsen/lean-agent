@@ -37,11 +37,13 @@ function setup(config: unknown, orchestrate = true) {
 }
 const bg = (h: any) => h.claudeCalls().filter((x: string[]) => x[0] === '--bg')
 
-test('no threads.tools: no --tools flag (a subagent only has the tools its parent has, so the full set stays the default)', async () => {
+test('no threads.tools: the default list (what an orchestrating thread and its workers need) is passed with --tools', async () => {
   const h = setup({})
   await leanThread(h.host, ROOT, { action: 'auto-restart', tN: 't1', reason: 'context' })
   expect(bg(h)).toHaveLength(1)
-  expect(bg(h)[0]).not.toContain('--tools')
+  const argv = bg(h)[0]
+  expect(argv[argv.indexOf('--tools') + 1]).toBe('Agent,Bash,Read,Edit,Write,Grep,Glob,Skill,SendMessage,TaskStop,ToolSearch,WebFetch,WebSearch')
+  expect(argv.indexOf('--tools')).toBeLessThan(argv.indexOf('--'))
 })
 
 test('threads.tools: the list goes before the `--` and the prompt on a fresh start, an auto restart and a resume', async () => {

@@ -743,9 +743,10 @@ Everything here is done by script (the thread's or the desk's mod), never by a m
   `+Edit,Write,Grep,Glob` 23.3k (with Skill) / 14.9k (without). The built-in tool schemas are about 38k of the base. `permissions.deny` does NOT
   remove a tool from the request; `--tools` does. A subagent can only use tools its parent session has (measured: a `lean-agent:worker-haiku` of
   a parent started with `--tools Agent,Bash,Read,Skill,SendMessage,TaskStop` answered "Write is disabled"; with `Edit,Write,Grep,Glob` added it
-  wrote the file), so there is NO default list: a thread is started with the full set unless config `threads.tools` (array of names) says
-  otherwise, e.g. `["Agent","Bash","Read","Skill","SendMessage","TaskStop","Edit","Write","Grep","Glob"]` (about 17k less on every request; the
-  mod still refuses the thread's own edits). The flag goes on a fresh start, an automatic restart and a `--resume` (before the `--`); it is
+  wrote the file), so the default list keeps what workers and readers need: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage,
+  TaskStop, ToolSearch, WebFetch, WebSearch` (measured in a real thread folder: 47.1k with the full set, 31.0k with this list, so about 16k less
+  on every request; the mod still refuses the thread's own edits). Config `threads.tools` (array of names) replaces the list; `[]` or `"all"` starts
+  threads with the full set again. A tool a thread or worker then lacks is recorded as a missing tool (feedback export). The flag goes on a fresh start, an automatic restart and a `--resume` (before the `--`); it is
   ignored with `lean.orchestrate: false`. The desk is opened by the app without flags and no settings key equivalent to `--tools` was found: its
   pool is cut by the mod's `tool.list` hook (`tools.desk.drop`), unmeasured. `lean_doctor overhead [tN]` shows the REAL base (the first
   request of a session transcript) next to the text estimate, and the start reply of a thread says the measured base once a thread session

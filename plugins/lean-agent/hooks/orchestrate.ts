@@ -49,15 +49,19 @@ export function orchConfig(cfg: any): OrchConfig {
   }
 }
 
-// The built-in tool list of a thread session (config threads.tools, an array of tool names), as the argv pair for `claude --bg`, or [] (no flag: the
-// full default set). Measured (haiku, one word answer): the built-in tool definitions are most of what a session carries on EVERY request, and a
-// subagent can only use tools its parent session has (a worker needs Edit, Write, Grep, Glob), so there is NO default list: the user sets one.
-// Off with lean.orchestrate false (the thread then edits itself). Names the CLI does not know are ignored by it; anything but a plain name is dropped here.
+// The built-in tool list of a thread session, as the argv pair for `claude --bg`. Measured (haiku, one word answer, a real thread folder): the
+// built-in tool definitions are most of what a session carries on EVERY request (47.1k with the full set, 31.0k with the list below). A subagent can
+// only use tools its parent session has, so the list keeps what workers and readers need (Edit, Write, Grep, Glob, WebFetch, WebSearch) and
+// ToolSearch (MCP tools stay deferred and loadable). config.json `threads.tools`: an array of names replaces the list; an empty array or "all"
+// means no flag (the full set). Off with lean.orchestrate false (the thread then edits itself). Anything but a plain name is dropped here.
+export const THREAD_TOOLS = ['Agent', 'Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'Skill', 'SendMessage', 'TaskStop', 'ToolSearch', 'WebFetch', 'WebSearch']
 export async function threadToolsArgv(h: Host): Promise<string[]> {
   try {
     if (!(await loadOrch(h)).on) return []
     const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, {})
     const raw = cfg?.threads?.tools ?? cfg?.['threads.tools']
+    if (raw === undefined || raw === null) return ['--tools', THREAD_TOOLS.join(',')]
+    if (raw === 'all') return []
     const names = Array.isArray(raw) ? [...new Set(raw.filter((x: unknown): x is string => typeof x === 'string' && /^[A-Za-z][A-Za-z0-9_]*$/.test(x)))] : []
     return names.length ? ['--tools', names.join(',')] : []
   } catch {
