@@ -351,7 +351,9 @@ test('restart desk writes the handover now and opens a new desk session', async 
   h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   let opened = 0
   const ok = await restartDesk(h.host, { recent: async () => ['keep it short'], open: async () => (opened++, { ok: true, text: 'Desk opened in the Claude app.' }) })
-  expect(ok).toEqual({ ok: true, text: DESK_RESTARTED })
+  expect(ok.ok).toBe(true)
+  expect(ok.text.startsWith(`${DESK_RESTARTED}. `)).toBe(true) // then: the mod cannot close a desktop session, archive it (olddesk.test.ts)
+  expect(ok.text).toContain('archive it in the Claude app (right-click, Archive)')
   expect(DESK_RESTARTED).toBe('New desk opened with the handover: close this one')
   expect(opened).toBe(1)
   const md = h.files.get(`${L}/desk/handover.md`)!

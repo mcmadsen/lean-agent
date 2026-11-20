@@ -53,7 +53,7 @@ export async function resolveRole($: Host, o: { cwd: string; root?: string; sid?
   if (byDir.kind === 'desk') return byDir
   if (byDir.kind === 'thread') return bySid && bySid.kind === 'thread' && bySid.id !== byDir.id ? bySid : byDir
   if (bySid) return bySid
-  let r = byDir
+  let r: Role = byDir
   if (o.useRoot !== false && o.root && o.root !== o.cwd) r = await detectRole($, o.root)
   return r
 }

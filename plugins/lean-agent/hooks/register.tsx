@@ -37,6 +37,7 @@ import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, audi
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
+import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
@@ -89,6 +90,7 @@ export const resetModState = () => {
   skew = null
   resetScripts()
   resetDeskCompact()
+  resetOldDesk()
   resetFinish()
   resetCap()
 }
@@ -129,7 +131,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -356,7 +358,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts), mcp-env (an MCP server needs a variable such as a site: with name + a NON-secret value it writes the env block of ~/.claude/settings.json so every session gets it; secret-looking names are refused; without them it lists the servers that need one).',
+        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts), mcp-env (an MCP server needs a variable such as a site: with name + a NON-secret value it writes the env block of ~/.claude/settings.json so every session gets it; secret-looking names are refused; without them it lists the servers that need one), dismiss-old-desk (ends the reminder to archive the desk that Restart desk replaced, once the user says they did or do not care).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -554,6 +556,11 @@ export const register: Register = on => {
         const served = await serveHandover(host, lastSid)
         if (served) pending.push(`[lean-agent] ${served}`)
       })
+      // a desk left behind by "Restart desk": the new desk's first notice names it (olddesk.ts); then once per desk turn until it is archived
+      await soft($, 'old desk', async () => {
+        const said = await oldDeskStep(host, lastSid, 'start')
+        if (said) pending.push(`[lean-agent] ${said}`)
+      })
     }
     // the desk's model and effort pin, when the session's model is already known (else the first request does it)
     if (role.kind === 'desk') await deskModelCheck($)
@@ -591,6 +598,10 @@ export const register: Register = on => {
     if (!e.agentId) busySince = (await $.clock.now()) || 1
     await redetect($)
     await showSkew($)
+    if (!e.agentId && role.kind === 'desk') {
+      const said = await oldDeskStep(hostOf($), lastSid, 'turn').catch(() => null) // at most once per desk turn, until the old desk is archived
+      if (said) pending.push(`[lean-agent] ${said}`)
+    }
     return next(e)
   })
   on('turn.complete', async ($, e: any, next) => {
@@ -774,7 +785,11 @@ export const register: Register = on => {
         if (o.ok) dropSetupCheck()
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
       }
-      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export or mcp-env', isError: true } as any
+      if (e.action === 'dismiss-old-desk') {
+        const o = await dismissOldDesk(host)
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env or dismiss-old-desk', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }

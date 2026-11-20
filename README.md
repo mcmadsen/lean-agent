@@ -384,7 +384,13 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   press confirms; a working thread's label warns that the current step is lost). It stops the session (only one in the thread's own
   folder) and starts a new one with the handover, same model and effort ("Restarted from the pane."). The desk can do the same with
   `lean_thread restart tN` when you ask. `Restart desk` (or `/lean-agent-restart-desk`) writes `~/.lean-agent/desk/handover.md` and
-  opens a new desk session, which reads it; close the old one.
+  opens a new desk session, which reads it. The mod cannot close the old desk (no engine call closes a session; it is a Desktop session,
+  which `claude rm` and `claude stop` are not assumed to reach): it records the old session's id and title before the new desk opens, and
+  the new desk's first notice, then once per desk turn, and the doctor name it and say "archive it in the Claude app (right-click,
+  Archive)" until `claude agents --json --all` no longer lists it as an active row. A desk the listing never shows cannot be checked: the
+  reminder ends 24 h after the restart, or with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) runs only when that exact id
+  is listed as a background-kind session that is not working and lives in the desk folder; the result is logged in
+  `~/.lean-agent/desk/old-desk.json`. The mod never stops the Claude app or a service.
 - **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters keeps its head and tail;
   the full text is saved under `~/.lean-agent/output/` (the same folder as the Bash line squeeze; files older than 7 days, and all but
   the newest 2000, are pruned) and one line says where. Edit and Write results, errors, subagents and the desk are

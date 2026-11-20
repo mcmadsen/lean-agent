@@ -11,6 +11,16 @@
   opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it from a
   terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
 
+### Added
+- **Restart desk remembers the desk it replaced and keeps asking you to archive it.** No engine call closes a session, and the desk is a
+  Desktop session that `claude rm` / `claude stop` (background sessions) are not assumed to reach. The restart records the old desk's id
+  and title (`~/.lean-agent/desk/old-desk.json`) before the new desk opens; the new desk's first notice, then once per desk turn, and the
+  doctor (`note old desk session ...`) name it and say "archive it in the Claude app (right-click, Archive)" until
+  `claude agents --json --all` no longer lists it as an active row. A desk session never listed there cannot be checked: the reminder
+  ends 24 h after the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact
+  id is listed as a background-kind session that is not working and runs in the desk folder; the result is logged in the record. Never
+  the new desk, never `--discard-unpushed` / `--force-remove-worktree`, never a stop of the app or a service.
+
 ## 1.0.13
 
 ### Fixed
