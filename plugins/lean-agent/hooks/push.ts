@@ -120,7 +120,7 @@ export function adoPrUrl(out: string, a: Ado): string | null {
   return `${typeof web === 'string' && /^https:\/\/[^\s"'<>]+$/.test(web) ? web.replace(/\/+$/, '') : adoRepoUrl(a)}/pullrequest/${id}`
 }
 
-type AdoResult = { kind: 'created' | 'open'; url: string } | { kind: 'missing' } | { kind: 'failed'; why: string }
+type AdoResult = { kind: 'created'; url: string } | { kind: 'open'; url: string } | { kind: 'missing' } | { kind: 'failed'; why: string }
 async function adoPullRequest(h: Host, dir: string, a: Ado, pr: { title: string; body: string; draft: boolean }, branch: string, base: string): Promise<AdoResult> {
   const az = await findCli(h, 'az', AZ_PLACES)
   if (!az) return { kind: 'missing' }
