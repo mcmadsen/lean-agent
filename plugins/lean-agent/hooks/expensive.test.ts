@@ -268,6 +268,17 @@ test('restart of a PARKED thread reopens it in the same step (no separate reopen
   expect((await c.call({ action: 'restart', tN: 't1' })).text).toContain('is closed: reopen it first')
 })
 
+test('a restart that names a model that does not exist refuses before anything is stopped', async () => {
+  const { h, call, bg, thread, running } = world()
+  thread({ model: 'sonnet' })
+  running()
+  const r = await call({ action: 'restart', tN: 't1', model: 'gpt' })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('model must be one of')
+  expect(h.claudeCalls().some(c => c[0] === 'stop')).toBe(false)
+  expect(bg()).toHaveLength(0)
+})
+
 test('resume, wake and send of a session recorded on opus (not approved) start a NEW sonnet session with the handover: a resume cannot change a saved model', async () => {
   const { h, call, bg, thread, state } = world()
   thread()

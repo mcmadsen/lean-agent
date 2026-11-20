@@ -274,6 +274,23 @@ test('a resume that does not start gives the mark back and counts a try; after t
   expect(resumes(x)).toHaveLength(MAX_TRIES)
 })
 
+test('a usage-limit resume of a session recorded on an unapproved opus starts a NEW sonnet session (a resume cannot change a saved model)', async () => {
+  const x = setup()
+  await blocked(x)
+  const f = '/h/.lean-agent/threads/t1/thread.json'
+  x.h.files.set(f, JSON.stringify({ ...JSON.parse(x.h.files.get(f)!), model: 'opus' }))
+  await x.tick()
+  x.h.clock.t = DUE
+  const did = await x.tick()
+  expect(did).toHaveLength(1)
+  expect(did[0]).toContain('t1: not resumed: t1 was recorded on opus') // (a new session, not a resume: the tick words it so)
+  expect(resumes(x)).toHaveLength(0)
+  const bg = x.h.claudeCalls().filter(a => a[0] === '--bg')
+  expect(bg).toHaveLength(2) // the thread's first start, then the new session
+  expect(bg[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(x.s.calls).toContain('stop 11111111')
+})
+
 test('limit-resume never stops or resumes a session that is working again', async () => {
   const x = setup()
   await blocked(x)
