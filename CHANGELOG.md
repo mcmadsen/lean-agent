@@ -12,12 +12,36 @@
   "default" = left out, so `config.json` `threads.*` apply as for the tool), a multi-line brief and Start, which runs the `lean_thread new` code (no model turn) and opens the new thread's pane. Empty or too long title and brief
   and an unregistered project are said inline before anything is created. Exported: `openNewThread($ | hostOf($), surface)`.
 - `hostOf($)` now carries `ui.open` (the two functions above open their panes through it).
+- **Desk toasts, no model** (`hooks/notify.ts`): a toast when a thread enters Needs you (approval, question, ready to push, blocked) or
+  reports done, once per event (the keys are kept in `~/.lean-agent/desk/notify-seen.json`; the first pass after an install, and the
+  time toasts are off, only record). `config.json` `notify: { toast: true, sound: false }`. `sound` is accepted and does nothing: the
+  engine plays only an audio clip the plugin bundles, and none is shipped.
+- `hooks/panelinks.ts`: the two buttons that open another pane (a thread's detail pane, the new-thread form) call
+  `openThreadPane(host, surface, id)` and `openNewThread(host, surface)` from here. Until those panes are merged the two functions are
+  stubs that say "comes in this release"; wiring them is two re-exports.
 
 ### Changed
 - **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
   budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the
   haiku agents, `reader-haiku` and the explorer low, threads sonnet / high, the desk opus / high. Nothing in the doctor, `stats` or the
   specs read an agent's effort, so only the two agent files and the README line changed.
+- **The desk pane is a dashboard, not a list** ([README: The pane](README.md#the-pane)). A header with the model/effort chip, the desk's
+  context as a bar against `deskTokens` (yellow from 80 %, red from 100 %, **Restart desk** beside it from 80 %), today's and the 7-day
+  spend, and the version and refresh time small and dim; the one-time "lean-agent set the model" line is drawn once, then the chip says
+  so. **Needs you (N)** comes first and only when something waits: approvals (the 1.0.10 **Open tN** rows), unanswered thread questions,
+  reports ready to push (sha, branch, review green, "ask the desk to push", no push button), blocked threads, scripts waiting for
+  Adopt / Reject, the desk over its limit; each is a card with its button. Every open thread is a bordered card coloured by state: id
+  and the whole title (wrapped, not cut), the state as ONE word (no more `[running]` next to `busy`), model/effort, branch, the review
+  verdict from the signed review record of the commit the reports name (`review green` / `review not green` / `no review`), today's
+  cost, the last report on one line, and **Open** (the thread's detail pane), **Resume** / **Start**, **Restart**, **Close**.
+- **The inbox replaces the flat Answers list**: grouped by thread, unread first, at most the last 5 read rows per thread ("show all"
+  for more), read rows older than 7 days archived (hidden in the pane, kept in `inbox.jsonl`), **ack all** stays. Closed threads stay
+  folded with their count; Projects and Scripts are one folded **More** section; Goals shows only when there are some.
+- **Footer actions**: **New thread**, **Feedback export** (the `/lean-agent-feedback` export, from the pane) and **Setup / repair**.
+  **Restart desk** moved to the header (from 80 % of the limit) and to the "desk over its limit" card.
+- **A minimized widget** (`placement: "widget"`, Claude desktop) draws a glance only, with no button: running and blocked threads,
+  how many need you, desk context in percent, today's spend. A narrow body (under 50 columns) gets shorter rows and wrapping buttons.
+
 
 ## 1.0.11
 

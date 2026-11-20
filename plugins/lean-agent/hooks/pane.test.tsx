@@ -137,34 +137,36 @@ test('view and pane: an open question shows until an answer row closes it', asyn
   expect(v.openQuestions.map(x => [x.q, x.from, x.question])).toEqual([[1, 't1', 'which db?']])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: 'Text', text: /open \? t1: which db\?/ }))?.text).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: /t1 asks: which db\?/ }))?.text).toBeTruthy() // in "Needs you"
   expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
   await ui.unmount()
 })
 
-test('pane Projects section: name, private, open threads, stale rules; hidden private ones left out', async ($, on) => {
+test('pane More section (projects and scripts): name, private, open threads, stale rules; hidden private ones left out', async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ p: { path: '/w/p' }, secret: { path: '/w/s', private: true } }))
   h.files.set('/h/.lean-agent/p/learn.json', JSON.stringify({ sha: 'a', areas: { ui: { globs: ['ui/**'], sha: 'a', lines: 5, stale: 'x' } } }))
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ private: 'off' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▸ Projects \(1\)/ })).toBeTruthy() // folded by default
+  expect(await ui.find({ type: 'Button', text: /▸ More \(1 projects, 0 scripts\)/ })).toBeTruthy() // folded by default
   expect(await ui.find({ type: 'Text', text: /p · open/ })).toBeFalsy()
-  await ui.press({ key: 'sec-projects' })
-  expect(await ui.find({ type: 'Button', text: /▾ Projects \(1\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /Projects/ })).toBeFalsy() // no section of its own any more
+  await ui.press({ key: 'sec-more' })
+  expect(await ui.find({ type: 'Button', text: /▾ More \(1 projects, 0 scripts\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Scripts: 0 candidates, 0 adopted/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /p · open · 2 thread\(s\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /1 rule area\(s\) stale/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /secret/ })).toBeFalsy()
   await ui.unmount()
 })
 
-test('pane thread row shows the thread\'s model/effort', async ($, on) => {
+test('pane thread card shows the thread\'s model/effort badge', async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /t1 · opus\/high/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /opus\/high · \w+ · no review/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -173,13 +175,13 @@ const rec = (o: unknown) => JSON.stringify(o) + '\n'
 const thr = (h: any, id: string, o: Record<string, unknown> = {}) => h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ id, title: `title ${id}`, project: 'p', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, ...o }))
 const SID_OF = (n: number) => `0000000${n}-2222-3333-4444-555555555555`
 
-test('sections are toggle buttons with counts; the state survives a remount; defaults: goals open, projects and closed folded', async ($, on) => {
+test('sections are toggle buttons with counts; the state survives a remount; defaults: goals, threads and inbox open, closed and More folded', async ($, on) => {
   const h = setup(on, [])
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', text: /▾ Goals \(2\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▾ Answers \(2, 2 unread\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▸ Projects \(0\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(2 unread\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▸ More \(0 projects, 0 scripts\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /▾ Threads \(2\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /▸ Closed \(1\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeTruthy()
@@ -195,35 +197,64 @@ test('sections are toggle buttons with counts; the state survives a remount; def
   await ui.unmount()
 })
 
-test('answers: the newest 5 and "show all (N)"; a row expands to its full text; unread first; many rows group by thread', async ($, on) => {
+test('inbox: grouped by thread, unread first (all of them), a row expands to its full text, ack moves a row to the read ones', async ($, on) => {
   const h = setup(on, [])
-  const long = 'x'.repeat(120) + ' THE-END'
-  const rows = Array.from({ length: 12 }, (_, n) => ({ ts: n, from: n % 2 ? 't1' : 't2', kind: 'report', text: n === 11 ? long : `report ${n}`, state: 'working' }))
+  const long = 'x'.repeat(260) + ' THE-END' // longer than a card's last-report line (200) and an inbox row's (70)
+  const rows = Array.from({ length: 12 }, (_, n) => ({ ts: h.clock.t - (12 - n) * 1000, from: n % 2 ? 't1' : 't2', kind: 'report', text: n === 11 ? long : `report ${n}`, state: 'working' }))
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(rec).join(''))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▾ Answers \(12, 12 unread\)/ })).toBeTruthy()
-  const rowsDrawn = async () => (await ui.findAll({ type: 'Button', text: /^[▸▾] (● )?(\? )?t\d: / })).length
-  expect(await rowsDrawn()).toBe(5)
-  expect(await ui.find({ type: 'Button', key: 'row-11' })).toBeTruthy() // newest first
-  expect(await ui.find({ type: 'Button', key: 'row-6' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(12 unread\)/ })).toBeTruthy()
+  const rowsDrawn = async () => (await ui.findAll({ type: 'Button', text: /^[▸▾] (● )?(\? )?(report|x)/ })).length
+  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(6 unread\)/ })).toBeTruthy() // a group per thread, open while it has unread rows
+  expect(await ui.find({ type: 'Button', text: /▾ t2 two \(6 unread\)/ })).toBeTruthy()
+  expect(await rowsDrawn()).toBe(12) // every unread row
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeFalsy() // cut at one line
   await ui.press({ key: 'row-11' })
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeTruthy() // the full report text
   await ui.press({ key: 'row-11' })
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeFalsy() // and collapses again
-  // ack one: it leaves the unread block (dimmed, after the unread rows)
   await ui.press({ key: 'ack-11' })
-  expect(await ui.find({ type: 'Button', text: /▾ Answers \(12, 11 unread\)/ })).toBeTruthy()
-  await ui.press({ key: 'answers-more' })
-  expect(await ui.find({ type: 'Button', text: /▸ t1 \(6, 5 unread\)/ })).toBeTruthy() // 12 rows: grouped by thread, folded
-  expect(await ui.find({ type: 'Button', text: /▸ t2 \(6, 6 unread\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'row-0' })).toBeFalsy() // t2's group is folded: only its newest line shows
-  expect(await ui.find({ type: 'Text', text: /report 10/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(11 unread\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(5 unread, 1 read\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'ack-11' })).toBeFalsy() // read: no ack button, dimmed, after the unread rows
+  expect(await ui.find({ type: 'Button', key: 'row-11' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('inbox: at most the last 5 read rows per thread, "show all" expands; read rows older than 7 days are archived (still in the file)', async ($, on) => {
+  const h = setup(on, [])
+  const day = 86_400_000
+  // t2: 9 read rows from the last days; t1: 2 read rows 8 days old, 1 unread row
+  const rows = [
+    ...Array.from({ length: 9 }, (_, n) => ({ ts: h.clock.t - (10 - n) * 60_000, from: 't2', kind: 'report', text: `recent ${n}`, state: 'working' })),
+    { ts: h.clock.t - 8 * day, from: 't1', kind: 'report', text: 'old a', state: 'working' },
+    { ts: h.clock.t - 8 * day, from: 't1', kind: 'report', text: 'old b', state: 'working' },
+    { ts: h.clock.t - 1000, from: 't1', kind: 'report', text: 'fresh', state: 'working' },
+  ]
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(rec).join(''))
+  h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 11, ns: [] })) // the first 11 rows are read, "fresh" is not
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(1 unread\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(1 unread\)/ })).toBeTruthy() // the 2 old read rows are archived: not even counted
+  expect(await ui.find({ type: 'Text', text: /2 read message\(s\) older than 7 days are archived/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /fresh/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▸ t2 two \(9 read\)/ })).toBeTruthy() // nothing unread: folded
   await ui.press({ key: 'grp-btn-t2' })
-  expect(await ui.find({ type: 'Button', key: 'row-0' })).toBeTruthy()
-  await ui.press({ key: 'answers-less' })
-  expect(await rowsDrawn()).toBe(5)
+  const drawn = async () => (await ui.findAll({ type: 'Button', text: /recent/ })).length
+  expect(await drawn()).toBe(5) // the last 5 read rows
+  expect(await ui.find({ type: 'Button', text: /recent 8/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /recent 3/ })).toBeFalsy()
+  await ui.press({ key: 'answers-more-t2' })
+  expect(await drawn()).toBe(9)
+  await ui.press({ key: 'answers-less-t2' })
+  expect(await drawn()).toBe(5)
+  // ack all: the unread row is read; the read rows stay in the file
+  await ui.press({ key: 'ack-all' })
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(all read\)/ })).toBeTruthy()
+  expect(h.files.get('/h/.lean-agent/desk/inbox.jsonl')!.split('\n').filter(Boolean)).toHaveLength(12)
   await ui.unmount()
 })
 
@@ -240,7 +271,9 @@ test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reje
   waiting('drop')
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: 'Text', text: /2 waiting for you/ }))).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Needs you \(2\)/ })).toBeTruthy() // a script that waits for the user's decision is a need
+  await ui.press({ key: 'sec-more' })
+  expect((await ui.find({ type: 'Text', text: /2 waiting for you/ }))).toBeTruthy() // and counted in More's scripts line
   expect(await ui.find({ type: 'Text', text: /keep \(global\) waits for you: uses the network/ })).toBeTruthy()
   await ui.press({ key: 'sr-drop' })
   expect(await ui.find({ type: 'Button', text: /Confirm reject drop/ })).toBeTruthy()
@@ -288,8 +321,9 @@ test('a working thread has no Close (a busy label); needs-you shows for a sessio
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /waiting for you/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /needs you: open it in the app/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^waiting for you: open it in the app/ })).toBeTruthy() // on its card
+  expect(await ui.find({ type: 'Text', text: /t1 waits on a prompt in its own session/ })).toBeTruthy() // and in "Needs you"
+  expect(await ui.find({ type: 'Text', text: /^busy$/ })).toBeFalsy() // no second word for "working"
   expect(await ui.find({ type: 'Button', key: 'close-t2' })).toBeTruthy() // an idle one still offers it
   void h
   await ui.unmount()
@@ -411,10 +445,26 @@ test('a finished thread row says the next message starts a new session', async (
   await ui.unmount()
 })
 
+// A desk request that reports `n` tokens of context (the plugin notes it for its compaction and the pane's bar). The hook is registered
+// before the test first touches `$` (an engine rule): call deskFeed(on) first, then `await feed($, n)` once the desk is started.
+function deskFeed(on: any) {
+  let tokens = 0
+  on('turn.step', async function* (_: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: e.model, input_tokens: tokens, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any
+  })
+  return async ($: any, n: number) => {
+    tokens = n
+    const st = $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1 } as any)
+    for (;;) if ((await st.next()).done) break
+  }
+}
+
 test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', async ($, on) => {
+  const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
+  await feed($, 170_000) // 85 % of the default limit: the button is beside the bar
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   const ui = await $.ui.mount(DESKPANE as any)
   await ui.press({ key: 'restart-desk' })
@@ -441,16 +491,38 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   await ui.unmount()
 })
 
-// (the engine's test host loads the plugin as its own module instance, so the compaction state that puts the advice row on top
-// cannot be seeded from here: deskcompact.test.ts covers that state, this one the quiet case)
-test('a desk under its limit has no advice row and no second Restart desk button', async ($, on) => {
+// (deskcompact.test.ts covers the compaction states; here the desk's context size comes from a request, as in a real session)
+test('header: a desk under 80 % of its limit has the bar and no Restart desk button; from 80 % the button is beside the bar; over the limit it is also a need', async ($, on) => {
+  const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' } as any)
+  const DESKPANE = { ...PANE, surface: 'desktop' } as const
+  let ui = await $.ui.mount(DESKPANE as any)
+  expect(await ui.find({ type: 'Text', text: /desk context: known after the next request/ })).toBeTruthy() // nothing was asked yet
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  await ui.unmount()
+  await feed($, 40_000)
+  ui = await $.ui.mount(DESKPANE as any)
+  expect(await ui.find({ type: 'Text', text: /40k of 200k/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
+  await ui.unmount()
+  await feed($, 170_000)
+  ui = await $.ui.mount(DESKPANE as any)
+  expect(await ui.find({ type: 'Text', text: /170k of 200k/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /the app cannot compact the desk automatically/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy() // still under the limit: not yet a need
+  await ui.unmount()
+  await feed($, 210_000)
+  ui = await $.ui.mount(DESKPANE as any)
+  expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /desk context 210k is over its limit \(200k\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeTruthy() // the button on the need's own card
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy() // and beside the bar
+  await ui.press({ key: 'restart-desk-top' })
+  expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy() // one two-step for both
+  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(2)
   await ui.unmount()
 })
 

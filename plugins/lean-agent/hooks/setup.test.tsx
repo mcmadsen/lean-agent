@@ -115,7 +115,7 @@ test('the desk pane shows the Setup / repair button and the fix lines after pres
   await start($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', text: /Setup \/ repair/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /Goals/ })).toBeTruthy() // a section header is a toggle button
+  expect(await ui.find({ type: 'Button', text: /Threads/ })).toBeTruthy() // a section header is a toggle button
   await ui.press({ key: 'repair' })
   expect(await ui.find({ type: 'Text', text: /desk folder ready/ })).toBeTruthy()
   expect(h.files.get('/h/.lean-agent/bin/open-desk.sh')).toContain('echo open')

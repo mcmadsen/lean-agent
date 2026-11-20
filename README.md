@@ -27,7 +27,7 @@ Python.
 | **Desk** | A local Claude desktop session in `~/lean-agent-desk`. Its generated `CLAUDE.md` makes it a router: it never reads code or edits files, it starts and talks to threads |
 | **Threads** | Background sessions (`claude --bg`), one folder each under `~/.lean-agent/threads/tN`, visible in the Claude app. A thread works in its own git worktree and reports back with `lean_report` / `lean_ask` / `lean_goal` |
 | **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when a cheaper one failed; read-only readers and a reviewer |
-| **Pane** | The desk's side pane: goals, answers (with acknowledge), threads with Resume / Start buttons, a status line with spend |
+| **Pane** | The desk's side pane: what needs you, one card per thread, the inbox by thread, spend and the desk's context at a glance ([The pane](#the-pane)) |
 | **Opener** | A login item that waits for the Claude app (never launches it) and opens a new session in the desk folder through the app's `claude://code/new?folder=…` link (`open`; `claude --desktop` only as the last fallback) |
 | **Rules** | What the `learn` skill writes per project: short `paths:`-scoped rules that load only when a matching file is read |
 
@@ -86,9 +86,9 @@ Talk to the desk in plain language. It starts a thread for anything that touches
 - "Park t3", "close t1", "reopen t3": flips the thread's state; closing also stops a finished-but-alive session and clears
   the goal. Reopening a **closed** thread starts a new session in the same folder with a handover built from its brief, notes,
   reports and remembered items (the old conversation is never resumed).
-- After a restart nothing is running. The pane offers **Resume** for threads that had a session and **Start** for the
+- After a restart nothing is running. A thread's card offers **Resume** for threads that had a session and **Start** for the
   ones that never started. **Close** (press twice) and **Close all done** never touch a working thread; closed threads sit in a
-  collapsed "Closed (N)" with **Reopen**. Section headers fold and unfold; an answer row expands to its full text.
+  collapsed "Closed (N)" with **Reopen**. Section headers fold and unfold; an inbox row expands to its full text.
 - Threads send a question or a done / blocked report straight to the desk's session; the inbox and the pane keep every report.
 - A thread stopped by the usage limit shows "paused until 16:00" and is resumed by the desk two minutes after the reset, once per
   reset and never when you parked or closed it (`{ "desk": { "autoResume": false } }` turns it off; [spec](docs/usage-limit-resume.md)).
@@ -115,6 +115,41 @@ Two more panes open beside the desk pane (the desk pane's buttons call them; `op
 
 `/lean-agent` opens the pane. Threads run with an allow-list: Edit, Write and Bash inside their own worktrees and the
 lean-agent folder without asking. Pushes stay behind the review gate and the private-project rule.
+
+## The pane
+
+Top to bottom (the desk's pane; any other session sees only the way to the desk or to setup):
+
+1. **Header.** The desk's model and effort as a chip (`[sonnet/high]`; `≠ pin` and a yellow line when the desk really runs another
+   model), today's spend and the last 7 days, the desk's context as a bar against `deskTokens` (green, yellow from 80 %, red from
+   100 %) with **Restart desk** beside it from 80 %, and the version and refresh time, small and dim. The one-time line "lean-agent set
+   sonnet / high" is drawn for 30 seconds after it first appears; after that the chip says "(set by lean-agent)".
+2. **Needs you (N)**, only when something waits: a thread blocked on an approval (**Open tN** opens its own session, where you
+   answer), an unanswered thread question, a report that is ready to push (its sha and branch, review green, not yet pushed: "ask the
+   desk to push"; there is no push button, the desk pushes), a blocked thread or one waiting on a prompt, a script waiting for your
+   Adopt / Reject, and the desk over its context limit. Each is a card with its button.
+3. **Threads.** One bordered card per open thread, coloured by state (green working, yellow asking / approval / waiting / paused,
+   red blocked, dim done / idle / parked). Line 1: id and the whole title (it wraps). Line 2: model/effort, the state as ONE word,
+   the branch, the review verdict (`review green`, `review not green`, `no review`) and today's cost. Line 3: the last report on one
+   line. Buttons: **Open** (the thread's detail pane), **Resume** / **Start**, **Restart** and **Close** (both press twice). The
+   branch, commit and verdict are read from the thread's latest reports and the signed review record of the commit they name; a
+   record whose signature does not verify counts as "not green".
+4. **Inbox.** Reports and questions grouped by thread, a thread with something unread first and open, unread rows first, then the
+   last 5 read ones ("show all" for the rest). A read row older than 7 days is archived: hidden here, still in
+   `~/.lean-agent/desk/inbox.jsonl`. **ack all** marks everything read.
+5. **Goals** (only when there are some), **Closed (N)** and **More** (projects, scripts) are folded sections.
+6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`; nothing is posted)
+   and **Setup / repair**.
+
+In the minimized widget form (Claude desktop), the pane draws a glance and no button, because clicks may not reach it: threads
+running and blocked, how many need you, the desk's context in percent and today's spend. On a narrow body (under 50 columns) the
+rows get shorter and the buttons wrap; the tree is the same on the terminal, the desktop app, VS Code and mobile.
+
+**Notifications.** The desk shows a toast, once per event, when a thread enters "Needs you" (an approval, a question, a report ready
+to push, a blocked thread) or reports done. A script decides, no model is involved. The first pass after an install only records what
+is there. `config.json`: `{ "notify": { "toast": true, "sound": false } }`; `toast: false` silences it. `sound` does nothing yet: the
+engine plays only an audio file the plugin bundles, and lean-agent ships none (speech would read thread titles aloud, so it is not
+used either).
 
 ## Skills
 
@@ -297,7 +332,7 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   done but is still on a final step is stopped only once it is idle. Any later `send`, `wake`, `resume` or `start` for it starts a
   NEW session with a handover (brief, goal, notes, reports including the done report, queued messages, branch and worktree), never a
   resume of the old conversation. Nothing checkpoints a thread mid-work.
-- **Restart buttons** (the pane, instead of any automatic restart): every open thread row has `Restart` (press twice: the second
+- **Restart buttons** (the pane, instead of any automatic restart): every open thread card has `Restart` (press twice: the second
   press confirms; a working thread's label warns that the current step is lost). It stops the session (only one in the thread's own
   folder) and starts a new one with the handover, same model and effort ("Restarted from the pane."). The desk can do the same with
   `lean_thread restart tN` when you ask. `Restart desk` (or `/lean-agent-restart-desk`) writes `~/.lean-agent/desk/handover.md` and
@@ -313,8 +348,9 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   is written and the status line reads "desk context Nk: type /compact (or start a new desk session; it reads the handover)".
   **In Claude Desktop the desk is an SDK (headless) session, and the engine does not offer `session.compact` there** ("compaction
   here runs inside a turn"). That is not a failure: it is asked once per session start (no retry, no red row, no notice), and while
-  the desk is over `deskTokens` the pane shows, at the top, "desk context Nk: the app cannot compact the desk automatically. Press
-  Restart desk (fresh desk with the handover) or type /compact" with the `Restart desk` button next to it (press twice).
+  the desk is over `deskTokens` the pane shows, under "Needs you", "desk context Nk: the app cannot compact the desk automatically.
+  Press Restart desk (fresh desk with the handover) or type /compact" with the `Restart desk` button on the same card (press twice;
+  the header's bar has the same button from 80 % of the limit).
   `lean_doctor check` shows it as a `note` row, not `FIX`. The mod does not send `/compact` itself: no engine call is documented to
   run a slash command in a headless session.
   The 1.0.6 key `checkpoint.deskTokens` is still read; `checkpoint.threadTokens` and `checkpoint.enabled` do nothing.
