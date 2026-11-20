@@ -816,7 +816,7 @@ export const register: Register = on => {
     // an oversized Bash or MCP result of a thread's main loop is cut before it enters the conversation (cap.ts); the full text is a file
     if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
-    if (audited && r?.deny === undefined) {
+    if (audited && role.kind === 'thread' && r?.deny === undefined) {
       const reply = texts(r?.result).join('\n')
       const said = await auditFromReply(host, role.id, reply, String(e.prompt ?? '')).catch(() => null)
       // (the engine ignored the foreground switch and the call came back as "Async agent launched": say that no verdict was recorded)

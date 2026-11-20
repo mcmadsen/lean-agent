@@ -15,10 +15,10 @@ roles: thread
    <base>`, then PRs into other targets when fewer than N; the threads from REST `.../pullRequests/<n>/threads` with a bearer token from
    `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`: never a PAT, never printed). Any other host: the tool
    says it is not supported.
-2. The tool has already dropped what is never a lesson, each counted in its first lines: the owner's own comments (only the owner's: other
-   humans and bots such as Copilot or CI reviewers are learned from), system threads (votes, policy results, ref updates, reviewer
-   changes), deleted comments, bare approvals ("LGTM") and one-off typo fixes. Fallback only when the owner could not be found: skip
-   comments that carry a lean-agent marker line (`<!-- lean-agent -->` or text starting `[lean-agent]`).
+2. The tool has already dropped what is never a lesson, each counted in its first lines: the owner's own comments (Only the owner's own
+   comments are excluded; other humans and bots such as Copilot or CI reviewers are learned from), system threads (votes, policy results,
+   ref updates, reviewer changes), deleted comments, bare approvals ("LGTM") and one-off typo fixes. Fallback only when the owner could
+   not be found: skip comments that carry a lean-agent marker line (`<!-- lean-agent -->` or text starting `[lean-agent]`).
 3. Read what is left: group it by theme and file area. An Azure thread's status says what happened to the point: `fixed` or `closed` =
    the author acted on it, `wontFix` or `byDesign` = the author disagreed (a lesson only if another reviewer says it too), `active` = still
    open.
