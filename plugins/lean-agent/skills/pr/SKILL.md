@@ -42,9 +42,11 @@ with the token in the header, read from an environment variable and never printe
     CLAUDE.md states the value; default off) and stop.
   - desk: ask the user, naming that sha and branch; only after an explicit yes call `lean_thread` `approve-push` (tN, sha) and then
     `push` (tN, sha, `pr: { title, body, base?, draft? }`). The mod checks the review, the approval and the thread's worktree, runs
-    the push and the PR itself (or answers with the compare URL when gh is missing) and queues a message to the thread.
-    Relay the URL to the user. Azure DevOps: the push runs the same way and the PR link is the compare URL; the PR itself
-    is then the user's to open.
+    the push and the PR itself (the host is read from the push remote's URL: `gh pr create` for GitHub, `az repos pr create --org
+    https://dev.azure.com/{org} --project {project} --repository {repo} --source-branch .. --target-branch ..` for Azure DevOps, with
+    the user's `az login`) and queues a message to the thread. Relay the URL to the user. When the CLI is missing or fails the reply
+    gives the host's create-PR link instead (Azure DevOps: `.../_git/{repo}/pullrequestcreate?sourceRef=..&targetRef=..`) and names the
+    CLI that was needed ("az repos pr create needs az + az login"); the PR is then the user's to open.
 - **status** (desk or thread; the desk's folder is not a repo, so it names the repo: github `--repo {owner}/{repo}`, Azure
   `--organization https://dev.azure.com/{org} --project {project} --repository {repo}`): github: `gh pr view <n> --json state,reviewDecision,statusCheckRollup,url,isDraft,mergeable`;
   find a branch's PR with `gh pr list --head <branch> --json number,url,state`. Azure: `az repos pr show --id <n>`;

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Desk push with `pr` now works on Azure DevOps.** The PR host is picked from the push remote's URL (as the `pr` skill does):
+  GitHub keeps `gh pr create`; `dev.azure.com/<org>/<project>/_git/<repo>`, the old `<org>.visualstudio.com` form and both ssh forms
+  open the PR with `az repos pr create --org https://dev.azure.com/<org> --project .. --repository .. --source-branch .. --target-branch ..`
+  (argv, no shell; `az` is found on PATH or in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; it uses the user's `az login`, never a
+  token) and the PR link is read from its JSON. When `az` is missing or fails, the reply gives the create-PR link
+  (`.../_git/<repo>/pullrequestcreate?sourceRef=<branch>&targetRef=<base>`, URL-encoded) and says "az repos pr create needs az + az login"
+  instead of advising to install `gh`. An already open PR is found with `az repos pr list` and reported as open.
+
 ## 1.0.11
 
 ### Fixed

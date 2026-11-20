@@ -2,13 +2,13 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
-import { compareUrl, firstError, repoOf } from './push'
+import { adoCreateLink, adoOf, adoPrUrl, compareUrl, firstError, repoOf } from './push'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -34,8 +34,13 @@ async function setup(o: Opts = {}) {
   }
   const ghCalls: { argv: string[]; cwd?: string; body: string; env?: Record<string, string>; timeoutMs?: number }[] = []
   h.exec.handler = (argv, c) => {
-    if (argv[1] === '--version') return { exitCode: o.gh === false ? 127 : 0, stdout: 'gh version 2\n' }
+    const isAz = /(^|\/)az$/.test(argv[0]!)
+    if (argv[1] === '--version') return { exitCode: (isAz ? o.az : o.gh) === false ? 127 : 0, stdout: 'version 2\n' }
     ghCalls.push({ argv, cwd: c.cwd, body: c.stdin ?? '<none>', env: c.env, timeoutMs: c.timeoutMs })
+    if (isAz) {
+      if (argv[3] === 'list') return { exitCode: 0, stdout: o.azList ?? '[]' }
+      return o.azFailure ? { exitCode: 1, stdout: '', stderr: o.azFailure } : { exitCode: 0, stdout: o.azOut ?? JSON.stringify({ pullRequestId: 12, repository: { webUrl: 'https://dev.azure.com/org1/00000000-aaaa/_git/repo1' } }) }
+    }
     return o.ghFailure ? { exitCode: 1, stdout: '', stderr: o.ghFailure } : { exitCode: 0, stdout: (o.ghUrl ?? 'https://github.com/o/r/pull/7') + '\n' }
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
@@ -275,4 +280,124 @@ test('compare URLs and first error lines are read from the output', () => {
   expect(compareUrl('Everything up-to-date')).toBeNull()
   expect(firstError({ stderr: 'hint: x\nfatal: could not read Username\nmore' })).toBe('fatal: could not read Username')
   expect(firstError({ stderr: '', stdout: '' })).toBe('no output')
+})
+
+const ADO_ORIGIN = 'https://dev.azure.com/org1/proj1/_git/repo1'
+const ADO_LINK = 'https://dev.azure.com/org1/proj1/_git/repo1/pullrequestcreate?sourceRef=feat&targetRef=main'
+
+test('adoOf reads org, project and repository from every Azure DevOps remote form, and nothing else', () => {
+  const want = { org: 'org1', project: 'proj1', repo: 'repo1' }
+  for (const url of [
+    'https://dev.azure.com/org1/proj1/_git/repo1',
+    'https://org1@dev.azure.com/org1/proj1/_git/repo1',
+    'https://dev.azure.com/org1/proj1/_git/repo1/',
+    'git@ssh.dev.azure.com:v3/org1/proj1/repo1',
+    'ssh://git@ssh.dev.azure.com/v3/org1/proj1/repo1',
+    'ssh://git@ssh.dev.azure.com:22/v3/org1/proj1/repo1',
+    'https://org1.visualstudio.com/proj1/_git/repo1',
+    'https://org1.visualstudio.com/DefaultCollection/proj1/_git/repo1',
+    'https://org1@org1.visualstudio.com/proj1/_git/repo1',
+    'org1@vs-ssh.visualstudio.com:v3/org1/proj1/repo1',
+  ]) expect([url, adoOf(url)]).toEqual([url, want])
+  // an encoded name is decoded; a project-less url names the project like the repository
+  expect(adoOf('https://dev.azure.com/org1/My%20Proj/_git/my%20repo')).toEqual({ org: 'org1', project: 'My Proj', repo: 'my repo' })
+  expect(adoOf('https://dev.azure.com/org1/_git/repo1')).toEqual({ org: 'org1', project: 'repo1', repo: 'repo1' })
+  for (const bad of ['https://github.com/o/r', 'git@github.com:o/r.git', '/srv/git/r', '', 'https://dev.azure.com/org1/proj1', 'https://dev.azure.com/org1/proj1/_git/', 'https://dev.azure.com/-org/proj1/_git/repo1', 'https://dev.azure.com/org1/-p/_git/repo1', 'https://dev.azure.com/org1/p%0Aq/_git/repo1', 'https://dev.azure.com/org1/p%2Fq/_git/repo1', 'https://example.com/dev.azure.com/org1/proj1/_git/repo1', 'git@ssh.dev.azure.com:v3/org1/proj1']) expect([bad, adoOf(bad)]).toEqual([bad, null])
+})
+
+test('the create-PR link is URL-encoded, and the PR link is read from az JSON', () => {
+  const a = { org: 'org1', project: 'My Proj', repo: 'my repo' }
+  expect(adoCreateLink(a, 'feature/a b&c', 'main')).toBe('https://dev.azure.com/org1/My%20Proj/_git/my%20repo/pullrequestcreate?sourceRef=feature%2Fa%20b%26c&targetRef=main')
+  const b = { org: 'org1', project: 'proj1', repo: 'repo1' }
+  expect(adoPrUrl('{"pullRequestId": 7, "repository": {"webUrl": "https://dev.azure.com/org1/guid/_git/repo1/"}}', b)).toBe('https://dev.azure.com/org1/guid/_git/repo1/pullrequest/7')
+  expect(adoPrUrl('{"pullRequestId": 7}', b)).toBe('https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/7') // no webUrl: built
+  expect(adoPrUrl('WARNING: x\n[{"pullRequestId": 9}]', b)).toBe('https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/9') // a notice first; a list
+  expect(adoPrUrl('{"repository": {"webUrl": "https://x"}}', b)).toBeNull()
+  expect(adoPrUrl('{"pullRequestId": "7; rm"}', b)).toBeNull()
+  expect(adoPrUrl('not json', b)).toBeNull()
+  expect(adoPrUrl('[]', b)).toBeNull()
+})
+
+test('Azure DevOps remote: push, then az repos pr create (argv, no shell, the user\'s az login), PR id read from its JSON', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN } })
+  const r = await s.push({ pr: { title: 'Fix the thing', body: 'What changed.\n\n- tested' } })
+  expect(r).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12` })
+  expect(s.ghCalls).toHaveLength(1)
+  expect(s.ghCalls[0]!.argv).toEqual(['az', 'repos', 'pr', 'create', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'main', '--title=Fix the thing', '--description=What changed.\n\n- tested', '--output', 'json'])
+  expect(s.ghCalls[0]).toMatchObject({ cwd: WT, timeoutMs: 120_000, env: { GIT_TERMINAL_PROMPT: '0' } })
+  expect(JSON.stringify(s.ghCalls)).not.toMatch(/gh|token|--pat|AZURE_DEVOPS_EXT_PAT/)
+  expect(s.h.calls.some(c => c.argv[0] === 'gh')).toBe(false) // gh is never looked for
+  const hist = JSON.parse(s.history().trim())
+  expect(hist).toMatchObject({ ok: true, pr: 'https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12', compare: ADO_LINK })
+  expect(JSON.parse(s.inbox().trim()).text).toBe(`the desk pushed ${SHA} to origin/feat; PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12`)
+  // draft, an explicit base, the ssh and the old url forms, no body: no --description
+  const b = await setup({ urls: { origin: 'git@ssh.dev.azure.com:v3/org1/proj1/repo1' } })
+  await b.push({ pr: { title: 'T', base: 'develop', draft: true } })
+  expect(b.ghCalls[0]!.argv).toEqual(['az', 'repos', 'pr', 'create', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'develop', '--title=T', '--draft', '--output', 'json'])
+  const c = await setup({ urls: { origin: 'https://org1.visualstudio.com/proj1/_git/repo1' } })
+  expect((await c.push({ pr: { title: 'T' } })).ok).toBe(true)
+  expect(c.ghCalls[0]!.argv.slice(4, 10)).toEqual(['--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1'])
+  // the push itself is unchanged
+  expect(s.pushes()).toEqual([['-C', WT, '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  // no PR asked: the reply names the create-PR link (the push output of Azure DevOps names none)
+  const n = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 0, stderr: '' } })
+  expect(await n.push()).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; compare URL ${ADO_LINK}` })
+  expect(n.ghCalls).toEqual([])
+})
+
+test('Azure DevOps remote: az is found in the usual places; missing az names az, never gh, and gives the create-PR link', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN }, az: false })
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain(`pushed ${SHA} to origin/feat`)
+  expect(r.text).toContain('az was not found')
+  expect(r.text).toContain('az repos pr create needs az + az login')
+  expect(r.text).toContain(`open it from ${ADO_LINK}`)
+  expect(r.text).not.toMatch(/\bgh\b/)
+  expect(s.ghCalls).toEqual([])
+  expect(JSON.parse(s.inbox().trim()).text).toBe(`the desk pushed ${SHA} to origin/feat; PR not created (no az), create-PR link ${ADO_LINK}`)
+  expect(JSON.parse(s.history().trim())).toMatchObject({ ok: true, pr: null, compare: ADO_LINK })
+  // a branch with a slash and a base are URL-encoded in the link
+  const t = await setup({ urls: { origin: ADO_ORIGIN }, az: false, branch: 'feature/a-b' })
+  expect((await t.push({ pr: { title: 'T', base: 'release-x' } })).text).toContain('pullrequestcreate?sourceRef=feature%2Fa-b&targetRef=release-x')
+  // not on PATH, but at the Homebrew place
+  const u = await setup({ urls: { origin: ADO_ORIGIN }, az: false })
+  u.h.files.set('/opt/homebrew/bin/az', '')
+  expect((await u.push({ pr: { title: 'T' } })).text).toContain('PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12')
+  expect(u.ghCalls[0]!.argv[0]).toBe('/opt/homebrew/bin/az')
+})
+
+test('Azure DevOps remote: a failing az keeps the pushed state visible, names az + az login and the link; an open PR is found', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: "ERROR: Please run 'az login' to setup account.\nmore" })
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain(`pushed ${SHA} to origin/feat`)
+  expect(r.text).toContain("the PR step failed at az repos pr create: ERROR: Please run 'az login' to setup account.")
+  expect(r.text).toContain('az repos pr create needs az + az login')
+  expect(r.text).toContain(`open the PR from ${ADO_LINK}`)
+  expect(r.text).not.toMatch(/\bgh\b/)
+  expect(JSON.parse(s.history().trim())).toMatchObject({ ok: false, step: 'az repos pr create', compare: ADO_LINK })
+  // az exits 0 but prints no id
+  const t = await setup({ urls: { origin: ADO_ORIGIN }, azOut: '{}' })
+  expect((await t.push({ pr: { title: 'T' } })).text).toContain('az printed no pull request id')
+  // a PR for that branch pair is already open: az does not name it, the list does
+  const u = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: 'ERROR: TF401179: An active pull request for the source and target branch already exists.', azList: '[{"pullRequestId": 5}]' })
+  expect(await u.push({ pr: { title: 'T' } })).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; PR already open: https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/5` })
+  expect(u.ghCalls[1]!.argv).toEqual(['az', 'repos', 'pr', 'list', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'main', '--status', 'active', '--output', 'json'])
+  // ... and when the list finds none, it is the failure with the link
+  const v = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: 'ERROR: TF401179: An active pull request for the source and target branch already exists.' })
+  expect((await v.push({ pr: { title: 'T' } })).ok).toBe(false)
+  // a push that failed creates no PR for Azure DevOps either
+  const w = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 1, stderr: 'fatal: nope' } })
+  expect((await w.push({ pr: { title: 'T' } })).ok).toBe(false)
+  expect(w.ghCalls).toEqual([])
+})
+
+test('a GitHub remote still uses gh, whatever the host is called', async () => {
+  const s = await setup({ urls: { origin: 'https://github.com/o/r' } })
+  await s.push({ pr: { title: 'T' } })
+  expect(s.ghCalls[0]!.argv[0]).toBe('gh')
+  const t = await setup({ urls: { origin: 'https://example.com/dev.azure.com/org1/proj1/_git/repo1' } })
+  await t.push({ pr: { title: 'T' } })
+  expect(t.ghCalls[0]!.argv[0]).toBe('gh')
 })

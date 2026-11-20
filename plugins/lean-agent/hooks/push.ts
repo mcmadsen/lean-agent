@@ -18,10 +18,12 @@ const FULL = /^[0-9a-f]{40,64}$/
 const NAME = /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,199}$/
 const nameOk = (n: string) => NAME.test(n) && !n.includes('..') && !n.includes('//') && !n.endsWith('/') && !n.endsWith('.lock') && !n.startsWith('refs/')
 const GH_PLACES = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '/usr/bin/gh'] // the app's PATH (a macOS GUI app) often lacks these
+const AZ_PLACES = ['/opt/homebrew/bin/az', '/usr/local/bin/az', '/usr/bin/az']
 
 const err = (text: string): Out => ({ ok: false, text })
 // no credential or ssh prompt can wait on a terminal nobody is at; every spawn is bounded (the thread's lock is held meanwhile)
-const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1' }
+// (az uses the user's own `az login`; no token is ever passed or read here)
+const NO_PROMPT = { GIT_TERMINAL_PROMPT: '0', GH_PROMPT_DISABLED: '1', AZURE_CORE_NO_COLOR: 'true', AZURE_CORE_ONLY_SHOW_ERRORS: 'true' }
 const NET_MS = 120_000
 // text from a remote or gh goes to the thread as a quote, never as plain words
 const quoted = (s: string) => JSON.stringify(s.replace(/[^\x20-\x7e]/g, ' ').slice(0, 200))
@@ -52,14 +54,94 @@ async function git(h: Host, dir: string, ...a: string[]): Promise<{ ok: boolean;
   }
 }
 
-async function findGh(h: Host): Promise<string | null> {
+async function findCli(h: Host, name: string, places: string[]): Promise<string | null> {
   try {
-    if ((await h.process.run(['gh', '--version'])).exitCode === 0) return 'gh'
+    if ((await h.process.run([name, '--version'])).exitCode === 0) return name
   } catch {
     /* not on PATH */
   }
-  for (const p of GH_PLACES) if (await h.fs.exists(p).catch(() => false)) return p
+  for (const p of places) if (await h.fs.exists(p).catch(() => false)) return p
   return null
+}
+
+// ---- Azure DevOps ------------------------------------------------------------------------------------------------
+// The PR host is picked from the push remote's URL, as the pr skill does: Azure DevOps (dev.azure.com, the old <org>.visualstudio.com,
+// and their ssh forms) opens the PR with `az repos pr create`; every other host keeps `gh`.
+export type Ado = { org: string; project: string; repo: string }
+const ADO_ORG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const decoded = (s: string) => {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return null
+  }
+}
+// a project or repository name: decoded, one line, no path or URL syntax, never a flag (it travels as an argv element, never through a shell)
+const adoName = (s: string | undefined): string | null => {
+  const d = s === undefined ? null : decoded(s)
+  return d !== null && d === d.trim() && /^[^\x00-\x1f\x7f\\/?#:*"<>|%]{1,128}$/.test(d) && !d.startsWith('-') ? d : null
+}
+export function adoOf(url: string): Ado | null {
+  const u = url.trim()
+  const user = '(?:[^@/\\s]+@)?'
+  let m: RegExpExecArray | null
+  let org: string | undefined
+  let project: string | undefined
+  let repo: string | undefined
+  if ((m = new RegExp(`^https?://${user}dev\\.azure\\.com/([^/\\s]+)/(?:([^/\\s]+)/)?_git/([^/\\s]+?)/?$`, 'i').exec(u))) [, org, project, repo] = m
+  else if ((m = new RegExp(`^https?://${user}([A-Za-z0-9-]+)\\.visualstudio\\.com/(?:DefaultCollection/)?(?:([^/\\s]+)/)?_git/([^/\\s]+?)/?$`, 'i').exec(u))) [, org, project, repo] = m
+  else if ((m = /^(?:ssh:\/\/)?[^@/\s]+@(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)(?::\d+)?[:/]v3\/([^/\s]+)\/([^/\s]+)\/([^/\s]+?)\/?$/i.exec(u))) [, org, project, repo] = m
+  if (!m || !org || !ADO_ORG.test(org)) return null
+  const r = adoName(repo)
+  const p = project === undefined ? r : adoName(project) // dev.azure.com/<org>/_git/<repo>: the project is named like the repository
+  return r && p ? { org, project: p, repo: r } : null
+}
+const enc = encodeURIComponent
+const adoRepoUrl = (a: Ado) => `https://dev.azure.com/${enc(a.org)}/${enc(a.project)}/_git/${enc(a.repo)}`
+// the "create a pull request" page of the host, for when the CLI cannot do it
+export const adoCreateLink = (a: Ado, branch: string, base: string) => `${adoRepoUrl(a)}/pullrequestcreate?sourceRef=${enc(branch)}&targetRef=${enc(base)}`
+
+// the PR link out of `az repos pr create|list --output json` (an object, or an array whose first element counts)
+export function adoPrUrl(out: string, a: Ado): string | null {
+  let j: any = null
+  for (const text of [out.trim(), out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1), out.slice(out.indexOf('['), out.lastIndexOf(']') + 1)]) {
+    try {
+      j = JSON.parse(text)
+      break
+    } catch {
+      /* try the next slice: az may print a notice before the JSON */
+    }
+  }
+  const pr = Array.isArray(j) ? j[0] : j
+  const id = pr && typeof pr === 'object' ? String(pr.pullRequestId ?? '') : ''
+  if (!/^\d{1,12}$/.test(id)) return null
+  const web = pr.repository?.webUrl
+  return `${typeof web === 'string' && /^https:\/\/[^\s"'<>]+$/.test(web) ? web.replace(/\/+$/, '') : adoRepoUrl(a)}/pullrequest/${id}`
+}
+
+type AdoResult = { kind: 'created' | 'open'; url: string } | { kind: 'missing' } | { kind: 'failed'; why: string }
+async function adoPullRequest(h: Host, dir: string, a: Ado, pr: { title: string; body: string; draft: boolean }, branch: string, base: string): Promise<AdoResult> {
+  const az = await findCli(h, 'az', AZ_PLACES)
+  if (!az) return { kind: 'missing' }
+  const scope = ['--org', `https://dev.azure.com/${a.org}`, '--project', a.project, '--repository', a.repo]
+  const run = async (argv: string[]) => {
+    try {
+      return await h.process.run(argv, { cwd: dir, timeoutMs: NET_MS, env: NO_PROMPT })
+    } catch (e) {
+      return { exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }
+    }
+  }
+  const created = await run([az, 'repos', 'pr', 'create', ...scope, '--source-branch', branch, '--target-branch', base, `--title=${pr.title}`, ...(pr.body ? [`--description=${pr.body}`] : []), ...(pr.draft ? ['--draft'] : []), '--output', 'json'])
+  const url = adoPrUrl(created.stdout, a)
+  if (created.exitCode === 0 && url) return { kind: 'created', url }
+  const all = `${created.stderr}\n${created.stdout}`
+  if (created.exitCode !== 0 && /TF401179|pull request[^\n]*already exists/i.test(all)) {
+    // az does not name the open PR in that error: ask for it (read-only)
+    const open = await run([az, 'repos', 'pr', 'list', ...scope, '--source-branch', branch, '--target-branch', base, '--status', 'active', '--output', 'json'])
+    const found = open.exitCode === 0 ? adoPrUrl(open.stdout, a) : null
+    if (found) return { kind: 'open', url: found }
+  }
+  return { kind: 'failed', why: created.exitCode === 0 ? 'az printed no pull request id' : firstError(created) }
 }
 
 // host, owner and repository of a plain `host/owner/repo` remote URL (https, ssh:// or scp-like git@host:owner/repo); null for anything else
@@ -202,13 +284,28 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const text = `push failed at git push (${short} to ${where}): ${firstError(pushed)}. Nothing was pushed${pr ? ' and no PR was created' : ''}; the approval is used: the user's yes is needed again (approve-push) to retry`
     return await finish(err(text), 'push', { step: 'git push' }, `the desk tried to push ${sha} to ${where} and git push failed (git said ${quoted(firstError(pushed))}). Nothing was pushed; the desk decides what happens next`)
   }
-  const compare = compareUrl(`${pushed.stderr}\n${pushed.stdout}`)
+  // the PR host is the push remote's: Azure DevOps has a create-PR page we can always name (and `az`); everything else is gh as before
+  const ado = adoOf(pushTo.out)
+  const adoBase = pr?.base || deflt
+  const compare = ado ? adoCreateLink(ado, branch, adoBase) : compareUrl(`${pushed.stderr}\n${pushed.stdout}`)
   const done = `pushed ${sha} to ${where}`
   const data = { pushed: true, sha, remote, branch, ...(compare ? { compare } : {}) }
   if (!pr) {
     return await finish({ ok: true, text: `${done}${compare ? `; compare URL ${compare}` : ''}`, data }, 'push', { compare }, `the desk pushed ${sha} to ${where}; no PR${compare ? `, compare URL ${compare}` : ''}`)
   }
-  const gh = await findGh(h)
+  if (ado) {
+    const r = await adoPullRequest(h, dir, ado, pr, branch, adoBase)
+    const need = 'az repos pr create needs az + az login (extension azure-devops)'
+    if (r.kind === 'created') return await finish({ ok: true, text: `${done}; PR ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}`)
+    if (r.kind === 'open') return await finish({ ok: true, text: `${done}; PR already open: ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}`)
+    if (r.kind === 'missing') {
+      const text = `${done}; az was not found (PATH, ${AZ_PLACES.join(', ')}), so no PR was created: ${need}; open it from ${compare}`
+      return await finish({ ok: true, text, data }, 'push', { compare, pr: null }, `the desk pushed ${sha} to ${where}; PR not created (no az), create-PR link ${compare}`)
+    }
+    const text = `${done}; the PR step failed at az repos pr create: ${r.why}. ${need}. The branch is pushed; open the PR from ${compare}`
+    return await finish({ ok: false, text, data }, 'push', { step: 'az repos pr create', compare }, `the desk pushed ${sha} to ${where}; the PR was not created (az said ${quoted(r.why)}), create-PR link ${compare}`)
+  }
+  const gh = await findCli(h, 'gh', GH_PLACES)
   if (!gh) {
     const text = `${done}; gh was not found (PATH, ${GH_PLACES.join(', ')}), so no PR was created: ${compare ? `open it from ${compare}` : 'the push output had no compare URL, open the PR by hand'}`
     return await finish({ ok: true, text, data }, 'push', { compare, pr: null }, `the desk pushed ${sha} to ${where}; PR not created (no gh), ${compare ? `compare URL ${compare}` : 'no compare URL'}`)
