@@ -8,7 +8,7 @@ import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
-import { reviewTool } from './reviewtool'
+import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
 import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
@@ -111,6 +111,7 @@ export const THREAD_TOOLS: Tool[] = [
       reviews: { type: 'array', items: { type: 'object' }, description: 'record, merge: the two independent reviewer runs\' JSON blocks of a high-risk diff' },
       model: { type: 'string', description: 'prepare: a reviewer model the brief explicitly asks for (an expensive one needs the user\'s approval in the pane); record: the reviewer model used' },
       passes: { type: 'number' },
+      ...REVIEW_EXTRA_PROPS,
       findings: { type: 'array', items: { type: 'string' }, description: 'record without review: open findings as text (never green)' },
       all: { type: 'boolean', description: 'decline: every branch of the project' },
       kind: { type: 'string', description: 'decline: the finding category (duplication, scope, ...)' },

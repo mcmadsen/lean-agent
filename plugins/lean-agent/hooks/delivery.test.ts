@@ -442,6 +442,13 @@ test('lean_report superseded: true is kept, shown to the desk text and the pane 
   expect(renderReports(recs)).toContain('[brief superseded by a later user message]: user changed')
 })
 
+test('the registered lean_review tool accepts level (light | full) and worktree, so a thread can ask for the full review the push gate needs', () => {
+  const rev: any = THREAD_TOOLS.find(t => t.name === 'lean_review')
+  expect(rev.inputSchema.properties.level.enum).toEqual(['light', 'full'])
+  expect(rev.inputSchema.properties.worktree.type).toBe('string')
+  expect(rev.inputSchema.properties.action.enum).toContain('prepare')
+})
+
 test('lean_report has no checkpoint state; a done report says the session is over once the turn ends, other reports do not', async () => {
   const rep: any = THREAD_TOOLS.find(t => t.name === 'lean_report')
   expect(rep.inputSchema.properties.state.enum).toEqual(['working', 'blocked', 'done'])
