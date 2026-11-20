@@ -5,7 +5,8 @@
 // left (the turn did not end with done / blocked / a question) <thread>/autorestart.json marks it for the desk.
 // Desk side (autoRestartTick, the desk mod's timer): the thread is restarted by script (leanThread auto-restart: a fresh session with the
 // handover, the snapshot and the pending worker results, the old one removed) as soon as its session is idle (IDLE_MS after the record) or,
-// whatever the session shows, `threads.stopGraceMinutes` (default 3) after it; the tick returns the notice text.
+// whatever the session shows (then with force: the session is stopped exactly like the manual restart), `threads.stopGraceMinutes` (default 3) after it;
+// a failed restart is retried at the next tick (5 tries, then one notice with the reason that offers `restart`); the tick returns the notice text.
 // Guards: one automatic restart per thread per 10 minutes, a fresh session that starts over the limit stops and asks the user, only while the
 // desk runs (its timer), config threads.autoRestart (default true). The hard stop itself does not depend on any of these.
 import { appendJsonl, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
@@ -23,8 +24,7 @@ export const IDLE_MS = 20_000 // the session must have ended its turn this long 
 export const MIN_GAP_MS = 10 * 60_000 // one automatic restart per thread per 10 minutes
 export const DEFAULT_GRACE_MIN = 3 // threads.stopGraceMinutes: after the stop record the thread is restarted even if its session still shows as working
 const NEWER_TURN_MS = 10_000 // a context record this much newer than the checkpoint is a later turn
-const RETRY_MS = 60_000
-const MAX_TRIES = 3
+export const MAX_TRIES = 5 // a failed automatic restart is retried at the next timer tick; after this many tries ONE desk notice
 
 export type Marker = {
   pending?: { ts: number; sid: string; tokens: number; limit: number; tries?: number; lastTry?: number }
@@ -121,7 +121,7 @@ export async function threadTurnEnd(h: Host, id: string, o: TurnEnd): Promise<Tu
 // ---- the desk's tick -------------------------------------------------------------------------------------------------------------
 export type RestartDeps = {
   agents: () => Promise<AgentRow[] | null>
-  restart: (id: string, why: string) => Promise<Out>
+  restart: (id: string, why: string, force: boolean) => Promise<Out> // force: stop a session that still shows as working (the grace rule applied)
 }
 export type Notice = { id: string; text: string }
 
@@ -165,7 +165,6 @@ async function tickOnce(h: Host, deps: RestartDeps): Promise<Notice[]> {
     }
     if (now - p.ts < IDLE_MS) continue
     if (mk.last && now - mk.last.at < MIN_GAP_MS) continue // one per 10 minutes: it waits
-    if (p.lastTry && now - p.lastTry < RETRY_MS) continue
     rows ??= await deps.agents()
     if (!rows) continue
     const row = rows.find(a => a.sid === p.sid)
@@ -175,14 +174,14 @@ async function tickOnce(h: Host, deps: RestartDeps): Promise<Notice[]> {
     }
     if (needsYou(row)) continue // it waits for the user's answer: left alone, the record stays
     if (isWorking(row) && now - p.ts < grace) continue // idle first; after the grace minutes a session that still shows as working is restarted too (the stop refuses all its tool calls)
-    const r = await deps.restart(id, `Its context was ${p.tokens} tokens (limit ${p.limit}): checkpointed at the end of its turn and restarted by script.`)
+    const r = await deps.restart(id, `Its context was ${p.tokens} tokens (limit ${p.limit}): checkpointed at the end of its turn and restarted by script.`, isWorking(row))
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
       await writeJson(h, markerFile(home, id), { last: { at: now, oldSid: p.sid }, ...(mk.stopped ? { stopped: true } : {}) } satisfies Marker)
       out.push({ id, text: `${id}: context ${kTokens(p.tokens)} was over the limit ${kTokens(p.limit)}: restarted as a new session by script (state kept in state.json). ${costOf(r.text)}`.trim() })
     } else {
       const tries = (p.tries ?? 0) + 1
       await writeJson(h, markerFile(home, id), { ...mk, pending: tries >= MAX_TRIES ? undefined : { ...p, tries, lastTry: now } } satisfies Marker)
-      if (tries >= MAX_TRIES) out.push({ id, text: `${id}: automatic restart failed ${tries} times (${r.text.slice(0, 160)}); it stays as it is, restart it by hand` })
+      if (tries >= MAX_TRIES) out.push({ id, text: `${id}: automatic restart failed ${tries} times (last reason: ${r.text.slice(0, 160)}); it stays stopped at the context limit. Say "restart ${id}" and the desk starts it fresh from the handover.` })
     }
   }
   return out

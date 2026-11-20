@@ -506,7 +506,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       // a thread over its context limit (checkpointed at its turn end, autorestart.ts) is restarted by script once its session has been idle
       // 20 s: a notice for the desk's next prompt and a toast, no desk model turn (config threads.autoRestart, default on)
       every($, 30_000, 'desk', async host2 => {
-        const notes = await autoRestartTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why }) })
+        const notes = await autoRestartTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, force) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force }) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-autorestart-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)

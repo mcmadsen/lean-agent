@@ -226,7 +226,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[] }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -878,9 +878,10 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         }
         case 'auto-restart': {
           // the desk's timer (autorestart.ts) at the context limit: the checkpoint was written, the session is idle. A NEW session with the
-          // handover; never a working session (freshSession leaves it alone), never a parked or closed thread.
+          // handover; never a parked or closed thread. A working session is left alone unless `force` (the desk's timer after the idle / grace rule:
+          // the hard stop already refuses its tool calls, so it is stopped exactly as the pane's restart does and a fresh one takes over).
           if (t.state !== 'open') return err(`${id} is ${t.state}: no automatic restart`)
-          const r = await freshSession(h, root, home, t, installed, i.reason ?? 'Its context was over the limit: checkpointed and restarted by script.', i)
+          const r = await freshSession(h, root, home, t, installed, i.reason ?? 'Its context was over the limit: checkpointed and restarted by script.', i, i.force === true)
           return fresh(r) ? { ...r, text: `${id} restarted at the context limit as a new session (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {

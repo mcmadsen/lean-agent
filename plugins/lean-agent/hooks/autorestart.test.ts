@@ -167,23 +167,27 @@ test('desk tick: never mid-turn, one per 10 minutes, stale checkpoints are dropp
   await autoRestartTick(d.host, { agents: rows(), restart: async () => (n++, ok) })
   expect(marker(d).pending).toBeUndefined()
   expect(n).toBe(1)
-  // a failing restart: retried no sooner than 60 s, reported after three tries
+  // a failing restart: retried at every timer tick, ONE notice (reason, offers restart) after five tries, never silently dropped
   const e = setup().h
   await end(e)
   let tries = 0
-  const bad = { agents: rows(), restart: async () => (tries++, { ok: false, text: 'claude --bg failed: boom' }) }
+  const bad = { agents: rows(), restart: async () => (tries++, { ok: false, text: 't1 is running: no new session started (stop it from the Claude app first)' }) }
   e.clock.t = 1_100_000
-  expect(await autoRestartTick(e.host, bad)).toEqual([])
-  e.clock.t += 30_000
-  await autoRestartTick(e.host, bad)
-  expect(tries).toBe(1)
-  e.clock.t += 60_000
-  await autoRestartTick(e.host, bad)
-  e.clock.t += 60_000
+  for (let k = 1; k < 5; k++) {
+    expect(await autoRestartTick(e.host, bad)).toEqual([])
+    expect(tries).toBe(k)
+    expect(marker(e).pending).toBeTruthy()
+    e.clock.t += 30_000
+  }
   const last = await autoRestartTick(e.host, bad)
-  expect(tries).toBe(3)
-  expect(last[0]!.text).toContain('automatic restart failed 3 times')
+  expect(tries).toBe(5)
+  expect(last).toHaveLength(1)
+  expect(last[0]!.text).toContain('automatic restart failed 5 times')
+  expect(last[0]!.text).toContain('no new session started')
+  expect(last[0]!.text).toContain('Say "restart t1"')
   expect(marker(e).pending).toBeUndefined()
+  expect(await autoRestartTick(e.host, bad)).toEqual([]) // one notice, no sixth try
+  expect(tries).toBe(5)
 })
 
 test('leanThread auto-restart: a new session with the handover (the old one stopped), never over a working session', async () => {
@@ -209,6 +213,25 @@ test('leanThread auto-restart: a new session with the handover (the old one stop
   const p = setup()
   p.h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', state: 'parked', sid: S1 }))
   expect((await leanThread(p.h.host, ROOT, { action: 'auto-restart', tN: 't1' })).ok).toBe(false)
+})
+
+test('over-limit thread whose session still shows working: after the grace minutes the timer stops it and starts a fresh session', async () => {
+  const { h, st } = setup({ row: { status: 'busy', state: 'working' } })
+  await end(h)
+  const deps = { agents: async () => st.rows.map(r => ({ sid: r.sessionId, name: '', cwd: r.cwd, status: r.status, state: r.state, startedAt: 1, pid: r.pid, id: r.id, waitingFor: '' })) as any, restart: (id: string, why: string, force: boolean) => leanThread(h.host, ROOT, { action: 'auto-restart', tN: id, reason: why, force }) }
+  h.clock.t = 1_000_000 + 60_000 // inside the grace: left alone
+  expect(await autoRestartTick(h.host, deps)).toEqual([])
+  expect(h.claudeCalls().filter(x => x[0] === '--bg' || x[0] === 'stop')).toHaveLength(0)
+  h.clock.t = 1_000_000 + 3 * 60_000 // grace over: the same path as the manual restart
+  const notes = await autoRestartTick(h.host, deps)
+  expect(h.claudeCalls().filter(x => x[0] === 'stop')).toHaveLength(1)
+  expect(h.claudeCalls().filter(x => x[0] === '--bg')).toHaveLength(1)
+  expect(notes).toHaveLength(1)
+  expect(notes[0]!.text).toContain('restarted as a new session by script')
+  expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).sid).toBe(NEW)
+  // without force (a direct call) a working session is still left alone
+  const w = setup({ row: { status: 'busy', state: 'working' } })
+  expect((await leanThread(w.h.host, ROOT, { action: 'auto-restart', tN: 't1' })).text).toContain('is running: no new session started')
 })
 
 test('desk tick: two overlapping ticks restart once (a restart can outlast the timer), and a finished thread is never restarted', async () => {
