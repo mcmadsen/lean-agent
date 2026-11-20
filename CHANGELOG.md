@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed (thread sessions, [README](README.md#thread-sessions-what-running-means-wake-names-leftovers))
+- **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and
+  the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`, default 10, no tool call or
+  inbox read) | done / parked. A `send` to an idle or stuck session says "queued, session idle: wake or restart it" and never
+  "running"; `wake` replaces a stuck session (stop, handover session) and wakes an idle one even with nothing queued, instead of
+  refusing "recorded as running"; a genuinely working session is never touched. A `[working]` report of a session that is not
+  running is marked stale; a start that ended its turn at once is reported loudly ("started, but it ended its turn at once: wake it
+  with the task"). The listed `state` (working / idle) now beats a `status` that still says busy.
+- **Restart, wake and the handover put the task first**: "Resume the work now (task: ...). Answer status requests with a short
+  lean_report as a side effect, never as the whole turn." A status request mid-work gets a one-line report without ending the turn.
+- **Session names**: every fresh start and restart passes `-n "tN · title"` with the generation ("(2)", "(3)" after restarts); the name
+  is read back from `claude agents` and a mismatch is said. Claude Code has no command to rename a background session, so it is left
+  (the doctor row says so).
+- **Superseded sessions are closed**: after a fresh session replaces an old one, `claude rm <old id>` (never `--discard-unpushed`,
+  never `--force-remove-worktree`, never a live or working process, never the new session; a refusal is logged and left). Config
+  `threads.removeOld` (default true). New doctor row "stale thread sessions" (`hooks/threadsessions.ts`); `doctor fix` removes them
+  the same way.
+- The thread `CLAUDE.md` no longer keeps a stale `model:` line after a model change (regenerated at every fresh start) and says that
+  tools starting the shell in the worktree are fine while the thread itself never `cd`s.
+- A restart or fresh start reply says what the new session costs: "new session: handover about N tokens (~$X first turn, estimate);
+  the old session's conversation is not resumed".
+
 ## 1.0.13
 
 ### Fixed
