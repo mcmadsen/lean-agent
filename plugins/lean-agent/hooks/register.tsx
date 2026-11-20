@@ -792,7 +792,11 @@ export const register: Register = on => {
     if (d.user) await noteUserChoice(host, d.user, deskSession())
     if (d.user) switchState.user = d.user
     if (!d.decision) return r
-    await noteSdkSwitch(host, String(e?.to_model ?? ''), deskSession(), d.decision === 'deny')
+    // The engine cannot tell the app's own choice from the person's click in the app's model menu (both "sdk"), so a switch is only asked about
+    // or refused when the user opted in (config desk.blockAppModel: true). Default: let it pass; the pin is put back before the next turn runs.
+    const block = ((await readConfig(host, await homeDir(host))) as any)?.desk?.blockAppModel === true
+    await noteSdkSwitch(host, String(e?.to_model ?? ''), deskSession(), block && d.decision === 'deny')
+    if (!block) return r
     return { ...r, permissionDecision: d.decision, permissionDecisionReason: d.reason }
   }).catch(($, e: any, next) => next(e))
   on('classic.PostModelSwitch', async ($, e: any, next) => {
