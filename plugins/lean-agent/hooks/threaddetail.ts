@@ -23,7 +23,7 @@ const TTL_GIT = 15_000
 const TTL_COST = 30_000
 const ID = /^t\d+$/
 
-export type Report = { ts: number; kind: 'report' | 'ask'; state?: string; text: string }
+export type Report = { n: number; ts: number; kind: 'report' | 'ask'; state?: string; text: string } // n: its place among all of the thread's records (stable while newer ones arrive)
 export type DiffStat = { base: string; files: string[]; more: number; summary: string }
 export type ReviewInfo = { sha: string; verdict: 'green' | 'not green' | 'unverified' | 'none'; passes?: number; findings: string[]; ts?: number }
 export type ThreadDetail = {
@@ -85,7 +85,8 @@ async function gitPart(h: Host, home: string, t: Thread, wt: { path: string; exi
   if (!wt) return { diffNote: 'no worktree is registered for this thread' }
   if (!wt.exists) return { diffNote: `the worktree ${wt.path} is gone` }
   const git = async (...a: string[]): Promise<string | null> => {
-    const r = await h.process.run(['git', '-C', wt.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
+    // the path comes from worktrees.json, which a thread can write: a repo there must not run its own fsmonitor or hooks in the desk
+    const r = await h.process.run(['git', '-C', wt.path, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...a], { timeoutMs: 15_000 }).catch(() => null)
     return r && r.exitCode === 0 ? r.stdout : null
   }
   const head = (await git('rev-parse', 'HEAD'))?.trim()
@@ -138,6 +139,17 @@ const text = async (h: Host, p: string): Promise<string> => {
   return typeof r === 'string' ? r : ''
 }
 
+// a pane's title needs only thread.json: no git, no session listing, no ledger
+export async function threadTitle(h: Host, id: string): Promise<string | null> {
+  if (!ID.test(id)) return null
+  try {
+    const t = await readJson<Thread | null>(h, `${threadsDir(await homeDir(h))}/${id}/thread.json`, null)
+    return t && t.id === id ? String(t.title ?? '') : null
+  } catch {
+    return null
+  }
+}
+
 // null: no such thread (a bad id or no thread.json). A closed thread is returned with state 'closed' and only what is cheap.
 export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetail | null> {
   if (!ID.test(id)) return null
@@ -188,7 +200,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   await guard('git', async () => {
     const hit = gitCache.get(id)
     const part = hit && now >= hit.at && now - hit.at < TTL_GIT ? hit.v : await gitPart(h, home, t, wt)
-    if (part.head !== undefined) gitCache.set(id, { at: now, v: part }) // (no HEAD = nothing worth keeping: asked again at the next draw)
+    if (part.diff) gitCache.set(id, { at: now, v: part }) // (only a complete answer is kept: a failure is asked again at the next draw)
     d.head = part.head
     d.diff = part.diff
     d.diffNote = part.diffNote
@@ -201,9 +213,9 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     const all = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask') && typeof r.text === 'string')
     d.reportsTotal = all.length
     d.reports = all
+      .map((r, n) => ({ n, ts: r.ts, kind: r.kind, ...(r.state ? { state: r.state } : {}), text: r.text }))
       .slice(-REPORTS_MAX)
       .reverse()
-      .map(r => ({ ts: r.ts, kind: r.kind, ...(r.state ? { state: r.state } : {}), text: r.text }))
     const last = all[all.length - 1]
     if (last && t.state === 'open') d.approval = approvalOf(last)
   })

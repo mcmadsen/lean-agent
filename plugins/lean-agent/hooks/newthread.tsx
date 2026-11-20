@@ -12,15 +12,18 @@ import type { Thread } from './threads'
 import { openThreadPane } from './threadpane'
 
 export const NEW_THREAD_PANE = 'lean-agent-new-thread'
-export const MODEL_CHOICES = ['sonnet', 'haiku', 'opus'] as const // the first is the default
+export const MODEL_CHOICES = ['sonnet', 'haiku', 'opus'] as const
 export const EFFORT_CHOICES = ['high', 'medium', 'low'] as const
+// The first option of model and effort leaves the field out: the tool's own default then applies (sonnet / high, or what config.json
+// `threads.model` / `threads.effort` say), so the form never overrides a configured default by spelling one itself.
+export const DEFAULT = '(default)'
 export const NO_PROJECT = '(none)' // a Select value that no project name can have (names are letters, digits, . _ -)
 export const BRIEF_ROWS = 8
 const TITLE_MAX = 80
 const BRIEF_MAX = 20_000
 
 type Form = { title: string; project: string; model: string; effort: string; brief: string; errors: string[]; notice: string; busy: boolean; surface?: string }
-const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: MODEL_CHOICES[0], effort: EFFORT_CHOICES[0], brief: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: DEFAULT, effort: DEFAULT, brief: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
 let form: Form = fresh()
 export const resetNewThread = () => {
   form = fresh()
@@ -45,8 +48,8 @@ export function validate(f: Pick<Form, 'title' | 'brief' | 'model' | 'effort'>):
   else if (f.title.trim().length > TITLE_MAX) out.push(`Title is too long (${f.title.trim().length} characters, at most ${TITLE_MAX}).`)
   if (!f.brief.trim()) out.push('Brief is empty: say what the thread should do.')
   else if (f.brief.length > BRIEF_MAX) out.push(`Brief is too long (${f.brief.length} characters, at most ${BRIEF_MAX}).`)
-  if (!(MODEL_CHOICES as readonly string[]).includes(f.model)) out.push(`Unknown model ${f.model}.`)
-  if (!(EFFORT_CHOICES as readonly string[]).includes(f.effort)) out.push(`Unknown effort ${f.effort}.`)
+  if (f.model !== DEFAULT && !(MODEL_CHOICES as readonly string[]).includes(f.model)) out.push(`Unknown model ${f.model}.`)
+  if (f.effort !== DEFAULT && !(EFFORT_CHOICES as readonly string[]).includes(f.effort)) out.push(`Unknown effort ${f.effort}.`)
   return out
 }
 
@@ -70,6 +73,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
   } catch (err) {
     listError = `could not list the projects: ${msg(err)}`
   }
+  if (form.project !== NO_PROJECT && !names.includes(form.project) && !listError) form.project = NO_PROJECT // a project that is no longer listed is "none", as the Select shows
   // (the surface keeps what is typed or picked until the next draw; these handlers keep it here too, so a redraw never loses it)
   const start = async () => {
     if (form.busy) return
@@ -88,7 +92,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
     try {
       // the same steps as the tool's handler for `new` (register.tsx): a stale parent guide is cleared first, the git hooks refreshed after
       await guardParents(host).catch(() => [])
-      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), model: f.model, effort: f.effort }), 'start thread', 130_000)
+      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), ...(f.model !== DEFAULT ? { model: f.model } : {}), ...(f.effort !== DEFAULT ? { effort: f.effort } : {}) }), 'start thread', 130_000)
       await ensureGitHooks(host).catch(() => undefined)
       const id = out.ok ? (out.data as Thread | undefined)?.id : undefined
       if (!out.ok || !id) {
@@ -99,7 +103,8 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
         Object.assign(form, fresh(surface), { notice: text }) // an empty form again; the new thread has its own pane now
       }
     } catch (err) {
-      f.errors = [`start failed: ${msg(err)}`]
+      // (after a timeout the session may still be starting: look at the desk pane before pressing Start again, or it is a second thread)
+      f.errors = [`start failed: ${msg(err)}. The thread may still have been created: check the desk pane before pressing Start again.`]
     } finally {
       f.busy = false
     }
@@ -107,8 +112,8 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
   }
   const projectOptions = [{ value: NO_PROJECT, label: 'none' }, ...names.map(n => ({ value: n, label: n }))]
   const known = projectOptions.some(o => o.value === form.project)
-  const modelOptions = MODEL_CHOICES.map(m => ({ value: m, label: m === MODEL_CHOICES[0] ? `${m} (default)` : m }))
-  const effortOptions = EFFORT_CHOICES.map(x => ({ value: x, label: x === EFFORT_CHOICES[0] ? `${x} (default)` : x }))
+  const modelOptions = [{ value: DEFAULT, label: 'default (sonnet, or threads.model in config.json)' }, ...MODEL_CHOICES.map(m => ({ value: m, label: m }))]
+  const effortOptions = [{ value: DEFAULT, label: 'default (high, or threads.effort in config.json)' }, ...EFFORT_CHOICES.map(x => ({ value: x, label: x }))]
   return (
     <Box flexDirection="column">
       <Text bold>New thread</Text>

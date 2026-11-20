@@ -106,8 +106,9 @@ Two more panes open beside the desk pane (the desk pane's buttons call them; `op
   and the buttons **Open session** (stops an idle process, then the `claude://resume` link, the same path as "Open tN"), **Restart** and
   **Close** (press twice; Close never touches a working thread) and **Refresh**. A closed or missing thread shows one short line. Data is
   read through short caches (session listing 8 s, git 15 s, cost 30 s), so many open panes do not multiply the work.
-- **New thread** (`lean-agent-new-thread`): a title field, a project (the registered ones or none), model (sonnet default, haiku, opus),
-  effort (high default, medium, low), a multi-line brief (the engine's `Input` takes `rows`) and **Start**. Start runs the tool's own `new`
+- **New thread** (`lean-agent-new-thread`): a title field, a project (the registered ones or none), model (default, haiku, sonnet, opus),
+  effort (default, high, medium, low; "default" leaves the field out, so sonnet / high or `config.json` `threads.model` /
+  `threads.effort` apply exactly as for the tool), a multi-line brief (the engine's `Input` takes `rows`) and **Start**. Start runs the tool's own `new`
   code, no model turn, then opens the new thread's pane. An empty title or brief, a title or brief that is too long and a project that
   is no longer registered are said inline, before any folder exists; a failed start keeps what you typed.
 - Both are desk-only (elsewhere they say so). The pane's open/fold state is kept in the mod, not in `$.state`, so a mod reload folds it again.

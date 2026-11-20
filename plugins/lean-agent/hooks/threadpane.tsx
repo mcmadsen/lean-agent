@@ -2,7 +2,7 @@
 // through openThreadPane. Several may be open at once; each draw reads its own thread's data (threaddetail.ts), so they never share a
 // view. Buttons: Open session (the 1.0.10 "Open tN" path), Restart and Close (two presses), Refresh. All logic is the lean_thread
 // tool's own code (leanThread), so it exists once. A closed or missing thread draws a short message, never a blank pane.
-import { loadThreadDetail, resetThreadCache } from './threaddetail'
+import { BRIEF_MAX, loadThreadDetail, resetThreadCache, threadTitle } from './threaddetail'
 import type { ThreadDetail } from './threaddetail'
 import { leanThread } from './threads'
 import { CONFIRM_MS } from './panestate'
@@ -49,8 +49,8 @@ export async function openThreadPane($: any, surface: string | undefined, id: st
   if (surface) s.surface = surface
   let title = id
   try {
-    const d = await loadThreadDetail(hostOf($), id)
-    if (d?.title) title = `${id} · ${short(d.title, 40)}`
+    const t = await threadTitle(hostOf($), id)
+    if (t) title = `${id} · ${short(t, 40)}`
   } catch {
     /* the title stays the bare id */
   }
@@ -63,7 +63,22 @@ export async function openThreadPane($: any, surface: string | undefined, id: st
 }
 
 // ---- the draw ----
+// Never blank: anything the draw throws becomes one red line (the pane's own rule, as in pane.tsx)
 export async function drawThreadPane($: any, e: any, id: string, roleOf: () => Role): Promise<any> {
+  try {
+    return await paint($, e, id, roleOf)
+  } catch (err) {
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text bold>{id}</Text>
+        <Text color="red">{`error: could not draw ${id}: ${msg(err)}`}</Text>
+      </Box>
+    )
+  }
+}
+
+async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<any> {
   const { Box, Text, Button } = $.ui.resolve(e)
   const host = hostOf($)
   const st = stateOf(id)
@@ -162,7 +177,8 @@ export async function drawThreadPane($: any, e: any, id: string, roleOf: () => R
 
   const runLabel = d.run === 'unknown' ? 'session unknown (claude agents failed)' : d.run
   const briefLines = d.brief.split('\n').map(l => l.trimEnd())
-  const briefMore = briefLines.length > BRIEF_LINES || d.brief.length >= 4000
+  const cut = d.brief.length >= BRIEF_MAX // the data keeps the first BRIEF_MAX characters of brief.md
+  const briefMore = briefLines.length > BRIEF_LINES || cut
   const briefOpen = st.open.has('brief')
   const row = (key: string, label: string, body: string, dim = false) => {
     const on = st.open.has(key)
@@ -188,7 +204,7 @@ export async function drawThreadPane($: any, e: any, id: string, roleOf: () => R
       <Text dimColor={!d.goal}>{d.goal ? short(d.goal, 200) : 'no goal set'}</Text>
       <Text bold>Brief</Text>
       <Text>{(briefOpen ? briefLines : briefLines.slice(0, BRIEF_LINES)).join('\n') || '(empty)'}</Text>
-      {briefMore && <Button key="brief-more" plain label={briefOpen ? '▾ show less' : `▸ show all (${briefLines.length} lines)`} onPress={toggle('brief')} />}
+      {briefMore && <Button key="brief-more" plain label={briefOpen ? '▾ show less' : `▸ show all (${briefLines.length} lines${cut ? `, cut at ${BRIEF_MAX} characters; the rest is in brief.md` : ''})`} onPress={toggle('brief')} />}
       <Text bold>Work</Text>
       {d.worktree ? (
         <Text color={d.worktree.exists ? undefined : 'yellow'}>
@@ -229,18 +245,18 @@ export async function drawThreadPane($: any, e: any, id: string, roleOf: () => R
         <Text dimColor>{d.worktree ? 'no HEAD to look up a review for' : 'no worktree, so no review record to look up'}</Text>
       )}
       <Text bold>Cost</Text>
-      <Text dimColor={!d.cost}>{d.cost ? `today ${usd(d.cost.today)} · total ${usd(d.cost.total)} (the ledger's rollup)` : 'cost not available'}</Text>
+      <Text dimColor={!d.cost}>{d.cost ? `today ${usd(d.cost.today)} · total ${usd(d.cost.total)} (the ledger's rollup, the last 120 days)` : 'cost not available'}</Text>
       <Text bold>{`Reports (${d.reports.length}${d.reportsTotal > d.reports.length ? ` of ${d.reportsTotal}` : ''}, newest first)`}</Text>
       {!d.reports.length && <Text dimColor>No reports yet.</Text>}
-      {d.reports.map((r, i) => row(`r${i}`, `${stamp(r.ts)} ${r.kind === 'ask' ? '? ' : ''}${r.state ? `[${r.state}] ` : ''}${short(r.text, 70)}`, r.text, r.kind !== 'ask' && r.state !== 'blocked'))}
+      {d.reports.map(r => row(`r${r.n}`,`${stamp(r.ts)} ${r.kind === 'ask' ? '? ' : ''}${r.state ? `[${r.state}] ` : ''}${short(r.text, 70)}`, r.text, r.kind !== 'ask' && r.state !== 'blocked'))}
       <Text bold>{`Queued messages (${d.queuedTotal})`}</Text>
       {!d.queued.length && <Text dimColor>None queued.</Text>}
-      {d.queued.map((q, i) => row(`q${i}`, `${stamp(q.ts)} ${q.from ? `[${q.from}] ` : ''}${short(q.text, 70)}`, q.text))}
+      {d.queued.map((q, i) => row(`q${d.queuedTotal - d.queued.length + i}`,`${stamp(q.ts)} ${q.from ? `[${q.from}] ` : ''}${short(q.text, 70)}`, q.text))}
       {d.queuedTotal > d.queued.length && <Text dimColor>{`(${d.queuedTotal - d.queued.length} older not shown)`}</Text>}
       <Box>
         <Button key="open-session" label="Open session" onPress={openSession} />
         <Button key="restart" label={armed('restart') ? (d.working ? `Confirm restart ${id} (it is working: the current step is lost)` : `Confirm restart ${id}`) : 'Restart'} onPress={restart} />
-        {d.working || d.needsYou ? <Text dimColor>{d.needsYou ? 'waiting for you' : 'busy'}</Text> : <Button key="close" label={armed('close') ? `Confirm close ${id}` : 'Close'} onPress={close} />}
+        {d.working || d.needsYou ? <Text dimColor>{d.needsYou ? 'waiting for you' : d.run === 'unknown' ? 'session unknown: not closed on a guess' : 'busy'}</Text> : <Button key="close" label={armed('close') ? `Confirm close ${id}` : 'Close'} onPress={close} />}
         <Button key="refresh" label="Refresh" onPress={refresh} />
       </Box>
       {!!st.notice && <Text color={st.bad ? 'red' : 'yellow'}>{st.notice}</Text>}

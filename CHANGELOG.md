@@ -8,8 +8,8 @@
   verifies, passes, open findings), cost today and total, the last 10 reports (expandable), queued messages, and Open session / Restart /
   Close (two presses) / Refresh. Several panes may be open at once; a closed or missing thread shows one line. Exported for the desk pane's
   buttons: `openThreadPane($ | hostOf($), surface, tN)`.
-- **A new-thread form** (`lean-agent-new-thread`, `hooks/newthread.tsx`): title, project (registered or none), model, effort, a multi-line
-  brief and Start, which runs the `lean_thread new` code (no model turn) and opens the new thread's pane. Empty or too long title and brief
+- **A new-thread form** (`lean-agent-new-thread`, `hooks/newthread.tsx`): title, project (registered or none), model and effort (each
+  "default" = left out, so `config.json` `threads.*` apply as for the tool), a multi-line brief and Start, which runs the `lean_thread new` code (no model turn) and opens the new thread's pane. Empty or too long title and brief
   and an unregistered project are said inline before anything is created. Exported: `openNewThread($ | hostOf($), surface)`.
 - `hostOf($)` now carries `ui.open` (the two functions above open their panes through it).
 

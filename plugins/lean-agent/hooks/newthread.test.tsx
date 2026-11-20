@@ -6,7 +6,7 @@ import { resetLocks } from './threads'
 import { resetViewCache } from './view'
 import { resetThreadCache } from './threaddetail'
 import { resetThreadPanes } from './threadpane'
-import { BRIEF_ROWS, EFFORT_CHOICES, MODEL_CHOICES, NEW_THREAD_PANE, NO_PROJECT, openNewThread, resetNewThread, validate } from './newthread'
+import { BRIEF_ROWS, DEFAULT, EFFORT_CHOICES, MODEL_CHOICES, NEW_THREAD_PANE, NO_PROJECT, openNewThread, resetNewThread, validate } from './newthread'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = decodeURIComponent(new URL('..', (import.meta as any).url).pathname).replace(/\/$/, '')
@@ -56,13 +56,16 @@ test('the form draws: title, project (none + registered), model (sonnet default)
   const brief = await ui.find({ key: 'brief' })
   expect(brief?.type).toBe('Input')
   expect(brief?.props.rows).toBe(BRIEF_ROWS) // the engine's Input is multi-line from rows: 2
-  const opts = async (key: string) => ((await ui.find({ key }))?.props.options ?? []).map((o: any) => o.value)
+  const optionsOf = async (key: string): Promise<{ value: string; label: string }[]> => ((await ui.find({ key }))?.props as any)?.options ?? []
+  const opts = async (key: string) => (await optionsOf(key)).map(o => o.value)
   expect(await opts('project')).toEqual([NO_PROJECT, 'app', 'lib'])
-  expect(await opts('model')).toEqual([...MODEL_CHOICES])
-  expect(await opts('effort')).toEqual([...EFFORT_CHOICES])
+  expect(await opts('model')).toEqual([DEFAULT, ...MODEL_CHOICES]) // "default" leaves the field out: the tool's default (or config.json) applies
+  expect(await opts('effort')).toEqual([DEFAULT, ...EFFORT_CHOICES])
   expect((await ui.find({ key: 'project' }))?.props.value).toBe(NO_PROJECT)
-  expect((await ui.find({ key: 'model' }))?.props.value).toBe('sonnet')
-  expect((await ui.find({ key: 'effort' }))?.props.value).toBe('high')
+  expect((await ui.find({ key: 'model' }))?.props.value).toBe(DEFAULT)
+  expect((await ui.find({ key: 'effort' }))?.props.value).toBe(DEFAULT)
+  expect((await optionsOf('model'))[0]!.label).toContain('sonnet')
+  expect((await optionsOf('effort'))[0]!.label).toContain('high')
   expect(await ui.find({ type: 'Button', text: 'Start' })).toBeTruthy()
   await ui.unmount()
 })
@@ -71,7 +74,7 @@ test('the form with no registered project offers only "none"', async ($, on) => 
   world(on, {})
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(((await ui.find({ key: 'project' }))?.props.options ?? []).map((o: any) => o.value)).toEqual([NO_PROJECT])
+  expect((((await ui.find({ key: 'project' }))?.props as any)?.options ?? []).map((o: any) => o.value)).toEqual([NO_PROJECT])
   expect((await ui.find({ key: 'project' }))?.props.label).toContain('none registered')
   await ui.unmount()
 })
@@ -124,7 +127,39 @@ test('Start: the lean_thread `new` path with the chosen project, model, effort a
   expect(h.opened.filter(p => p.id !== 'lean-agent')).toEqual([{ id: 'lean-agent-thread-t1', title: 't1 · add a widget' }]) // the new thread's own pane (the desk opened its own at the start)
   expect(await text(ui, /t1 started/)).toBe(true)
   expect((await ui.find({ key: 'title' }))?.props.value).toBe('')
-  expect((await ui.find({ key: 'model' }))?.props.value).toBe('sonnet')
+  expect((await ui.find({ key: 'model' }))?.props.value).toBe(DEFAULT)
+  await ui.unmount()
+})
+
+test('Start on "default" leaves model and effort out: config.json threads.model / threads.effort apply, as for the tool', async ($, on) => {
+  const h = world(on)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku', effort: 'medium' } }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await fill(ui, 'cheap one', 'do it')
+  await ui.press({ key: 'start' })
+  const t = JSON.parse(h.files.get(`${THREADS}/t1/thread.json`)!)
+  expect([t.model, t.effort]).toEqual(['haiku', 'medium'])
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'medium'])
+  await fill(ui, 'pinned one', 'do it')
+  await ui.select({ key: 'model', value: 'opus' }) // a choice made in the form beats the config
+  await ui.press({ key: 'start' })
+  const u = JSON.parse(h.files.get(`${THREADS}/t2/thread.json`)!)
+  expect([u.model, u.effort]).toEqual(['opus', 'medium'])
+  await ui.unmount()
+})
+
+test('two presses of Start at once make one thread; a project that is no longer listed becomes "none"', async ($, on) => {
+  const h = world(on)
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await fill(ui, 'quick one', 'do it')
+  await Promise.all([ui.press({ key: 'start' }), ui.press({ key: 'start' })])
+  expect(threadsMade(h)).toHaveLength(1) // one thread, not two
+  await ui.select({ key: 'project', value: 'lib' })
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
+  await ui.press({ key: 'start' }) // empty fields: the form redraws and the stale choice is dropped
+  expect((await ui.find({ key: 'project' }))?.props.value).toBe(NO_PROJECT)
   await ui.unmount()
 })
 
