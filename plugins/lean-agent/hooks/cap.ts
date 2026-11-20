@@ -33,9 +33,9 @@ export function cutText(text: string, cap: number, file: string): string {
   return `${head}\n[... ${dropped} characters cut ...]\n${tail}\n[lean-agent: result cut from ${text.length} to ${head.length + tail.length} characters; the full text is in ${file} (Read it if you need more)]`
 }
 
-const isText = (b: any): b is { type: 'text'; text: string } => !!b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string'
+export const isText = (b: any): b is { type: 'text'; text: string } => !!b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string'
 // the text of a result, in order (what the model would read)
-function textsOf(v: unknown): string[] {
+export function textsOf(v: unknown): string[] {
   if (typeof v === 'string') return [v]
   if (Array.isArray(v)) return v.flatMap(textsOf)
   if (isText(v)) return [v.text]
@@ -43,7 +43,7 @@ function textsOf(v: unknown): string[] {
   return []
 }
 // the same shape with every text passed through `f`
-function mapTexts(v: unknown, f: (t: string) => string): unknown {
+export function mapTexts(v: unknown, f: (t: string) => string): unknown {
   if (typeof v === 'string') return f(v)
   if (Array.isArray(v)) return v.map(x => mapTexts(x, f))
   if (isText(v)) return { ...v, text: f(v.text) }

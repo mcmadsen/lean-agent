@@ -297,7 +297,7 @@ test('private projects never push or publish, review or not', async () => {
 
 test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {
   const h = setup()
-  expect(parseGrants('do it\nallow-edit: /a/b, /c\nallow-cmd: git log, ls\n--allow-edit=rel')).toEqual({ edit: ['/a/b', '/c', ], cmds: ['git log', 'ls'] })
+  expect(parseGrants('do it\nallow-edit: /a/b, /c\nallow-cmd: git log, ls\n--allow-edit=rel')).toEqual({ edit: ['/a/b', '/c', ], cmds: ['git log', 'ls'], mcp: [], mcpWrite: [] })
   await recordGrant(h.host, thread, 'call1', 'lean-agent:reader-sonnet', { cmds: ['git log', 'ls'] })
   await recordGrant(h.host, thread, 'call2', 'lean-agent:worker-sonnet', { edit: ['/h/.lean-agent/worktrees/app/t1'] })
   const edit = (p: string) => ({ tool: 'Edit', file_path: p })

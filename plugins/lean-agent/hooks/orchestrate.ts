@@ -2,17 +2,18 @@
 // small step for a haiku worker. Enforced here by the guard (guard.ts calls orchDecide), not by text a model has to remember.
 // Pure rules over a call plus a little in-memory state (per-turn direct reads, workers in flight, per-worker step counts).
 import { plainPipeline } from './shell'
+import { jobOf, retryDenial, retryReset, stepBudget } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 
-export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number }
-export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; home: string; threadDir?: string; cwd?: string }
+export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean }
+export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string }
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
 export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku'
 export const SPLIT = 'return what you have; the thread splits the rest'
-export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15 }
+export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false }
 export const DIRECT_READ_LINES = 200
 
 // a key of config.json: nested (`threads: { directReads }`) or flat (`"threads.directReads"`)
@@ -25,6 +26,13 @@ const pick = (cfg: any, key: string): unknown => {
 }
 const num = (v: unknown, d: number): number => (typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.floor(v) : d)
 
+// config.json `workers.stepsByJob: { lookup, edit, run, check }`: whole numbers >= 1 for the four job types, anything else ignored
+const byJob = (v: unknown): Partial<Record<string, number>> => {
+  const out: Partial<Record<string, number>> = {}
+  if (v && typeof v === 'object' && !Array.isArray(v)) for (const j of ['lookup', 'edit', 'run', 'check']) { const n = (v as any)[j]; if (typeof n === 'number' && Number.isFinite(n) && n >= 1) out[j] = Math.floor(n) }
+  return out
+}
+
 export function orchConfig(cfg: any): OrchConfig {
   const on = pick(cfg, 'lean.orchestrate')
   return {
@@ -35,6 +43,8 @@ export function orchConfig(cfg: any): OrchConfig {
     workers: num(pick(cfg, 'threads.workers'), DEFAULTS.workers),
     briefChars: num(pick(cfg, 'workers.briefChars'), DEFAULTS.briefChars),
     steps: num(pick(cfg, 'workers.steps'), DEFAULTS.steps),
+    stepsByJob: byJob(pick(cfg, 'workers.stepsByJob')),
+    requireJob: pick(cfg, 'workers.requireJob') === true,
   }
 }
 
@@ -57,11 +67,12 @@ export function orchReset(): void {
   reads.clear()
   inflight.clear()
   steps.clear()
+  retryReset()
 }
 
 // ---- helpers ---------------------------------------------------------------------------------------------------------------
 const bare = (t?: string) => (t ?? '').replace(/^lean-agent:/, '')
-export const isSmall = (t?: string): boolean => /^(worker|reader)-(haiku|sonnet|opus)$/.test(bare(t))
+export const isSmall = (t?: string): boolean => /^(worker|reader)-(haiku|sonnet|opus|mcp)$/.test(bare(t))
 const isAgentTool = (e: Call) => e.tool === 'Agent' || e.tool === 'Task'
 const key = (ctx: OCtx) => ctx.threadDir ?? ctx.home
 const under = (p: string, root: string) => p === root || p.startsWith(root + '/')
@@ -127,9 +138,12 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if ((s === 'worker-sonnet' || s === 'reader-sonnet') && !/^\s*why-sonnet:\s*\S/m.test(p)) return `haiku by default: add a prompt line \`why-sonnet: <reason>\` or use lean-agent:${s.replace('sonnet', 'haiku')}`
   if (!isSmall(s)) return null
   if (p.length > c.briefChars) return `one step per job: the brief is ${p.length} chars, at most ${c.briefChars} (workers.briefChars); split it, one job per step`
+  if (c.requireJob && !jobOf(p)) return 'the first line of the brief names the job: `job: lookup|edit|run|check` (workers.requireJob)'
   const k = key(ctx)
   const n = inflight.get(k) ?? 0
   if (n >= c.workers) return `at most ${c.workers} workers at once (threads.workers); wait for one to finish`
+  const again = retryDenial(k, p) // (counted only when nothing else refused it)
+  if (again) return again
   inflight.set(k, n + 1)
   return null
 }
@@ -167,7 +181,8 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   const n = (steps.get(k) ?? 0) + 1
   if (!steps.has(k) && steps.size >= MAX_TRACKED) steps.delete(steps.keys().next().value as string)
   steps.set(k, n)
-  return n > c.steps ? SPLIT : null
+  const budget = stepBudget(ctx.job, c.steps, c.stepsByJob)
+  return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
 // null = allow, a string = the refusal

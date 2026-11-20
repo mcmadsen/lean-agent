@@ -7,12 +7,15 @@ import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyFo
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide } from './orchestrate'
+import { jobOf } from './jobs'
+import { mcpDecision, isMcpTool } from './mcpgrant'
+import { isOwn, serverOf } from './profile'
 import type { Host } from './state'
 import type { Role } from './role'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
-export type Grants = { edit?: string[]; cmds?: string[] }
+export type Grants = { edit?: string[]; cmds?: string[]; mcp?: string[]; mcpWrite?: string[]; job?: string }
 type GrantRec = Grants & { call: string; type?: string }
 type GrantDoc = { pending: GrantRec[]; agents: Record<string, GrantRec> }
 
@@ -318,8 +321,10 @@ export async function grantsFile($: Host, role: Role): Promise<string> {
 export function parseGrants(prompt: unknown): Grants {
   const t = typeof prompt === 'string' ? prompt : ''
   const list = (key: string) => [...t.matchAll(new RegExp(`^\\s*-{0,2}${key}\\s*[:=]\\s*(.+)$`, 'gim'))].flatMap(m => m[1]!.split(',')).map(x => x.trim().replace(/^["'`]|["'`]$/g, '')).filter(Boolean)
-  return { edit: list('allow-edit').filter(x => x.startsWith('/')), cmds: list('allow-cmd') }
+  return { edit: list('allow-edit').filter(x => x.startsWith('/')), cmds: list('allow-cmd'), mcp: list('allow-mcp'), mcpWrite: list('allow-mcp-write'), ...(jobOf(t) ? { job: jobOf(t)! } : {}) }
 }
+// does the brief carry anything the guard must remember for the subagent it starts (a grant or a job type)?
+export const hasGrants = (g: Grants): boolean => !!(g.edit?.length || g.cmds?.length || g.mcp?.length || g.mcpWrite?.length || g.job)
 
 let chain: Promise<unknown> = Promise.resolve()
 function locked<T>(f: () => Promise<T>): Promise<T> {
@@ -336,7 +341,7 @@ export function recordGrant($: Host, role: Role, call: string, type: string | un
   return locked(async () => {
     const file = await grantsFile($, role)
     const d = await readDoc($, file)
-    d.pending.push({ call, type, edit: g.edit ?? [], cmds: g.cmds ?? [] })
+    d.pending.push({ call, type, edit: g.edit ?? [], cmds: g.cmds ?? [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
     await writeJson($, file, d)
   })
 }
@@ -767,10 +772,13 @@ async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: s
   return true
 }
 
+const LEAN_TYPE = /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$|auditor$)/
 async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const t = ctx.agentType ?? 'unresolved' // a subagent whose type is not known is a reader with no grants
   const edits = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
+  // MCP is opt-in per job: a lean-agent subagent reaches a server only when the brief says `allow-mcp: <server>` (read-only tools)
+  if (isMcpTool(e.tool) && !isOwn(serverOf(e.tool)) && (t === 'unresolved' || LEAN_TYPE.test(t))) return mcpDecision(await grantFor($, ctx), e.tool)
   if (isReader(t)) {
     if (edits) return t === 'unresolved' ? 'lean-agent: agent type unresolved, so it is a reader (read-only); report this with the debug log line "agent fields"' : `lean-agent: ${t} is read-only`
     if (e.tool === 'Bash') {
@@ -898,14 +906,14 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
 async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const dear = await expensiveDenial($, ctx, e)
   if (dear) return dear
-  // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit lines from anyone else would start a
+  // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit / allow-mcp lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''
   if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$|auditor$)/.test(sub) && !(ctx.role.kind === 'thread' && !ctx.agentId)) {
     const g = parseGrants(e.prompt)
-    if (g.edit?.length || g.cmds?.length) {
+    if (g.edit?.length || g.cmds?.length || g.mcp?.length || g.mcpWrite?.length) {
       const who = ctx.agentId ? 'a subagent' : `a ${ctx.role.kind} session`
-      return `lean-agent: this Agent call carries ${[g.cmds?.length ? 'allow-cmd' : '', g.edit?.length ? 'allow-edit' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
+      return `lean-agent: this Agent call carries ${[g.cmds?.length ? 'allow-cmd' : '', g.edit?.length ? 'allow-edit' : '', g.mcp?.length ? 'allow-mcp' : '', g.mcpWrite?.length ? 'allow-mcp-write' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
     }
   }
   // the script auditor judges what it is given: its prompt is exactly the brief the mod generated (a thread cannot add instructions)
@@ -918,7 +926,8 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const orch = await loadOrch($)
   if (orch.on) {
     const home = await homeDir($)
-    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined }, e)
+    const job = ctx.agentId && isSmall(ctx.agentType) ? (await grantFor($, ctx)).job : undefined // the job type of the brief this worker was started with
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined }, e)
     if (o) return o
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {

@@ -14,11 +14,12 @@ const C = orchConfig({})
 const th = { kind: 'thread', home: HOME, threadDir: TDIR, cwd: '/r/app' } as const
 const worker = { kind: 'thread', home: HOME, threadDir: TDIR, cwd: '/r/app', agentType: 'lean-agent:worker-haiku', agentId: 'w1' } as const
 const call = (ctx: any, e: any, c = C) => orchDecide(c, ctx, e)
+let seqN = 0 // a fresh brief each time: an identical brief is a retry (jobs.ts retryDenial)
 
 test('config: defaults, nested and flat keys, junk falls back, false switches the model off', () => {
-  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15 })
+  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false })
   const c = orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
-  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5 })
+  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false })
   expect(orchConfig({ 'lean.orchestrate': false }).on).toBe(false)
   expect(orchConfig({ workers: { steps: 'x' }, threads: { workers: -1 } })).toEqual(C)
   expect(orchConfig({ threads: { directReads: 0 } }).directReads).toBe(0)
@@ -70,7 +71,7 @@ test('thread: at most threads.directReads small direct reads per turn (<= 200 li
 
 test('Agent: sonnet needs why-sonnet, opus is left to the approval, briefs are capped, a worker never spawns workers', () => {
   orchReset()
-  const ag = (sub: string, prompt = 'do one thing') => call(th, { tool: 'Agent', subagent_type: sub, prompt })
+  const ag = (sub: string, prompt = `do one thing ${++seqN}`) => call(th, { tool: 'Agent', subagent_type: sub, prompt })
   expect(ag('lean-agent:worker-haiku')).toBeNull()
   orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' })
   expect(ag('lean-agent:reader-haiku')).toBeNull()
@@ -91,7 +92,7 @@ test('Agent: sonnet needs why-sonnet, opus is left to the approval, briefs are c
 
 test('Agent: at most threads.workers at once; a finished worker frees its slot; slots are per thread', () => {
   orchReset()
-  const ag = (ctx: any = th) => call(ctx, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: 'x' })
+  const ag = (ctx: any = th) => call(ctx, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: `x${++seqN}` })
   for (let i = 0; i < 4; i++) expect(ag()).toBeNull()
   expect(ag()).toContain('at most 4')
   expect(ag({ ...th, threadDir: '/h/.lean-agent/threads/t2' })).toBeNull()
@@ -100,7 +101,7 @@ test('Agent: at most threads.workers at once; a finished worker frees its slot; 
   for (let i = 0; i < 10; i++) orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' }) // never below 0
   expect(ag()).toBeNull()
   orchEnd(th, { tool: 'Read' }) // not an Agent call: ignored
-  expect(call(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: 'x' }, orchConfig({ threads: { workers: 1 } }))).toContain('at most 1')
+  expect(call(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: 'y1' }, orchConfig({ threads: { workers: 1 } }))).toContain('at most 1')
 })
 
 test('worker: a tool-call budget (workers.steps); at the budget the call is refused with the split line; counts are per worker', () => {
@@ -148,8 +149,8 @@ test('guard: small workers are exempt from the user subagent cap (agents.cap); o
   const h = fakeHost(null, { orchestrate: true })
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ agents: { cap: 1 } }))
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ sid: 's1' }))
-  const role = { kind: 'thread', id: 't1' }
-  const ag = (sub: string) => decide(h.host, { role, cwd: '/r/app' }, { tool: 'Agent', subagent_type: sub, prompt: 'x' })
+  const role = { kind: 'thread', id: 't1' } as const
+  const ag = (sub: string) => decide(h.host, { role, cwd: '/r/app' }, { tool: 'Agent', subagent_type: sub, prompt: `x${++seqN}` })
   expect(await ag('lean-agent:explorer')).toBeNull() // the one counted subagent
   expect(await ag('lean-agent:explorer')).toContain('subagent cap reached')
   expect((await ag('lean-agent:explorer')) ?? '').toContain('lean-agent:worker-* / reader-*')
