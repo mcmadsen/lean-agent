@@ -17,7 +17,7 @@ import type { DeskRec } from './delivery'
 import { buildSnapshot, takeEdited, writeSnapshot } from './snapshot'
 import { kTokens, readContext, recordContext, threadLimits } from './threadcontext'
 import { readStop, stopRecordText, writeStop } from './contextstop'
-import { isWorking, needsYou } from './threads'
+import { isWorking } from './threads'
 import type { AgentRow, Out, Thread } from './threads'
 
 export const IDLE_MS = 20_000 // the session must have ended its turn this long ago
@@ -173,7 +173,9 @@ async function tickOnce(h: Host, deps: RestartDeps): Promise<Notice[]> {
       await drop()
       continue
     }
-    if (needsYou(row)) continue // it waits for the user's answer: left alone, the record stays
+    // A real open prompt (a permission prompt, a question) is left alone. The engine also labels a session `blocked` when its last turn says it
+    // could not finish, which is exactly what a hard-stopped thread says: that label alone never holds the restart back (seen live).
+    if (row.waitingFor) continue
     if (isWorking(row) && now - p.ts < grace) continue // idle first; after the grace minutes a session that still shows as working is restarted too (the stop refuses all its tool calls)
     const r = await deps.restart(id, `Its context was ${p.tokens} tokens (limit ${p.limit}): checkpointed at the end of its turn and restarted by script.`, isWorking(row))
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {

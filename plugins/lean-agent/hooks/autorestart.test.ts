@@ -132,6 +132,20 @@ test('desk tick: restarts after 20 s idle with a notice naming size and cost; ne
   expect(calls).toHaveLength(1)
 })
 
+test('desk tick: a hard-stopped session the engine labels blocked (no open prompt) is restarted after the grace minutes (it counts as still working); one with an open prompt is left alone', async () => {
+  const { h } = setup()
+  await end(h)
+  const calls: string[] = []
+  const restart = async (id: string, why: string) => (calls.push(`${id}|${why}`), ok)
+  h.clock.t = 1_000_000 + 3 * 60_000 // threads.stopGraceMinutes (default 3): the engine's `blocked` label reads as a session that is not idle
+  const row = (waitingFor: string) => async () => [{ sid: S1, name: '', cwd: T1, status: 'idle', state: 'blocked', startedAt: 1, pid: 42, id: 'a', waitingFor }] as any
+  expect(await autoRestartTick(h.host, { agents: row('permission prompt'), restart })).toEqual([])
+  expect(calls).toHaveLength(0)
+  const notes = await autoRestartTick(h.host, { agents: row(''), restart })
+  expect(calls).toHaveLength(1)
+  expect(notes).toHaveLength(1)
+})
+
 test('desk tick: never mid-turn, one per 10 minutes, stale checkpoints are dropped, failures are retried then reported', async () => {
   // a working session is left alone, the checkpoint stays
   const a = setup().h
