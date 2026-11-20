@@ -130,6 +130,21 @@ and replaceable. All by script, no model turn.
 
 ### Changed
 
+- **Rule text diet** (always-loaded guides, one short line per rule, no history or rationale, nothing the guard already enforces except
+  the name of the right tool; every rule kept, the contract check's required sentences unchanged). Tokens are chars / 4 from
+  `lean_doctor overhead`'s script:
+
+  | text | before | after | change |
+  |---|---:|---:|---:|
+  | `templates/front-desk.md` (the desk's guide) | 3222 | 1056 | -67% |
+  | `templates/thread.md` (every thread's guide) | 2679 | 1567 | -42% |
+  | `skills/thread/SKILL.md` (the desk's thread skill) | 4683 | 1352 | -71% |
+  | desk guide in all (template + thread skill) | 7905 | 2408 | -70% |
+
+  The new model is stated once: the desk routes only; a thread orchestrates only; every read, search or edit is one single-step job for a
+  small worker (haiku by default, `why-sonnet:`, `job:` line, `allow-edit:` / `allow-cmd:` / `allow-mcp:` grants); tests and builds go
+  through `lean_run`; the store is the memory (state snapshot, automatic restart, `find` / `ask` / `report`). The thread skill gets its
+  `argument-hint`, so the contract no longer exempts it.
 - **Approvals of the five write kinds go through the desk** (this reverses 1.0.14's "answered in the thread's own session" for those
   kinds only; no hook carries a decision, the mod performs the approved action itself). Everything else a permission check denies is
   still answered in the thread's own session (`approval`, Open tN). The thread guide tells a thread to use `action` instead of trying the

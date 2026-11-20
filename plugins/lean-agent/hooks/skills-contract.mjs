@@ -85,7 +85,6 @@ for (const n of ['reader-sonnet', 'reader-haiku', 'explorer']) {
 for (const name of readdirSync(`${root}/skills`).sort()) {
   const head = readFileSync(`${root}/skills/${name}/SKILL.md`, 'utf8').split('\n---\n')[0]
   if (!/^roles:.*\bdesk\b/m.test(head)) continue
-  if (name === 'thread') continue // owned by the texts thread (the desk routes through it; its argument-hint comes with the rewrite)
   if (!/^description:\s*\S.+$/m.test(head)) fail(`skill ${name}: needs a one-line description (offered on the desk)`)
   if (!/^argument-hint:\s*\S.*$/m.test(head)) fail(`skill ${name}: offered on the desk, so it needs an argument-hint (\`/lean-agent:${name} <args>\` is the direct call)`)
 }

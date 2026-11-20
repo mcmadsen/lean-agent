@@ -377,14 +377,22 @@ and what the transcript names of MCP (servers, tool names, instructions). This r
 
 | role | template | agent | skills | lean tools | total |
 |---|---:|---:|---:|---:|---:|
-| desk | 2663 | 0 | 669 | 2788 | 6120 |
-| thread | 2293 | 0 | 1087 | 4510 | 7890 |
+| desk | 1056 | 0 | 998 | 2788 | 4842 |
+| thread | 1567 | 0 | 1109 | 4510 | 7186 |
 | worker-haiku | 0 | 572 | 0 | 0 | 572 |
 | reader-haiku | 0 | 754 | 0 | 0 | 754 |
 | reader-sonnet | 0 | 781 | 0 | 0 | 781 |
 | worker-sonnet | 0 | 598 | 0 | 0 | 598 |
 | reviewer | 0 | 3099 | 0 | 0 | 3099 |
 | auditor | 0 | 855 | 0 | 0 | 855 |
+
+After the rule text diet (1.0.15), the guides, in tokens:
+
+| text | before | after | change |
+|---|---:|---:|---:|
+| `templates/front-desk.md` | 3222 | 1056 | -67% |
+| `templates/thread.md` | 2679 | 1567 | -42% |
+| `skills/thread/SKILL.md` | 4683 | 1352 | -71% |
 
 **Removing tools instead of refusing them.** A refusal at call time leaves the tool's schema in every request. What was found (engine
 types, `claude --help`, the engine binary), and what each way does:
