@@ -36,15 +36,23 @@ export async function threadLimits(h: Host): Promise<Limits> {
 }
 
 // ---- the record: <thread folder>/context.json {tokens, at, sid} ----
-export type ContextRec = { tokens: number; at: number; sid: string }
+export type Sample = { at: number; tokens: number }
+export const HIST_MAX = 20 // the last turn-end samples kept in context.json (the pane's growth per turn)
+export type ContextRec = { tokens: number; at: number; sid: string; hist?: Sample[] }
 export const contextFile = (home: string, id: string) => `${threadsDir(home)}/${id}/context.json`
 
 // Written by the thread's own mod at the end of a turn; false = nothing written (no usable size or session id), never throws.
-export async function recordContext(h: Host, id: string, sid: string, tokens: unknown): Promise<boolean> {
+// `sample`: a turn end, one history sample is kept (the last HIST_MAX); every other write keeps the history of the same session as it was.
+export async function recordContext(h: Host, id: string, sid: string, tokens: unknown, o: { sample?: boolean } = {}): Promise<boolean> {
   if (!/^t\d+$/.test(id) || !sid || typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return false
   try {
-    const rec: ContextRec = { tokens: Math.round(tokens), at: await h.clock.now(), sid }
-    await writeJson(h, contextFile(await homeDir(h), id), rec) // atomic: tmp file + mv
+    const home = await homeDir(h)
+    const at = await h.clock.now()
+    const old = await readJson<Partial<ContextRec> | null>(h, contextFile(home, id), null)
+    let hist = old && old.sid === sid && Array.isArray(old.hist) ? old.hist.filter(x => x && typeof x.at === 'number' && typeof x.tokens === 'number') : []
+    if (o.sample) hist = [...hist, { at, tokens: Math.round(tokens) }].slice(-HIST_MAX)
+    const rec: ContextRec = { tokens: Math.round(tokens), at, sid, ...(hist.length ? { hist } : {}) }
+    await writeJson(h, contextFile(home, id), rec) // atomic: tmp file + mv
     return true
   } catch {
     return false
@@ -61,7 +69,7 @@ export async function readContext(h: Host, home: string, t: { id: string; sid?: 
   if (!r || typeof r !== 'object' || typeof r.sid !== 'string' || typeof r.tokens !== 'number' || !Number.isFinite(r.tokens) || r.tokens < 0) return null
   const at = typeof r.at === 'number' ? r.at : 0
   const mine = r.sid === t.sid || (Array.isArray(t.sids) && t.sids.includes(r.sid) && at >= (t.lastWake ?? 0) && at > 0)
-  return mine ? { tokens: r.tokens, at, sid: r.sid } : null
+  return mine ? { tokens: r.tokens, at, sid: r.sid, ...(Array.isArray(r.hist) && r.hist.length ? { hist: r.hist } : {}) } : null
 }
 
 // ---- level and text ----
@@ -70,13 +78,27 @@ export const levelOf = (tokens: number | null | undefined, l: Limits): Level =>
   typeof tokens !== 'number' ? 'unknown' : tokens > l.limit ? 'over' : tokens > l.warn ? 'warn' : 'ok'
 export const kTokens = (n: number) => `${Math.round(n / 1000)}k`
 // "ctx 108k/120k" | "ctx unknown"
-export const ctxText = (tokens: number | null | undefined, l: Limits) => (typeof tokens === 'number' ? `ctx ${kTokens(tokens)}/${kTokens(l.limit)}` : 'ctx unknown')
+export const ctxText = (tokens: number | null | undefined, l: Limits, growth?: number | null) =>
+  typeof tokens === 'number' ? `ctx ${kTokens(tokens)}/${kTokens(l.limit)}${typeof growth === 'number' ? `, +${kTokens(growth)}/turn` : ''}` : 'ctx unknown'
+
+// The mean growth per turn from the turn-end samples: the steps up (a drop is a compaction or a restart, left out), at least two of them, else null.
+export function growthPerTurn(hist: Sample[] | undefined): number | null {
+  if (!hist || hist.length < 3) return null
+  const ups: number[] = []
+  for (let i = 1; i < hist.length; i++) {
+    const d = hist[i]!.tokens - hist[i - 1]!.tokens
+    if (d > 0) ups.push(d)
+  }
+  if (ups.length < 2) return null
+  const mean = ups.reduce((a, b) => a + b, 0) / ups.length
+  return mean >= 500 ? mean : null // under half a thousand a turn is not worth a figure
+}
 
 // What the views read: the text, the level (dim under the warn level, yellow above it, red over the limit) and the size
 export type CtxView = { text: string; level: Level; tokens?: number }
 export function ctxView(rec: ContextRec | null, l: Limits): CtxView {
   const tokens = rec?.tokens
-  return { text: ctxText(tokens, l), level: levelOf(tokens, l), ...(typeof tokens === 'number' ? { tokens } : {}) }
+  return { text: ctxText(tokens, l, growthPerTurn(rec?.hist)), level: levelOf(tokens, l), ...(typeof tokens === 'number' ? { tokens } : {}) }
 }
 export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number }, l?: Limits): Promise<CtxView> {
   return ctxView(await readContext(h, home, t), l ?? (await threadLimits(h)))

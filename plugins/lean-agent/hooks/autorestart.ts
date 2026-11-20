@@ -14,7 +14,7 @@ import { deskState } from './delivery'
 import { logRefusal } from './feedback'
 import type { DeskRec } from './delivery'
 import { buildSnapshot, takeEdited, writeSnapshot } from './snapshot'
-import { kTokens, readContext, threadLimits } from './threadcontext'
+import { kTokens, readContext, recordContext, threadLimits } from './threadcontext'
 import { readStop, stopRecordText, writeStop } from './contextstop'
 import { isWorking, needsYou } from './threads'
 import type { AgentRow, Out, Thread } from './threads'
@@ -101,6 +101,7 @@ export async function threadTurnEnd(h: Host, id: string, o: TurnEnd): Promise<Tu
     const stopped = o.sid ? await readStop(h, home, id, o.sid) : null
     out.snapshot = await writeSnapshot(h, home, await buildSnapshot(h, home, id, { sid: o.sid, tokens: o.tokens, edited: takeEdited(), tasks: o.tasks, pending: stopped?.pending }))
     if (o.tokens === null) return out
+    await recordContext(h, id, o.sid, o.tokens, { sample: true }) // one history sample per turn end (the pane's growth per turn)
     const limit = (await threadLimits(h)).limit
     const mk = await readMarker(h, home, id)
     if (o.tokens < limit) {
