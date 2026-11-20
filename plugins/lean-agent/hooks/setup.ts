@@ -36,7 +36,14 @@ const UNFIXABLE = /needs Claude Desktop|not on PATH|start a new session|close it
 export const problemsOf = (lines: string[]): string[] => fixLines(lines).filter(l => !UNFIXABLE.test(l))
 export const notesOf = (lines: string[]): string[] => fixLines(lines).filter(l => UNFIXABLE.test(l))
 
-export const mcpOf = (lines: string[]): string[] => lines.filter(l => l.startsWith('MCP ')).map(l => l.replace(/^MCP\s+/, ''))
+// What "lean-agent is not set up" may say: only rows of the setup itself (desk folder, trust, model line, folder access, opener, launch agent,
+// the 1.0 state). Every other FIX row (a skewed thread, a failed report, a stale worktree entry, a model share ...) is a doctor finding.
+const SETUP_ROW = /^(desk folder|desk model|desk \.claude|desk can open|opener script|launch agent|state is 1\.0)/
+export const missingOf = (problems: string[]): string[] => problems.filter(p => SETUP_ROW.test(p))
+// the `note ` rows of a check: information, nothing to press
+export const infoOf = (lines: string[]): string[] => lines.filter(l => l.startsWith('note ')).map(l => l.replace(/^note\s+/, ''))
+
+export const mcpOf =(lines: string[]): string[] => lines.filter(l => l.startsWith('MCP ')).map(l => l.replace(/^MCP\s+/, ''))
 
 export async function setupCheck(h: Host, root: string): Promise<{ checked: string[]; problems: string[]; notes: string[]; mcp: string[] }> {
   const checked = await check(h, root)
