@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Strict read-only reviewer of a diff, in ordered passes (completeness, correctness, behaviour before/after, reuse, scope, tests, defaults, style) with a structured JSON result. Never edits. Call it with run_in_background: false.
+description: Strict read-only reviewer of a diff, in ordered passes (completeness, correctness, behaviour before/after, reuse, scope, tests, defaults, style) with a structured JSON result. Never edits. Set the Agent parameter run_in_background to the boolean false; if it still starts in the background, wait for its result notification (no polling, no duplicate job).
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash

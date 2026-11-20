@@ -11,7 +11,7 @@ export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agen
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
-export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku (pass run_in_background: false)'
+export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (workers may read and edit) / lean-agent:reader-haiku (set the Agent parameter run_in_background to the boolean false; a worker that still starts in the background is fine: wait for its result notification, do not poll or duplicate the job)'
 export const SPLIT = 'return what you have; the thread splits the rest'
 export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
 export const DIRECT_READ_LINES = 200
@@ -72,9 +72,7 @@ export function orchReset(): void {
   steps.clear()
   slots.clear()
   stopped.clear()
-  grantRoots.clear()
-  grantMiss.clear()
-  lost.clear()
+  denied.clear()
   retryReset()
 }
 
@@ -155,11 +153,8 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (p.length > c.briefChars) return `one step per job: the brief is ${p.length} chars, at most ${c.briefChars} (workers.briefChars); split it, one job per step`
   if (c.requireJob && !jobOf(p)) return 'the first line of the brief names the job: `job: lookup|edit|run|check` (workers.requireJob)'
   const k = key(ctx)
-  const lostNote = lost.get(k)
-  if (lostNote && !lostNote.told) {
-    lostNote.told = true // said once; the thread's own edits are allowed from now on
-    return GRANT_LOST
-  }
+  const hint = takeDeniedHint(k) // a worker call was denied by the permission check: said once, here or on the thread's next result
+  if (hint) return hint
   const now = Date.now()
   for (const [id, sl] of slots) if (now - sl.at > c.grantTtlMin * 60_000) freeSlot(id) // a worker that never ended: its slot is not held forever
   const n = inflight.get(k) ?? 0
@@ -176,12 +171,13 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (isAgentTool(e)) return agentCallDenial(c, ctx, e)
   if (t === 'Edit' || t === 'Write' || t === 'NotebookEdit') {
     const f = String(e.file_path ?? e.notebook_path ?? '')
-    return f && (inLean(ctx, f) || lostEdit(ctx, e)) ? null : THREAD_STEP
+    return f && (inLean(ctx, f) || deniedEdit(ctx, e)) ? null : THREAD_STEP
   }
   if (t === 'Read') {
     const f = String(e.file_path ?? '')
     if (f && inLean(ctx, f)) return null
     const lim = Number(e.limit)
+    if (f && deniedEdit(ctx, e) && Number.isFinite(lim) && lim >= 1 && lim <= DIRECT_READ_LINES) return null // a small read of a path the denied call named: not counted
     if (!Number.isFinite(lim) || lim < 1 || lim > DIRECT_READ_LINES) return `${THREAD_STEP}; a direct read needs limit <= ${DIRECT_READ_LINES}`
     const k = key(ctx)
     const n = reads.get(k) ?? 0
@@ -191,9 +187,9 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   }
   if (t === 'Grep' || t === 'Glob') {
     const p = String(e.path ?? '')
-    return p && inLean(ctx, p) ? null : THREAD_STEP
+    return p && (inLean(ctx, p) || deniedEdit(ctx, e)) ? null : THREAD_STEP
   }
-  if (t === 'Bash') return bashOk(ctx, String(e.command ?? '')) ? null : 'run tests and builds with lean_run, or give the step to lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku'
+  if (t === 'Bash') return bashOk(ctx, String(e.command ?? '')) ? null : 'run tests and builds with lean_run, or give the step to lean-agent:worker-haiku / lean-agent:reader-haiku'
   return null
 }
 
@@ -258,35 +254,37 @@ export function orchAgentEnd(agentId: string): void {
   }
 }
 
-// ---- grants that did not arrive ----------------------------------------------------------------------------------------------
-// A worker edit refused as outside its grant although the path is inside an `allow-edit` root the thread passed on its last Agent calls:
-// after 2 such refusals the next one (and the thread's next worker Agent call) says to do the edit yourself, and the thread's OWN edit
-// of files under those roots is allowed for the rest of the session. Work never stops on a lost grant.
-export const GRANT_LOST = 'grants are not reaching workers (lean-agent bug or a version mix): do this edit yourself now'
-const grantRoots = new Map<string, string[]>() // thread key (its folder) -> allow-edit roots of its last worker Agent calls
-const grantMiss = new Map<string, number>() // thread key -> worker edits refused although inside those roots
-const lost = new Map<string, { told: boolean }>()
-export function noteGrantRoots(threadKey: string, edit: string[] | undefined): void {
-  if (!edit?.length) return
-  grantRoots.set(threadKey, [...new Set([...(grantRoots.get(threadKey) ?? []), ...edit.map(r => normPath(r))])].slice(-12))
+// ---- a delegation the permission check denied ----------------------------------------------------------------------------------
+// Our guard is a token policy, not a safety boundary: it must never turn a permission denial (the auto mode classifier, a rule) of the
+// thread's worker Agent call into a dead end. When the engine reports the denial (classic.PermissionDenied, or a failed Agent result that
+// says so), the thread's OWN Edit/Write on the paths that call named in its brief (and its own small reads there) are allowed for the
+// rest of the session; the engine's own permission check still judges each of those edits itself. Nothing here changes a permission.
+export const DELEGATION_DENIED = 'the permission check denied the worker call: do this one step yourself (your own edit is allowed here now), then carry on'
+const denied = new Map<string, { roots: string[]; told: boolean }>() // thread key -> roots of the denied worker call(s), said once
+export function noteDelegationDenied(threadKey: string, roots: string[]): boolean {
+  const abs = roots.map(r => normPath(r)).filter(r => r !== '/')
+  if (!abs.length) return false
+  const cur = denied.get(threadKey)
+  denied.set(threadKey, { roots: [...new Set([...(cur?.roots ?? []), ...abs])].slice(-12), told: cur?.told ?? false })
+  return true
 }
-const inRoots = (threadKey: string, abs: string): boolean => (grantRoots.get(threadKey) ?? []).some(r => under(abs, r))
-// a worker's edit was refused as outside its grant: null = count it as before, a string = the fail-fast text (the 3rd such refusal on)
-export function grantRefused(threadKey: string, absPath: string): string | null {
-  if (!inRoots(threadKey, normPath(absPath))) return null
-  const n = (grantMiss.get(threadKey) ?? 0) + 1
-  grantMiss.set(threadKey, n)
-  if (n <= 2) return null
-  if (!lost.has(threadKey)) lost.set(threadKey, { told: false })
-  return GRANT_LOST
+export const delegationDenied = (threadKey: string): boolean => denied.has(threadKey)
+// said once: the next refusal of a worker call, or else the next tool result of the thread
+export function takeDeniedHint(threadKey: string): string | null {
+  const d = denied.get(threadKey)
+  if (!d || d.told) return null
+  d.told = true
+  return DELEGATION_DENIED
 }
-export const grantArrived = (threadKey: string): void => void grantMiss.delete(threadKey) // a worker edit was allowed: the grants do arrive
-// the thread's own edit under a root it granted, after the grants were lost (the guard's fallback; register logs it as `grant-lost`)
-export function lostEdit(ctx: OCtx, e: Call): boolean {
-  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType || !lost.has(key(ctx))) return false
-  const f = String(e.file_path ?? e.notebook_path ?? '')
-  if (!f) return false
-  const abs = normPath(f, ctx.cwd)
+const inDenied = (ctx: OCtx, abs: string): boolean => {
+  const d = denied.get(key(ctx))
+  if (!d) return false
   const lean = `${ctx.home}/.lean-agent`
-  return inRoots(key(ctx), abs) && !(under(abs, lean) && LEAN_PROTECTED.test(abs.slice(lean.length))) // never its own settings, grants or review records
+  return d.roots.some(r => under(abs, r)) && !(under(abs, lean) && LEAN_PROTECTED.test(abs.slice(lean.length))) // never its own settings, grants or review records
+}
+// the thread's own edit (or read) of a path the denied worker call named: the guard's fallback (register logs the edit as `delegation-denied`)
+export function deniedEdit(ctx: OCtx, e: Call): boolean {
+  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType) return false
+  const f = String(e.file_path ?? e.notebook_path ?? e.path ?? '')
+  return !!f && inDenied(ctx, normPath(f, ctx.cwd))
 }

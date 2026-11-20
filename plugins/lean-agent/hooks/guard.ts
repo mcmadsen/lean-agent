@@ -6,7 +6,7 @@ import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
-import { DESK_ROUTE, grantArrived, grantRefused, isSmall, loadOrch, orchDecide } from './orchestrate'
+import { DESK_ROUTE, isSmall, loadOrch, orchDecide } from './orchestrate'
 import { jobOf } from './jobs'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -42,7 +42,7 @@ async function resolve($: Host, p: string, cwd: string): Promise<string> {
 
 // Both sides of a grant check go through this: the real path of the deepest EXISTING parent (symlinks, /private/tmp on macOS, a file that
 // does not exist yet under a granted directory), `..` / `.` / doubled and trailing slashes removed, `~` expanded. Never the raw spelling.
-async function deepReal($: Host, raw: string, cwd: string): Promise<string> {
+export async function deepReal($: Host, raw: string, cwd: string): Promise<string> {
   const home = await homeDir($)
   const t = raw === '~' ? home : raw.startsWith('~/') ? `${home}/${raw.slice(2)}` : raw
   const abs = t.startsWith('/') ? norm(t) : norm(`${cwd}/${t}`)
@@ -60,26 +60,6 @@ async function deepReal($: Host, raw: string, cwd: string): Promise<string> {
   }
   return abs
 }
-// the edited path is within a granted root (a file grant is the file itself, a directory grant everything below it). A case-insensitive file
-// system (macOS): paths that differ only by case match when the path as the worker spelled it exists (a case-sensitive one answers no).
-async function inGrant($: Host, raw: string, roots: string[], cwd: string): Promise<{ ok: boolean; shown: string[] }> {
-  const p = await deepReal($, raw, cwd)
-  const shown: string[] = []
-  for (const r of roots) {
-    const rr = await deepReal($, r, cwd)
-    shown.push(rr === norm(r) ? rr : `${norm(r)} (= ${rr})`)
-    const isFile = (await $.fs.stat(rr).then(x => x.kind === 'file', () => false)) // a file grant is that file only
-    if (isFile ? p === rr : within(p, rr)) return { ok: true, shown }
-    if (isFile) continue
-    if (within(p.toLowerCase(), rr.toLowerCase())) {
-      const asSpelled = raw.startsWith('/') ? norm(raw) : norm(`${cwd}/${raw}`)
-      const exists = async (q: string) => $.fs.stat(q, { resolve: true }).then(() => true, () => false)
-      if ((await exists(rr)) && (await exists(asSpelled.slice(0, rr.length)))) return { ok: true, shown }
-    }
-  }
-  return { ok: false, shown }
-}
-
 // ---- shell command analysis ----------------------------------------------------------------------------------
 const META = /[;&|<>`\n\r]|\$\(|\$\{/
 export const hasMeta = (c: string) => META.test(c)
@@ -366,7 +346,15 @@ export function parseGrants(prompt: unknown): Grants {
   return { edit: list('allow-edit').filter(x => x.startsWith('/') || x === '~' || x.startsWith('~/')), cmds: list('allow-cmd'), mcp: list('allow-mcp'), mcpWrite: list('allow-mcp-write'), ...(jobOf(t) ? { job: jobOf(t)! } : {}) }
 }
 // does the brief carry anything the guard must remember for the subagent it starts (a grant or a job type)?
-export const hasGrants = (g: Grants): boolean => !!(g.edit?.length || g.cmds?.length || g.mcp?.length || g.mcpWrite?.length || g.job)
+// (allow-edit / allow-cmd lines are accepted and ignored: workers and readers need no grant for them)
+// the absolute paths a brief names (its `allow-edit:` lines and any absolute path in the text, at least two levels deep): what the thread may
+// do itself when the permission check denied that worker call (orchestrate.ts delegation-denied)
+export function pathsOf(prompt: unknown): string[] {
+  const t = typeof prompt === 'string' ? prompt : ''
+  const found = [...(parseGrants(t).edit ?? []), ...[...t.matchAll(/(?:^|[\s`'"(=:,])((?:~|\/)[\w.@+\-/]*[\w@+\-/])/g)].map(m => m[1]!)]
+  return [...new Set(found.filter(p => (p.startsWith('~/') || p.startsWith('/')) && p.split('/').filter(Boolean).length >= 2))].slice(0, 12)
+}
+export const hasGrants = (g: Grants): boolean => !!(g.mcp?.length || g.mcpWrite?.length || g.job)
 
 let chain: Promise<unknown> = Promise.resolve()
 function locked<T>(f: () => Promise<T>): Promise<T> {
@@ -401,7 +389,7 @@ export const sweepGrants = ($: Host, role: Role, o: GrantOpts = {}): Promise<voi
 
 export function recordGrant($: Host, role: Role, call: string, type: string | undefined, g: Grants, o: GrantOpts = {}): Promise<void> {
   return mutate($, role, o, (d, now) => {
-    d.pending.push({ call, type, at: now, ...(o.sid ? { sid: o.sid } : {}), edit: g.edit ?? [], cmds: g.cmds ?? [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
+    d.pending.push({ call, type, at: now, ...(o.sid ? { sid: o.sid } : {}), edit: [], cmds: [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
   })
 }
 
@@ -451,28 +439,6 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
   })
 }
 
-// A grant (`allow-cmd: git -C /w diff main...abc1234`) matches a command that is the grant itself or the grant followed by more words
-// (flags, paths), compared word by word: spacing, quotes, `--no-pager` and a `-C` path spelled with `..`, `.` or a trailing slash do not
-// matter (a thread folder is not a repository, so the review grants its git commands in the `git -C <worktree> ...` form). The command
-// must have passed hasMeta already: no pipe, redirect or substitution ever rides on a grant.
-const grantWords = (s: string): string[] => {
-  const w = words(s)
-  const out: string[] = []
-  for (let i = 0; i < w.length; i++) {
-    if (w[i] === '--no-pager') continue
-    if (w[i] === '-C' && w[i + 1]?.startsWith('/')) {
-      out.push('-C', norm(w[i + 1]!))
-      i++
-    } else out.push(w[i]!)
-  }
-  return out
-}
-export const grantMatches = (command: string, grant: string): boolean => {
-  const c = grantWords(command)
-  const x = grantWords(grant)
-  return x.length > 0 && x.length <= c.length && x.every((t, i) => t === c[i])
-}
-
 // Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
 // other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
 // (shell.ts plainPipeline: no redirect, substitution, expansion, glob, brace or tilde outside quotes), the only global options are
@@ -484,7 +450,7 @@ const GIT_EXPLORER = ['log', 'ls-files']
 const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse', 'merge-base'] // (merge-base: the review's `git -C <worktree> merge-base <base> <sha>`; it only reads)
 export const builtinGit = (t?: string): string[] => {
   const n = ownName(t) ?? ''
-  return n === 'explorer' || n === 'auditor' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
+  return n === 'explorer' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' || n === 'auditor' ? GIT_READER : []
 }
 // long options git accepts by any unambiguous prefix: --out, --output=f, --ext, --ext-diff, --exec, --exec-path ...
 const BAD_LONG = (o: string, sub: string) =>
@@ -516,7 +482,7 @@ const MORE_CMDS = new Set(['sed', 'stat', 'file', 'diff', 'jq', 'tree', 'sort', 
 const GLOB_CMDS = new Set(['rg', 'grep', 'ls', 'wc', 'head', 'tail', 'cat', 'sort', 'cut', 'nl'])
 export const builtinMore = (t?: string): boolean => {
   const n = ownName(t) ?? ''
-  return /^reader-/.test(n) || n === 'reviewer'
+  return /^reader-/.test(n) || n === 'reviewer' || n === 'auditor'
 }
 // Every flag a built-in search command may carry is listed here; ANY other flag (or abbreviation, or cluster letter) refuses the
 // command, so no option can shift which word is a pattern, read a file, run a program, write, or follow a symlink out of the roots.
@@ -851,6 +817,114 @@ async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: s
   return true
 }
 
+// A thread's OWN read-only git and `ls` (one cheap command is cheaper than a reader): the same read-only flag checks the readers have (gitOk),
+// only on its registered worktrees and the project repositories (cRoots), and the Bash result of a thread is capped (cap.ts). `branch` only
+// lists and `worktree` only lists; every other word of those two is refused. Anything else falls through to the orchestration rules.
+const THREAD_GIT = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse', 'merge-base', 'branch', 'worktree']
+const BRANCH_LIST = /^(-a|-r|-v|-vv|--all|--remotes|--verbose|--show-current|--list|--no-color|--(contains|merged|no-merged|format|sort)=\S+)$/
+const WORKTREE_LIST = /^(--porcelain|-v|--verbose)$/
+async function threadReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
+  const segs = plainPipeline(c)
+  if (!segs?.length) return false
+  const roots = await cRoots($, ctx)
+  if (!roots.some(r => within(norm(ctx.cwd), r))) return false // no path named: the command works in the session folder, which must be one of the roots
+  for (const w of segs) {
+    if (w[0] === 'ls') {
+      if (!(await searchOk($, ctx, w, roots, true, false))) return false
+      continue
+    }
+    if (w[0] !== 'git' || w.some(isGlobWord) || !(await gitOk($, ctx, w, THREAD_GIT, roots))) return false
+    let i = 1
+    while (i < w.length && w[i]!.startsWith('-')) i += w[i] === '-C' ? 2 : 1
+    const sub = w[i], rest = w.slice(i + 1)
+    if (sub === 'branch' && !rest.every(a => BRANCH_LIST.test(a))) return false
+    if (sub === 'worktree' && !(rest[0] === 'list' && rest.slice(1).every(a => WORKTREE_LIST.test(a)))) return false
+  }
+  return true
+}
+// ---- what a subagent may do: read and edit, with a short never-list ------------------------------------------------------------
+// Workers (worker-*) edit anywhere the engine's own permission check allows, and run any shell command; readers (reader-*, explorer) read
+// anything and run any shell command that writes nothing outside a temp folder. The reviewer and the auditor stay on the read-only command
+// list (their verdicts must be trustworthy). Never, for any of them: git push / tags / releases, a forge write (gh / az), a change of
+// permissions or settings, lean-agent's own state under the lean home. `allow-edit:` / `allow-cmd:` lines in a brief are accepted and ignored.
+const GIT_TAG = /\bgit\b[^;&|\n]*\btag\b[ \t]*([^;&|\n]*)/g
+const TAG_LIST = /^(-l\b|--list\b|-n\b|--contains\b|--points-at\b|--merged\b|--no-merged\b|--sort\b|$)/
+const SETTINGS_CMD = /\bclaude\s+(config|mcp|plugin|permissions|settings|login|logout|setup-token)\b|(^|[\s/'"])(\.claude\/settings(\.local)?\.json|managed-settings\.json)/
+const SETTINGS_PATH = /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)managed-settings\.json$/
+const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr|stdout)$|\$\{?TMPDIR\}?\/|[^\0]*\/\.claude\/jobs\/[^/]+\/tmp\/|[^\0]*\/\.lean-agent\/tmp\/)/
+const tempFile = (w: string): boolean => TEMP_OK.test(w) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
+// the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
+export function redirectTargets(c: string): string[] {
+  const out: string[] = []
+  let q = ''
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]!
+    if (q) { if (ch === q) q = ''; else if (ch === '\\' && q === '"') i++; continue }
+    if (ch === '\\') { i++; continue }
+    if (ch === "'" || ch === '"') { q = ch; continue }
+    if (ch !== '>') continue
+    let j = i + 1
+    if (c[j] === '>') j++
+    if (c[j] === '&' && /[\d-]/.test(c[j + 1] ?? '')) { i = j + 1; continue }
+    if (c[j] === '&' || c[j] === '|') j++
+    while (c[j] === ' ' || c[j] === '\t') j++
+    let w = ''
+    let qq = ''
+    for (; j < c.length; j++) {
+      const d = c[j]!
+      if (qq) { if (d === qq) qq = ''; else w += d; continue }
+      if (d === "'" || d === '"') { qq = d; continue }
+      if (/[\s;&|()<>]/.test(d)) break
+      w += d
+    }
+    out.push(w)
+    i = Math.max(i, j - 1)
+  }
+  return out
+}
+const UNQUOTED = (c: string) => c.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''")
+const CMD_AT = (names: string) => new RegExp(`(?:^|[;&|(\\n])\\s*(?:sudo\\s+|env\\s+)?(?:${names})\\b`)
+const WRITING_PROGS = CMD_AT('rm|mv|cp|touch|truncate|dd|ln|install|rsync|patch')
+const WRITING_GIT = CMD_AT('git(?:\\s+-C\\s+\\S+)?\\s+(?:commit|add|checkout|switch|reset|restore|stash|merge|rebase|cherry-pick|apply|clean|rm|mv|am|pull|revert)')
+// a reader's shell command that would write a file (it has no Edit / Write tool: the shell is its only way to)
+export function readerWrite(c: string): string | null {
+  const bad = redirectTargets(c).find(w => !tempFile(w))
+  const u = UNQUOTED(c)
+  if (bad !== undefined) return `lean-agent: a reader writes no file (redirect to ${bad.slice(0, 80) || 'a command'}); only a temp folder may be written, or give the step to a worker`
+  if (/\btee\b/.test(u) && /\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(u) && !tempFile(/\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(c)?.[1]?.replace(/^['"]|['"]$/g, '') ?? '')) return 'lean-agent: a reader writes no file (tee); only a temp folder may be written, or give the step to a worker'
+  if (/\b(sed|perl)\b[^;&|\n]*\s(-[a-zA-Z]*i\S*|--in-place\S*)(\s|$)/.test(u) || WRITING_PROGS.test(u) || WRITING_GIT.test(u)) return 'lean-agent: a reader changes nothing in the project (no rm / mv / cp / touch / sed -i / git write); give the step to a worker'
+  return null
+}
+// the never-list of every subagent's shell
+async function neverDenial($: Host, c: string): Promise<string | null> {
+  const a = analyze(c)
+  if (a.push || PUSH.test(c)) return 'lean-agent: a subagent never pushes; report to the thread (the desk pushes after the review)'
+  if (a.write) return 'lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread'
+  for (const m of c.matchAll(GIT_TAG)) if (!TAG_LIST.test(m[1]!.trim())) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
+  if (SETTINGS_CMD.test(c)) return 'lean-agent: a subagent never changes permissions or settings'
+  return null
+}
+// a worker's shell command that names lean-agent's protected state and writes (a redirect, or a program that can)
+async function leanStateShell($: Host, c: string): Promise<boolean> {
+  const home = await homeDir($)
+  const names = c.includes(leanDir(home)) || /(~|\$HOME|\$\{HOME\})\/\.lean-agent\b/.test(c)
+  if (!names || !/(config\.json|projects\.json|grants|approvals|\/reviews\b|\/threads\/)/.test(c)) return false
+  return redirectTargets(c).length > 0 || /\b(rm|mv|cp|tee|truncate|dd|ln|install|rsync|sed|perl|python3?|node|ruby)\b/.test(UNQUOTED(c))
+}
+// lean-agent's own state under the lean home: refused for a worker's edit (and a shell write); worktrees and the thread's own folder are not
+async function leanStateDenial($: Host, ctx: Ctx, abs: string): Promise<string | null> {
+  const home = await homeDir($)
+  const own = ctx.role.kind === 'thread' ? ctx.role.id : ''
+  for (const lean of new Set([norm(leanDir(home)), norm(await realPath($, leanDir(home)))])) {
+    if (!within(abs, lean)) continue
+    const rel = abs.slice(lean.length)
+    if (/^\/worktrees\//.test(rel)) return null
+    const th = /^\/threads\/([^/]+)\/(.*)$/.exec(rel)
+    if (th && own && th[1] === own && !/^(grants\.json$|approvals|reviews(\/|$))/.test(th[2]!)) return null
+    return `lean-agent: ${abs} is lean-agent's own state (settings, grants, approvals, review records, other threads): a worker never edits it; report it to the thread`
+  }
+  return null
+}
 const LEAN_TYPE = /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$|auditor$)/
 async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const t = ctx.agentType ?? 'unresolved' // a subagent whose type is not known is a reader with no grants
@@ -858,38 +932,35 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   // MCP is opt-in per job: a lean-agent subagent reaches a server only when the brief says `allow-mcp: <server>` (read-only tools)
   if (isMcpTool(e.tool) && !isOwn(serverOf(e.tool)) && (t === 'unresolved' || LEAN_TYPE.test(t))) return mcpDecision(await grantFor($, ctx), e.tool)
+  const wideReader = /^(reader-|explorer$)/.test(ownName(t) ?? '')
+  if (e.tool === 'Bash' && (isWorker(t) || wideReader)) {
+    const c = String(e.command ?? '')
+    const never = await neverDenial($, c)
+    if (never) return never
+    if (isWorker(t)) {
+      if (await leanStateShell($, c)) return 'lean-agent: a worker never changes lean-agent\'s own state (settings, grants, approvals, review records, threads); report it to the thread'
+      return null
+    }
+    return readerWrite(c)
+  }
   if (isReader(t)) {
     if (edits) return t === 'unresolved' ? 'lean-agent: agent type unresolved, so it is a reader (read-only); report this with the debug log line "agent fields"' : `lean-agent: ${t} is read-only`
     if (e.tool === 'Bash') {
       const c = String(e.command ?? '').trim()
-      if (t === 'unresolved') return 'lean-agent: agent type unresolved, so it is a reader with no grants; report this (feedback skill) with the debug log line "agent fields"'
+      if (t === 'unresolved') return 'lean-agent: agent type unresolved, so it is a reader; report this (feedback skill) with the debug log line "agent fields"'
       const refused = await builtinReadOnly($, ctx, c)
       if (!refused) return null
-      const g = await grantFor($, ctx)
-      const ok = !hasMeta(c) && (g.cmds ?? []).some(x => grantMatches(c, x))
       // the refused program is named (first word only) so the feedback export shows WHAT readers ask for
-      return ok ? null : `lean-agent: refused: ${refused.prog} (${refused.why}); ${t} may run only its built-in read-only commands (${builtinList(t)}) and the commands the thread granted (allow-cmd)`
+      return `lean-agent: refused: ${refused.prog} (${refused.why}); ${t} may run only its built-in read-only commands (${builtinList(t)})`
     }
     return null
   }
   if (isWorker(t) && edits) {
-    const g = await grantFor($, ctx)
     const raw: string = e.file_path ?? e.notebook_path ?? ''
     if (!raw) return 'lean-agent: edit without a path'
     const p = await resolve($, raw, ctx.cwd)
-    const tkey = ctx.role.kind === 'thread' ? `${threadsDir(await homeDir($))}/${ctx.role.id}` : ''
-    const found = 'call' in g // a grant record was found for this worker (the thread's Agent call gave it one)
-    const hit = await inGrant($, raw, g.edit ?? [], ctx.cwd)
-    if (hit.ok) {
-      if (tkey) grantArrived(tkey)
-      return null
-    }
-    const gone = tkey ? grantRefused(tkey, raw.startsWith('/') ? raw : `${ctx.cwd}/${raw}`) : null // the 3rd refusal inside a root the thread granted: the grant did not arrive
-    if (gone) return `lean-agent: ${gone} (${p})`
-    const tail = 'stop and report this path to the thread (do not edit it another way); the thread adds the path to allow-edit and briefs you again'
-    return found
-      ? `lean-agent: the path ${p} is not within the granted roots: ${hit.shown.join(', ') || 'none'}: ${tail}`
-      : `lean-agent: no grant is recorded for this worker (granted on the call: none found), path ${p}: ${tail}`
+    if (SETTINGS_PATH.test(p)) return `lean-agent: ${p} holds permissions or settings: a worker never edits it; report it to the thread`
+    return await leanStateDenial($, ctx, p)
   }
   return null
 }
@@ -996,14 +1067,14 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
 async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const dear = await expensiveDenial($, ctx, e)
   if (dear) return dear
-  // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit / allow-mcp lines from anyone else would start a
+  // grants are owned by a thread's own loop: an Agent call with allow-mcp lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''
   if ((e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?(worker-|reader-|reviewer$|explorer$|auditor$)/.test(sub) && !(ctx.role.kind === 'thread' && !ctx.agentId)) {
     const g = parseGrants(e.prompt)
-    if (g.edit?.length || g.cmds?.length || g.mcp?.length || g.mcpWrite?.length) {
+    if (g.mcp?.length || g.mcpWrite?.length) { // (allow-edit / allow-cmd lines are ignored, never refused)
       const who = ctx.agentId ? 'a subagent' : `a ${ctx.role.kind} session`
-      return `lean-agent: this Agent call carries ${[g.cmds?.length ? 'allow-cmd' : '', g.edit?.length ? 'allow-edit' : '', g.mcp?.length ? 'allow-mcp' : '', g.mcpWrite?.length ? 'allow-mcp-write' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
+      return `lean-agent: this Agent call carries ${[g.mcp?.length ? 'allow-mcp' : '', g.mcpWrite?.length ? 'allow-mcp-write' : ''].filter(Boolean).join(' and ')} lines, but ${who} cannot own grants (only a thread's own session records them), so the subagent could do nothing. Remove the lines or run this from a thread`
     }
   }
   // the script auditor judges what it is given: its prompt is exactly the brief the mod generated (a thread cannot add instructions)
@@ -1014,7 +1085,8 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const capped = await capDenial($, ctx, e)
   if (capped) return capped
   const orch = await loadOrch($)
-  if (orch.on) {
+  const ownGit = ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'Bash' && orch.on && (await threadReadOnly($, ctx, String(e.command ?? '')))
+  if (orch.on && !ownGit) {
     const home = await homeDir($)
     const job = ctx.agentId && isSmall(ctx.agentType) ? (await grantFor($, ctx)).job : undefined // the job type of the brief this worker was started with
     const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined }, e)

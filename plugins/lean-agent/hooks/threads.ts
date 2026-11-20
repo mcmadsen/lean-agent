@@ -457,28 +457,11 @@ function needsOf(v: unknown): string[] | string | undefined {
   return names(v)
 }
 
-// Grants named up front on `new` (allowEdit: absolute paths a worker may edit, allowCmd: read-only commands a reader may run): they go into
-// the thread's brief as the exact lines a worker's Agent prompt takes, so the thread does not have to guess a path outside its worktree (a
-// repo's `.claude/skills/...` file is the usual one) and no worker is refused halfway. The guard is not widened by this: a grant still
-// only lives for the Agent call the thread makes with it, and a command with a shell form never rides on one.
+// `allowEdit` / `allowCmd` on `new` are accepted and ignored: workers may read and edit, readers read, and no brief needs a grant for it.
+// (They stay in the input so an older desk that still passes them is never refused.)
 export const GRANTS_MAX = 20
-export function grantsBlock(i: Pick<Input, 'allowEdit' | 'allowCmd'>): string | { error: string } {
-  const list = (v: unknown, what: string): string[] | { error: string } => {
-    if (v === undefined) return []
-    if (!Array.isArray(v) || v.length > GRANTS_MAX || !v.every(x => typeof x === 'string')) return { error: `${what} must be a list of at most ${GRANTS_MAX} strings` }
-    return v.map(x => x.trim()).filter(Boolean)
-  }
-  const edit = list(i.allowEdit, 'allowEdit')
-  if ('error' in edit) return edit
-  const cmds = list(i.allowCmd, 'allowCmd')
-  if ('error' in cmds) return cmds
-  for (const p of edit) {
-    if (!p.startsWith('/') || p.split('/').includes('..') || /[\u0000-\u001f\u007f,]/.test(p) || p.length > 300) return { error: `allowEdit needs absolute paths without "..", commas or control characters (got "${p.slice(0, 60)}")` }
-    if (p.replace(/\/+$/, '').split('/').filter(Boolean).length < 2) return { error: `allowEdit "${p.slice(0, 60)}" is too wide: name a folder or file at least two levels deep (a worktree, a file of it)` }
-  }
-  for (const c of cmds) if (/[\u0000-\u001f\u007f,;&|<>$`]/.test(c) || c.length > 300) return { error: `allowCmd takes one plain read-only command per entry, no commas, ;, &, |, redirects or substitution (got "${c.slice(0, 60)}")` }
-  if (!edit.length && !cmds.length) return ''
-  return `\n\nGrants for your workers (the desk named them for this task: put each line, unchanged, in the Agent prompt of every worker or reader that needs it; a worker is refused anything outside them):\n${edit.length ? `allow-edit: ${edit.join(', ')}\n` : ''}${cmds.length ? `allow-cmd: ${cmds.join(', ')}\n` : ''}`.trimEnd()
+export function grantsBlock(_i: Pick<Input, 'allowEdit' | 'allowCmd'>): string | { error: string } {
+  return ''
 }
 
 async function create(h: Host, root: string, home: string, i: Input, installed = ''): Promise<Out> {
@@ -722,6 +705,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
+    const finishing = !!truth && truth.word === 'running' && lastRec?.kind === 'report' && lastRec.state === 'done' && row?.status === 'idle' // reported done, only a background worker's notification is pending
     const ended = !!truth && !!t.sid && t.lastWake > 0 && endedAtOnce({ word: truth.word, req0: t.req0, req: typeof t.req0 === 'number' ? await requestsOf(h, t.id, now0) : null, reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
     const lo = await readLoaded(h, home, t.id)
     // the code the thread's session runs (its own mod's report) when it differs from what is installed: "running X, installed Y"
@@ -731,7 +715,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
     const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
     const cv = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }

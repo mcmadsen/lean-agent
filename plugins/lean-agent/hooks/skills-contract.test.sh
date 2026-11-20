@@ -54,7 +54,8 @@ exempt="Reviewer passes and the second-opinion reader are exempt from any subage
 for f in "$here/review/SKILL.md" "$root/templates/thread.md" "$root/hooks/reviewtool.ts"; do grep -qF -- "$exempt" "$f" || fail "$(basename "$f") lacks the subagent-cap exemption sentence (word for word)"; done
 # the review levels and the refused-edit rule reach the thread guide (the review skill and the worker agents carry them already)
 grep -qF 'pass `level: "full"` only for the review before "ready to push"' "$root/templates/thread.md" || fail "thread.md must say light at checkpoints and level full only before ready to push"
-grep -qF 'outside its `allow-edit` grant stops and reports that exact path' "$root/templates/thread.md" || fail "thread.md must say a refused worker edit stops and reports the path"
+grep -qF 'If the permission check denies a worker call, do that one step yourself' "$root/templates/thread.md" || fail "thread.md must say a thread does the step itself when the permission check denied the worker call"
+grep -qF 'Workers may read and edit' "$root/templates/thread.md" || fail "thread.md must say workers may read and edit (no grant lines)"
 # the tool's action is `list`: no file names a `threads` action
 if grep -rnE 'lean_thread[` ]+threads\b|`threads` (and|shows|says)|with threads`?[ ,.;]' "$root/templates" "$here" "$root/commands" "$root/../../README.md" "$root"/hooks/threads.ts >/dev/null 2>&1; then fail "a file names a \`threads\` action: the lean_thread action is \`list\`"; fi
 need scripts 'never executes'
@@ -123,8 +124,12 @@ need review 'always sonnet'
 # a thread's approval of a denied action (hooks/approvals.ts): the user answers in the thread's own session. No hook carries a decision for the
 # user (a classifier's denial is no ask a PermissionRequest hook hears, PermissionDenied only retries: see the changelog), so no module registers
 # one, and the desk is told where the user answers, never to ask it with AskUserQuestion or relay a yes with send
-hooked=$(grep -lE "on\([[:space:]]*['\"]classic\.Permission(Request|Denied)" $mods | while read -r f; do basename "$f"; done | tr '\n' ' ')
-[ -z "$hooked" ] || fail "no module may register a PermissionRequest / PermissionDenied hook: a hook cannot carry the user's yes past a denial (found in: $hooked)"
+hooked=$(grep -lE "on\([[:space:]]*['\"]classic.PermissionRequest" $mods | while read -r f; do basename "$f"; done | tr '\n' ' ')
+[ -z "$hooked" ] || fail "no module may register a PermissionRequest hook: a hook cannot carry the user's yes past a denial (found in: $hooked)"
+# PermissionDenied is only RECORDED (a worker call the permission check denied: the thread may do that step itself), by register.tsx alone, and never answered with retry
+hooked=$(grep -lE "on\([[:space:]]*['\"]classic.PermissionDenied" $mods | while read -r f; do basename "$f"; done | tr '\n' ' ')
+[ "$hooked" = "register.tsx " ] || [ -z "$hooked" ] || fail "only register.tsx may register a PermissionDenied hook (found in: $hooked)"
+! grep -qE "retry[[:space:]]*:[[:space:]]*true" "$root/hooks/register.tsx" || fail "the PermissionDenied hook must never answer retry"
 grep -q 'does NOT satisfy it' "$root/templates/front-desk.md" || fail "front-desk.md must say a relayed yes does not satisfy the permission check"
 grep -q 'do not ask them to approve it with a question' "$root/templates/front-desk.md" || fail "front-desk.md must say an approval of a denied action is not asked with AskUserQuestion"
 grep -q 'never `send` a yes' "$root/skills/thread/SKILL.md" || fail "the thread skill must say a yes is never sent to a thread"
@@ -138,8 +143,8 @@ grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-
 grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
 grep -qF 'Never call `approve-action` on your own' "$here/thread/SKILL.md" || fail "the thread skill must say approve-action is never called on the desk's own judgment"
 grep -qF '`action-list`' "$here/thread/SKILL.md" || fail "the thread skill must list action-list"
-grep -qF '`allowEdit?`' "$here/thread/SKILL.md" || fail "the thread skill must list allowEdit / allowCmd on new"
-grep -qF 'allowEdit' "$root/templates/front-desk.md" || fail "front-desk.md must tell the desk to name allowEdit / allowCmd when the work needs a path outside the worktree"
+grep -qF 'workers may read and edit' "$here/thread/SKILL.md" || fail "the thread skill must say workers may read and edit (no grant lines)"
+grep -qF 'Workers may read and edit' "$root/templates/front-desk.md" || fail "front-desk.md must say workers may read and edit (no grant lines)"
 grep -qF '`refusals`' "$here/doctor/SKILL.md" || fail "the doctor skill must list the refusals action"
 for k in ado-pr-reply ado-pr-comment ado-workitem-comment ado-workitem-update gh-pr-comment; do
   grep -qF "$k" "$root/templates/thread.md" || fail "thread.md lacks the action kind $k"

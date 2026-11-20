@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { decide, parseGrants, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
-import { DEFAULTS, GRANT_LOST, noteGrantRoots, orchAgentEnd, orchDecide, orchEnd, orchReset, launchOf } from './orchestrate'
+import { decide, parseGrants, recordGrant, releaseAgent, releaseGrant, sweepGrants, workerJob } from './guard'
+import { DEFAULTS, orchAgentEnd, orchDecide, orchEnd, orchReset, launchOf } from './orchestrate'
 import { ruleOf } from './refusals'
 import { resetLocks } from './threads'
 
@@ -9,6 +9,7 @@ const thread = { kind: 'thread', id: 't1' } as any
 const HAIKU = 'lean-agent:worker-haiku'
 const edit = (p: string) => ({ tool: 'Edit', file_path: p })
 const run = (h: any, e: any, agentId?: string, agentType = HAIKU, cwd = '/r') => decide(h.host, { role: thread, cwd, agentType: agentId ? agentType : undefined, agentId }, e)
+const jobOf = (h: any, agentId: string) => workerJob(h.host, { role: thread, cwd: '/r', agentType: HAIKU, agentId }) // what the grant record gives a worker (its job)
 const grants = (h: any) => JSON.parse(h.files.get('/h/.lean-agent/threads/t1/grants.json') ?? '{}')
 
 function host(orchestrate = false) {
@@ -20,31 +21,31 @@ function host(orchestrate = false) {
 
 test('a grant lives as long as the subagent: an async launch keeps it, the subagent end releases it, a resumed worker keeps it', async () => {
   const h = host()
-  await recordGrant(h.host, thread, 'u1', HAIKU, { edit: ['/real/w'] })
+  await recordGrant(h.host, thread, 'u1', HAIKU, { job: 'edit' })
   // "Async agent launched ... agentId": the pending grant is bound to that id and stays
   await releaseGrant(h.host, thread, 'u1', { async: true, agentId: 'w1' })
   expect(grants(h).pending).toEqual([])
   expect(Object.keys(grants(h).agents)).toEqual(['w1'])
-  expect(await run(h, edit('/real/w/a.ts'), 'w1')).toBeNull()
+  expect(await jobOf(h, 'w1')).toBe('edit')
   // the subagent ends: its grant is released; another worker of the same type gets nothing
   await releaseAgent(h.host, thread, 'w1')
   expect(grants(h).agents).toEqual({})
-  expect(await run(h, edit('/real/w/a.ts'), 'w2')).toContain('no grant is recorded')
+  expect(await jobOf(h, 'w2')).toBeUndefined()
   // the same subagent resumed (SendMessage, same id) takes its grant back
-  expect(await run(h, edit('/real/w/a.ts'), 'w1')).toBeNull()
+  expect(await jobOf(h, 'w1')).toBe('edit')
 })
 
 test('an async launch without an id leaves the grant pending, bound by type as before; a foreground return releases both', async () => {
   const h = host()
-  await recordGrant(h.host, thread, 'u1', HAIKU, { edit: ['/real/w'] })
+  await recordGrant(h.host, thread, 'u1', HAIKU, { job: 'edit' })
   await releaseGrant(h.host, thread, 'u1', { async: true })
   expect(grants(h).pending.length).toBe(1)
-  expect(await run(h, edit('/real/w/a.ts'), 'w1')).toBeNull() // bound by type now
+  expect(await jobOf(h, 'w1')).toBe('edit') // bound by type now
   await releaseGrant(h.host, thread, 'u1') // a foreground call returned
   expect(grants(h).pending).toEqual([])
   expect(grants(h).agents).toEqual({})
-  expect(await run(h, edit('/real/w/a.ts'), 'w9')).toContain('no grant is recorded')
-  await recordGrant(h.host, thread, 'u2', HAIKU, { edit: ['/real/w'] }) // a call that never bound (nothing acted): removed when it returns
+  expect(await jobOf(h, 'w9')).toBeUndefined()
+  await recordGrant(h.host, thread, 'u2', HAIKU, { job: 'edit' }) // a call that never bound (nothing acted): removed when it returns
   await releaseGrant(h.host, thread, 'u2')
   expect(grants(h).pending).toEqual([])
 })
@@ -52,11 +53,11 @@ test('an async launch without an id leaves the grant pending, bound by type as b
 test('two parallel workers of one type each get their own grant', async () => {
   const h = host()
   h.files.set('/real/v/keep', 'x')
-  await recordGrant(h.host, thread, 'u1', HAIKU, { edit: ['/real/w'] })
-  await recordGrant(h.host, thread, 'u2', HAIKU, { edit: ['/real/v'] })
-  const a = await run(h, edit('/real/w/a.ts'), 'wa')
-  const b = await run(h, edit('/real/v/b.ts'), 'wb')
-  expect([a, b].filter(x => x === null).length).toBe(2) // each bound one (whichever the first to act took)
+  await recordGrant(h.host, thread, 'u1', HAIKU, { job: 'edit' })
+  await recordGrant(h.host, thread, 'u2', HAIKU, { job: 'edit' })
+  const a = await jobOf(h, 'wa')
+  const b = await jobOf(h, 'wb')
+  expect([a, b]).toEqual(['edit', 'edit']) // each bound one (whichever the first to act took)
   expect(Object.keys(grants(h).agents).sort()).toEqual(['wa', 'wb'])
   expect(grants(h).pending).toEqual([])
 })
@@ -116,111 +117,32 @@ test('worker slots and the step budget follow the subagent\'s life, not the Agen
   expect(orchDecide(c, ctx, call('6'))).toBeNull()
 })
 
-// ---- paths: both sides of the check are resolved the same way ---------------------------------------------------------------
-test('path match: symlinked parent, doubled / trailing slashes and dots, ~, not-yet-existing files', async () => {
+// ---- no grant needed: a worker edits anywhere but lean-agent's own state --------------------------------------------------------
+test('a worker edit with no grant line is allowed; lean-agent\'s own state and settings stay refused', async () => {
   const h = host()
-  h.links.set('/tmp/w', '/real/w') // /tmp -> /private/tmp on macOS
-  const ok = async (root: string, p: string) => {
-    resetLocks()
-    h.files.delete('/h/.lean-agent/threads/t1/grants.json')
-    await recordGrant(h.host, thread, 'u' + root + p, HAIKU, { edit: [root] })
-    return run(h, edit(p), 'w' + root + p)
-  }
-  expect(await ok('/tmp/w', '/real/w/x.ts')).toBeNull() // granted through the link, edited by its real path
-  expect(await ok('/real/w', '/tmp/w/x.ts')).toBeNull() // the other way round
-  expect(await ok('/real/w/', '/real//w/./sub/../x.ts')).toBeNull() // trailing slash, doubled slash, dots
-  expect(await ok('/real/w', '/real/w/new/deep/x.ts')).toBeNull() // not-yet-existing folders under a granted one
-  h.files.set('/h/proj/keep', 'x')
-  expect(await ok('~/proj', '/h/proj/a.ts')).toBeNull() // ~ expanded (the home of the host)
-  expect(parseGrants('allow-edit: ~/proj, /real/w').edit).toEqual(['~/proj', '/real/w'])
-  expect(await ok('/real/w', '/real/wx/a.ts')).toContain('not within the granted roots') // a prefix is not a parent
+  expect(await run(h, edit('/real/w/a.ts'), 'w1')).toBeNull()
+  expect(await run(h, edit('/etc/x'), 'w2')).toBeNull() // (the engine's own permission check judges that one)
+  expect(await run(h, edit('/h/.lean-agent/config.json'), 'w3')).toContain('lean-agent\'s own state')
+  expect(await run(h, edit('/h/.lean-agent/projects.json'), 'w3')).toContain('lean-agent\'s own state')
+  expect(await run(h, edit('/h/.lean-agent/threads/t2/thread.json'), 'w3')).toContain('lean-agent\'s own state') // another thread's folder
+  expect(await run(h, edit('/h/.lean-agent/threads/t1/grants.json'), 'w3')).toContain('lean-agent\'s own state')
+  expect(await run(h, edit('/h/.lean-agent/worktrees/app/src/a.ts'), 'w3')).toBeNull()
+  expect(await run(h, edit('/real/w/.claude/settings.json'), 'w3')).toContain('permissions or settings')
 })
 
-test('path match: a file grant is that file only, a directory grant everything below it; a link inside never escapes', async () => {
-  const h = host()
-  h.files.set('/real/w/one.ts', 'x')
-  const file = async (p: string) => {
-    h.files.delete('/h/.lean-agent/threads/t1/grants.json')
-    await recordGrant(h.host, thread, 'f' + p, HAIKU, { edit: ['/real/w/one.ts'] })
-    return run(h, edit(p), 'v' + p)
-  }
-  expect(await file('/real/w/one.ts')).toBeNull()
-  expect(await file('/real/w/two.ts')).toContain('not within the granted roots')
-  expect(await file('/real/w/one.tsx')).toContain('not within the granted roots')
-  expect(await file('/real/w/one.ts/x')).toContain('not within the granted roots')
-  // a granted file that does not exist yet
-  h.files.delete('/h/.lean-agent/threads/t1/grants.json')
-  await recordGrant(h.host, thread, 'n', HAIKU, { edit: ['/real/w/brand-new.ts'] })
-  expect(await run(h, edit('/real/w/brand-new.ts'), 'vn')).toBeNull()
-  // a link inside a granted folder that points out is refused: the real path decides
-  h.links.set('/real/w/out', '/etc')
-  h.files.set('/etc/passwd', 'x')
-  h.files.delete('/h/.lean-agent/threads/t1/grants.json')
-  await recordGrant(h.host, thread, 'd', HAIKU, { edit: ['/real/w'] })
-  expect(await run(h, edit('/real/w/out/passwd'), 'vd')).toContain('not within the granted roots')
-})
-
-test('path match: case-insensitive file systems match paths that differ only by case when the path exists; case-sensitive ones do not', async () => {
-  const h = host()
-  h.files.set('/w/proj/keep', 'x')
-  await recordGrant(h.host, thread, 'c1', HAIKU, { edit: ['/w/proj'] })
-  // case-sensitive (the fake): /w/Proj does not exist
-  expect(await run(h, edit('/w/Proj/a.ts'), 'w1')).toContain('not within the granted roots')
-  // macOS: the same folder answers to either spelling, and stat keeps the spelling it was given
-  const ci = { ...h.host, fs: { ...h.host.fs, stat: async (p: string, o?: any) => ({ ...(await h.host.fs.stat(p.toLowerCase(), o)), realPath: p }) } }
-  expect(await decide(ci as any, { role: thread, cwd: '/r', agentType: HAIKU, agentId: 'w1' }, edit('/w/Proj/a.ts'))).toBeNull()
-  expect(await decide(ci as any, { role: thread, cwd: '/r', agentType: HAIKU, agentId: 'w1' }, edit('/w/Other/a.ts'))).toContain('not within the granted roots')
-})
-
-test('the refusal says which it is: no grant recorded, or the path is not within the roots; each has its own refusal rule', async () => {
-  const h = host()
-  const none = (await run(h, edit('/real/w/a.ts'), 'w1')) as string
-  expect(none).toContain('no grant is recorded for this worker (granted on the call: none found)')
-  expect(ruleOf(none)).toBe('grant-missing')
-  await recordGrant(h.host, thread, 'u1', HAIKU, { edit: ['/real/w'] })
-  const mism = (await run(h, edit('/etc/x'), 'w2')) as string
-  expect(mism).toContain('the path /etc/x is not within the granted roots: /real/w')
-  expect(ruleOf(mism)).toBe('grant-mismatch')
-  expect(mism.split('\n').length).toBe(1)
-})
-
-// ---- the grants did not arrive: fail fast, then the thread does it itself ------------------------------------------------------
-test('after 2 refused worker edits inside a granted root the next refusal and the next Agent call say so, and the thread edits under its roots itself', async () => {
+test('old allow-edit / allow-cmd lines are accepted and ignored: never a refusal, no grant is recorded for them', async () => {
   const h = host(true)
-  const tdir = '/h/.lean-agent/threads/t1'
-  noteGrantRoots(tdir, ['/real/w'])
-  const first = await run(h, edit('/real/w/a.ts'), 'w1')
-  const second = await run(h, edit('/real/w/b.ts'), 'w2')
-  expect(first).toContain('no grant is recorded')
-  expect(second).toContain('no grant is recorded')
-  const third = (await run(h, edit('/real/w/c.ts'), 'w3')) as string
-  expect(third).toContain(GRANT_LOST)
-  expect(ruleOf(third)).toBe('grant-lost')
-  // the thread's next worker Agent call says it once, then the calls go on
-  const agent = { tool: 'Agent', subagent_type: HAIKU, prompt: 'job: edit\nallow-edit: /real/w' }
-  expect(await run(h, agent)).toContain(GRANT_LOST)
+  const agent = { tool: 'Agent', subagent_type: HAIKU, prompt: 'job: edit\nallow-edit: /real/w\nallow-cmd: git log' }
   expect(await run(h, agent)).toBeNull()
-  // the thread's own edit under a root it granted is allowed for the rest of the session; elsewhere it is not
-  expect(await run(h, edit('/real/w/c.ts'))).toBeNull()
-  expect(await run(h, edit('/real/elsewhere/c.ts'))).not.toBeNull()
-  expect(await run(h, edit('/h/.lean-agent/config.json'))).not.toBeNull()
-})
-
-test('a worker edit that is allowed resets the count: grants that arrive never trigger the fallback', async () => {
-  const h = host(true)
-  noteGrantRoots('/h/.lean-agent/threads/t1', ['/real/w'])
-  expect(await run(h, edit('/real/w/a.ts'), 'w1')).toContain('no grant is recorded')
-  expect(await run(h, edit('/real/w/a.ts'), 'w2')).toContain('no grant is recorded')
-  await recordGrant(h.host, thread, 'u1', HAIKU, { edit: ['/real/w'] })
-  expect(await run(h, edit('/real/w/a.ts'), 'w3')).toBeNull()
-  expect(await run(h, edit('/real/w/a.ts'), 'w4')).toContain('no grant is recorded') // not the fail-fast text
-  expect(await run(h, edit('/real/w/a.ts'))).not.toBeNull() // the thread's own edit is still a worker step
+  expect(await run(h, edit('/real/other/a.ts'), 'w1')).toBeNull()
 })
 
 // ---- through the engine (register.tsx) ----------------------------------------------------------------------------------------
 async function session($: any, on: any, reply: (e: any) => any, seen: any[] = []) {
   const h = fakeHost(on, { orchestrate: true })
   on('classic.SubagentStop', () => ({}))
+  on('classic.PermissionDenied', () => ({}))
+  on('classic.PostToolUseFailure', () => ({}))
   on('tool.call', (_: any, e: any) => (seen.push(e), { result: reply(e) }) as any)
   resetLocks()
   h.files.set('/real/w/keep', 'x')
@@ -246,7 +168,7 @@ test('through the engine: "Async agent launched", then the worker\'s Edit inside
   await $.classic.SubagentStop({ agent_id: 'w1', agent_type: HAIKU } as any)
   expect(grants(h).agents).toEqual({})
   expect(((await $.tool.call(agentCall('3'))) as any).deny).toBeUndefined() // the slot is free again
-  expect(((await $.tool.call(workerEdit('w9'))) as any).deny).toContain('no grant is recorded') // nothing left for a stranger
+  expect(((await $.tool.call(workerEdit('w9'))) as any).deny).toBeUndefined() // a worker needs no grant to edit
   expect(((await $.tool.call(workerEdit('w1'))) as any).deny).toBeUndefined() // a resumed w1 keeps its grant
 })
 
@@ -290,15 +212,32 @@ test('through the engine: a rejected call (error result) consumes no try, no slo
   expect(grants(h).pending).toEqual([])
 })
 
-test('through the engine: the fail-fast fallback is logged as a grant-lost refusal row and the thread edits under its roots', async ($, on) => {
+const denied = (id: string, prompt = 'job: edit\nedit /real/w/c.ts please') => ({ tool_name: 'Agent', tool_use_id: id, reason: 'x', tool_input: { subagent_type: HAIKU, prompt }, session_id: 's', transcript_path: '', cwd: '/h/.lean-agent/threads/t1' }) as any
+const refusalRows = (h: any) => (h.files.get('/h/.lean-agent/refusals.jsonl') ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l))
+
+test('through the engine: the permission check denied a worker call: the thread does that one step itself, a row is logged, and no retry is ever answered', async ($, on) => {
   const h = await session($, on, () => 'ok')
-  await $.tool.call(agentCall('1')) // roots noted; the call returned (foreground) so the grant is gone
-  for (const w of ['w1', 'w2']) expect(((await $.tool.call(workerEdit(w))) as any).deny).toContain('no grant is recorded')
-  expect(((await $.tool.call(workerEdit('w3'))) as any).deny).toContain('grants are not reaching workers')
-  expect(((await $.tool.call(agentCall('2'))) as any).deny).toContain('do this edit yourself now')
-  const own: any = await $.tool.call({ tool: 'Edit', file_path: '/real/w/c.ts' } as any)
-  expect(own.deny).toBeUndefined()
-  const rows = (h.files.get('/h/.lean-agent/refusals.jsonl') ?? '').split('\n').filter(Boolean).map(l => JSON.parse(l))
-  expect(rows.filter(r => r.rule === 'grant-lost').length).toBe(3) // the refusal text, the Agent call's refusal and the fallback edit
-  expect(rows.filter(r => r.rule === 'grant-missing').length).toBe(2)
+  const own = { tool: 'Edit', file_path: '/real/w/c.ts' } as any
+  expect(((await $.tool.call(own)) as any).deny).toContain('one step for a small worker') // before the denial: a worker step
+  const r: any = await $.classic.PermissionDenied(denied('u9'))
+  expect(r?.retry).toBeUndefined() // the event is only recorded: never `retry`, no permission changed
+  const a: any = await $.tool.call(own)
+  expect(a.deny).toBeUndefined()
+  expect((a.context ?? []).join('\n')).toContain('the permission check denied the worker call: do this one step yourself')
+  expect(((await $.tool.call({ tool: 'Read', file_path: '/real/w/c.ts', limit: 20 } as any)) as any).deny).toBeUndefined() // a small read there
+  expect(((await $.tool.call({ tool: 'Edit', file_path: '/real/elsewhere/c.ts' } as any)) as any).deny).toContain('one step for a small worker') // only the named paths
+  expect(((await $.tool.call({ tool: 'Edit', file_path: '/h/.lean-agent/config.json' } as any)) as any).deny).toBeDefined()
+  expect(refusalRows(h).filter((x: any) => x.rule === 'delegation-denied').length).toBe(1)
+})
+
+test('through the engine: a failed Agent result that says the permission check denied it counts too; our own refusal text and a non-worker call do not', async ($, on) => {
+  const h = await session($, on, () => 'ok')
+  const own = { tool: 'Edit', file_path: '/real/w/c.ts' } as any
+  await $.classic.PostToolUseFailure({ ...denied('u1'), error: 'lean-agent: at most 4 workers at once; the permission check refused (lean-agent 1.0.18)' })
+  await $.classic.PostToolUseFailure({ ...denied('u2'), error: 'it failed: file not found' })
+  await $.classic.PostToolUseFailure({ ...denied('u3'), tool_name: 'Bash', error: 'denied by the auto mode classifier' })
+  expect(((await $.tool.call(own)) as any).deny).toContain('one step for a small worker')
+  await $.classic.PostToolUseFailure({ ...denied('u4'), error: 'Permission denied by the auto mode classifier: [Destructive or Unwanted Actions]' })
+  expect(((await $.tool.call(own)) as any).deny).toBeUndefined()
+  expect(refusalRows(h).filter((x: any) => x.rule === 'delegation-denied').length).toBe(1)
 })

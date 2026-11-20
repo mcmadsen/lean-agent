@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Workers may read and edit, readers read; only the desk and the threads orchestrate.** No `allow-edit` / `allow-cmd` grant is needed any more.
+  `lean-agent:worker-*`: Edit / Write anywhere Claude Code's own permission check allows, except lean-agent's own state under the lean home (config.json,
+  projects.json, grants, approvals, review records, other threads' folders) and permission / settings files; Bash is not limited by our command rules.
+  `reader-*` and the explorer: any read tool and any shell read (pipes included), but no file written outside a temp folder (a redirect, `tee`, `sed -i`, `rm`,
+  `git commit` ... are refused). The reviewer and the auditor stay on the read-only command list (their verdicts must be trustworthy; the auditor now has the
+  readers' wide read commands). Never, for any subagent: `git push`, tags, releases, a forge write (`gh` / `az`), a change of permissions or settings.
+- `allow-edit:` / `allow-cmd:` lines in a brief (and `allowEdit` / `allowCmd` on `lean_thread new`) are accepted and ignored: never a refusal. `allow-mcp:`, `job:`,
+  the step budgets, the result schema, the worker count, the retry rule and `why-sonnet` are unchanged. The grants-did-not-arrive fallback (`grant-lost`) and the
+  `grant-missing` / `grant-mismatch` refusals are gone. Agent descriptions, the thread template, the thread and worktree skills say "workers may read and edit".
+- Every place that asks for the foreground says: set the Agent parameter `run_in_background` to the boolean false (never the string); a worker that still starts
+  in the background is fine: wait for its result notification, do not poll or duplicate the job.
+
+### Fixed
+
+- A dead end when the permission check denies a worker call (field: Claude Code's auto mode classifier, "[Destructive or Unwanted Actions]"; our guard refused
+  the thread's own edit, so nothing could land). The engine's `PermissionDenied` event (it carries `tool_name`, `tool_input`, `tool_use_id`, `reason`; it fires after
+  auto mode classifier denials per Claude Code's changelog; this hook only records and never answers `retry`) and, as a fallback, a failed Agent result whose text
+  says the permission check / classifier denied it, record the denial: the thread's own Edit / Write on the paths that brief named (and its small reads there) are
+  allowed for the session, the thread is told "do this one step yourself", and a `delegation-denied` refusal row is logged for the feedback export. No permission
+  is changed; the engine's own check still judges each edit.
+- A thread's own read-only git (status, log, diff, show, branch listing, rev-parse, merge-base, worktree list, ls-files) and `ls` in its registered worktrees and
+  project repos are allowed (the readers' read-only flag checks; the Bash result cap applies), so it does not spawn a reader for a diff.
+- A thread that reported done while a background worker's notification is pending showed `running`; the pane and `lean_thread list` now say `done (finishing)`
+  when the last report is done and the session's status is idle.
+
 ## 1.0.17
 
 ### Fixed

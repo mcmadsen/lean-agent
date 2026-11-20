@@ -11,7 +11,7 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 
 | action | input | effect |
 |---|---|---|
-| `new` | `title`, `project?`, `text` (brief), `model?` (haiku/sonnet; opus: see below), `effort?`, `needs?` (MCP servers/plugins on top of the project profile), `keep?`, `allowEdit?` (absolute paths, 2+ levels deep), `allowCmd?`, `review?` ({pr\|branch\|sha, base?}: a review thread) | creates and starts the session; `allowEdit` / `allowCmd` become `allow-edit:` / `allow-cmd:` lines the thread copies to its workers; a bad path or shell form is refused |
+| `new` | `title`, `project?`, `text` (brief), `model?` (haiku/sonnet; opus: see below), `effort?`, `needs?` (MCP servers/plugins on top of the project profile), `keep?`, `review?` ({pr\|branch\|sha, base?}: a review thread) | creates and starts the session; workers may read and edit: brief them with `job:` and one step (`allowEdit` / `allowCmd` are accepted and ignored) |
 | `send` / `wake` / `resume` | `tN`, `text?` | `send` queues and wakes an idle thread once; a running one is never resumed. A finished thread (not keep mode) or one over its context limit gets a NEW session with a handover; so does a stale-version or unapproved-opus one |
 | `restart` | `tN`, `model?`, `effort?`, `reason?` | only on the user's request: stops the session, starts a new one with the handover (a parked thread reopens) |
 | `start` | `tN`, `model?`, `effort?`, `reason?`, `needs?`, `keep?` | starts a thread that has no session yet |

@@ -505,3 +505,19 @@ test('the reply of a restart or fresh start says what the handover costs, as an 
   const n = await fresh.run({ action: 'new', title: 'second', text: 'do it' })
   expect(n.text).not.toContain('new session: handover')
 })
+
+test('a thread that reported done while a background worker\'s notification is pending says "done (finishing)", not running', async () => {
+  const done = JSON.stringify({ ts: NOW - 2 * MIN, from: 't1', kind: 'report', state: 'done', text: 'finished the change' }) + '\n'
+  const pending = world({ rows: [row({ status: 'idle', state: 'working', pid: 42 })] })
+  pending.h.files.set(`${L}/desk/inbox.jsonl`, done)
+  const th = (await loadView(pending.h.host)).threads.find(x => x.id === 't1')!
+  expect(th.finishing).toBe(true)
+  expect(stateOf(th).word).toBe('done (finishing)')
+  // a session that works with a busy status (not idle), or has no done report, is unchanged
+  const busy = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })] })
+  busy.h.files.set(`${L}/desk/inbox.jsonl`, done)
+  const bv = (await loadView(busy.h.host)).threads.find(x => x.id === 't1')!
+  expect([bv.finishing, stateOf(bv).word]).toEqual([undefined, 'working'])
+  const none = world({ rows: [row({ status: 'idle', state: 'working', pid: 42 })] })
+  expect(stateOf((await loadView(none.h.host)).threads.find(x => x.id === 't1')!).word).toBe('working')
+})

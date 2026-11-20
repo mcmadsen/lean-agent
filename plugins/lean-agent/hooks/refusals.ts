@@ -31,10 +31,10 @@ export function patternOf(rawText: string, agent: string): Pattern {
     const kind = prog === 'cd' ? 'cd' : /redirect|substitution|glob|shell form/.test(why) ? 'shell' : /flag that writes|runs a program/.test(why) ? 'flag' : /outside the allowed/.test(why) ? 'path' : 'other'
     const fixes: Record<string, string> = {
       cd: 'a reader never cds: name absolute paths, or git -C <abs repo> ...',
-      shell: 'one plain command per call: no ;, &&, ||, redirects, $(...) or a glob that leaves the allowed folders; a grant (allow-cmd) never covers a shell form',
-      flag: 'that flag writes or runs a program: not grantable to a reader; have a worker (with allow-edit) or the thread do it',
-      path: 'the path is outside the folders a reader may read: name one inside the worktree, or the thread grants that exact command with allow-cmd',
-      other: `if \`${prog}\` is read-only and the work needs it, the thread grants it in the Agent prompt (allow-cmd: <the command>) or passes allowCmd on lean_thread new`,
+      shell: 'one plain command per call: no ;, &&, ||, redirects, $(...) or a glob that leaves the allowed folders; give a plain command, or the step to a worker',
+      flag: 'that flag writes or runs a program: a reader does not write: give the step to a worker',
+      path: 'the path is outside the folders a reader may read: name one inside the worktree',
+      other: `if \`${prog}\` is read-only and the work needs it, give the step to a reader-haiku (wide read commands) or a worker`,
     }
     return { key: `cmd:${who}:${prog}:${kind}`, label: `${who} refused \`${prog}\` (${why})`, fix: fixes[kind]! }
   }
@@ -42,7 +42,7 @@ export function patternOf(rawText: string, agent: string): Pattern {
   m = /^lean-agent: (?:the path )?(\/\S+?):? (?:is outside the paths the thread granted this worker|is not within the granted roots)/.exec(text) ?? /^lean-agent: no grant is recorded for this worker \(granted on the call: none found\), path (\/\S+?):/.exec(text)
   if (m) {
     const dir = dirOf(m[1]!)
-    return { key: `edit:${dir}`, label: `a worker's edit outside allow-edit: ${dir}`, fix: `give it in the brief: allowEdit: ["${dir}"] on lean_thread new (a path outside the worktree, such as a repo's .claude/skills file, is the usual one), or the thread adds allow-edit: ${dir} to the worker's prompt` }
+    return { key: `edit:${dir}`, label: `a worker's edit outside its grant (older wording): ${dir}`, fix: 'older lean-agent wording (a grant refusal): since 1.0.18 a worker edits anywhere the permission check allows, no grant needed' }
   }
   if (/strict mode: route this to a thread/.test(text)) return { key: 'desk-strict', label: 'the desk was refused a command or file (strict mode)', fix: 'the desk routes work to a thread (thread skill); it reads only under ~/.lean-agent and runs the read-only git / gh forms' }
   if (/subagent cap reached/.test(text)) return { key: 'cap', label: 'the subagent cap was reached', fix: 'raise agents.cap in config.json, or do the rest in the thread (reviewer passes never count)' }
@@ -50,7 +50,7 @@ export function patternOf(rawText: string, agent: string): Pattern {
   if (m) return { key: `model:${m[1]}`, label: `${m[1]} was refused until the user approves it`, fix: 'approve it in the pane (Needs you) when it is worth it, otherwise start the work on sonnet' }
   if (/push gate/.test(text)) return { key: 'push-gate', label: 'a thread tried git push', fix: 'a thread never pushes: run the full review, then lean_report "ready to push <sha>"; the desk pushes after the user\'s yes' }
   if (/a thread never asks the user directly/.test(text)) return { key: 'thread-ask', label: 'a thread used AskUserQuestion', fix: 'a thread asks with lean_ask; the desk relays it' }
-  if (/cannot own grants/.test(text)) return { key: 'grants-owner', label: 'an Agent call with allow-* lines outside a thread', fix: 'grants are written only by a thread\'s own session: remove the lines or run the call from a thread' }
+  if (/cannot own grants/.test(text)) return { key: 'grants-owner', label: 'an Agent call with allow-* lines outside a thread', fix: 'allow-mcp lines are written only by a thread\'s own session: remove the lines or run the call from a thread' }
   for (const [id, re] of RULES) if (re.test(text)) return { key: `${id}:${who}`, label: `${who}: ${text.slice(0, 120)}`, fix: RULE_FIX[id] ?? 'read the refusal text' }
   return { key: `other:${who}:${text.slice(0, 50)}`, label: `${who}: ${text.slice(0, 120)}`, fix: 'read the refusal text; it names what was refused and why' }
 }
@@ -66,19 +66,15 @@ const RULE_FIX: Record<string, string> = {
   'worker-slots': 'wait for a running worker to finish before starting the next (threads.workers)',
   'worker-spawn': 'a worker answers `split: <rest>`; the thread starts the next step',
   'worker-step-budget': 'the step was too big: give the worker one smaller step (workers.steps / stepsByJob)',
-  'thread-orchestrate': 'a thread orchestrates: give a small step to lean-agent:worker-haiku (allow-edit: <path>) / reader-haiku, tests and builds go through lean_run',
+  'thread-orchestrate': 'a thread orchestrates: give a small step to lean-agent:worker-haiku / reader-haiku (workers may read and edit), tests and builds go through lean_run',
   'allow-mcp-missing': 'add `allow-mcp: <server>` to the worker brief (MCP is opt-in per job), or allowMcp on lean_thread new',
   'allow-mcp-other-server': 'the worker called a server its brief did not grant: grant that server, or keep the step to the granted ones',
   'allow-mcp-write-tool': 'a worker has read-only MCP access: the write goes through the thread and the desk\'s approval',
-  'grant-missing': 'no allow-edit grant reached this worker: the thread puts `allow-edit: <abs path>` in the Agent prompt and starts it with that call (a lean-agent bug when it did)',
-  'grant-mismatch': 'the edited path is not within the granted roots as the guard resolves them (symlinks, case): the thread grants the path it gave, or its real path',
-  'grant-lost': 'the thread\'s allow-edit grants did not reach the workers: update the plugin and restart the session (a version mix); the thread edits under the roots it granted itself meanwhile',
+  'delegation-denied': 'the permission check (auto mode classifier or a rule) denied the thread\'s worker call: the thread did that step itself (its own edit under the call\'s allow-edit paths is allowed, the permission check still judges it); not a lean-agent fault',
   'run-refused': 'lean_run runs tests and builds only: push and forge commands are the desk\'s',
 }
 const RULES: [string, RegExp][] = [
-  ['grant-missing', /no grant is recorded for this worker/],
-  ['grant-mismatch', /^lean-agent: the path \S+ is not within the granted roots/],
-  ['grant-lost', /grants are not reaching workers|grant-lost/],
+  ['delegation-denied', /^delegation-denied:|^the permission check denied the worker call/],
   ['retry-limit', /this exact job already ran (twice|once)/],
   ['desk-routing', /^the desk routes:/],
   ['why-sonnet-missing', /^haiku by default: add a prompt line/],

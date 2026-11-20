@@ -21,13 +21,13 @@ test('a refusal text becomes a pattern with a one-line fix: the program and the 
   expect(cd.label).toContain('`cd`')
   expect(cd.fix).toContain('git -C')
   const flag = patternOf(REFUSED('rg', 'a flag that writes or runs a program, a path outside the allowed folders, or a missing operand / -n'), 'reviewer')
-  expect(flag.fix).toContain('not grantable')
+  expect(flag.fix).toContain('a reader does not write')
   const other = patternOf(REFUSED('make', 'not a built-in read-only command'), 'reader-sonnet')
-  expect(other.fix).toContain('allow-cmd')
-  expect(other.fix).toContain('allowCmd')
+  expect(other.fix).toContain('reader-haiku')
+  expect(other.fix).toContain('reader-haiku')
   const e = patternOf(EDIT('/r/app/.claude/skills/x/SKILL.md'), 'worker-sonnet')
   expect(e.key).toBe('edit:/r/app/.claude/skills/x')
-  expect(e.fix).toContain('allowEdit: ["/r/app/.claude/skills/x"]')
+  expect(e.fix).toContain('no grant needed')
   expect(patternOf('lean-agent strict mode: route this to a thread (thread skill): Read only under ~/.lean-agent (lean-agent 1.0.9)', 'session').key).toBe('desk-strict')
   expect(patternOf('lean-agent: lean-agent:reviewer may run only its built-in read-only git commands and the commands the thread granted (allow-cmd) (lean-agent 1.0.8)', 'reviewer').key).toBe('cmd-old:reviewer')
   expect(patternOf('lean-agent: subagent cap reached: 4 subagents already started', 'session').key).toBe('cap')
@@ -48,7 +48,7 @@ test('lean_doctor refusals groups the guard rows by pattern with counts, most fr
   expect(g.groups.map(x => x.n)).toEqual([4, 2, 2])
   expect(g.groups[0]!.label).toMatch(/^reviewer refused `cd` \(redirect/)
   expect(g.groups[1]!.label).toMatch(/^reader-sonnet refused `cd`/)
-  expect(g.groups[2]!.label).toBe("a worker's edit outside allow-edit: /r/app/.claude/skills/a") // two files of one folder are one pattern
+  expect(g.groups[2]!.label).toBe("a worker's edit outside its grant (older wording): /r/app/.claude/skills/a") // two files of one folder are one pattern
   const text = await refusalsText(h.host)
   expect(text).toContain('8 guard refusal(s) in the last 7 day(s), 3 pattern(s)')
   expect(text).toContain('(x4) REPEATS reviewer refused `cd`')
@@ -91,32 +91,12 @@ function setup() {
   return h
 }
 
-test('lean_thread new takes allowEdit and allowCmd: they are lines in the brief, the start prompt and brief.md, and nothing else changes', async () => {
+test('lean_thread new accepts allowEdit and allowCmd and ignores them: the brief is exactly what it was, nothing is refused', async () => {
   const h = setup()
-  const r = await leanThread(h.host, '/p', { action: 'new', title: 'skills change', text: 'update the skill file', allowEdit: ['/r/app/.claude/skills/x/SKILL.md', '/h/wt/app-t1'], allowCmd: ['git -C /h/wt/app-t1 log --stat'] } as any)
+  const r = await leanThread(h.host, '/p', { action: 'new', title: 'skills change', text: 'update the skill file', allowEdit: ['/r/app/.claude/skills/x/SKILL.md', 'rel/path'], allowCmd: ['git -C /h/wt/app-t1 log --stat'] } as any)
   expect(r.ok, r.text).toBe(true)
-  const brief = h.files.get(`${L}/threads/t1/brief.md`)!
-  expect(brief).toContain('update the skill file')
-  expect(brief).toContain('allow-edit: /r/app/.claude/skills/x/SKILL.md, /h/wt/app-t1\n')
-  expect(brief).toContain('allow-cmd: git -C /h/wt/app-t1 log --stat')
-  expect(brief).toContain('put each line, unchanged, in the Agent prompt')
+  expect(h.files.get(`${L}/threads/t1/brief.md`)).toBe('update the skill file\n')
   const prompt = h.claudeCalls().find(a => a[0] === '--bg')!.slice(-1)[0]!
-  expect(prompt).toContain('allow-edit: /r/app/.claude/skills/x/SKILL.md, /h/wt/app-t1')
-  // no grants: the brief is exactly what it was
-  const r2 = await leanThread(h.host, '/p', { action: 'new', title: 'plain', text: 'just this' })
-  expect(r2.ok).toBe(true)
-  expect(h.files.get(`${L}/threads/t2/brief.md`)).toBe('just this\n')
-  // the thread's own settings are untouched by a grant (no allow rule is added to dodge a permission check)
-  expect(h.files.get(`${L}/threads/t1/.claude/settings.json`)).toBe(h.files.get(`${L}/threads/t2/.claude/settings.json`))
-})
-
-test('grants are checked before any folder exists: relative, parent, too wide, comma, shell forms, too many', async () => {
-  const h = setup()
-  for (const bad of [{ allowEdit: ['rel/path'] }, { allowEdit: ['/r/app/../etc/x'] }, { allowEdit: ['/'] }, { allowEdit: ['/home'] }, { allowEdit: ['/r/a,/etc/x'] }, { allowEdit: ['/r/app\n/etc/x'] }, { allowEdit: 'x' }, { allowCmd: ['rg x | sh'] }, { allowCmd: ['ls > /x'] }, { allowCmd: ['echo $(id)'] }, { allowCmd: ['a; b'] }, { allowCmd: ['a, b'] }, { allowEdit: Array.from({ length: GRANTS_MAX + 1 }, (_, n) => `/r/app/f${n}`) }]) {
-    const r = await leanThread(h.host, '/p', { action: 'new', title: 'x', text: 'y', ...bad } as any)
-    expect([JSON.stringify(bad).slice(0, 40), r.ok]).toEqual([JSON.stringify(bad).slice(0, 40), false])
-  }
-  expect(h.files.has(`${L}/threads/t1/thread.json`)).toBe(false) // nothing was created
-  expect(grantsBlock({})).toBe('')
-  expect(grantsBlock({ allowEdit: ['/a/b'] })).toContain('allow-edit: /a/b')
+  expect(prompt).not.toContain('allow-edit')
+  expect(grantsBlock({ allowEdit: ['/a/b'] })).toBe('')
 })

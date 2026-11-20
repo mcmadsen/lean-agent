@@ -41,7 +41,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
+export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -65,7 +65,7 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'working' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'working' | 'done (finishing)' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
@@ -74,6 +74,7 @@ export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.blocked) return { word: 'blocked', color: 'error' }
   if (t.asking) return { word: 'asking', color: 'warning' }
   if (t.live === 'stuck') return { word: 'stuck', color: 'error' }
+  if (t.finishing) return { word: 'done (finishing)', color: 'inactive' } // reported done, the session only waits for a background worker's notification
   if (t.working) return { word: 'working', color: 'success' }
   if (t.done || t.finished) return { word: 'done', color: 'inactive' }
   return { word: 'idle', color: 'inactive' }
@@ -328,6 +329,7 @@ export async function loadView(h: Host): Promise<View> {
         run: t.state === 'parked' ? 'parked' : running ? 'running' : 'idle',
         last: lastLine(typeof notes === 'string' ? notes : '') || owner.get(t.id) || '',
         resumable: t.state === 'open' && !running && agentsOk,
+        ...(isDone && agentsOk && truth.word === 'running' && ag?.agent.status === 'idle' ? { finishing: true } : {}), // the last report is done and the session's status is idle: it only finishes (a pending background worker)
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
         asking: asking.has(t.id) || lr?.kind === 'ask',

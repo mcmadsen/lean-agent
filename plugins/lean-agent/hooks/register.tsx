@@ -29,7 +29,7 @@ import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
-import { hasGrants, parseGrants, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
+import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
@@ -48,7 +48,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, lostEdit, loadOrch, noteGrantRoots, orchAgentEnd, orchEnd, orchRan, orchTurnStart } from './orchestrate'
+import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -177,8 +177,8 @@ const SCHEMA = {
     path: { type: 'string', description: 'project-add: folder (must exist)' },
     on: { type: 'boolean', description: 'project-private: true or false; profile: false removes the project profile; keep: true or false (without it keep only says what is set)' },
     keep: { type: 'boolean', description: 'new/start: keep mode, off by default: after a done report follow-up messages RESUME the same session until its context passes the limit (threadTokens), instead of starting a new one' },
-    allowEdit: { type: 'array', items: { type: 'string' }, description: 'new: absolute paths (a folder or file at least two levels deep) the thread\'s WORKERS may edit besides what it grants itself, for work that needs a path outside its worktree (a repo\'s .claude/skills/... file is the usual one). They go into the brief as `allow-edit:` lines the thread copies into the worker\'s prompt' },
-    allowCmd: { type: 'array', items: { type: 'string' }, description: 'new: plain read-only commands (no shell form) the thread\'s readers may run besides their built-in set; they go into the brief as `allow-cmd:` lines' },
+    allowEdit: { type: 'array', items: { type: 'string' }, description: 'new: accepted and ignored (workers may read and edit without a grant)' },
+    allowCmd: { type: 'array', items: { type: 'string' }, description: 'new: accepted and ignored (readers need no command grant)' },
     needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs on top of its project profile (e.g. ["azure-devops"]); this thread only. Everything else stays deferred' },
     mcp: { type: 'array', items: { type: 'string' }, description: 'profile: the MCP servers the project loads (allow-list; others are deferred, still found by ToolSearch)' },
     plugins: { type: 'array', items: { type: 'string' }, description: 'profile: the plugins the project loads (allow-list; skill-only plugins outside it are off)' },
@@ -419,7 +419,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new (allowEdit / allowCmd: grants for the thread\'s workers and readers, named up front when the work needs a path outside the worktree), send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -633,6 +633,23 @@ async function showSkew($: any): Promise<void> {
   }
 }
 
+// (see the hooks in register: classic.PermissionDenied and classic.PostToolUseFailure)
+const DENIAL_TEXT = /(denied|blocked|refused|rejected)\b[^.\n]{0,80}\b(permission (check|system)|auto mode|classifier)|\b(permission (check|system)|auto mode|classifier)\b[^.\n]{0,80}\b(denied|blocked|refused|rejected)|\[Destructive or Unwanted Actions\]/i
+async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string): Promise<void> {
+  if (role.kind !== 'thread' || e?.agent_id || e?.agentId) return
+  const input = e?.tool_input
+  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !/^(lean-agent:)?worker-/.test(String(input.subagent_type ?? ''))) return
+  const id = String(e?.tool_use_id ?? '')
+  if (id && deniedSeen.has(id)) return
+  if (id) { if (deniedSeen.size >= 200) deniedSeen.clear(); deniedSeen.add(id) }
+  const host = hostOf($)
+  const roots: string[] = []
+  for (const r of pathsOf(input.prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
+  const key = `${threadsDir(await homeDir(host))}/${role.id}`
+  const recorded = noteDelegationDenied(key, roots)
+  await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the worker call (${via})${recorded ? '; the thread\'s own edit of its allow-edit paths is allowed now' : '; the call named no allow-edit path'}`, agent: String(input.subagent_type ?? ''), tool: String(e.tool_name), thread: role.id, version: VERSION })
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
@@ -688,6 +705,21 @@ export const register: Register = on => {
       orchAgentEnd(id)
       await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
     }
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
+
+  // the permission check (the auto mode classifier, a rule) denied a thread's worker Agent call: our guard is a token policy, not a safety
+  // boundary, so it must not become a dead end. Recorded on the engine's own evidence only: the PermissionDenied event, or a failed Agent
+  // result whose text says the permission check / auto mode classifier denied it. From then on the thread's own edit of the paths that call
+  // named in its brief is allowed (orchestrate.ts; the engine's permission check still judges each edit). Never `retry`, no permission changed.
+  const deniedSeen = new Set<string>()
+  on('classic.PermissionDenied', async ($, e: any, next) => {
+    await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied').catch(() => undefined)
+    return next(e) // never `retry`
+  }).catch(($, e: any, next) => next(e))
+  on('classic.PostToolUseFailure', async ($, e: any, next) => {
+    const msg = String(e?.error ?? '')
+    if (!e?.is_interrupt && !/lean-agent/.test(msg) && DENIAL_TEXT.test(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result').catch(() => undefined) // our own refusals say lean-agent and are never evidence
     return next(e)
   }).catch(($, e: any, next) => next(e))
 
@@ -1057,7 +1089,6 @@ export const register: Register = on => {
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
     const gopts = { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }
-    if (octx?.threadDir && g && isLeanCall(e)) noteGrantRoots(octx.threadDir, g.edit) // for the fail-fast when the grants do not arrive
     if (gcall) {
       try {
         await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!, gopts)
@@ -1066,8 +1097,6 @@ export const register: Register = on => {
         throw err
       }
     }
-    // the thread's own edit the guard let through because the grants did not reach its workers: a refusal-record row (the feedback export counts them)
-    if (octx && role.kind === 'thread' && lostEdit(octx, e)) await logRefusal(host, { role: 'thread', rule: 'grant-lost', text: `grant-lost: thread edit of ${String(e.file_path ?? e.notebook_path ?? '').slice(0, 200)} allowed (fallback, grants are not reaching workers)`, tool: e.tool, thread: role.id, version: VERSION })
     // a call's input is NEVER changed here (auto mode rejects a call whose input a hook changed after it reviewed it): the foreground is
     // asked for in the agent descriptions and the briefs (run_in_background: false); a background worker's result is cut when it arrives
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
@@ -1133,6 +1162,8 @@ export const register: Register = on => {
     try {
       const batch = role.kind === 'thread' ? await takeBatch(host, role.id) : role.kind === 'desk' ? await takeReports(host) : null
       if (batch) lines.push(batch)
+      const hint = octx?.threadDir ? takeDeniedHint(octx.threadDir) : null // a worker call was denied by the permission check: said once
+      if (hint) lines.push(hint)
     } catch {
       /* delivery is retried at the next call */
     }

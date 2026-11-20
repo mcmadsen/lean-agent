@@ -42,7 +42,7 @@ test('turn.step writes a ledger row and refuses past the daily cap', async ($, o
   expect(b.answer).toContain('daily $1.00')
 })
 
-test('an Agent call records the thread\'s grants while it runs and removes them after', async ($, on) => {
+test('an Agent call records the thread\'s job and mcp grants while it runs and removes them after (allow-edit lines are ignored)', async ($, on) => {
   let during = ''
   let h: any
   h = await threadSession($, on, () =>
@@ -51,8 +51,9 @@ test('an Agent call records the thread\'s grants while it runs and removes them 
       return { result: 'done' } as any
     }),
   )
-  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: 'do it\nallow-edit: /w/t1' } as any)
-  expect(during).toContain('/w/t1')
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: 'job: edit\nallow-mcp: srv\nallow-edit: /w/t1' } as any)
+  expect(during).toContain('srv')
+  expect(during).not.toContain('/w/t1')
   const after = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/grants.json'))
   expect(after.pending).toEqual([])
 })
