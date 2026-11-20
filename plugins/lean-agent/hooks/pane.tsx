@@ -27,7 +27,7 @@ import { answerAction, approveAction } from './deskactions'
 import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.14'
+export const VERSION = '1.0.15'
 const NOTE_MS = 30_000 // the one-time "lean-agent set the model" line is drawn this long, then only the header chip carries it
 const GROUP_ROWS = 20 // rows drawn in one unfolded inbox group
 const NARROW = 50 // a body narrower than this (cells) gets the short forms
