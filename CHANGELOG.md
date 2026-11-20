@@ -30,7 +30,12 @@ against a live auto-mode session.
 - **A stale "needs your yes" card no longer stays after the thread carried on.** The card existed for as long as the blocked report was
   the thread's last record, so a thread that went on after the user answered in its session (or that decided the matter itself) still
   showed "tN needs your yes in its own session ... (it is working: wait)". It now exists only while the thread is really blocked: the
-  session is not working, and it has made no tool call since it reported (the mod notes the first one, `approvals.ts`).
+  session is not working, and it has made no tool call since it reported (the mod notes the first one, `approvals.ts`); the generic
+  "tN is blocked" row, its toast and the red state word end with it. Limits: any later tool call of the thread's main loop counts, so a
+  desk wake or chaser message that makes a blocked thread call a tool also ends the card (the thread's own report is then what is
+  left); the notes live in the mod store, which the expensive-model requests already share between a thread's session and the desk,
+  but this was not run live. The thread detail does not know the usage-limit pause, so a paused thread keeps its card in the pane and
+  loses it in the detail.
 
 ### Changed
 - The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with

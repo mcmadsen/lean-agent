@@ -89,7 +89,9 @@ test('the pane: an idle blocked thread has the card; working, or a tool call sin
   resetViewCache()
   expect(await w.approval()).toBeUndefined() // it carried on
   expect(needsOf(await loadView(w.h.host)).filter(n => n.kind === 'approval')).toHaveLength(0)
-  w.state.rows = [row()] // idle again, no later desk record, but it made a tool call after the report
+  expect((await loadView(w.h.host)).threads.find(t => t.id === 't1')?.blocked).toBe(false) // no stale "blocked" row, word or toast takes its place
+  expect(needsOf(await loadView(w.h.host)).filter(n => n.kind === 'blocked')).toHaveLength(0)
+  w.state.rows = [row()] // idle again, no later desk record: the card is back until a tool call follows the report
   resetViewCache()
   expect(await w.approval()).toBe(ACTION)
   await notePending(w.h.host, 't1', 5)

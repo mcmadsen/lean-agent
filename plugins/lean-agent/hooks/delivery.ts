@@ -557,7 +557,7 @@ export const renderReports = (recs: DeskRec[]) =>
 export const RELAY_GAP_MS = 60_000
 export const BUSY_MAX_MS = 15 * 60_000 // a turn that never reported its end (aborted) stops blocking the relay after this
 export const worthRelay = (recs: DeskRec[]) => recs.some(r => r.kind === 'ask' || r.state === 'done' || r.state === 'blocked')
-export const RELAY_LEAD = '[lean-agent] Threads reported while you were idle. Relay this to the user now: ask each question with AskUserQuestion and send the answer to its thread; when a thread is done and the user needs nothing more, close it and clear its goal.'
+export const RELAY_LEAD = '[lean-agent] Threads reported while you were idle. Relay this to the user now: ask each question with AskUserQuestion and send the answer to its thread (not an approval: see its hint); when a thread is done and the user needs nothing more, close it and clear its goal.'
 
 // One relay: hands ALL unread reports to `submit` (marked read first; marked unread again if the submit is refused). Returns whether it
 // submitted. `busy` (a desk turn runs) and `last` (the previous relay, ms) debounce it. Never for progress alone.

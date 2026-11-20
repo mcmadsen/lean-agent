@@ -300,7 +300,7 @@ export async function loadView(h: Host): Promise<View> {
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
         asking: asking.has(t.id) || lr?.kind === 'ask',
-        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
+        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv), // not once its approval ended: it carried on
         needsYou: !!ag?.needsYou && !paused,
         ...(apv ? { approval: apv } : {}),
         ...(paused ? { pausedUntil: paused.resetAt } : {}),

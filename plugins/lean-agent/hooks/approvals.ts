@@ -50,6 +50,6 @@ export const resumedAt = async (h: Host, thread: string): Promise<number> => (id
 export const approvalLive = (text: string, ts: number, o: { working: boolean; resumedAt: number }): string => (!text || o.working || (o.resumedAt > 0 && o.resumedAt >= ts) ? '' : text)
 
 export async function liveApproval(h: Host, thread: string, text: string, ts: number, working: boolean): Promise<string> {
-  if (!text || working) return ''
+  if (!text || working) return '' // (no store read for a card that is not there)
   return approvalLive(text, ts, { working, resumedAt: await resumedAt(h, thread) })
 }
