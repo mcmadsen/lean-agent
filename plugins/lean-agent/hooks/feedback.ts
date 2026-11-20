@@ -5,6 +5,7 @@
 // entries are kept in the feedback row.
 import { addGap, pathsIn, slugOk } from './rules'
 import { appendJsonl, homeDir, leanDir } from './state'
+import { running } from './skew'
 import type { Host } from './state'
 
 export type Refusal = { command: string; text: string }
@@ -44,12 +45,26 @@ export type FbCtx = { thread?: string; project?: string; agent?: string; version
 // mod itself saw (register.tsx, every denied tool call: text, agent type, tool, thread, running version); "worker" is a refusal a
 // worker REPORTED in its LEAN-FEEDBACK (the command and the text it quotes). The feedback export counts the guard rows as the
 // refusals and takes the worker rows for the `refused` texts, so one refusal is never counted twice.
-export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string }
+export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string; role?: string; rule?: string; kind?: 'refusal' | 'missing-tool'; server?: string; job?: string }
 export async function appendRefusal(h: Host, row: RefusalRow): Promise<void> {
   const home = await homeDir(h)
   const clean = Object.fromEntries(Object.entries({ ts: await h.clock.now(), ...row, text: String(row.text ?? '').slice(0, 300), agent: row.agent?.replace(/^lean-agent:/, '') }).filter(([, v]) => v !== undefined))
   await appendJsonl(h, `${leanDir(home)}/refusals.jsonl`, clean)
 }
+
+// The ONE entry for every refusal the mod makes (a guard refusal, a refused tool call, a refused action, a trimmed result, a gate): one row,
+// one format: role (desk | thread | worker | ...), rule id (refusals.ts ruleOf, or the id the caller gives), short text, running version. It
+// lands in refusals.jsonl, which the feedback export lists under "Guard refusals" and `lean_doctor refusals` groups. Never throws.
+export type RefusalRec = { role?: string; rule?: string; text: string; tool?: string; agent?: string; thread?: string; version?: string }
+export const logRefusal = (h: Host, rec: RefusalRec): Promise<void> =>
+  appendRefusal(h, { src: 'guard', kind: 'refusal', ...rec, role: rec.role ?? (rec.agent ? 'worker' : 'session'), rule: rec.rule ?? 'guard', version: rec.version || running.version || undefined }).catch(() => undefined)
+
+// A tool a session or worker needed and did not have (the call failed because it is not available, an MCP server is not connected, a worker
+// answered `split:` / `missing:` / `refused:`): one row of kind missing-tool, in the same file. `what` is the tool or the server; grouped
+// (with counts) under "Missing tools" in the feedback export and in `lean_doctor refusals`.
+export type MissingRec = { role: string; what: string; job?: string; text?: string; thread?: string; agent?: string; version?: string }
+export const logMissingTool = (h: Host, rec: MissingRec): Promise<void> =>
+  appendRefusal(h, { src: 'guard', kind: 'missing-tool', role: rec.role, tool: rec.what.slice(0, 120), ...(rec.job ? { job: rec.job } : {}), thread: rec.thread, agent: rec.agent, text: rec.text ?? `missing tool: ${rec.what}`, version: rec.version || running.version || undefined }).catch(() => undefined)
 
 export async function applyFeedback(h: Host, ctx: FbCtx, fb0: Feedback): Promise<{ gaps: number; remembered: number }> {
   const fb: Feedback = { ...fb0, refused: fb0.refused ?? [], unverified: fb0.unverified ?? [], unreached: fb0.unreached ?? [] }

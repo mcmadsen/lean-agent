@@ -674,6 +674,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
           </Text>
         </Box>
+        {!!v?.window && <Text dimColor>{v.window}</Text>}
         {/* the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick, at the top */}
         {!!v?.deskModel && !v.deskModelRed && <Text color="yellow">{v.deskModel}</Text>}
         {showSetNote && <Text dimColor>{setNote}</Text>}

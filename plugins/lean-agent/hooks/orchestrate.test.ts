@@ -5,7 +5,8 @@ import { decide } from './guard'
 import { DESK_ROUTE, SPLIT, THREAD_STEP, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart } from './orchestrate'
 import { capTo } from './cap'
 import { runSummary, runText, summarize } from './runjob'
-import { preflightText } from './preflight'
+import { preflightFor, preflightText } from './preflight'
+import { buildHandover, setPreflight } from './handover'
 import { bucketOf, contextStat, contextText } from './contextstat'
 
 const HOME = '/h'
@@ -257,4 +258,36 @@ test('contextstat: tokens by tool and size bucket, top results, delegated agains
   expect(contextStat([]).haikuShare).toBe(0)
   expect(contextText(s)).toContain('delegated (Agent results)')
   expect(contextText(s)).toContain('haiku share of model tokens: 43%')
+})
+
+// ---- wiring of the other 1.0.15 changes under the orchestrate rules ------------------------------------------------------------------------
+test('a thread (a review thread too) keeps what the store-as-memory, review and MCP changes need: lean_thread find/ask/report/dismiss, lean_run, lean_review, reviewer passes, read-only git', () => {
+  orchReset()
+  for (const tool of ['lean_thread', 'lean_run', 'lean_review', 'lean_report', 'lean_ask', 'lean_doctor']) expect(call(th, { tool: `mcp__lean-agent__${tool}` })).toBeNull()
+  // the review skill: git rev-parse / branch / diff --stat, then the reviewer agent with its allow-cmd lines (it is not a small worker: no brief limit, no why-sonnet)
+  for (const command of ['git rev-parse HEAD', 'git branch --show-current', 'git -C /r/app diff main...HEAD --stat', 'git -C /r/app log --oneline -3']) expect(call(th, { tool: 'Bash', command })).toBeNull()
+  const longPrompt = 'review this diff\nallow-cmd: git -C /r/app diff main...HEAD\n' + 'x'.repeat(4000)
+  expect(call(th, { tool: 'Agent', subagent_type: 'lean-agent:reviewer', prompt: longPrompt, model: 'sonnet' })).toBeNull()
+  expect(call(th, { tool: 'Agent', subagent_type: 'lean-agent:reviewer', prompt: longPrompt, model: 'sonnet' })).toBeNull() // the second-opinion pass: the same prompt again is not a retry of a worker job
+  expect(call({ ...th, agentType: 'lean-agent:reviewer', agentId: 'r1' }, { tool: 'Bash', command: 'git -C /r/app diff main...HEAD' })).toBeNull() // the reviewer's own calls are not step-budgeted
+  // an MCP reader worker: granted through the brief, counted like any worker
+  expect(call(th, { tool: 'Agent', subagent_type: 'lean-agent:reader-mcp', prompt: 'job: lookup\nallow-mcp: datadog\nlatest error rate?' })).toBeNull()
+  expect(call({ ...worker, agentType: 'lean-agent:reader-mcp' }, { tool: 'mcp__datadog__query' })).toBeNull()
+})
+
+test('the preflight pack is in the handover once connected (setPreflight(preflightFor) in register.tsx): the thread\'s project checkout is read, nothing explores', async () => {
+  const h = fakeHost(null)
+  h.git.handler = (a: string[]) => (a.includes('rev-parse') ? { exitCode: 0, stdout: 'fix-x\n' } : { exitCode: 1, stdout: '' })
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
+  const t: any = { id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }
+  setPreflight(null)
+  expect((await buildHandover(h.host, '/h', t, 'restart', [])).prompt).not.toContain('branch: fix-x')
+  setPreflight(preflightFor)
+  try {
+    const ho = await buildHandover(h.host, '/h', t, 'restart', [])
+    expect(ho.prompt).toContain('## Preflight')
+    expect(ho.prompt).toContain('branch: fix-x')
+  } finally {
+    setPreflight(null)
+  }
 })

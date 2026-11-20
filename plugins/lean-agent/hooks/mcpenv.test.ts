@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { threadSettings as leanThreadSettings } from './leantools'
 import { check, tidyLegacy } from './doctor'
 import { exportFeedback } from './feedbackexport'
 import { leanThread, resetLocks } from './threads'
@@ -423,7 +424,7 @@ test('a thread start whose settings file cannot be made user-only still starts, 
   expect(r.text).not.toContain(S2)
   const f = '/h/.lean-agent/threads/t1/.claude/settings.json'
   expect(h.files.get(f)).not.toContain(S2)
-  expect(Object.keys(JSON.parse(h.files.get(f)!).env).sort()).toEqual(['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'])
+  expect(Object.keys(JSON.parse(h.files.get(f)!).env).sort()).toEqual([...Object.keys(leanThreadSettings().env), 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'].sort())
 })
 
 const SID = '11111111-2222-3333-4444-555555555555'
@@ -446,7 +447,7 @@ test('a thread start puts the command\'s value into THAT thread\'s settings env,
   expect(r.text).not.toContain(S2)
   const f = '/h/.lean-agent/threads/t1/.claude/settings.json'
   const s = JSON.parse(h.files.get(f)!)
-  expect(s.env).toEqual({ DD_API_KEY: S2, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/h/.lean-agent/githooks' })
+  expect(s.env).toEqual({ ...leanThreadSettings().env, DD_API_KEY: S2, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/h/.lean-agent/githooks' })
   expect(h.perms.get(f)!.mode).toBe(0o600)
   expect(JSON.stringify(h.calls)).not.toContain(S2) // never in a process argument
   // no other file carries the value
@@ -464,7 +465,7 @@ test('a thread start with the name in the user settings env leaves it out of the
   expect(r.ok).toBe(true)
   expect(r.text).toContain('CMD_TOKEN: its command exited 1')
   const s = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/.claude/settings.json')!)
-  expect(Object.keys(s.env).sort()).toEqual(['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'])
+  expect(Object.keys(s.env).sort()).toEqual([...Object.keys(leanThreadSettings().env), 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'].sort())
 })
 
 // ---- migration: 0.45's mcp-env.json ------------------------------------------------------------------------------------------

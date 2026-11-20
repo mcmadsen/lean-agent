@@ -356,6 +356,8 @@ export function releaseGrant($: Host, role: Role, call: string): Promise<void> {
   })
 }
 
+// the job type of the brief a worker was started with (the refusal and missing-tool records name it)
+export const workerJob = async ($: Host, ctx: Ctx): Promise<string | undefined> => (await grantFor($, ctx).catch(() => ({}) as Grants)).job
 async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
   if (!ctx.agentId) return {}
   return locked(async () => {

@@ -254,7 +254,11 @@ desk says so ("could not be read by the mod") and the pane's Approve / Deny on t
 PR thread's *status* change (fixed / closed) after a reply is outside the five kinds and stays a manual step.
 
 Avoidable blocks: `lean_doctor refusals` groups the guard's recorded refusals by pattern with a count and a one-line fix, and the
-doctor shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). `lean_thread new` takes
+doctor shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). Every refusal of the execution model
+(desk routing, thread orchestrate, worker budgets, briefs, grants, `lean_run`, desk actions, trimmed results, the auto-restart guard, the review
+and external-review gates) is one record (role, rule id, short text, version) in the same file, and a tool a session or worker needed and
+did not have (or a worker's `split:` / `missing:` / `refused:` line) is a `missing-tool` record: the feedback export lists both, under "Guard
+refusals" and "Missing tools". `lean_thread new` takes
 `allowEdit` (absolute paths, at least two levels deep) and `allowCmd` (plain read-only commands): they are written into the brief as the
 exact lines the thread copies into its workers' prompts, for work that needs a path outside the worktree (a repo's `.claude/skills/...`
 file). No allow rule is added to any settings file to get past a classifier, and the guard is not widened for anything that writes or runs

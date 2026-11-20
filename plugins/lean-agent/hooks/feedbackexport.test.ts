@@ -378,7 +378,7 @@ test('the rows feedback.ts really writes (counts, claims, folders, worker refusa
   expect(t).toContain('### refused\n\n- rg -n foo src -> lean-agent: rg is not allowed here')
   expect(t).toContain('### unverified\n\n- the cache is rebuilt nightly')
   expect(t).toContain('### unreached\n\n- vendor/')
-  expect(t).toContain('- (x1) [explorer] lean-agent: rg is not allowed here') // the guard section: one, the worker's report is not a second refusal
+  expect(t).toContain('- (x1) [explorer] guard: lean-agent: rg is not allowed here (1.0.4)') // the guard section: one, the worker's report is not a second refusal
 })
 
 test('guard refusals: grouped by text and agent type with counts', async () => {
@@ -393,9 +393,9 @@ test('guard refusals: grouped by text and agent type with counts', async () => {
   expect(h.files.has(lean(h, 'logs/refusals.jsonl'))).toBe(false)
   const t = read(h, await run(h))
   expect(t).toContain('## Guard refusals since the last export')
-  expect(t).toContain('- (x2) [reader-haiku] lean-agent: reader-haiku is read-only')
-  expect(t).toContain('- (x1) [worker-sonnet] lean-agent: reader-haiku is read-only')
-  expect(t).toContain('- (x1) [session] strict mode: route this to a thread')
+  expect(t).toContain('- (x2) [reader-haiku] guard: lean-agent: reader-haiku is read-only')
+  expect(t).toContain('- (x1) [worker-sonnet] guard: lean-agent: reader-haiku is read-only')
+  expect(t).toContain('- (x1) [session] guard: strict mode: route this to a thread')
 })
 
 test('drafts, core candidates and blocked reports go in once; the next export has only what is new', async () => {

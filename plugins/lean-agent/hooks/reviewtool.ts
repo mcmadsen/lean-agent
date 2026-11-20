@@ -5,6 +5,7 @@ import { homeDir } from './state'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
+import { logRefusal } from './feedback'
 import { noteReviewed } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, prepText, prepare, refOk, resolveRange } from './reviewprep'
@@ -329,7 +330,13 @@ async function doDecline(h: Host, project: string, i: any): Promise<Out> {
 }
 
 // `thread`: the calling thread's id (an approval of an expensive reviewer model is for that thread only)
+// a refused call on someone else's ref (prepare with ref, record with mode external) is recorded like every refusal (feedback.ts)
 export async function reviewTool(h: Host, project: string, i: any, thread = ''): Promise<Out> {
+  const out = await reviewToolRun(h, project, i, thread)
+  if (!out.ok && (str(i?.ref) || str(i?.mode) === 'external')) await logRefusal(h, { role: 'thread', rule: 'external-review-refused', text: out.text.split('\n')[0]!.slice(0, 200), tool: 'lean_review', thread: thread || undefined })
+  return out
+}
+async function reviewToolRun(h: Host, project: string, i: any, thread = ''): Promise<Out> {
   if (!slugOk(project)) return { ok: false, text: 'lean_review needs a project name' }
   const action = str(i.action) || 'record'
   const les = await lessonsTool(h, project, i) // the learned lessons (reviewlessons.ts): lessons, learn, lessons-list/-rm/-undo/-verify

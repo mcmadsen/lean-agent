@@ -93,6 +93,9 @@ test('a fresh session that starts over the limit stops and asks the user, once',
   expect(r[0].text).toContain('again over it')
   expect(marker(h).stopped).toBe(true)
   expect(marker(h).last.newSid).toBe(S1)
+  const rec = (h.files.get('/h/.lean-agent/refusals.jsonl') ?? '').trim().split('\n').map(l => JSON.parse(l)) // the loop guard is a refusal record (feedback.ts), which the export lists
+  expect(rec).toHaveLength(1)
+  expect(rec[0]).toMatchObject({ role: 'thread', rule: 'auto-restart-loop', kind: 'refusal', thread: 't1' })
   expect((await end(h)).action).toBe('none') // stopped: no loop
   expect(inbox(h)).toHaveLength(1)
   // under the limit again: restarts are allowed again

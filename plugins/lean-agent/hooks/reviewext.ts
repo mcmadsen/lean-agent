@@ -21,7 +21,7 @@ export function parseExt(raw: string): (ExtRef & { repo?: string }) | string {
     if (!m) return `${JSON.stringify(s.slice(0, 120))} is not a pull request URL (.../pull/<n> or .../pullrequest/<n>)`
     return { pr: Number(m[2]), repo: m[1]!.split('/').pop()!.toLowerCase() }
   }
-  if (!refOk(s)) return `${JSON.stringify(s.slice(0, 80))} is not a plain ref (PR number or URL, branch, tag or sha)`
+  if (!refOk(s)) return `${JSON.stringify((s as string).slice(0, 80))} is not a plain ref (PR number or URL, branch, tag or sha)`
   return { ref: s }
 }
 

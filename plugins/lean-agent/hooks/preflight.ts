@@ -2,6 +2,8 @@
 // handover includes it (`preflightText`), so the new session starts from facts instead of exploring with its own tool calls.
 import { leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
+import { listProjects } from './projects'
+import { readRegistry } from './worktreereg'
 
 export type PreflightThread = { id: string; cwd: string; home: string }
 
@@ -70,4 +72,19 @@ export async function preflightText(h: Host, t: PreflightThread): Promise<string
     `open tasks: ${await part(() => openTasks(h, t.home), NA)}`,
     `PR / work item: ${await part(() => knownRef(h, t.home, t.id), NA)}`,
   ].join('\n').split('\n').slice(0, 40).join('\n')
+}
+
+// The adapter handover.ts calls (`setPreflight(preflightFor)` in register.tsx): the thread's checkout is the worktree registered to it,
+// else its project's folder; with neither, git finds nothing and the pack says n/a.
+export async function preflightFor(h: Host, home: string, t: { id: string; project: string }): Promise<string> {
+  let cwd = ''
+  try {
+    const { reg } = await readRegistry(h, home)
+    const own = Object.values(reg).find(e => e && e.thread === t.id && typeof e.path === 'string')
+    if (own) cwd = String(own.path)
+  } catch {
+    /* no registry */
+  }
+  if (!cwd) cwd = (await listProjects(h, true).catch(() => ({ rows: [] as { name: string; path: string }[] }))).rows.find(r => r.name === t.project)?.path ?? ''
+  return preflightText(h, { id: t.id, cwd, home })
 }

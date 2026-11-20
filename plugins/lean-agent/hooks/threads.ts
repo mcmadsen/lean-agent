@@ -28,6 +28,7 @@ import { dismissAction } from './dismiss'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
+import { threadSettings as leanThreadSettings } from './leantools'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -173,10 +174,11 @@ const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}
 // `plugins`: the installed plugins outside the project's profile, switched off for this thread (profile.ts disabledPlugins)
 // `extraEnv`: the MCP variables this thread gets (mcpenv.ts threadEnv: only names the user's own settings env does not set, so the
 // two blocks never collide; the git hooks names are GIT_*, which mcpenv refuses). The settings env here MERGES with the user's.
-export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}, extraEnv: Record<string, string> = {}): Promise<string> {
+export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}, extraEnv: Record<string, string> = {}, mcp?: string[]): Promise<string> {
   const lean = leanDir(await homeDir(h))
   const cfg = await readJson<{ attribution?: unknown }>(h, `${lean}/config.json`, {})
-  const env = { ...extraEnv, ...(hooks ? gitEnv(await homeDir(h)) : {}) }
+  const lt = leanThreadSettings({ mcp }) // hooks/leantools.ts: the built-ins a thread never calls are denied (fewer tool schemas), the engine's own switches
+  const env = { ...lt.env, ...extraEnv, ...(hooks ? gitEnv(await homeDir(h)) : {}) }
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
   return JSON.stringify(
@@ -184,6 +186,7 @@ export async function threadSettings(h: Host, id: string, hooks = true, choice?:
       permissions: {
         allow: ['Bash', `Edit(${abs}/**)`, `Write(${abs}/**)`],
         additionalDirectories: [lean],
+        deny: lt.permissions.deny,
       },
       // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
       // so the repo's own hooks keep running (the failure shows as a notice)
@@ -377,7 +380,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // (user-only file); a failure is a line in the reply (names only), never a failed start
   const menv = await threadEnv(h, home).catch(() => ({ env: {} as Record<string, string>, lines: [] as string[] }))
   const hasEnv = Object.keys(menv.env).length > 0
-  const kept = await writeThreadSettings(h, `${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off, menv.env), hasEnv, hasEnv ? await threadSettings(h, t.id, hooks, choice, off) : undefined).catch(async () => {
+  const kept = await writeThreadSettings(h, `${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off, menv.env, loaded.mcp ?? undefined), hasEnv, hasEnv ? await threadSettings(h, t.id, hooks, choice, off, {}, loaded.mcp ?? undefined) : undefined).catch(async () => {
     await h.fs.write(`${folder}/.claude/settings.json`, await threadSettings(h, t.id, hooks, choice, off)) // never a failed start, never a secret left in a loose file
     return false
   })

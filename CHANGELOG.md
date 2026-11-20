@@ -2,13 +2,10 @@
 
 ## Unreleased
 
-### Fixed
-- The desk's `push` and `lean_worktree register` take over a worktree registered to a closed thread (or a thread that no longer exists): the
-  registry entry moves to the pushing/registering thread (`adopted: true`, former owner in `from`), written only after the push's gates hold,
-  logged in the thread's history and said in the reply; a worktree of an open, parked or closing thread is refused with the owner and its
-  state named. Doctor gets an info row for worktrees owned by closed threads.
+### Added
 
-### Measured first: why a thread gets blocked
+#### Measured first: why a thread gets blocked
+
 Read-only measurement before any code, from the feedback exports on hand (7 distinct files, 2026-11-18 to 2026-11-20, lean-agent 1.0.5
 to 1.0.12; one of them was exported twice, byte for byte, and is counted once) and from the guard, the specs and the skills. A refusal
 row in an export keeps the agent type, the refused program (first word) and the reason, not the whole command. The exports are the
@@ -29,7 +26,6 @@ own session), and the grants a thread forgot. Nothing in settings.json was widen
 writes or runs a program. A harmless class the classifier keeps denying, other than the five write kinds below: none showed up in
 the data (the PATCH of a PR thread's status above is a write, not a harmless read).
 
-### Added
 - **Typed desk-executed actions: a thread's remote write is approved at the desk and sent by the mod.** `lean_report` takes
   `action: {kind, params, why}` (state blocked) for five kinds only, from a fixed table in `hooks/deskactions.ts`: `ado-pr-reply`,
   `ado-pr-comment`, `ado-workitem-comment`, `ado-workitem-update` (fields `state`, `assignedTo`, `tags`, `title`) and `gh-pr-comment`.
@@ -53,19 +49,6 @@ the data (the PATCH of a PR thread's status above is a write, not a harmless rea
   commands); they become `allow-edit:` / `allow-cmd:` lines at the end of the thread's brief, which the thread copies into its workers'
   Agent prompts. A relative path, `..`, a path that is too wide, a comma or a shell form is refused before anything is created.
 
-### Changed
-- **Approvals of the five write kinds go through the desk** (this reverses 1.0.14's "answered in the thread's own session" for those
-  kinds only; no hook carries a decision, the mod performs the approved action itself). Everything else a permission check denies is
-  still answered in the thread's own session (`approval`, Open tN). The thread guide tells a thread to use `action` instead of trying the
-  write; the desk guide and the thread skill describe the flow; the skills contract checks the wording and that only the question hook
-  and the pane's press write a human answer.
-- A blocked thread that carries an `action` request shows the request's card, not the generic "tN is blocked" row on top of it.
-- Not built, on purpose: any allow rule in a settings file to get past the classifier, and any widening of the guard for a command that
-  writes or runs a program. Not covered: a PR thread's status change (fixed / closed) after a reply (reported above). Not run live: the
-  user's answer is read from the engine's typed `AskUserQuestion` result; if a real result does not carry it the desk says so and the
-  pane's Approve / Deny is the decision.
-
-### Added
 - **Execution model** (`lean.orchestrate`, default on; see [README](README.md#execution-model)): the guard makes the desk a router
   (project reads, searches, edits and Agent are refused: "the desk routes: …"; its tool results are cut to `deskToolResultChars`), a
   thread an orchestrator (own Edit/Write on project files, greps and most Bash refused; `threads.directReads` small direct reads per
@@ -110,7 +93,6 @@ and replaceable. All by script, no model turn.
   1h 13m) | 7d: 41%" and the snapshot age (`windowLine(h)` is exported from stats.ts for the pane); the desk notices at 80 % and 90 % once
   per window, naming the working threads; above config `window.holdAbove` (default 85) `new` and `start` replies carry a warning.
 
-### Added
 - **Every review runs through `lean-agent:review`, with evidence.** `lean_thread new` takes `review: {pr | branch | sha, base?}` (and
   `project`): it starts a review thread whose brief the mod builds from `templates/review-brief.md` (load the skill, prepare at level full,
   run the passes, record, report); sonnet / high by default, a haiku is raised to sonnet and the reply says so. A kind-review thread
@@ -133,10 +115,56 @@ and replaceable. All by script, no model turn.
 - **Dismiss.** `lean_thread dismiss tN` and a two-press **Dismiss** button on a blocked card record in `history.jsonl` that the user
   acknowledged that blocked report: the notice and the blocked badge go until a NEWER blocked report arrives; the report stays in the inbox.
 
+- **Refusals and missing tools are feedback.** Every refusal path of this release writes ONE record through ONE helper (`feedback.ts`
+  `logRefusal`): role (desk, thread, worker), rule id, short text, running version, into the file the feedback export reads. Rule ids:
+  `desk-routing`, `thread-orchestrate` (own edit, read, grep), `worker-step-budget`, `brief-too-long`, `why-sonnet-missing`, `job-missing`,
+  `worker-slots`, `worker-spawn`, `retry-limit`, `allow-mcp-missing`, `allow-mcp-other-server`, `allow-mcp-write-tool`, `run-refused`
+  (`lean_run`), `action-unknown-kind`, `result-trimmed` (a worker result cut to its schema: one row each, counted), `auto-restart-loop`,
+  `review-report-gate`, `external-review-refused`; the older guard refusals keep their pattern name as the rule. The export lists them as
+  `(xN) [agent] rule: text (version)` under "Guard refusals since the last export".
+- **Missing tools** (kind `missing-tool`, same file, `logMissingTool`): a tool call that fails because the tool is not available to that
+  session or worker (the engine's "no such tool" / "server not connected" answer, matched narrowly: a failing test is never one), and a
+  worker's `split:` / `missing:` / `refused:` answer lines. Recorded with role, tool or server (`mcp <server>`), job type and a count. The feedback
+  export gets a "Missing tools since the last export" section next to "Guard refusals" (grouped, counts, anonymised) and `lean_doctor refusals`
+  lists both. Specs: one per path, each checking that it lands in the export (`refusalrecord.test.ts`, `autorestart.test.ts`).
+
 ### Changed
+
+- **Approvals of the five write kinds go through the desk** (this reverses 1.0.14's "answered in the thread's own session" for those
+  kinds only; no hook carries a decision, the mod performs the approved action itself). Everything else a permission check denies is
+  still answered in the thread's own session (`approval`, Open tN). The thread guide tells a thread to use `action` instead of trying the
+  write; the desk guide and the thread skill describe the flow; the skills contract checks the wording and that only the question hook
+  and the pane's press write a human answer.
+- A blocked thread that carries an `action` request shows the request's card, not the generic "tN is blocked" row on top of it.
+- Not built, on purpose: any allow rule in a settings file to get past the classifier, and any widening of the guard for a command that
+  writes or runs a program. Not covered: a PR thread's status change (fixed / closed) after a reply (reported above). Not run live: the
+  user's answer is read from the engine's typed `AskUserQuestion` result; if a real result does not carry it the desk says so and the
+  pane's Approve / Deny is the decision.
+
 - **Pane header.** "lean-agent is not set up" and the Set up button show only when the setup itself is missing (desk folder, trust, model
   line, folder access, opener, launch agent, 1.0 state). What else the doctor found shows as "Doctor: N findings (F fix, I info)" with a
   Run fix button when something needs a fix.
+
+- **The 1.0.15 changes are wired together.** The handover includes the preflight pack (`setPreflight(preflightFor)`: the thread's registered
+  worktree, else its project folder); the thread settings writer writes `leantools.ts` `threadSettings()` (deny list for built-ins a thread
+  never calls, the engine's switches in `env`) and `lean_doctor fix` merges `deskSettings()` into the desk's settings; the desk pane shows the
+  plan window line under the header (`windowLine`); the orchestrate rules of a thread allow `lean_thread find` / `ask` / `report` / `dismiss`,
+  `lean_run`, `lean_review`, the review skill's read-only git and reviewer passes (no brief limit, no `why-sonnet:`), and an MCP reader worker
+  with an `allow-mcp:` grant. The execution model is off in the shared test host unless a spec opts in (`fakeHost(on, { orchestrate: true })`).
+
+### Fixed
+
+- The desk's `push` and `lean_worktree register` take over a worktree registered to a closed thread (or a thread that no longer exists): the
+  registry entry moves to the pushing/registering thread (`adopted: true`, former owner in `from`), written only after the push's gates hold,
+  logged in the thread's history and said in the reply; a worktree of an open, parked or closing thread is refused with the owner and its
+  state named. Doctor gets an info row for worktrees owned by closed threads.
+
+- A type error in `reviewext.ts` (the ref narrowed to `never` after the `refOk` guard) that the validator reported as a warning.
+
+### Removed
+
+- Built-in tools the desk can never call and tools a thread never calls are no longer in their tool lists (`permissions.deny` in the folder
+  settings, `hooks/leantools.ts`): fewer tool schemas in every request. Connectors and MCP servers of a thread's project are never denied.
 
 ## 1.0.14
 

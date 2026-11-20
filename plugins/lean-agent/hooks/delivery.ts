@@ -15,6 +15,7 @@ import { fillProfile, profileText } from './profile'
 import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 import { notePending } from './approvals'
 import { ACTION_KINDS, addActionRequest } from './deskactions'
+import { logRefusal } from './feedback'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -439,7 +440,10 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (i.action !== undefined) {
         if (str(i.state) !== 'blocked') return { ok: false, text: 'lean_report action needs state blocked (you wait for the user\'s yes, given at the desk)' }
         const made = await addActionRequest(h, id, i.action)
-        if (!made.ok) return { ok: false, text: `lean_report action refused: ${made.text}` }
+        if (!made.ok) {
+          await logRefusal(h, { role: 'thread', rule: /^action kind /.test(made.text) ? 'action-unknown-kind' : 'action-refused', text: made.text.slice(0, 200), tool: 'lean_report', thread: id })
+          return { ok: false, text: `lean_report action refused: ${made.text}` }
+        }
         action = { id: made.request!.id, kind: made.request!.kind, headline: made.request!.headline }
       }
       const approval = !action && str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes

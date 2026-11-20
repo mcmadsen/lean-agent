@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { threadSettings as leanThreadSettings } from './leantools'
 import { leanThread, parseAgents, resetLocks, threadClaudeMd, trustFolder } from './threads'
 import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handover'
 
@@ -33,7 +34,8 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')).toBe('# t1 fix login')
   const s = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/.claude/settings.json')!)
   expect(s.permissions.allow).toContain('Edit(//h/.lean-agent/**)')
-  expect(s.env).toEqual({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/h/.lean-agent/githooks' })
+  expect(s.permissions.deny).toEqual(leanThreadSettings().permissions.deny) // the built-ins a thread never calls are removed from its tool list (leantools.ts)
+  expect(s.env).toEqual({ ...leanThreadSettings().env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/h/.lean-agent/githooks' })
   // thread start installs the chaining wrappers and the private list
   for (const n of ['pre-push', 'pre-commit', 'commit-msg', 'reference-transaction']) expect(h.files.get(`/h/.lean-agent/githooks/${n}`)).toContain('chain')
   expect(h.files.has('/h/.lean-agent/githooks/private.list')).toBe(true)

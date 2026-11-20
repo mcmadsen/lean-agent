@@ -5,6 +5,7 @@ import type { Host } from './state'
 import { trustFolder } from './threads'
 import { withFolderLock } from './folderlock'
 import { DESK_DEFAULT, deskChoice, deskModelConfigured, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
+import { mergeDeskSettingsFile } from './leantools'
 import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
@@ -104,6 +105,8 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
   lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}${was}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   lines.push(opened ? 'desk can open files in ~/.lean-agent' : 'desk .claude/settings.json does not parse: ~/.lean-agent not added to the desk\'s folders, fix the file by hand')
+  const slim = await mergeDeskSettingsFile(h, `${deskDir(home)}/.claude/settings.json`)
+  lines.push(slim ? 'desk tools: the built-ins strict mode cannot allow are removed from its tool list' : 'desk .claude/settings.json does not parse: tool list not trimmed')
   const trusted = await trustFolder(h, deskDir(home))
   lines.push(trusted ? 'desk folder trusted (real path)' : '~/.claude.json does not parse: desk folder not trusted, accept the dialog once')
   lines.push(...(await guardParents(h).catch(() => [] as string[]))) // a stale 0.45 guide above the thread folders moves aside

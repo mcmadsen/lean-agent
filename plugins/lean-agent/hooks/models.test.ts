@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { deskSettings, mergeSettings } from './leantools'
 import { check, fix } from './doctor'
 import { mergeModelSettings, readModelSettings, threadChoice } from './models'
 
@@ -11,7 +12,7 @@ test('setup pins the desk to sonnet / high (the 1.0.10 opus pin is reverted) and
   h.files.set(DESK, JSON.stringify({ theme: 'dark', permissions: { allow: ['Read'] } }))
   const f = await fix(h.host, '/p')
   expect(f.lines).toContain('desk pinned to sonnet / effort high') // nothing was pinned before: no "was"
-  expect(JSON.parse(h.files.get(DESK)!)).toEqual({ model: 'sonnet', effortLevel: 'high', theme: 'dark', permissions: { allow: ['Read'], additionalDirectories: ['/h/.lean-agent'] } })
+  expect(JSON.parse(h.files.get(DESK)!)).toEqual(mergeSettings({ model: 'sonnet', effortLevel: 'high', theme: 'dark', permissions: { allow: ['Read'], additionalDirectories: ['/h/.lean-agent'] } }, deskSettings())) // plus the tools strict mode cannot allow, removed (leantools.ts)
   const ok = (await check(h.host, '/p')).find(l => l.includes('desk model'))!
   expect(ok.startsWith('ok')).toBe(true)
 })
@@ -70,14 +71,14 @@ test('setup lets the desk open files in ~/.lean-agent: the folder is merged into
   expect(before.startsWith('FIX')).toBe(true)
   const f = await fix(h.host, '/p')
   expect(f.lines).toContain('desk can open files in ~/.lean-agent')
-  expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'] })
+  expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'], deny: deskSettings().permissions.deny })
   expect((await check(h.host, '/p')).find(l => l.includes('open files in ~/.lean-agent'))!.startsWith('ok')).toBe(true)
   // the user's own folders, allow list and other keys are kept; the folder is added once
   h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared'] } }))
   expect((await check(h.host, '/p')).find(l => l.includes('open files in ~/.lean-agent'))!.startsWith('FIX')).toBe(true)
   await fix(h.host, '/p')
   const once = h.files.get(DESK)!
-  expect(JSON.parse(once)).toEqual({ model: 'sonnet', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared', '/h/.lean-agent'] } })
+  expect(JSON.parse(once)).toEqual(mergeSettings({ model: 'sonnet', effortLevel: 'high', hooks: { x: 1 }, permissions: { allow: ['Read'], deny: ['Bash(rm:*)'], additionalDirectories: ['/data/shared', '/h/.lean-agent'] } }, deskSettings())) // the user's deny entry stays, the desk's removed tools are added
   await fix(h.host, '/p')
   expect(h.files.get(DESK)).toBe(once)
   // odd shapes: permissions that is not an object, a list that is not an array
@@ -86,7 +87,7 @@ test('setup lets the desk open files in ~/.lean-agent: the folder is merged into
   expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual(['/h/.lean-agent'])
   h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: null }))
   await fix(h.host, '/p')
-  expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'] })
+  expect(JSON.parse(h.files.get(DESK)!).permissions).toEqual({ additionalDirectories: ['/h/.lean-agent'], deny: deskSettings().permissions.deny })
   h.files.set(DESK, JSON.stringify({ model: 'sonnet', effortLevel: 'high', permissions: { additionalDirectories: [1, null, '/x'] } }))
   await fix(h.host, '/p')
   expect(JSON.parse(h.files.get(DESK)!).permissions.additionalDirectories).toEqual([1, null, '/x', '/h/.lean-agent']) // the user's entries are not judged

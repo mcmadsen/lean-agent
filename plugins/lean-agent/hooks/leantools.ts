@@ -11,6 +11,8 @@
 // The thread settings writer lives in threads.ts: add `leanThreadSettings` there (see the README "Fixed overhead").
 import { DESK_TOOLS } from './guard'
 import { nameMatches, serverOf } from './profile'
+import { atomicWrite, dirOf, mkdirp } from './state'
+import type { Host } from './state'
 
 export type ToolsSettings = { permissions: { deny: string[] }; env: Record<string, string>; enableAllProjectMcpServers?: boolean }
 
@@ -76,3 +78,20 @@ export function mergeSettings(base: any, f: ToolsSettings): any {
 // the names the thread settings writer imports (threads.ts has its own threadSettings)
 export const leanDeskSettings = deskSettings
 export const leanThreadSettings = threadSettings
+
+// the desk folder's settings.json with deskSettings() merged in (the doctor's fix step); false = the file does not parse, nothing written
+export async function mergeDeskSettingsFile(h: Host, path: string): Promise<boolean> {
+  let cur: unknown = {}
+  if (await h.fs.exists(path)) {
+    try {
+      const t = String(await h.fs.read(path))
+      cur = t.trim() ? JSON.parse(t) : {}
+    } catch {
+      return false
+    }
+    if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return false
+  }
+  await mkdirp(h, dirOf(path))
+  await atomicWrite(h, path, JSON.stringify(mergeSettings(cur, deskSettings()), null, 2) + '\n')
+  return true
+}

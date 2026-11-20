@@ -9,6 +9,7 @@
 import { appendJsonl, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
+import { logRefusal } from './feedback'
 import type { DeskRec } from './delivery'
 import { buildSnapshot, takeEdited, writeSnapshot } from './snapshot'
 import { kTokens, readContext, threadLimits } from './threadcontext'
@@ -75,6 +76,7 @@ export async function threadTurnEnd(h: Host, id: string, o: TurnEnd): Promise<Tu
     if (first) {
       await appendJsonl(h, inbox, { ts: now, from: id, kind: 'ask', mod: true, text: `${id} was restarted at the context limit, but the new session is again over it (${kTokens(o.tokens)} over ${kTokens(limit)}): the handover plus the work do not fit. No more automatic restarts for ${id} until it is under the limit. Raise threadTokens, trim notes.md, or split the task?`, options: ['raise threadTokens', 'trim notes.md and restart', 'split the task'] } satisfies Record<string, unknown>)
       await writeJson(h, markerFile(home, id), { ...mk, stopped: true })
+      await logRefusal(h, { role: 'thread', rule: 'auto-restart-loop', text: `automatic restart stopped: the new session is again over the context limit (${kTokens(o.tokens)} over ${kTokens(limit)})`, thread: id })
       out.action = 'ask'
       return out
     }

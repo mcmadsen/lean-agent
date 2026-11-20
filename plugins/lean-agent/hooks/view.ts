@@ -7,7 +7,7 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNotices } from './notices'
 import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
-import { costBadge, spendNumbers, spendText, threadCostsToday } from './stats'
+import { costBadge, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
@@ -57,7 +57,7 @@ export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: stri
 // one thread's inbox: unread rows first, then at most READ_SHOWN read ones (`read` holds every read row that is not archived)
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; desk: DeskInfo; errors: string[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -174,7 +174,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [], modelRequests: [] }
+  const v: View = { window: '', scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [], modelRequests: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -244,6 +244,7 @@ export async function loadView(h: Host): Promise<View> {
   await guard('budget', async () => {
     v.spend = await loadBudget(h, home)
     v.budget = v.spend ? spendText(v.spend) : 'n/a'
+    v.window = await windowLine(h) // the plan windows (windows.ts), one line under the header
     costs = await threadCostsToday(h, v.spend).catch(() => ({}) as Record<string, ThreadCost>) // the card's badge: today's usd, "!" over the alert
   })
   const reviews: Reviews = new Map()

@@ -7,7 +7,6 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl
 import type { Host } from './state'
 import { check } from './doctor'
 import { allScripts } from './scripts'
-import { appendRefusal } from './feedback'
 
 export const EXPORT_CAP = 40 * 1024
 const exportDir = (home: string) => `${leanDir(home)}/feedback-export`
@@ -307,8 +306,8 @@ const nameWords = (file: string) => file.replace(/\.md$/i, '').replace(/^\d{4}-\
 type State = { at: number; drafts: string[]; core: string[] }
 const emptyState = (): State => ({ at: 0, drafts: [], core: [] })
 
-// a refusal the guard just made (register.tsx): the one writer, feedback.ts appendRefusal, the one file ~/.lean-agent/refusals.jsonl
-export const logRefusal = (h: Host, rec: { text: string; agent?: string; tool?: string; thread?: string; version?: string }): Promise<void> => appendRefusal(h, { src: 'guard', ...rec })
+// a refusal the guard just made (register.tsx): the one writer is feedback.ts logRefusal / logMissingTool (the one file ~/.lean-agent/refusals.jsonl)
+export { logRefusal, logMissingTool } from './feedback'
 
 type Collected = {
   notes: string
@@ -319,7 +318,8 @@ type Collected = {
   statuses: [string, number][]
   missingReports: number // reports that name missing context (the texts come from the gap logs and from older rows that carry them)
   fields: Record<(typeof FB_FIELDS)[number], Group[]>
-  refusals: { text: string; agent: string; n: number }[]
+  refusals: { text: string; agent: string; n: number; rule?: string; version?: string }[]
+  missingTools: { text: string; n: number }[] // rows of kind missing-tool: role, tool or server, job type (counts)
   core: { name: string; line: string }[]
   blocked: string[]
 }
@@ -381,7 +381,7 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     for (const t of arr(r.unverifiedClaims)) texts.unverified!.push({ text: A(t), ts: tsOf(r) })
     for (const t of arr(r.unreachedFolders)) texts.unreached!.push({ text: A(t), ts: tsOf(r) })
   }
-  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string }>(h, `${lean}/refusals.jsonl`)
+  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string; kind?: string; role?: string; rule?: string; version?: string; tool?: string; job?: string }>(h, `${lean}/refusals.jsonl`)
   // a refusal a worker reported: its command and the refusal text, as the worker quoted them
   for (const r of refRows) if (r?.src === 'worker' && typeof r.command === 'string' && isNew(r, st)) texts.refused!.push({ text: A(`${r.command}${r.text ? ` -> ${r.text}` : ''}`), ts: tsOf(r) })
   // `missing` also comes from the gap logs (one line per gap a worker reported)
@@ -389,21 +389,29 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   for (const d of await h.fs.list(lean).catch(() => [])) if (d.kind === 'dir') gapFiles.push(`${lean}/${d.name}/gaps.jsonl`)
   for (const f of gapFiles) for (const g of await readJsonl<{ ts?: number; text?: string }>(h, f)) if (typeof g?.text === 'string' && isNew(g, st)) texts.missing!.push({ text: A(g.text), ts: tsOf(g) })
   const fields = Object.fromEntries(FB_FIELDS.map(f => [f, group(texts[f]!)])) as Collected['fields']
-  const ref = new Map<string, { text: string; agent: string; n: number }>()
+  const ref = new Map<string, { text: string; agent: string; n: number; rule?: string; version?: string }>()
+  const miss = new Map<string, { text: string; n: number }>()
   for (const r of refRows) {
+    if (r?.kind === 'missing-tool' && isNew(r, st)) {
+      const t = A(`[${r.role ?? 'session'}] ${r.tool ?? '?'}${r.job ? ` (job ${r.job})` : ''}`).replace(/\s+/g, ' ').trim()
+      const m = miss.get(t)
+      if (m) m.n++
+      else miss.set(t, { text: t, n: 1 })
+      continue
+    }
     if (typeof r?.text !== 'string' || !isNew(r, st) || r.src === 'worker' || r.command !== undefined) continue // the guard's own rows only
-    const agent = (r.agent ?? 'session').replace(/^lean-agent:/, '')
+    const agent = (r.agent ?? r.role ?? 'session').replace(/^lean-agent:/, '')
     const t = A(r.text).replace(/\s+/g, ' ').trim()
-    const k = `${agent}\u0000${key(t)}`
+    const k = `${agent}\u0000${r.rule ?? ''}\u0000${key(t)}`
     const cur = ref.get(k)
     if (cur) cur.n++
-    else ref.set(k, { text: t, agent, n: 1 })
+    else ref.set(k, { text: t, agent, n: 1, ...(r.rule ? { rule: r.rule } : {}), ...(r.version ? { version: r.version } : {}) })
   }
   const core = (await allScripts(h).catch(() => [])).filter(x => x.meta.core && !st.core.includes(x.meta.name)).map(x => ({ name: x.meta.name, line: A(`${x.meta.name}: ${x.meta.purpose} (run: ${x.meta.run}; inputs: ${x.meta.inputs.join('; ')}; ${x.meta.status})`) }))
   const blocked = (await readJsonl<{ ts?: number; from?: string; kind?: string; state?: string; text?: string }>(h, `${lean}/desk/inbox.jsonl`))
     .filter(r => r?.kind === 'report' && r.state === 'blocked' && isNew(r, st))
     .map(r => `${r.from ?? '?'}: ${A(String(r.text ?? '').split('\n')[0]!.trim().slice(0, 200))}`)
-  return { notes: A(o.notes ?? '').trim(), env, problems, drafts, sources, statuses: [...counts], missingReports, fields, refusals: [...ref.values()].sort((a, b) => b.n - a.n), core, blocked }
+  return { notes: A(o.notes ?? '').trim(), env, problems, drafts, sources, statuses: [...counts], missingReports, fields, refusals: [...ref.values()].sort((a, b) => b.n - a.n), missingTools: [...miss.values()].sort((a, b) => b.n - a.n), core, blocked }
 }
 
 // ---- rendering with the size cap ------------------------------------------------------------------------------------------------
@@ -427,7 +435,9 @@ function render(c: Collected, at: number, lim: Limits): string {
     out.push(`### ${f}`, '', ...(shown.length ? [...shown.map(g => `- ${g.n > 1 ? `(x${g.n}) ` : ''}${g.text}`), ...more(rest, 'entries'), ''] : none))
   }
   const [rShown, rRest] = top(c.refusals)
-  out.push('## Guard refusals since the last export', '', ...(rShown.length ? [...rShown.map(r => `- (x${r.n}) [${r.agent}] ${r.text}`), ...more(rRest, 'refusals'), ''] : none))
+  out.push('## Guard refusals since the last export', '', ...(rShown.length ? [...rShown.map(r => `- (x${r.n}) [${r.agent}] ${r.rule ? `${r.rule}: ` : ''}${r.text}${r.version ? ` (${r.version})` : ''}`), ...more(rRest, 'refusals'), ''] : none))
+  const [mShown, mRest] = top(c.missingTools)
+  out.push('## Missing tools since the last export', '', ...(mShown.length ? [...mShown.map(r => `- (x${r.n}) ${r.text}`), ...more(mRest, 'missing tools'), ''] : none))
   const [cShown, cRest] = top(c.core)
   out.push('## Script candidates for lean-agent core', '', ...(cShown.length ? [...cShown.map(x => `- ${x.line}`), ...more(cRest, 'candidates'), ''] : none))
   const [bShown, bRest] = top(c.blocked.slice().reverse())

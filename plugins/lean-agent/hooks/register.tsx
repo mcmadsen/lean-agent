@@ -8,9 +8,9 @@ import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
-import { decide } from './guard'
+import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
-import { refusalsText } from './refusals'
+import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -40,7 +40,8 @@ import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
 import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, markAuditStarted, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
-import { exportFeedback, logRefusal } from './feedbackexport'
+import { exportFeedback } from './feedbackexport'
+import { logMissingTool, logRefusal } from './feedback'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
@@ -58,10 +59,12 @@ import { resetRequestCache } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext } from './threadcontext'
 import { autoRestartTick, threadTurnEnd } from './autorestart'
-import { handoverReport } from './handover'
+import { handoverReport, setPreflight } from './handover'
+import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
 import { recordWindows, windowTick } from './windows'
 
+setPreflight(preflightFor) // handover.ts includes the preflight pack (hooks/preflight.ts); a hooks module cannot import() lazily
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
 export { hostOf }
@@ -283,6 +286,18 @@ async function compactDesk($: any, host2: Host): Promise<string> {
 }
 
 // a worker's reply ends with LEAN-FEEDBACK: gaps and memory go to the files, the thread's own turn is unchanged
+// a failed tool call that says the tool is not available to this session or worker (refusals.ts missingWhat): recorded as kind missing-tool
+async function noteMissingTool(host: Host, gctx: any, rname: string, e: any, text: string): Promise<void> {
+  const what = missingWhat(String(e.tool ?? ''), text)
+  if (!what) return
+  const job = e.agentId ? await workerJob(host, gctx) : undefined
+  await logMissingTool(host, { role: rname, what, job, thread: role.kind === 'thread' ? role.id : undefined, agent: gctx.agentType, version: VERSION })
+}
+// the answer lines of a worker that stopped at its limit: `split:`, `missing:`, `refused:` (the job type is the one in the brief)
+async function noteWorkerLines(host: Host, thread: string, agent: string | undefined, e: any, text: string): Promise<void> {
+  const job = jobOf(e.prompt) ?? undefined
+  for (const l of workerLines(text)) await logMissingTool(host, { role: 'worker', what: l, job, thread, agent, version: VERSION })
+}
 const texts = (v: any): string[] => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(texts) : v && typeof v === 'object' ? Object.values(v).flatMap(texts) : [])
 async function feedbackOf(host: Host, e: any, r: any): Promise<void> {
   if (e.agentId || (e.tool !== 'Agent' && e.tool !== 'Task') || r?.deny !== undefined) return
@@ -976,7 +991,9 @@ export const register: Register = on => {
       const r = await runSummary(hostOf($), { command: String(e.command ?? ''), cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : undefined, home })
       return { result: runText(r), ...(r.exit === 0 ? {} : { isError: true as const }) } as any
     } catch (err) {
-      return { result: `lean_run refused: ${String((err as Error)?.message ?? err)}`, isError: true } as any
+      const why = `lean_run refused: ${String((err as Error)?.message ?? err)}`
+      await logRefusal(hostOf($), { role: 'thread', rule: 'run-refused', text: why, tool: RUN, thread: role.id, version: VERSION })
+      return { result: why, isError: true } as any
     }
   })
 
@@ -986,7 +1003,10 @@ export const register: Register = on => {
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       // a review thread's done report needs a lean_review record of the sha it reviewed; the evidence is appended from the store (reviewevidence.ts)
       const gate = t.name === 'lean_report' && typeof e.text === 'string' && !e.agentId ? await reviewReport(hostOf($), role.id, String(e.state ?? ''), e.text).catch(() => null) : null
-      if (gate && !gate.ok) return { result: gate.text, isError: true } as any
+      if (gate && !gate.ok) {
+        await logRefusal(hostOf($), { role: 'thread', rule: 'review-report-gate', text: gate.text.split('\n')[0]!.slice(0, 200), tool: t.name, thread: role.id, version: VERSION })
+        return { result: gate.text, isError: true } as any
+      }
       const gated = gate ? { ...e, text: gate.text } : e
       // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
       const out = t.name === 'lean_compare'
@@ -1011,9 +1031,11 @@ export const register: Register = on => {
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
     const atype = await agentType($, e.agentId, e)
-    const why = await decide(host, { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION, root: String($.plugin.root ?? '') }, e)
+    const gctx = { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION, root: String($.plugin.root ?? '') }
+    const rname = atype || e.agentId ? 'worker' : role.kind // the role field of every refusal / missing-tool record
+    const why = await decide(host, gctx, e)
     if (why) {
-      await logRefusal(host, { text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }).catch(() => undefined) // for the feedback export
+      await logRefusal(host, { role: rname, rule: ruleOf(why, atype ?? ''), text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }) // for the feedback export (feedback.ts: the one writer)
       return { deny: why } as any
     }
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
@@ -1027,17 +1049,24 @@ export const register: Register = on => {
     let r: any
     try {
       r = await next(audited ? foregroundCall(e) : e)
+    } catch (err) {
+      await noteMissingTool(host, gctx, rname, e, String((err as Error)?.message ?? err)) // a tool the session or worker does not have
+      throw err
     } finally {
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
       if (octx) orchEnd(octx, e) // a worker's slot (threads.workers) is free again
     }
+    if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
     if (octx && r?.deny === undefined && !e.agentId) {
       const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))
       if (oc.on && role.kind === 'desk') r = await capTo(host, 'desk', r, oc.deskChars).catch(() => r)
       else if (oc.on && role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {
+        const untrimmed = r
         r = jobResult(r, jobOf(e.prompt)) // the result is cut to its job's schema (jobs.ts), then to agentChars
+        if (r !== untrimmed) await logRefusal(host, { role: 'worker', rule: 'result-trimmed', text: `worker result outside the ${jobOf(e.prompt)} schema, trimmed`, agent: atype ?? String(e.subagent_type ?? ''), tool: e.tool, thread: role.id, version: VERSION }) // counted in the feedback export
         r = await capTo(host, role.id, r, oc.agentChars).catch(() => r)
       }
     }
