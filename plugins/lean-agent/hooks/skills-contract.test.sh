@@ -103,6 +103,19 @@ callers=$(grep -lE 'grantModelApproval[[:space:]]*\(' $mods | while read -r f; d
 writers=$(grep -l 'model\.approvals' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
 [ "$writers" = "expensive.ts " ] || fail "only expensive.ts may touch the model approvals (found in: $writers)"
 [ "$(grep -c 'grantModelApproval(' "$root/hooks/pane.tsx")" = "1" ] || fail "pane.tsx must call grantModelApproval from exactly one place (the Approve press)"
+# typed desk actions (hooks/deskactions.ts): the HUMAN's answer is written only by the desk's AskUserQuestion hook (bindAnswers, which reads the tool
+# result) and by the pane's press; only the desk's lean_thread (threads.ts) and the pane send an approved request; nothing outside deskactions.ts
+# touches the requests, the answers or the used marks; nothing the model can call writes an answer
+callers=$(grep -lE 'answerAction[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may only be called from deskactions.ts (bindAnswers) and the pane's press (callers: $callers)"
+callers=$(grep -lE 'bindAnswers[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts register.tsx " ] || fail "bindAnswers may only be called from the desk's AskUserQuestion hook (callers: $callers)"
+callers=$(grep -lE 'approveAction[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts pane.tsx threads.ts " ] || fail "approveAction may only be called from the desk's lean_thread and the pane (callers: $callers)"
+writers=$(grep -lE "action\.(answer|used|requests)" $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$writers" = "deskactions.ts " ] || fail "only deskactions.ts may touch the action requests, answers and used marks (found in: $writers)"
+[ "$(grep -c "tool: 'AskUserQuestion'" "$root/hooks/register.tsx")" = "1" ] || fail "register.tsx must hook the desk's AskUserQuestion exactly once (the user's answer is read from its result)"
+grep -q 'answers belong to the user' "$root/hooks/register.tsx" || fail "register.tsx must refuse an AskUserQuestion whose input carries answers"
 grep -q 'Never choose opus' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk never chooses opus"
 grep -q "worker-opus" "$root/templates/thread.md" && grep -q "only when the user asks" "$root/templates/thread.md" || fail "thread.md must say worker-opus is only for when the user asks"
 need thread 'never choose opus'

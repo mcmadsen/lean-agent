@@ -9,6 +9,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
+import { actionListText, approveAction, dropActions } from './deskactions'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
@@ -216,7 +217,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -727,6 +728,14 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
     if (i.action === 'list') return await list(h, home, root)
     if (i.action === 'profile') return await profileAction(h, home, i)
+    // typed remote writes a thread asked for with lean_report `action` (deskactions.ts): the desk lists them, asks the USER, and sends
+    // only a request the user approved; the thread is told the outcome through its inbox
+    if (i.action === 'action-list' || i.action === 'approve-action') {
+      const tell = (thread: string, text: string): Promise<void> => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined)
+      if (i.action === 'action-list') return { ok: true, text: await actionListText(h, tell) }
+      const o = await approveAction(h, (i.id ?? '').trim(), tell)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
     if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
       const r = await projectsAction(h, i)
       if (i.action !== 'projects') await ensureGitHooks(h).catch(() => undefined) // projects.json changed: the private list follows
@@ -893,6 +902,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           t.state = 'closed'
           await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
+          await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null

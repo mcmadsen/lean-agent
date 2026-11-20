@@ -168,7 +168,16 @@ const json = (t: string): unknown => {
     return null
   }
 }
-const oneLine = (s: string, n = 200) => s.replace(/\s+/g, ' ').trim().slice(0, n)
+export const oneLine = (s: string, n = 200) => s.replace(/\s+/g, ' ').trim().slice(0, n)
+
+// the bearer token for Azure DevOps (`az account get-access-token`, never a PAT): returned to the caller's memory only; the caller sends it
+// to curl on STDIN and scrubs it from every error
+export async function azureToken(h: Host): Promise<{ token: string } | { error: string }> {
+  const tok = await sh(h, ['az', 'account', 'get-access-token', '--resource', AZURE_DEVOPS_RESOURCE, '--query', 'accessToken', '--output', 'tsv'])
+  const token = tok.out.trim()
+  if (!tok.ok || !token) return { error: `az could not give an access token for Azure DevOps (${oneLine(tok.err, 120)}): az login` }
+  return { token }
+}
 
 // `gh api --paginate` prints one JSON array per page, back to back: joined by scanning (strings and escapes respected), never by a
 // text replace, which would also rewrite a comment body such as "see a[1] [2]".
@@ -285,9 +294,9 @@ async function fromAzure(h: Host, host: Extract<PrHost, { kind: 'azure' }>, n: n
       prs = [...prs, ...more].slice(0, last)
     }
   }
-  const tok = await sh(h, ['az', 'account', 'get-access-token', '--resource', AZURE_DEVOPS_RESOURCE, '--query', 'accessToken', '--output', 'tsv'])
-  const token = tok.out.trim()
-  if (!tok.ok || !token) return `prs: az could not give an access token for Azure DevOps (${oneLine(tok.err, 120)}): az login`
+  const tok = await azureToken(h)
+  if ('error' in tok) return `prs: ${tok.error}`
+  const { token } = tok
   const scrub = (s: string) => s.split(token).join('***')
   let raw: Raw[] = []
   for (const p of prs) {
