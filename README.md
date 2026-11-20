@@ -138,8 +138,8 @@ Top to bottom (the desk's pane; any other session sees only the way to the desk 
    last 5 read ones ("show all" for the rest). A read row older than 7 days is archived: hidden here, still in
    `~/.lean-agent/desk/inbox.jsonl`. **ack all** marks everything read.
 5. **Goals** (only when there are some), **Closed (N)** and **More** (projects, scripts) are folded sections.
-6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`; nothing is posted)
-   and **Setup / repair**.
+6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`; nothing is posted),
+   **Setup / repair** and **Restart desk**, always here (the header's button shows only near the limit; both press twice and do the same).
 
 In the minimized widget form (Claude desktop), the pane draws a glance and no button, because clicks may not reach it: threads
 running and blocked, how many need you, the desk's context in percent and today's spend. On a narrow body (under 50 columns) the

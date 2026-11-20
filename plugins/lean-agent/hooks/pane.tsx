@@ -644,6 +644,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Button key="new-thread" label="New thread" onPress={newThreadPress} />
           <Button key="feedback" label="Feedback export" onPress={feedbackPress} />
           <Button key="repair" label="Setup / repair" onPress={runSetup} />
+          {/* always here (the header's button shows only near the limit): the same two-press confirm, the same handover */}
+          <Button key="restart-desk-footer" label={restartLabel} onPress={restartDeskPress} />
         </Box>
       </Box>
     )

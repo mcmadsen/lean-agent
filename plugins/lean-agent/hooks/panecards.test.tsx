@@ -281,8 +281,8 @@ test('every section empty: no Needs you, no Goals, an empty-state line for threa
   expect(await ui.find({ type: 'Button', text: /▸ More \(0 projects, 0 scripts\)/ })).toBeTruthy()
   expect(all.some(t => /^lean-agent$/.test(t))).toBe(true)
   expect(all.some(t => /lean-agent 1\.0\.\d+ · refreshed \d\d:\d\d:\d\d/.test(t))).toBe(true)
-  for (const k of ['new-thread', 'feedback', 'repair']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // under 80 %: not offered
+  for (const k of ['new-thread', 'feedback', 'repair', 'restart-desk-footer']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // under 80 %: not beside the bar (the footer button is permanent)
   await ui.unmount()
 })
 

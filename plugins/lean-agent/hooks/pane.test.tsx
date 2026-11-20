@@ -492,7 +492,7 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
 })
 
 // (deskcompact.test.ts covers the compaction states; here the desk's context size comes from a request, as in a real session)
-test('header: a desk under 80 % of its limit has the bar and no Restart desk button; from 80 % the button is beside the bar; over the limit it is also a need', async ($, on) => {
+test('header: a desk under 80 % of its limit has the bar and no Restart desk button beside it; from 80 % the button is beside the bar; over the limit it is also a need; the footer button is always there', async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
@@ -501,11 +501,13 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   let ui = await $.ui.mount(DESKPANE as any)
   expect(await ui.find({ type: 'Text', text: /desk context: known after the next request/ })).toBeTruthy() // nothing was asked yet
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // no context figure yet: still there
   await ui.unmount()
   await feed($, 40_000)
   ui = await $.ui.mount(DESKPANE as any)
   expect(await ui.find({ type: 'Text', text: /40k of 200k/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // under 80 %: the footer button, not the header's
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
   await ui.unmount()
   await feed($, 170_000)
@@ -522,7 +524,26 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy() // and beside the bar
   await ui.press({ key: 'restart-desk-top' })
   expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy() // one two-step for both
-  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(2)
+  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(3) // the card, beside the bar, the footer
+  await ui.unmount()
+})
+
+test('the footer Restart desk button works under 80 %: the first press arms it, the second writes the handover and opens a new desk', async ($, on) => {
+  const feed = deskFeed(on)
+  const h = setup(on, [])
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  await feed($, 40_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' } as any)
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // nothing beside the bar
+  await ui.press({ key: 'restart-desk-footer' })
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: /Confirm restart desk/ })).toBeTruthy()
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(0)
+  await ui.press({ key: 'restart-desk-footer' })
+  expect(h.files.get('/h/.lean-agent/desk/handover.md')).toContain('# Desk handover')
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
   await ui.unmount()
 })
 
