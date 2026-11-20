@@ -343,7 +343,10 @@ export async function prepare(h: Host, r: Range, from: string = r.mb, exclude: s
   const raw = await git('diff', '-U0', '--no-color', '--no-renames', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--end-of-options', from, r.head)
   const names = await git('diff', '--name-status', '--no-renames', '--end-of-options', from, r.head)
   const all = (names ?? '').split('\n').map(l => l.split('\t')).filter(p => p[1])
-  const gen = await generatedFiles(h, r.path, all.map(p => p[1]!), exclude)
+  // a re-review's delta may not hold a .gitattributes an earlier round added: ask the whole range (merge base..head) too
+  const rangeNames = from === r.mb ? null : await git('diff', '--name-only', '--no-renames', '--end-of-options', r.mb, r.head)
+  const attrChanged = rangeNames === null ? from !== r.mb : rangeNames.split('\n').some(n => n.slice(n.lastIndexOf('/') + 1) === '.gitattributes') // (git did not answer: the rule is left out)
+  const gen = await generatedFiles(h, r.path, all.map(p => p[1]!), exclude, attrChanged)
   const cut = dropSections(raw ?? '', new Set(gen.files.keys()))
   let diff = cut.diff
   const truncated = diff.length > MAX_DIFF_CHARS

@@ -5,8 +5,9 @@
 ### Added
 - **Thread status is the truth.** "Running" is what `claude agents --json --all` says, not a recorded flag. `lean_thread list`, the pane
   cards, the thread pane and the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`,
-  default 10, no tool call or inbox read) | done / parked. A `send` to an idle or stuck session says "queued, session idle: wake or
-  restart it" and never "running"; `wake` replaces a stuck session whose turn ended and wakes an idle one even with nothing queued;
+  default 10, no tool call or inbox read) | done / parked. A `send` to an idle session wakes it (within 30 s of a wake it only queues
+  and says "session idle: wake or restart it"); a `send` to a stuck one queues and says "stuck: wake or restart it"; neither is ever
+  called "running". `wake` replaces a stuck session whose turn ended and wakes an idle one even with nothing queued;
   a session that is still working is never stopped by send, wake or resume (only `restart` replaces it). A `[working]` report of a
   session that is not running is marked stale, and a start that ended its turn without a tool call is reported loudly ("started, but it
   ended its turn at once: wake it with the task"). See [README](README.md#thread-sessions-what-running-means-wake-names-leftovers).
@@ -37,7 +38,8 @@
   (`git -C <worktree> ...`) and the `allow-cmd:` line for it.
 - **Readers and the reviewer run more read-only commands**: unquoted globs whose every match is inside the allowed folders,
   `2>/dev/null`, `rg`/`grep` with no path (cwd inside the roots), and `sort` (no `-o`), `uniq` (one operand), `cut`, `tr`, `nl`.
-  `xargs`, `cd`, any other redirect, `;`, `&&`, `$(...)` and paths outside the roots stay refused.
+  `xargs`, `cd`, any other redirect, `;`, `&&`, `$(...)` and paths outside the roots stay refused, and so does a word that mixes a
+  quoted and an unquoted glob character (the shell reads the quoted one literally).
 - **Budget alerts by default** (`config.json` `budget.daily` 25 USD and `budget.threadDaily` 20 USD, `"off"` allowed): a desk notice and
   a toast at 50% and 80% of the daily budget (once per day per level; today's spend, the top 3 threads and their models) and when one
   thread passes its daily alert; the chaser asks a stale expensive thread what the spend bought. The thread cards show today's cost

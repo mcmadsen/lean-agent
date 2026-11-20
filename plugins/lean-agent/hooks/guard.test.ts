@@ -639,6 +639,7 @@ test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg wit
     'cat .*', 'ls .*', 'ls .?', 'ls ..*', 'rg x .*/.*/.*/.*', 'ls src/.*', 'cat .*/x', // (older shells expand .* to . and .., which climbs out of the roots)
     'sort [!]]o a.md', 'cat []a]', 'cat [!]]', 'cat [[:alpha:]]', 'cat src/[]]', 'cat [a-z[:digit:]]', // (a bracket set that is sized differently by the shell)
     'rg foo | wc -l /etc/*', 'rg foo | sort *.md > out',
+    "cat '[ab]'/*", 'cat "[ab]"/*', "cat '*'*", "cat a'?'*", // (a quoted glob character is literal to the shell, an unquoted one in the same word is not: the word is refused)
     'uniq a.md b.md', 'uniq /etc/passwd', 'uniq -c a.md out', 'cut -f1 /etc/passwd', 'tr', 'tr a b c', 'tr -d', 'tr a b /etc/passwd', 'tr a-z *', 'nl /etc/passwd', 'nl -h x --output=y a.md',
     'xargs ls', 'rg -l foo | xargs cat', 'cd src', 'cd /h && ls', 'awk 1 a.md', 'find . -name *.ts', 'sed -n 1p *.md', 'jq . *.json', 'stat *.md', 'diff *.md', 'git log *.ts', 'git -C /h/code/app diff -- *.ts', 'rg *.ts', 'rg foo -g *.ts src', 'grep -e *x src', 'rg -t * x']
   for (const t of ['lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')

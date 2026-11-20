@@ -7,7 +7,7 @@ import type { Context } from './reviewgate'
 import type { Prep } from './reviewprep'
 import { chooseModel, classifyRisk, requiredRuns, wantSecondOpinion } from './reviewrisk'
 import { digestOf, mergeRuns, sameBlocks } from './reviewmerge'
-import { builtinGenerated, globRe } from './reviewexclude'
+import { builtinGenerated, excludedText, generatedFiles, globRe } from './reviewexclude'
 import { grantModelApproval, listRequests } from './expensive'
 
 const prep = (p: Partial<Prep> = {}): Prep => ({ files: [], symbols: [], tests: [], renamed: [], params: [], state: [], exports: [], changed: ['src/a.ts'], lines: 20, hunks: {}, ...p })
@@ -577,6 +577,20 @@ test('lean_review prepare: generated files are left out of the lists, the line c
   expect(s.text).toContain('say so in "missing"')
 })
 
+test('reviewexclude: a .gitattributes changed anywhere in the range (not only in the re-review delta) switches the attribute rule off', async () => {
+  const f = fakeHost(null)
+  f.git.handler = a => (a.includes('check-attr') ? { exitCode: 0, stdout: 'src/gen.ts: linguist-generated: set\n' } : { exitCode: 1, stdout: '' })
+  const asked = await generatedFiles(f.host, '/r', ['src/gen.ts', 'src/a.ts'], [])
+  expect([...asked.files.keys()], 'no .gitattributes in the range: the mark applies').toEqual(['src/gen.ts'])
+  expect(asked.attrSkipped).toBe(false)
+  const delta = await generatedFiles(f.host, '/r', ['src/gen.ts', 'src/a.ts'], [], true) // the delta holds no .gitattributes, the range does
+  expect([...delta.files.keys()]).toEqual([])
+  expect(delta.attrSkipped).toBe(true)
+  const named = await generatedFiles(f.host, '/r', ['src/gen.ts', 'x/golden/a.json'], [], true) // by-name rules still apply
+  expect([...named.files.keys()]).toEqual(['x/golden/a.json'])
+  expect(excludedText({ files: ['a\nb'], lines: 1 })).not.toMatch(/a\nb/)
+})
+
 test('reviewexclude: the built-in rules and the config globs', () => {
   for (const f of ['a/b.snap', 'x/__snapshots__/y.txt', 'test/golden/a.json', 'tests/fixtures/data.json', 'golden/a', 'package-lock.json', 'sub/pnpm-lock.yaml', 'yarn.lock', 'Cargo.lock', 'go.sum', 'poetry.lock', 'dist/app.min.js', 'a.min.css']) expect(builtinGenerated(f), f).toBe(true)
   for (const f of ['src/golden.ts', 'src/fixtures.ts', 'src/a.ts', 'lock.ts', 'readme.md', 'a/snap.ts', 'src/admin.js']) expect(builtinGenerated(f), f).toBe(false)
@@ -605,7 +619,13 @@ test('lean_review prepare: the reviewer prompt carries the thread\'s own worktre
   expect(r.text).not.toContain('/w/app-t2')
   // an explicit worktree must be a registered one of this project
   expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/w/app-t2' })).text).toContain('git -C /w/app-t2 diff')
-  expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/etc' })).text).toContain('git -C /r/app diff')
+  const refused = await tool(h, { action: 'prepare', base: 'main', worktree: '/etc' }) // never a silent fallback to another checkout
+  expect(refused.ok).toBe(false)
+  expect(refused.text).toContain('is not a live registered worktree of app')
+  const rec = await tool(h, { sha: H2, base: 'main', green: true, worktree: '/etc', review: { ...base, reuse: reuseOf('plain1') } }) // record gives the same answer
+  expect(rec.ok).toBe(false)
+  expect(rec.text).toContain('is not a live registered worktree of app')
+  expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[2] === '/etc')).toBe(false)
   // record reads the same checkout as prepare (the generated-file marks and the lists must agree)
   h.calls.length = 0
   await tool(h, { sha: H2, base: 'main', review: { ...base, reuse: reuseOf('plain1') } })

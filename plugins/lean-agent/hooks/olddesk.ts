@@ -14,7 +14,7 @@ import { homeDir, readJson, realPath, writeJson, deskDir } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
 import { setNotice } from './notices'
-import { isWorking } from './threads'
+import { isWorking, listAgents } from './threads'
 import type { AgentRow } from './threads'
 
 export const NOTICE_KEY = 'old-desk'
@@ -50,51 +50,21 @@ const logLine = async (h: Host, r: OldDesk, text: string): Promise<void> => {
 }
 
 // ---- the listing: `claude agents --json --all` ---------------------------------------------------------------------
-type Row = AgentRow & { ids: string[]; kind: string; archived: boolean }
+// the one parser of `claude agents --json --all` is threads.ts (parseAgents / listAgents); this adds the 15 s timeout (a hung service must not
+// hang a desk turn; a timeout is a failed listing)
+type Row = AgentRow
 // null = the listing failed or was not JSON (never read as "the session is gone")
 export async function listRows(h: Host): Promise<Row[] | null> {
-  let r
   try {
-    r = await h.process.run(['claude', 'agents', '--json', '--all'], { timeoutMs: 15_000 }) // (a hung service must not hang a desk turn; a timeout is a failed listing)
+    return await listAgents(h, 15_000)
   } catch {
     return null
   }
-  if (r.exitCode !== 0) return null
-  let v: any
-  try {
-    v = JSON.parse(r.stdout)
-  } catch {
-    return null
-  }
-  const list = Array.isArray(v) ? v : v && typeof v === 'object' ? (v.agents ?? v.sessions ?? v.items) : null
-  if (!Array.isArray(list)) return null
-  const out: Row[] = []
-  for (const x of list) {
-    if (!x || typeof x !== 'object') continue
-    const ids = [x.sessionId, x.session_id, x.id].filter((i: unknown): i is string => typeof i === 'string' && !!i)
-    if (!ids.length) continue
-    const status = String(x.status ?? x.state ?? '').toLowerCase()
-    const state = String(x.state ?? '').toLowerCase()
-    out.push({
-      sid: ids[0]!,
-      ids,
-      name: String(x.name ?? ''),
-      cwd: String(x.cwd ?? ''),
-      status,
-      startedAt: Number(x.startedAt ?? x.started_at ?? 0) || 0,
-      pid: Number(x.pid) || 0,
-      id: String(x.id ?? ''),
-      state,
-      waitingFor: x.waitingFor == null || x.waitingFor === false ? '' : String(x.waitingFor).slice(0, 120),
-      kind: String(x.kind ?? '').toLowerCase(),
-      archived: x.archived === true || status === 'archived' || state === 'archived',
-    })
-  }
-  return out
 }
-const rowOf = (rows: Row[], sid: string): Row | undefined => rows.find(r => r.ids.includes(sid))
+const hasId = (r: Row, sid: string) => r.sid === sid || r.id === sid
+const rowOf = (rows: Row[], sid: string): Row | undefined => rows.find(r => hasId(r, sid))
 // an active row: listed and not archived (a stopped background session is still in the app's list: still active here)
-const isActive = (r: Row | undefined): r is Row => !!r && !r.archived
+const isActive = (r: Row | undefined): r is Row => !!r && !r.archived && r.status !== 'archived' && r.state !== 'archived'
 
 // the title the old desk has in the listing, '' when it is not listed (best effort, never throws)
 export async function titleOf(h: Host, sid: string): Promise<string> {
@@ -132,7 +102,7 @@ export const reminder = (r: OldDesk, listed: boolean): string =>
 async function tryRm(h: Host, rec: OldDesk, row: Row, mySid: string): Promise<boolean> {
   if (rec.rm) return false // once
   if (rec.sid === mySid || rec.sid === rec.newSid) return false // never the running desk
-  if (!row.ids.includes(rec.sid)) return false
+  if (!hasId(row, rec.sid)) return false
   if (row.kind !== 'background' && row.kind !== 'bg') return false
   if (isWorking(row) || row.pid > 0 || row.waitingFor) return false
   const home = await homeDir(h)

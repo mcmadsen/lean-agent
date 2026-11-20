@@ -411,6 +411,7 @@ test('removeSession never removes a working or live process, the current session
   expect(await rm(row({ state: 'stopped', status: 'stopped' }), { current: OLD })).toMatchObject({ removed: false, skipped: "it is the thread's current session" })
   expect(await rm(row({ state: 'stopped', status: 'stopped', cwd: '/h/elsewhere' }))).toMatchObject({ removed: false })
   expect(await rm(undefined)).toMatchObject({ removed: false, skipped: 'not in the session list' })
+  expect(await rm(row({ state: 'stopped', status: 'stopped', id: '--discard-unpushed' }))).toMatchObject({ removed: false, skipped: 'its id is not a plain token' }) // an id that reads as a flag is never an argument
   expect(w.calls('rm')).toHaveLength(0)
   expect(await rm(row({ state: 'stopped', status: 'stopped' }))).toEqual({ removed: true })
   expect(w.calls('rm')).toEqual([['rm', OLD.slice(0, 8)]])

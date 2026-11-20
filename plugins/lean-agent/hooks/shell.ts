@@ -341,18 +341,21 @@ export function plainPipeline(c: string, opts: { glob?: boolean; devnull?: boole
   let cur = ''
   let has = false
   let globbed = false
-  const endWord = () => { if (has) words.push(globbed ? GLOB_MARK + cur : cur); cur = ''; has = false; globbed = false }
+  let quotedMeta = false // a quoted * ? [ ] in this word: the shell reads it literally, a caller that expands the word would not
+  let mixed = false // a word with both a quoted and an unquoted glob character is refused (the caller could not tell which is which)
+  const endWord = () => { if (has) { if (globbed && quotedMeta) mixed = true; words.push(globbed ? GLOB_MARK + cur : cur) } cur = ''; has = false; globbed = false; quotedMeta = false }
   const endSeg = (): boolean => { endWord(); if (!words.length) return false; segs.push(words); words = []; return true }
   const n = c.length
   for (let i = 0; i < n; i++) {
     const ch = c[i]!
-    if (ch === "'") { const j = c.indexOf("'", i + 1); if (j < 0) return null; cur += c.slice(i + 1, j); has = true; i = j; continue }
+    if (ch === "'") { const j = c.indexOf("'", i + 1); if (j < 0) return null; if (/[*?[\]]/.test(c.slice(i + 1, j))) quotedMeta = true; cur += c.slice(i + 1, j); has = true; i = j; continue }
     if (ch === '"') {
       has = true
       let j = i + 1
       for (; j < n && c[j] !== '"'; j++) {
         const d = c[j]!
         if (d === '$' || d === '`') return null
+        if (d === '*' || d === '?' || d === '[' || d === ']') quotedMeta = true
         if (d === '\\') { const e = c[j + 1] ?? ''; if (e === '"' || e === '\\') cur += e; else cur += '\\' + e; j++; continue } // bash keeps other backslashes literally ("a\|b")
         cur += d
       }
@@ -382,7 +385,7 @@ export function plainPipeline(c: string, opts: { glob?: boolean; devnull?: boole
     cur += ch
     has = true
   }
-  if (!endSeg()) return null
+  if (!endSeg() || mixed) return null
   return segs
 }
 

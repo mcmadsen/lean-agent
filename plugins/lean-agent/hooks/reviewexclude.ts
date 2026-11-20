@@ -43,8 +43,10 @@ export type Excluded = { files: string[]; lines: number; attrFailed?: boolean; a
 // the files of `names` a review leaves out, with the reason of each
 // The change under review must not mark its own files generated: when a .gitattributes is among the changed files the attribute rule is not
 // applied at all (attrSkipped), whatever it says; the by-name rules and the user's own config globs still are.
-export async function generatedFiles(h: Host, repo: string, names: string[], globs: string[]): Promise<{ files: Map<string, string>; attrFailed: boolean; attrSkipped: boolean }> {
-  const attrSkipped = names.some(n => base(n) === '.gitattributes')
+// `attrChanged`: a .gitattributes changed anywhere in the whole range (merge base..head), not only in `names`: a re-review looks at a delta,
+// and a .gitattributes an earlier round added is not in it.
+export async function generatedFiles(h: Host, repo: string, names: string[], globs: string[], attrChanged = false): Promise<{ files: Map<string, string>; attrFailed: boolean; attrSkipped: boolean }> {
+  const attrSkipped = attrChanged || names.some(n => base(n) === '.gitattributes')
   const files = new Map<string, string>()
   const res = globs.map(g => [g, globRe(g)] as const)
   const left: string[] = []
@@ -88,7 +90,7 @@ export function excludeSpecs(ex: Excluded | undefined): string {
 }
 export function excludedText(ex: Excluded | undefined): string {
   if (!ex?.files.length) return ''
-  const shown = ex.files.slice(0, 15).join(', ')
+  const shown = ex.files.slice(0, 15).map(f => f.replace(/[\u0000-\u001f\u007f]/g, '?')).join(', ') // (a name with a control character cannot start a line of the prompt)
   const notes = [ex.attrFailed ? 'git check-attr did not answer, so .gitattributes marks were not applied' : '', ex.attrSkipped ? 'a .gitattributes is among the changed files, so its marks were not applied (the change must not mark its own files generated)' : ''].filter(Boolean)
   return `Generated files left out of the lists, the risk and the line count: ${ex.files.length} file${ex.files.length === 1 ? '' : 's'}, ${ex.lines} line${ex.lines === 1 ? '' : 's'} (${shown}${ex.files.length > 15 ? ', ...' : ''}). Do not review them; if one of them is hand-written code (named like a fixture or snapshot but holding logic), say so in "missing"${notes.length ? ` (${notes.join('; ')})` : ''}.`
 }

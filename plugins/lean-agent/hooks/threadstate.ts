@@ -120,7 +120,9 @@ export async function removeSession(h: Host, home: string, o: { id: string; sid:
   if (liveOf(row) === 'working' || row.pid > 0) return { removed: false, skipped: 'its process is still alive' }
   const own = `${threadsDir(home)}/${o.id}`
   if (!(await inThreadFolder(h, home, o.id, row.cwd))) return { removed: false, skipped: `it runs outside the thread folder (${row.cwd || 'unknown'})` }
-  const argv = ['claude', 'rm', row.id || o.sid.slice(0, 8)] // no flag, ever
+  const target = row.id || o.sid.slice(0, 8)
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(target)) return { removed: false, skipped: 'its id is not a plain token' } // (an id that starts with - would be read as a flag)
+  const argv = ['claude', 'rm', target] // no flag, ever
   const r = await h.process.run(argv).catch(() => null)
   if (r && r.exitCode === 0) {
     if (o.log) await appendJsonl(h, `${own}/history.jsonl`, { ts: await h.clock.now(), kind: 'rm-old', ok: true, sid: o.sid }).catch(() => undefined)

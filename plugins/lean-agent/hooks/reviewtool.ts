@@ -53,7 +53,7 @@ async function preparedLevel(h: Host, project: string, sha: string): Promise<Lev
 // The two arguments this file adds to the lean_review tool's inputSchema (delivery.ts spreads them into its properties)
 export const REVIEW_EXTRA_PROPS = {
   level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (the default: ONE cheap sonnet pass on correctness, behaviour and reuse at an intermediate checkpoint; it never records green) or full (the strict review the push gate needs: every pass, two runs for a high-risk diff; ask for it only before "ready to push")' },
-  worktree: { type: 'string', description: 'prepare: absolute path of a registered worktree of the project to review (default: the calling thread\'s own registered worktree, else the project\'s path)' },
+  worktree: { type: 'string', description: 'prepare, record (the same one on both sides): absolute path of a registered worktree of the project to review (default: the calling thread\'s own registered worktree, else the project\'s path)' },
 }
 
 // The checkout a review reads: the calling thread's own registered worktree of this project (its HEAD is the work under review), else the
@@ -128,6 +128,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   if (!level) return { ok: false, text: `prepare: level must be "light" (one cheap pass at a checkpoint, never green) or "full" (the strict review the push gate needs), not ${JSON.stringify(str(i.level).slice(0, 20))}` }
   const light = level === 'light'
   const checkout = await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
+  if (str(i.worktree) && !checkout) return { ok: false, text: `prepare: worktree ${JSON.stringify(str(i.worktree).slice(0, 200))} is not a live registered worktree of ${project} (lean_worktree register it first); nothing was computed` } // (never fall back to another checkout silently)
   const range = await resolveRange(h, project, str(i.base) || undefined, str(i.head) || undefined, checkout)
   if (typeof range === 'string') return { ok: false, text: `prepare: ${range}` }
   const branch = str(i.branch)
@@ -244,7 +245,9 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const base = str(i.base)
   const branch = str(i.branch)
   // the same checkout prepare read (the thread's own worktree): generated-file marks and the lists must be the same on both sides
-  const range = await resolveRange(h, project, base || undefined, sha, await checkoutOf(h, project, thread, branch, ''))
+  const askedWt = str(i.worktree)
+  const checkout = await checkoutOf(h, project, thread, branch, askedWt)
+  const range = askedWt && !checkout ? `worktree ${JSON.stringify(askedWt.slice(0, 200))} is not a live registered worktree of ${project}` : await resolveRange(h, project, base || undefined, sha, checkout)
   if (typeof range === 'string') {
     const file = await writeReview(h, rec)
     return { ok: !wantGreen, text: `${wantGreen ? 'green refused' : 'recorded not green'}: ${range} (base is needed to compute the new symbols and edited tests); recorded NOT green in ${file}` }

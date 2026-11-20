@@ -58,7 +58,8 @@ export type Inbox = { ts: number; text: string; from?: string }
 // non-object entries, damaged JSON (-> []).
 // state: what `claude agents` calls the session's state (working | done | stopped | blocked ...); waitingFor: set while the session waits
 // for something nobody gave it (a permission prompt); model: the session's model when listed
-export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number; pid: number; id: string; state: string; waitingFor: string; model?: string }
+export type AgentRow = { sid: string; name: string; cwd: string; status: string; startedAt: number; pid: number; id: string; state: string; waitingFor: string; model?: string; kind?: string; archived?: boolean }
+// (kind, lower-cased: "background" for a `claude --bg` session; archived: only set when the listing says so)
 
 export function parseAgents(text: string): AgentRow[] {
   let v: unknown
@@ -85,6 +86,8 @@ export function parseAgents(text: string): AgentRow[] {
       state: String(r.state ?? '').toLowerCase(),
       waitingFor: r.waitingFor == null || r.waitingFor === false ? '' : typeof r.waitingFor === 'string' ? r.waitingFor : JSON.stringify(r.waitingFor).slice(0, 120),
       ...(typeof r.model === 'string' && r.model ? { model: r.model } : {}),
+      ...(typeof r.kind === 'string' && r.kind ? { kind: r.kind.toLowerCase() } : {}),
+      ...(r.archived === true ? { archived: true } : {}),
     })
   }
   return out
@@ -101,8 +104,8 @@ export const needsYou = (r: AgentRow | undefined) => !!r && (!!r.waitingFor || r
 
 // null = the listing failed or was not JSON: the caller must not treat that as "nothing is running"
 export { agents as listAgents }
-async function agents(h: Host): Promise<AgentRow[] | null> {
-  const r = await h.process.run(['claude', 'agents', '--json', '--all'])
+async function agents(h: Host, timeoutMs?: number): Promise<AgentRow[] | null> {
+  const r = await h.process.run(['claude', 'agents', '--json', '--all'], timeoutMs ? { timeoutMs } : undefined) // (a caller in a desk turn passes a timeout: a hung service is a failed listing)
   if (r.exitCode !== 0) return null
   try {
     JSON.parse(r.stdout)

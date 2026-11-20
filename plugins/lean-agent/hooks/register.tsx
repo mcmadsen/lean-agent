@@ -44,6 +44,7 @@ import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
+import { resetRequestCache } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext } from './threadcontext'
 
@@ -96,6 +97,7 @@ export const resetModState = () => {
   resetFinish()
   resetCap()
   resetApprovals()
+  resetRequestCache()
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
