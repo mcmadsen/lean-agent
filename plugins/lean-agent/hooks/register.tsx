@@ -47,6 +47,10 @@ import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
 import { resetRequestCache } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext } from './threadcontext'
+import { autoRestartTick, threadTurnEnd } from './autorestart'
+import { handoverReport } from './handover'
+import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
+import { recordWindows, windowTick } from './windows'
 
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
 
@@ -136,14 +140,14 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'handover'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'restart', 'keep'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'restart', 'keep', 'find', 'ask', 'report'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
-    text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line' },
+    text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
@@ -198,6 +202,26 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
 }
 
 const spent = new Map<string, number>() // usd per subagent id, this session
+
+let inTurn = false // a main-thread turn is running: the snapshot and the restart checkpoint are written at its END only, never in the middle
+let turnStartedAt = 0
+let lastEnd = '' // the turn end last handled (tokens@time): session.measure and turn.complete both reach it, once is enough
+let lastTokens: number | null = null // the context size of the last session.measure of this thread
+
+// A thread's turn end, by script (no model turn): the context size record, the plan-window snapshot, the state snapshot and, over the
+// context limit with work left, the checkpoint the desk's timer restarts from (autorestart.ts). Observes only; every failure is silent.
+// No engine call of its own (session.measure hands it the figures it already read): turn.complete uses the last measured size.
+async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string): Promise<void> {
+  try {
+    const tokens = typeof tokensIn === 'number' && Number.isFinite(tokensIn) ? tokensIn : null
+    const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
+    if (lastEnd === key) return
+    lastEnd = key
+    await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
+  } catch {
+    /* the next turn end tries again */
+  }
+}
 
 // the desk's 10 s tick (exported for the specs): finished threads, queued messages, unread reports
 export async function deskSweep($: any, host2: Host): Promise<void> {
@@ -396,6 +420,37 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
       every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
+      // a thread over its context limit (checkpointed at its turn end, autorestart.ts) is restarted by script once its session has been idle
+      // 20 s: a notice for the desk's next prompt and a toast, no desk model turn (config threads.autoRestart, default on)
+      every($, 30_000, 'desk', async host2 => {
+        const notes = await autoRestartTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-autorestart-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // the plan windows (desk/windows.json, written by the sessions' mods): a notice at 80 % and at 90 %, once per window, naming the
+      // threads working now (windows.ts)
+      every($, 60_000, 'desk', async host2 => {
+        const lines = await windowTick(host2, {
+          working: async () => {
+            const home = await homeDir(host2)
+            const rows = (await listAgents(host2)) ?? []
+            const ids = (await host2.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])).map(x => x.name).filter(n => /^t\d+$/.test(n))
+            const out: string[] = []
+            for (const id of ids) {
+              const t = await readJson<{ sid?: string } | null>(host2, `${threadsDir(home)}/${id}/thread.json`, null)
+              const row = t?.sid ? rows.find(a => a.sid === t.sid) : undefined
+              if (row && row.state === 'working') out.push(id)
+            }
+            return out
+          },
+        })
+        for (const text of lines) {
+          $.ui.notify(text, { key: `lean-window-${text.slice(0, 2)}` })
+          pending.push(`[lean-agent] ${text}`)
+        }
+      })
     })
     // the desk folder's CLAUDE.md is generated: written only when it changed
     await step('desk CLAUDE.md', async () => {
@@ -602,6 +657,11 @@ export const register: Register = on => {
   // fallback when the hook is not delivered: a cheap compare of the session's directory
   on('turn.start', async ($, e: any, next) => {
     if (!e.agentId) busySince = (await $.clock.now()) || 1
+    if (!e.agentId) {
+      inTurn = true
+      turnStartedAt = busySince
+      resetEdited()
+    }
     await redetect($)
     await showSkew($)
     if (!e.agentId && role.kind === 'desk') {
@@ -612,6 +672,8 @@ export const register: Register = on => {
   })
   on('turn.complete', async ($, e: any, next) => {
     if (!e.agentId) busySince = 0
+    if (!e.agentId) inTurn = false
+    if (role.kind === 'thread' && !e.agentId && lastSid) await threadEnd(hostOf($), role.id, lastTokens, lastSid)
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
@@ -624,13 +686,25 @@ export const register: Register = on => {
   // `e.context` is `$.session.usage()`'s context): written to the thread's folder for the desk's restart-at-next-message rule
   // (threadcontext.ts). Observes only; a failed write is no failure (a session with no record is treated as under the limit).
   on('session.measure', async ($, e: any, next) => {
+    // the plan windows (rateLimits) are part of the same reading: any session snapshots them to desk/windows.json (windows.ts), also
+    // mid-turn. The event carries `$.session.usage()`'s figures; only a thread without a context figure on the event asks usage() itself.
+    let usage: any = e
+    if (role.kind === 'thread' && typeof e?.context?.tokens !== 'number') usage = await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null)
+    try {
+      await recordWindows(hostOf($), usage)
+    } catch {
+      /* the next reading writes it */
+    }
     if (role.kind === 'thread') {
       const id = role.id
       try {
         const host = hostOf($)
-        const tokens = typeof e?.context?.tokens === 'number' ? e.context.tokens : (await bounded($, Promise.resolve($.session.usage()), 'session.usage'))?.context?.tokens
+        const tokens = usage?.context?.tokens
         const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
         await recordContext(host, id, sid, tokens)
+        lastTokens = typeof tokens === 'number' ? tokens : null
+        // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
+        if (!inTurn) await threadEnd(host, id, tokens, sid)
       } catch {
         /* the size stays unknown */
       }
@@ -757,7 +831,31 @@ export const register: Register = on => {
   // what a thread writes and runs: a scratch script that ran without a proposal is nudged once (prompt.submit); a run of an adopted script counts
   on('tool.call', { tool: 'Write' }, async ($, e: any, next) => {
     const r: any = await next(e)
-    if (role.kind === 'thread' && r?.deny === undefined) noteWrite(e.file_path)
+    if (role.kind === 'thread' && r?.deny === undefined) {
+      noteWrite(e.file_path)
+      noteEdited(e.file_path) // the snapshot lists the files edited this turn
+    }
+    return r
+  })
+  on('tool.call', { tool: 'Edit' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteEdited(e.file_path)
+    return r
+  })
+  // the task list for the state snapshot (snapshot.ts): what the thread wrote with its task tools
+  on('tool.call', { tool: 'TodoWrite' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteTasks('TodoWrite', e)
+    return r
+  })
+  on('tool.call', { tool: 'TaskCreate' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteTasks('TaskCreate', e)
+    return r
+  })
+  on('tool.call', { tool: 'TaskUpdate' }, async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind === 'thread' && r?.deny === undefined) noteTasks('TaskUpdate', e)
     return r
   })
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => {
@@ -791,6 +889,11 @@ export const register: Register = on => {
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
+      if (e.action === 'handover') {
+        const id = typeof e.name === 'string' ? e.name.trim() : ''
+        if (!/^t\d+$/.test(id)) return { result: 'handover needs name: a thread id like t3', isError: true } as any
+        return { result: await handoverReport(host, await homeDir(host), id) } as any
+      }
       if (e.action === 'compare') {
         const out = await compare(host, $.plugin.root, { project: typeof e.project === 'string' ? e.project : undefined, mode: typeof e.mode === 'string' ? e.mode : undefined }, 'desk')
         return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any

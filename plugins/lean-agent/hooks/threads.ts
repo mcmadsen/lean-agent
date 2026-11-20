@@ -23,6 +23,8 @@ import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, pr
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
+import { askText, findText, reportText } from './threadask'
+import { holdWarning } from './windows'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -721,7 +723,28 @@ async function profileAction(h: Host, home: string, i: Input): Promise<Out> {
   return { ok: true, text: await profileText(h, home, project) }
 }
 
+// find, ask and report answer from the store by script (threadask.ts); `new` and `start` carry the plan-window warning above
+// window.holdAbove (windows.ts). Everything else is leanThreadCore.
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
+  try {
+    if (i.action === 'find' || i.action === 'ask' || i.action === 'report') {
+      const home = await homeDir(h)
+      if (i.action === 'find') return await findText(h, home, i.text ?? '')
+      if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
+      return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!)
+    }
+    const out = await leanThreadCore(h, root, i)
+    if (out.ok && (i.action === 'new' || i.action === 'start')) {
+      const warn = await holdWarning(h, await homeDir(h))
+      if (warn) return { ...out, text: `${out.text}\n${warn}` }
+    }
+    return out
+  } catch (e) {
+    return err(`${i.action} failed: ${(e as Error)?.message ?? e}`)
+  }
+}
+
+async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
   try {
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
@@ -824,6 +847,13 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             return r
           }
           return { ...r, text: `${id} ${wasParked ? 'was parked: reopened and restarted' : 'restarted'} as a new session (old conversation kept read-only). ${r.text}` }
+        }
+        case 'auto-restart': {
+          // the desk's timer (autorestart.ts) at the context limit: the checkpoint was written, the session is idle. A NEW session with the
+          // handover; never a working session (freshSession leaves it alone), never a parked or closed thread.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: no automatic restart`)
+          const r = await freshSession(h, root, home, t, installed, i.reason ?? 'Its context was over the limit: checkpointed and restarted by script.', i)
+          return fresh(r) ? { ...r, text: `${id} restarted at the context limit as a new session (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)

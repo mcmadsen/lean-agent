@@ -1,0 +1,206 @@
+// Automatic restart at the context limit (autorestart.ts, threads.ts auto-restart): the thread's mod checkpoints at the turn end, the
+// desk's timer restarts by script once the session has been idle 20 s. Synthetic ids, names and paths only.
+import { expect, test } from 'claude-code/testing'
+import { fakeHost } from './fake'
+import { IDLE_MS, MIN_GAP_MS, autoRestartTick, checkpointText, threadTurnEnd, workLeft } from './autorestart'
+import { leanThread, resetLocks } from './threads'
+import { resetFinish } from './finish'
+import { resetThreadCache } from './threaddetail'
+
+const S1 = '11111111-2222-3333-4444-555555555555'
+const S0 = '00000000-2222-3333-4444-555555555555'
+const NEW = '99999999-8888-7777-6666-555555555555'
+const ROOT = '/p'
+const L = '/h/.lean-agent'
+const T1 = `${L}/threads/t1`
+const INBOX = `${L}/desk/inbox.jsonl`
+const MARK = `${T1}/autorestart.json`
+const rec = (o: Record<string, unknown>) => JSON.stringify(o) + '\n'
+const marker = (h: any) => JSON.parse(h.files.get(MARK) ?? '{}')
+const inbox = (h: any) => (h.files.get(INBOX) ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l))
+
+function setup(o: { config?: unknown; row?: Record<string, unknown> } = {}) {
+  resetLocks()
+  resetFinish()
+  resetThreadCache()
+  const h = fakeHost(null)
+  h.clock.t = 1_000_000
+  h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
+  h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: 0, delivered: 0, model: 'sonnet', effort: 'medium' }))
+  h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
+  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  const st = { rows: [{ sessionId: S1, name: 't1 · fix login', cwd: T1, status: 'idle', state: 'idle', startedAt: 1, pid: 42, id: 'abcd1234', ...o.row }] as any[] }
+  h.claude.handler = (a: string[]) => {
+    if (a[0] === '--bg') return { exitCode: 0, stdout: `started ${NEW}\n` }
+    if (a[0] === 'agents' && a[1] === '--json') return { exitCode: 0, stdout: JSON.stringify(st.rows) }
+    if (a[0] === 'stop') {
+      for (const r of st.rows) r.pid = 0
+      return { exitCode: 0, stdout: '' }
+    }
+    return { exitCode: 0, stdout: '' }
+  }
+  return { h, st }
+}
+const end = (h: any, o: Partial<{ sid: string; tokens: number | null; since: number }> = {}) => threadTurnEnd(h.host, 't1', { sid: S1, tokens: 205_000, since: 0, ...o })
+
+test('turn end over the limit with work left: snapshot, a mod-authored inbox record, a pending marker', async () => {
+  const { h } = setup()
+  const out = await end(h)
+  expect(out).toEqual({ snapshot: true, action: 'checkpoint' })
+  expect(JSON.parse(h.files.get(`${T1}/state.json`)!).tokens).toBe(205_000)
+  const r = inbox(h)
+  expect(r).toHaveLength(1)
+  expect(r[0]).toMatchObject({ from: 't1', kind: 'report', state: 'checkpoint', mod: true, restart: { tokens: 205_000, limit: 120_000, sid: S1 } })
+  expect(r[0].text).toBe(checkpointText(205_000, 120_000))
+  expect(r[0].text).toMatch(/context .* over the limit .*: checkpointed, restart me/)
+  expect(marker(h).pending).toMatchObject({ ts: 1_000_000, sid: S1, tokens: 205_000 })
+  // the same session ending another turn does not write a second checkpoint
+  expect((await end(h)).action).toBe('none')
+  expect(inbox(h)).toHaveLength(1)
+})
+
+test('turn end: under the limit, or after done / blocked / a question, only the snapshot is written', async () => {
+  const under = setup().h
+  expect(await end(under, { tokens: 50_000 })).toEqual({ snapshot: true, action: 'none' })
+  expect(inbox(under)).toHaveLength(0)
+  for (const last of [{ kind: 'report', state: 'done' }, { kind: 'report', state: 'blocked' }, { kind: 'ask' }]) {
+    const { h } = setup()
+    h.files.set(INBOX, rec({ ts: 500, from: 't1', text: 'x', ...last }))
+    expect((await end(h, { since: 400 })).action).toBe('none')
+    expect(inbox(h)).toHaveLength(1) // only the report that was there
+  }
+  // a done report of an EARLIER turn does not count (the thread went on working)
+  const { h } = setup()
+  h.files.set(INBOX, rec({ ts: 100, from: 't1', kind: 'report', state: 'done', text: 'x' }))
+  expect((await end(h, { since: 400 })).action).toBe('checkpoint')
+  expect(workLeft([], 't1', 0)).toBe(true)
+})
+
+test('config threads.autoRestart false: the snapshot only, no checkpoint', async () => {
+  const { h } = setup({ config: { threads: { autoRestart: false } } })
+  expect(await end(h)).toEqual({ snapshot: true, action: 'none' })
+  expect(inbox(h)).toHaveLength(0)
+  expect(await autoRestartTick(h.host, { agents: async () => [], restart: async () => ({ ok: true, text: '' }) })).toEqual([])
+})
+
+test('a fresh session that starts over the limit stops and asks the user, once', async () => {
+  const { h } = setup()
+  h.files.set(MARK, JSON.stringify({ last: { at: 900_000, oldSid: S0 } }))
+  expect((await end(h)).action).toBe('ask') // S1 is not the session that was restarted: its first turn end is over the limit
+  const r = inbox(h)
+  expect(r[0]).toMatchObject({ from: 't1', kind: 'ask', mod: true })
+  expect(r[0].text).toContain('again over it')
+  expect(marker(h).stopped).toBe(true)
+  expect(marker(h).last.newSid).toBe(S1)
+  expect((await end(h)).action).toBe('none') // stopped: no loop
+  expect(inbox(h)).toHaveLength(1)
+  // under the limit again: restarts are allowed again
+  await end(h, { tokens: 10_000 })
+  expect(marker(h).stopped).toBe(false)
+  // a later overflow of the same session checkpoints normally
+  expect((await end(h)).action).toBe('checkpoint')
+})
+
+const rows = (state = 'idle') => async () => [{ sid: S1, name: '', cwd: T1, status: state, state, startedAt: 1, pid: 42, id: 'a', waitingFor: '' }] as any
+const ok = { ok: true, text: 't1 started (x) · sonnet/medium · new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old session\'s conversation is not resumed', data: { fresh: true } }
+
+test('desk tick: restarts after 20 s idle with a notice naming size and cost; never earlier; once', async () => {
+  const { h } = setup()
+  await end(h)
+  const calls: string[] = []
+  const deps = { agents: rows(), restart: async (id: string, why: string) => (calls.push(`${id}|${why}`), ok) }
+  h.clock.t = 1_000_000 + IDLE_MS - 1
+  expect(await autoRestartTick(h.host, deps)).toEqual([])
+  expect(calls).toHaveLength(0)
+  h.clock.t = 1_000_000 + IDLE_MS
+  const notes = await autoRestartTick(h.host, deps)
+  expect(calls).toHaveLength(1)
+  expect(calls[0]).toContain('t1|Its context was 205000 tokens (limit 120000)')
+  expect(notes).toHaveLength(1)
+  expect(notes[0]!.text).toMatch(/^t1: context .* was over the limit .*: restarted as a new session by script/)
+  expect(notes[0]!.text).toContain('handover about 3.2k tokens (~$0.01 first turn, estimate)')
+  expect(marker(h)).toMatchObject({ last: { at: h.clock.t, oldSid: S1 } })
+  expect(marker(h).pending).toBeUndefined()
+  expect(await autoRestartTick(h.host, deps)).toEqual([])
+  expect(calls).toHaveLength(1)
+})
+
+test('desk tick: never mid-turn, one per 10 minutes, stale checkpoints are dropped, failures are retried then reported', async () => {
+  // a working session is left alone, the checkpoint stays
+  const a = setup().h
+  await end(a)
+  a.clock.t = 1_100_000
+  let n = 0
+  expect(await autoRestartTick(a.host, { agents: rows('working'), restart: async () => (n++, ok) })).toEqual([])
+  expect(n).toBe(0)
+  expect(marker(a).pending).toBeTruthy()
+  // a session waiting on a prompt for the user is not restarted either
+  expect(await autoRestartTick(a.host, { agents: async () => [{ sid: S1, name: '', cwd: T1, status: 'idle', state: 'blocked', startedAt: 1, pid: 42, id: 'a', waitingFor: 'permission' }] as any, restart: async () => (n++, ok) })).toEqual([])
+  expect(n).toBe(0)
+  // a restart within 10 minutes of the last one waits
+  const b = setup().h
+  b.files.set(MARK, JSON.stringify({ last: { at: 1_000_000 - 1000, oldSid: S0 }, pending: { ts: 1_000_000, sid: S1, tokens: 205_000, limit: 120_000 } }))
+  b.clock.t = 1_000_000 + MIN_GAP_MS - 2000
+  expect(await autoRestartTick(b.host, { agents: rows(), restart: async () => (n++, ok) })).toEqual([])
+  expect(n).toBe(0)
+  b.clock.t = 1_000_000 - 1000 + MIN_GAP_MS
+  expect(await autoRestartTick(b.host, { agents: rows(), restart: async () => (n++, ok) })).toHaveLength(1)
+  // a later turn ended since (context record newer than the checkpoint): dropped
+  const c = setup().h
+  await end(c)
+  c.files.set(`${T1}/context.json`, JSON.stringify({ tokens: 30_000, at: 1_100_000, sid: S1 }))
+  c.clock.t = 1_200_000
+  expect(await autoRestartTick(c.host, { agents: rows(), restart: async () => (n++, ok) })).toEqual([])
+  expect(marker(c).pending).toBeUndefined()
+  // a parked thread, or another session id: dropped
+  const d = setup().h
+  await end(d)
+  d.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', state: 'parked', sid: S1 }))
+  d.clock.t = 1_200_000
+  await autoRestartTick(d.host, { agents: rows(), restart: async () => (n++, ok) })
+  expect(marker(d).pending).toBeUndefined()
+  expect(n).toBe(1)
+  // a failing restart: retried no sooner than 60 s, reported after three tries
+  const e = setup().h
+  await end(e)
+  let tries = 0
+  const bad = { agents: rows(), restart: async () => (tries++, { ok: false, text: 'claude --bg failed: boom' }) }
+  e.clock.t = 1_100_000
+  expect(await autoRestartTick(e.host, bad)).toEqual([])
+  e.clock.t += 30_000
+  await autoRestartTick(e.host, bad)
+  expect(tries).toBe(1)
+  e.clock.t += 60_000
+  await autoRestartTick(e.host, bad)
+  e.clock.t += 60_000
+  const last = await autoRestartTick(e.host, bad)
+  expect(tries).toBe(3)
+  expect(last[0]!.text).toContain('automatic restart failed 3 times')
+  expect(marker(e).pending).toBeUndefined()
+})
+
+test('leanThread auto-restart: a new session with the handover (the old one stopped), never over a working session', async () => {
+  const { h, st } = setup()
+  await end(h)
+  const r = await leanThread(h.host, ROOT, { action: 'auto-restart', tN: 't1', reason: 'Its context was 205000 tokens (limit 120000): checkpointed.' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 restarted at the context limit as a new session')
+  expect(r.text).toContain('new session: handover about')
+  const starts = h.claudeCalls().filter(x => x[0] === '--bg')
+  expect(starts).toHaveLength(1)
+  const prompt = starts[0]![starts[0]!.length - 1]!
+  expect(prompt).toContain('Resume the work now')
+  expect(prompt).toContain('Its context was 205000 tokens')
+  expect(prompt).toContain('## State at the end of the last turn (state.json)') // the handover carries the snapshot
+  expect(st.rows[0]!.pid).toBe(0)
+  // a working session is not touched
+  const w = setup({ row: { status: 'busy', state: 'working' } })
+  const r2 = await leanThread(w.h.host, ROOT, { action: 'auto-restart', tN: 't1' })
+  expect(r2.text).toContain('is running: no new session started')
+  expect(w.h.claudeCalls().filter(x => x[0] === '--bg')).toHaveLength(0)
+  // a parked thread is refused
+  const p = setup()
+  p.h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', state: 'parked', sid: S1 }))
+  expect((await leanThread(p.h.host, ROOT, { action: 'auto-restart', tN: 't1' })).ok).toBe(false)
+})

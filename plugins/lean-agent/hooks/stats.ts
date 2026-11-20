@@ -10,6 +10,8 @@ import { deskChoice, modelFamily, threadChoice } from './models'
 import { readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
+import { windowLine } from './windows'
+export { windowLine } // for the pane (pane.tsx is not edited here): `windowLine(h)` is one line of text
 
 export const STATS_DAYS = 7
 export const MAX_STATS_DAYS = 90
@@ -59,6 +61,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   }
   const td = ro.days[today]
   const out: string[] = []
+  out.push(await windowLine(h)) // the plan windows lead: "5h window: 78% used, resets 14:20 (in 1h 13m) | 7d: 41% (snapshot 3 min old)"
   out.push(`lean-agent stats: last ${n} day(s) to ${today}`)
   // the period and the files this report read, and a warning when the live file starts inside the window (a rotation moved older rows)
   const read = Object.keys(ro.files).sort()
