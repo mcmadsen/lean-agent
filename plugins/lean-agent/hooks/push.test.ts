@@ -8,7 +8,7 @@ const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string; wtList?: string; registry?: Record<string, unknown> }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -18,6 +18,8 @@ async function setup(o: Opts = {}) {
   h.git.handler = a => {
     const s = a.join(' ')
     log.push(a)
+    if (s.includes('worktree list')) return o.wtList ? { exitCode: 0, stdout: o.wtList } : { exitCode: 1, stdout: '' }
+    if (s.includes('--show-toplevel')) return { exitCode: 0, stdout: a[1] + '\n' }
     if (s.includes('--git-common-dir')) return { exitCode: 0, stdout: (o.wtCommon && s.includes(WT) ? o.wtCommon : '/r/app/.git') + '\n' }
     if (s.includes('ls-remote')) return o.lsFail ? { exitCode: 128, stdout: '', stderr: 'fatal: unable to access remote' } : { exitCode: 0, stdout: `ref: refs/heads/${o.lsDefault ?? 'main'}\tHEAD\n${SHA}\tHEAD\n` }
     if (s.includes('rev-parse')) return { exitCode: 0, stdout: (o.head ?? SHA) + '\n' }
@@ -45,7 +47,7 @@ async function setup(o: Opts = {}) {
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: o.state ?? 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
-  h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
+  h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify(o.registry ?? { 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
   if (o.review !== false) await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   const pushes = () => log.filter(a => a.includes('push'))
@@ -391,6 +393,66 @@ test('Azure DevOps remote: a failing az keeps the pushed state visible, names az
   const w = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 1, stderr: 'fatal: nope' } })
   expect((await w.push({ pr: { title: 'T' } })).ok).toBe(false)
   expect(w.ghCalls).toEqual([])
+})
+
+const LIST = (...wts: [string, string, string][]) => ['worktree /r/app\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n', ...wts.map(([p, head, br]) => `worktree ${p}\nHEAD ${head}\n${br ? `branch refs/heads/${br}` : 'detached'}\n`)].join('\n')
+const registry = (s: Awaited<ReturnType<typeof setup>>) => JSON.parse(String(s.h.files.get('/h/.lean-agent/worktrees.json')))
+
+test('an unregistered linked worktree at the approved sha is adopted by the push; the other gates still apply', async () => {
+  // made with plain `git worktree add`, outside the project's folders, never registered
+  const a = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  const r = await a.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(a.pushes()).toEqual([['-C', '/w/feat', '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  expect(registry(a)).toEqual({ 'app/feat': { path: '/w/feat', repo: '/r/app', branch: 'feat', thread: 't1', adopted: true } })
+  // the project's own repository is asked, read-only
+  expect(a.log).toContainEqual(['-C', '/r/app', 'worktree', 'list', '--porcelain'])
+  // no review: adopted (it is registered for the thread), but nothing is pushed
+  const b = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']), review: false })
+  expect((await b.push()).text).toContain('no green review record')
+  expect(b.pushes()).toEqual([])
+  expect(Object.keys(registry(b))).toEqual(['app/feat'])
+  // a protected branch is refused as for a registered worktree
+  const c = await setup({ registry: {}, wtList: LIST(['/w/rel', SHA, 'release/1.0']), branch: 'release/1.0' })
+  expect((await c.push()).text).toContain('protected branch')
+  // registered worktrees keep working as before and are never searched for another
+  const d = await setup()
+  await d.push()
+  expect(d.log.filter(x => x.includes('worktree'))).toEqual([])
+})
+
+test('an unregistered worktree is NOT adopted unless it is the one linked worktree at that sha on a branch', async () => {
+  const none: [string, Opts, string][] = [
+    ['HEAD is another commit', { wtList: LIST(['/w/feat', 'f'.repeat(40), 'feat']) }, 'no registered worktree'],
+    ['detached', { wtList: LIST(['/w/feat', SHA, '']), branch: '' }, 'no registered worktree'],
+    ['git cannot list', {}, 'no registered worktree'],
+    ['only the main checkout is at the sha', { wtList: `worktree /r/app\nHEAD ${SHA}\nbranch refs/heads/feat\n` }, 'no registered worktree'],
+    ['registered for another thread (never taken over)', { registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) }, 'no registered worktree'],
+    ['a prunable entry', { wtList: LIST(['/w/feat', SHA, 'feat']).replace('branch refs/heads/feat', 'branch refs/heads/feat\nprunable gitdir file points to non-existent location') }, 'no registered worktree'],
+    ['two candidates (ambiguous, named)', { wtList: LIST(['/w/a', SHA, 'feat'], ['/w/b', SHA, 'feat2']) }, '2 unregistered worktrees are at'],
+  ]
+  for (const [name, opts, want] of none) {
+    const s = await setup({ registry: {}, ...opts })
+    const r = await s.push()
+    expect([name, r.ok, r.text]).toEqual([name, false, expect.stringContaining(want)])
+    expect([name, s.pushes()]).toEqual([name, []])
+    expect([name, s.history()]).toEqual([name, '']) // nothing consumed
+    if (name.startsWith('registered for another')) expect(registry(s)['app/feat'].thread).toBe('t2')
+  }
+})
+
+test('adopting under a key that another live worktree holds registers a suffixed key, never silently fails', async () => {
+  const s = await setup({ registry: { 'app/feat': { path: '/w/other', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  s.h.files.set('/w/other/.git', 'gitdir: x') // the other worktree exists
+  const r = await s.push()
+  expect(r.ok).toBe(true)
+  expect(registry(s)['app/feat'].path).toBe('/w/other')
+  expect(registry(s)['app/feat~2']).toMatchObject({ path: '/w/feat', thread: 't1', adopted: true })
+  // the recorded path is gone: the entry is replaced
+  const t = await setup({ registry: { 'app/feat': { path: '/w/gone', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  expect((await t.push()).ok).toBe(true)
+  expect(registry(t)['app/feat']).toMatchObject({ path: '/w/feat', thread: 't1' })
+  expect(Object.keys(registry(t))).toEqual(['app/feat'])
 })
 
 test('a GitHub remote still uses gh, whatever the host is called', async () => {

@@ -10,6 +10,18 @@
   token) and the PR link is read from its JSON. When `az` is missing or fails, the reply gives the create-PR link
   (`.../_git/<repo>/pullrequestcreate?sourceRef=<branch>&targetRef=<base>`, URL-encoded) and says "az repos pr create needs az + az login"
   instead of advising to install `gh`. An already open PR is found with `az repos pr list` and reported as open.
+- **An unregistered worktree no longer blocks the desk's push.** A thread that made its worktree with plain `git worktree add` got
+  "tN has no registered worktree". The push now adopts it when it is a linked worktree of the project's own repository (`git worktree list`),
+  on a branch, with HEAD equal to the approved sha, and no registry entry (of any thread) has it; it is registered for the thread
+  (`adopted`) and every other gate (branch, review, approval) still applies. Several candidates are named, never guessed.
+- **A taken registry key no longer fails silently** ("The registry has no free slot for this path"). New `lean_worktree` tool for threads
+  (`register`, `list`; `hooks/worktreereg.ts`) replaces hand-editing `worktrees.json`: a key whose recorded path is gone or no longer a
+  worktree is replaced; a key held by another live worktree gets a suffixed key (`<project>/<branch>~2`); the same worktree of another
+  thread, a damaged file and a failed write are refusals that say why. The review skill's ready-to-push step registers first.
+- **Doctor:** a stale registry entry (folder gone, or git says it is no worktree) is a FIX row and `fix` prunes it; a git that does not
+  answer never makes an entry stale. The desk's spend on the model the app started it on is an info note ("the app started the desk on
+  <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,
+  today only, not when a later session could not be set).
 
 ## 1.0.11
 

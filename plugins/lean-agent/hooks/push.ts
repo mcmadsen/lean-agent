@@ -10,6 +10,7 @@ import type { Host } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { PROTECTED, guardedBy, patternsFor, projectOf } from './guard'
 import type { Inbox, Out, Thread } from './threads'
+import { registerWorktree, unregisteredAt } from './worktreereg'
 
 export type PrInput = { title?: unknown; body?: unknown; base?: unknown; draft?: unknown }
 
@@ -206,22 +207,46 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   // 2. the thread's worktree: the registered one whose HEAD is the approved commit
   const reg = await readJson<Record<string, Wt>>(h, `${leanDir(home)}/worktrees.json`, {})
   const mine = Object.values(reg && typeof reg === 'object' ? reg : {}).filter((w): w is Wt & { path: string } => !!w && typeof w === 'object' && w.thread === id && typeof w.path === 'string' && w.path.startsWith('/'))
-  if (!mine.length) return err(`${id} has no registered worktree (worktrees.json), so the desk does not know what to push: have ${id} register its worktree (worktree skill, adopt), then ask again`)
-  let wt: (Wt & { path: string }) | null = null
+  let wt = null as (Wt & { path: string }) | null // (set inside pick: the cast keeps the compiler from narrowing it to null)
   let seen = ''
-  for (const w of [...mine].reverse()) {
-    const p = await projectOf(h, w.path)
-    if (!p || p.slug !== t.project) { seen = seen || `${w.path} does not belong to project ${t.project}`; continue }
-    if (p.private) return err(`${p.slug} is a private project: it is never pushed. Give the user the manual push command instead`)
-    const wc = await git(h, w.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
-    if (!wc.ok || (await realPath(h, wc.out)) !== (await realPath(h, common.out))) { seen = seen || `${w.path} is not a worktree of the repository of project ${t.project}`; continue }
-    const head = await git(h, w.path, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}')
-    if (!head.ok || !FULL.test(head.out)) { seen = seen || `${w.path}: cannot read HEAD (${head.first})`; continue }
-    if (head.out !== sha) { seen = seen || `HEAD of ${w.path} is ${head.out.slice(0, 8)}, not ${short}`; continue }
-    wt = w
-    break
+  // `listed`: the worktree came from `git worktree list` of the project's own repository (adopted below), so it needs no folder-based
+  // project check (a plain `git worktree add ../x` lives outside the project's folders); a registry entry is thread-writable and does
+  const pick = async (list: (Wt & { path: string })[], listed = false): Promise<Out | null> => {
+    for (const w of [...list].reverse()) {
+      const p = listed ? { slug: t.project, private: false } : await projectOf(h, w.path)
+      if (!p || p.slug !== t.project) { seen = seen || `${w.path} does not belong to project ${t.project}`; continue }
+      if (p.private) return err(`${p.slug} is a private project: it is never pushed. Give the user the manual push command instead`)
+      const wc = await git(h, w.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      if (!wc.ok || (await realPath(h, wc.out)) !== (await realPath(h, common.out))) { seen = seen || `${w.path} is not a worktree of the repository of project ${t.project}`; continue }
+      const head = await git(h, w.path, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}')
+      if (!head.ok || !FULL.test(head.out)) { seen = seen || `${w.path}: cannot read HEAD (${head.first})`; continue }
+      if (head.out !== sha) { seen = seen || `HEAD of ${w.path} is ${head.out.slice(0, 8)}, not ${short}`; continue }
+      wt = w
+      break
+    }
+    return null
   }
-  if (!wt) return err(`not pushed: ${seen}. Push exactly the commit the user approved: ask ${id} for the current sha`)
+  const refused = await pick(mine)
+  if (refused) return refused
+  if (!wt) {
+    // A worktree made with plain `git worktree add` was never registered. It is adopted here when it is a LINKED worktree of the
+    // project's own repository, on a branch, with HEAD == the approved commit, and no registry entry (of any thread) has it: the same
+    // facts the worktree skill's adopt checks. The gates below (project, branch, review, approval) still apply to it.
+    const un = await unregisteredAt(h, home, pj.path, sha)
+    if (un.why) seen = seen || un.why
+    if (un.one) {
+      const reg2 = await registerWorktree(h, { project: t.project, path: un.one.path, repo: pj.path, branch: un.one.branch, thread: id, adopted: true })
+      if (!reg2.ok) seen = seen || reg2.text
+      else {
+        const refused2 = await pick([{ path: un.one.path, branch: un.one.branch, thread: id }], true)
+        if (refused2) return refused2
+      }
+    }
+  }
+  if (!wt) {
+    if (!mine.length && !seen) return err(`${id} has no registered worktree (worktrees.json) and no unregistered linked worktree of ${t.project} is at ${short}, so the desk does not know what to push: have ${id} register its worktree (lean_worktree register, worktree skill), then ask again`)
+    return err(`not pushed: ${seen || `${id} has no registered worktree (worktrees.json)`}. Push exactly the commit the user approved: ask ${id} for the current sha`)
+  }
   const dir = wt.path
   // 3. the branch: the one checked out, the one registered, never a protected, guarded or default branch
   const cur = await git(h, dir, 'symbolic-ref', '--quiet', '--short', 'HEAD')

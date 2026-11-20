@@ -31,6 +31,19 @@ export async function readDeskModel(h: Host): Promise<DeskModelState | null> {
   const v = await readJson<Partial<DeskModelState> | null>(h, stateFile(await homeDir(h)), null)
   return v && typeof v.running === 'string' && v.pin && typeof v.pin.model === 'string' && typeof v.pin.effort === 'string' ? { running: v.running.slice(0, 80), pin: { model: v.pin.model, effort: v.pin.effort }, at: Number(v.at) || 0 } : null
 }
+// The record of a switch (kept, unlike model.json): the app started the desk on `from`, lean-agent switched the session to `to` at `at`.
+// Doctor reads it so that the spend on `from` before the switch is not reported as a session on an unexpected model.
+export type DeskSwitch = { from: string; to: string; at: number }
+const switchFile = (home: string) => `${leanDir(home)}/desk/model-set.json`
+async function writeSwitch(h: Host, s: DeskSwitch): Promise<void> {
+  const home = await homeDir(h)
+  await mkdirp(h, `${leanDir(home)}/desk`)
+  await atomicWrite(h, switchFile(home), JSON.stringify(s) + '\n')
+}
+export async function readDeskSwitch(h: Host): Promise<DeskSwitch | null> {
+  const v = await readJson<Partial<DeskSwitch> | null>(h, switchFile(await homeDir(h)), null)
+  return v && typeof v.from === 'string' && typeof v.to === 'string' && typeof v.at === 'number' && v.at > 0 ? { from: v.from, to: v.to, at: v.at } : null
+}
 async function clearState(h: Host): Promise<void> {
   const f = stateFile(await homeDir(h))
   await setNotice(h, NOTICE_KEY, null) // the notice first: a pane load in between never shows it as a stray red line
@@ -108,6 +121,7 @@ export async function checkDeskModel(h: Host, eng: Engine | null, running: strin
       const eff = done.effort ? ` / ${pin.effort}` : ` (effort not changed: ${done.why.find(w => /effort/.test(w)) ?? 'it already was the pin'})`
       const text = `the desk was on ${running} (the app chose it); lean-agent set ${pin.model}${eff} through /config (the app may keep that as your default for new sessions)`
       await setNotice(h, NOTICE_SET, text) // (shown until the next desk session's attempt)
+      await writeSwitch(h, { from: running.slice(0, 80), to: pin.model, at: await h.clock.now() }).catch(() => undefined) // (doctor: today's spend on that model is info, not FIX)
       return { kind: 'set', text }
     }
   }
