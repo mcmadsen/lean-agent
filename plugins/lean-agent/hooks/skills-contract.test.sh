@@ -129,6 +129,23 @@ grep -q 'does NOT satisfy it' "$root/templates/front-desk.md" || fail "front-des
 grep -q 'do not ask them to approve it with a question' "$root/templates/front-desk.md" || fail "front-desk.md must say an approval of a denied action is not asked with AskUserQuestion"
 grep -q 'never `send` a yes' "$root/skills/thread/SKILL.md" || fail "the thread skill must say a yes is never sent to a thread"
 grep -q 'decide yourself' "$root/templates/thread.md" || fail "thread.md must say approval is never for something the thread decides itself"
+# the typed desk actions reach the guides: a thread uses `action` instead of trying the write; the desk asks the USER with the exact text, then
+# approve-action; the five kinds are the same list everywhere (the table in hooks/deskactions.ts)
+grep -qF 'Use `action` instead' "$root/templates/thread.md" || fail "thread.md must tell a thread to use action instead of trying the write itself"
+grep -qF 'never try it with `az`, `gh api`, `curl`' "$root/templates/thread.md" || fail "thread.md must forbid trying the remote write with az / gh / curl"
+grep -qF 'ask the user with AskUserQuestion' "$root/templates/front-desk.md" || grep -qF 'Ask the user with AskUserQuestion' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk asks the user with AskUserQuestion for an action request"
+grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-desk.md" || fail "front-desk.md must name the three options"
+grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
+grep -qF 'Never call `approve-action` on your own' "$here/thread/SKILL.md" || fail "the thread skill must say approve-action is never called on the desk's own judgment"
+grep -qF '`action-list`' "$here/thread/SKILL.md" || fail "the thread skill must list action-list"
+grep -qF '`allowEdit?`' "$here/thread/SKILL.md" || fail "the thread skill must list allowEdit / allowCmd on new"
+grep -qF 'allowEdit' "$root/templates/front-desk.md" || fail "front-desk.md must tell the desk to name allowEdit / allowCmd when the work needs a path outside the worktree"
+grep -qF '`refusals`' "$here/doctor/SKILL.md" || fail "the doctor skill must list the refusals action"
+for k in ado-pr-reply ado-pr-comment ado-workitem-comment ado-workitem-update gh-pr-comment; do
+  grep -qF "$k" "$root/templates/thread.md" || fail "thread.md lacks the action kind $k"
+  grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
+done
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "5" ] || fail "the action table (PARAM_KEYS) must hold exactly five kinds"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)

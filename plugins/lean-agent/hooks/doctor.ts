@@ -18,6 +18,7 @@ import { oldDeskRows } from './olddesk'
 import { reportFailures } from './delivery'
 import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
+import { topRefusalsRow } from './refusals'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -185,6 +186,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   if (stale.length) row(false, `worktrees.json has ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}: ${stale.slice(0, 5).map(s => `${s.key} (${s.why}${s.path ? `: ${s.path}` : ''})`).join('; ')}${stale.length > 5 ? `; ${stale.length - 5} more` : ''}. Run fix to drop them`)
   else out.push('ok   no stale worktree registry entry')
   out.push(...(await threadSessionRows(h).catch(() => [] as string[]))) // threadsessions.ts: stale thread sessions, session names
+  out.push((await topRefusalsRow(h).catch(() => null)) ?? 'ok   no guard refusal pattern repeats') // refusals.ts: the same refusal again and again is a missing grant or command
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

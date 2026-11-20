@@ -23,6 +23,42 @@ own session), and the grants a thread forgot. Nothing in settings.json was widen
 writes or runs a program. A harmless class the classifier keeps denying, other than the five write kinds below: none showed up in
 the data (the PATCH of a PR thread's status above is a write, not a harmless read).
 
+### Added
+- **Typed desk-executed actions: a thread's remote write is approved at the desk and sent by the mod.** `lean_report` takes
+  `action: {kind, params, why}` (state blocked) for five kinds only, from a fixed table in `hooks/deskactions.ts`: `ado-pr-reply`,
+  `ado-pr-comment`, `ado-workitem-comment`, `ado-workitem-update` (fields `state`, `assignedTo`, `tags`, `title`) and `gh-pr-comment`.
+  An unknown kind or param is refused with the list; no command, no push, merge, delete or settings change. The mod stores the request
+  signed (HMAC with the review key), with the exact rendering (method, URL, body) and its sha256; the pane's "Needs you" shows the
+  exact text with Approve / Deny (two presses), the desk's inbox line says what to do. `lean_thread action-list` prints the question
+  to ask; the desk asks the user with AskUserQuestion (request id, check code and exact text in the question; options Approve, Deny,
+  Edit first); the desk's `tool.call` hook reads the user's answer from the tool's own result and records it for that one request.
+  `lean_thread approve-action <id>` (desk only) is refused unless a signed human Approve for that id and text is on record, the request
+  is under 2 h old and unused, and the text derived again from the params has the signed check code; single use. The mod sends it:
+  Azure DevOps through `az account get-access-token` and `curl` with the token and body on stdin (never in argv, a log or an output),
+  GitHub through `gh api`; it records the result in the thread's `history.jsonl` and messages the thread. A failing send leaves the
+  request approved and unused and says why; a connection that broke mid-request is marked used and reported as unknown. Specs with canned
+  `az` / `curl` / `gh` output for every kind, the answer binding, forged and model-made approvals, a changed text, replay, expiry,
+  another thread's request, the token never in argv or output, and failing executors. New modules `hooks/deskactions.ts`,
+  `hooks/refusals.ts`. See [README](README.md#remote-writes-go-through-the-desk-typed-actions).
+- **`lean_doctor refusals`**: the guard's recorded refusals (the rows the feedback export lists under "Guard refusals") grouped by
+  pattern with a count and a one-line fix (a grant the brief should have given, a command the readers lack, a path a worker needs), and a
+  `note top refusals` doctor row when one pattern repeats (config `refusals.repeat`, default 3).
+- **Grants up front**: `lean_thread new` takes `allowEdit` (absolute paths at least two levels deep) and `allowCmd` (plain read-only
+  commands); they become `allow-edit:` / `allow-cmd:` lines at the end of the thread's brief, which the thread copies into its workers'
+  Agent prompts. A relative path, `..`, a path that is too wide, a comma or a shell form is refused before anything is created.
+
+### Changed
+- **Approvals of the five write kinds go through the desk** (this reverses 1.0.14's "answered in the thread's own session" for those
+  kinds only; no hook carries a decision, the mod performs the approved action itself). Everything else a permission check denies is
+  still answered in the thread's own session (`approval`, Open tN). The thread guide tells a thread to use `action` instead of trying the
+  write; the desk guide and the thread skill describe the flow; the skills contract checks the wording and that only the question hook
+  and the pane's press write a human answer.
+- A blocked thread that carries an `action` request shows the request's card, not the generic "tN is blocked" row on top of it.
+- Not built, on purpose: any allow rule in a settings file to get past the classifier, and any widening of the guard for a command that
+  writes or runs a program. Not covered: a PR thread's status change (fixed / closed) after a reply (reported above). Not run live: the
+  user's answer is read from the engine's typed `AskUserQuestion` result; if a real result does not carry it the desk says so and the
+  pane's Approve / Deny is the decision.
+
 ## 1.0.14
 
 ### Added

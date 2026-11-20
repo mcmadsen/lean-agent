@@ -22,6 +22,7 @@ Without the tool, setup still works from the mod: the user types `/lean-agent-se
 | `migrate` | one-time 0.45 -> 1.0 conversion, then `fix`. Idempotent: a second run says "already migrated" |
 | `mcp-env` | an MCP server needs a variable (a site, a domain). Without arguments: lists the servers that need one. With `name` and `value`: writes it into the `env` block of `~/.claude/settings.json` (merge, other keys kept) so every new session has it; the reply never repeats the value |
 | `dismiss-old-desk` | ends the reminder to archive the desk that Restart desk replaced (a `note old desk session ...` row in `check`, a pane notice). The mod cannot close a desktop session: the user archives it in the Claude app (right-click, Archive). The reminder also ends by itself when `claude agents --json --all` no longer lists it as an active row, 24 h after the restart when it never was listed, or 7 days after it. Use it when the user says they did, or do not care |
+| `refusals` | the guard's recorded refusals (the rows the feedback export lists under "Guard refusals"), last `days` (default 7), grouped by pattern with a count and a one-line fix: a grant the brief should have given (`allowEdit` / `allowCmd` on `lean_thread new`), a command the readers lack, a path a worker needs. `check` shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). The fixes are advice: nothing is added to any allow list |
 
 ## MCP servers that need a variable
 

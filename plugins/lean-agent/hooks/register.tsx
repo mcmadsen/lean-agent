@@ -10,6 +10,7 @@ import type { Host } from './state'
 import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
+import { refusalsText } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -138,7 +139,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -157,6 +158,8 @@ const SCHEMA = {
     path: { type: 'string', description: 'project-add: folder (must exist)' },
     on: { type: 'boolean', description: 'project-private: true or false; profile: false removes the project profile; keep: true or false (without it keep only says what is set)' },
     keep: { type: 'boolean', description: 'new/start: keep mode, off by default: after a done report follow-up messages RESUME the same session until its context passes the limit (threadTokens), instead of starting a new one' },
+    allowEdit: { type: 'array', items: { type: 'string' }, description: 'new: absolute paths (a folder or file at least two levels deep) the thread\'s WORKERS may edit besides what it grants itself, for work that needs a path outside its worktree (a repo\'s .claude/skills/... file is the usual one). They go into the brief as `allow-edit:` lines the thread copies into the worker\'s prompt' },
+    allowCmd: { type: 'array', items: { type: 'string' }, description: 'new: plain read-only commands (no shell form) the thread\'s readers may run besides their built-in set; they go into the brief as `allow-cmd:` lines' },
     needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs on top of its project profile (e.g. ["azure-devops"]); this thread only. Everything else stays deferred' },
     mcp: { type: 'array', items: { type: 'string' }, description: 'profile: the MCP servers the project loads (allow-list; others are deferred, still found by ToolSearch)' },
     plugins: { type: 'array', items: { type: 'string' }, description: 'profile: the plugins the project loads (allow-list; skill-only plugins outside it are off)' },
@@ -361,7 +364,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new (allowEdit / allowCmd: grants for the thread\'s workers and readers, named up front when the work needs a path outside the worktree), send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -836,7 +839,8 @@ export const register: Register = on => {
         const o = await dismissOldDesk(host)
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
       }
-      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env or dismiss-old-desk', isError: true } as any
+      if (e.action === 'refusals') return { result: await refusalsText(host, typeof e.days === 'number' ? e.days : undefined) } as any
+      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env, dismiss-old-desk or refusals', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
