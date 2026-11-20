@@ -119,6 +119,29 @@ test('check reports what to fix and the last opener line', async () => {
   out = (await check(h.host, '/plug')).join('\n')
   expect(out).not.toContain('FIX')
   expect(out).toContain('last opener run: 2026-11-18 desk opened (exit 0)')
+  expect(out).toContain('ok   no stale worktree registry entry')
+})
+
+test('doctor: a stale worktree registry entry is a FIX row (the key blocks a new worktree) and fix drops it; live entries stay', async () => {
+  const h = fakeHost(null)
+  h.files.set('/plug/opener/open-desk.sh', 'x')
+  h.claude.handler = () => ({ exitCode: 0, stdout: '2.1.327' })
+  h.git.handler = a => (a.join(' ').includes('--show-toplevel') ? { exitCode: 0, stdout: a[1] + '\n' } : { exitCode: 1, stdout: '' })
+  h.files.set('/w/live/.git', 'gitdir: x')
+  h.files.set(`${L}/worktrees.json`, JSON.stringify({ 'app/live': { path: '/w/live', branch: 'live', thread: 't1' }, 'app/old': { path: '/w/gone', branch: 'old', thread: 't2' }, 'app/nopath': { branch: 'x' } }))
+  const rows = await check(h.host, '/plug')
+  const row = rows.find(r => r.startsWith('FIX  worktrees.json has 2 stale entries'))
+  expect(row).toBeTruthy()
+  expect(row).toContain('app/old (the folder is gone: /w/gone)')
+  expect(row).toContain('app/nopath (no usable path)')
+  expect(row).toContain('Run fix to drop them')
+  expect(row).not.toContain('app/live')
+  const f = await fix(h.host, '/plug')
+  expect(f.lines.join('\n')).toContain('worktree registry: dropped 2 stale entries (app/old: the folder is gone; app/nopath: no usable path)')
+  expect(Object.keys(JSON.parse(h.files.get(`${L}/worktrees.json`)!))).toEqual(['app/live'])
+  expect((await check(h.host, '/plug')).join('\n')).not.toContain('stale entr')
+  // nothing stale: fix says nothing about the registry
+  expect((await fix(h.host, '/plug')).lines.join('\n')).not.toContain('worktree registry')
 })
 
 test('migrate on Linux disables and archives the 0.45 systemd unit; check says 1.0 needs macOS', async () => {

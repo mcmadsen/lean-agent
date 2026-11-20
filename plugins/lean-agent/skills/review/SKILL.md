@@ -11,7 +11,9 @@ Run in a thread, in the repo or worktree to push. A push needs `lean_review` to 
 full HEAD sha (registered projects only); any new commit changes the sha, so the review must be redone after every change.
 **A thread never runs `git push` or `gh pr create` itself**: its own permission check judges the command in a session that
 never heard the user's yes (it was said to the desk), so it refuses. After a green review, `lean_report` "ready to push
-<full sha> (branch, PR title)" and stop. The desk asks the user, records the yes with `approve-push <tN> <sha>` (one sha, single
+<full sha> (branch, PR title)" and stop. Before that, make sure this worktree is registered: `lean_worktree` `register` with its
+absolute path (a no-op refresh when it is, and it adopts one made with plain `git worktree add`); the desk's push needs it, and the
+answer says why when it refuses (a taken key is replaced when stale, else registered under a `~2` suffix). The desk asks the user, records the yes with `approve-push <tN> <sha>` (one sha, single
 use, 2 hours) and pushes with `push` (and opens the PR) from the desk. Or the user pushes by hand with the printed `git -C ... push` command.
 
 The review is strict on purpose: the reviewer works in ordered passes (completeness, correctness traced end to end, behaviour

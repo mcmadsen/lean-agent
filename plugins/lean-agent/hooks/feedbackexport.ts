@@ -67,6 +67,48 @@ const AZURE_PATH = /dev\.azure\.com\/[^/\s]+(?:\/[^/\s]+)?/g
 const AZURE_HOST = /\b([A-Za-z0-9-]+)\.visualstudio\.com/g
 const USER_PATH = /\/(?:Users|home)\/[A-Za-z0-9._-]+(\/|(?![A-Za-z0-9._-]))/g
 
+// ---- branch names, first names, the OS build -----------------------------------------------------------------------------------
+// A branch name is work-specific text (it often carries a ticket's words). The first path segment is kept when it is a branch TYPE
+// (bugfix/, feature/ ...: it says what kind of work, not which), the rest is masked; any other first segment may be a person's name.
+const BRANCH_TYPES = new Set(['bugfix', 'bug', 'feature', 'feat', 'fix', 'hotfix', 'chore', 'infra', 'release', 'refactor', 'docs', 'test', 'ci', 'build', 'perf', 'task', 'story', 'wip', 'dev'])
+const GENERIC_BRANCHES = new Set(['main', 'master', 'develop', 'trunk', 'head'])
+// `feature/alpha-beta` -> `feature/<branch>`, `alpha-beta` and `alice/x` -> `<branch>`
+const maskBranch = (b: string): string => {
+  const i = b.indexOf('/')
+  return i > 0 && BRANCH_TYPES.has(b.slice(0, i).toLowerCase()) ? `${b.slice(0, i)}/<branch>` : '<branch>'
+}
+// the same for a worktree folder, where slashes became dashes (`feature-alpha-beta`) or stayed (`feature/alpha`)
+const maskBranchDir = (d: string): string => {
+  if (d.includes('<')) return d // already masked
+  if (d.includes('/')) return maskBranch(d)
+  const m = /^([A-Za-z]+)-/.exec(d)
+  return m && BRANCH_TYPES.has(m[1]!.toLowerCase()) ? `${m[1]}-<branch>` : '<branch>'
+}
+// a name that looks like a branch (a plain word does not: it may just be a word) and is no default branch
+const branchLike = (b: string) => b.length >= 4 && !GENERIC_BRANCHES.has(b.toLowerCase()) && (/[/_.-]/.test(b) || /\d/.test(b)) && !b.includes('<')
+// the word `branch`, then a branch-like name: "Branch infra/alpha-beta", "branch `x/y`", "branch: x-1"
+// (also "branch (x/y)", and a comma list: "branches: a-b, c-d")
+const BRANCH_NAME = '[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]'
+const AFTER_BRANCH_RE = new RegExp(`\\b(branch(?:es)?\\b\\s*[:=]?\\s*[\`'"(]?)(${BRANCH_NAME}(?:\\s*,\\s*(?!branch(?:es)?\\b)${BRANCH_NAME})*)`, 'gi')
+// every branch-like name of a matched list, masked
+const maskList = (list: string) => list.replace(new RegExp(BRANCH_NAME, 'g'), n => (branchLike(n) ? maskBranch(n) : n))
+// <label>/<type>/<rest>: a registry key (project/branch) after the project rule ran
+const LABEL_BRANCH_RE = new RegExp(`(project-(?:[A-Z]|\\d+)/(?:${[...BRANCH_TYPES].join('|')})/)[A-Za-z0-9][A-Za-z0-9._/~-]*[A-Za-z0-9]`, 'g')
+// .../worktrees/<project>/<branch folder>
+// (one folder, or a branch type and the folder after it: `feature/alpha`; whatever follows, a file inside the worktree, stays)
+const WORKTREE_PATH_RE = new RegExp(`(\\/worktrees\\/[^/\\s\`'"<>]+\\/)((?:(?:${[...BRANCH_TYPES].join('|')})\\/)?[^/\\s\`'"),;:]+)`, 'g')
+// a first name after the words that introduce a person; a product or common word is no name
+const NAME_AFTER_RE = /(?<![A-Za-z0-9])((?:[Rr]eply to|[Rr]eplied to|[Aa]sked by|[Ff]rom|[Tt]o))(\s+)([A-Z][a-z]{2,14})(?![A-Za-z0-9_-])/g
+const NOT_A_NAME = new Set(
+  ('claude opus sonnet haiku fable anthropic github gitlab bitbucket azure devops desk mac macos darwin linux windows homebrew node bun git docker desktop code doctor thread threads pane stats budget review learn compare worktree plugin plugins skill skills settings config json markdown python typescript javascript yarn npm pnpm jira slack google microsoft apple openai notion ' +
+    'the this that these those it its an your you each every all any none one some main master origin upstream remote now here there then when where what which once after before both either neither my our their his her them today tomorrow yesterday true false null step phase version section line file folder page chapter item list table row column ' +
+    'read write edit bash grep glob agent task notebookedit webfetch websearch todowrite askuserquestion ' +
+    'monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december').split(' '),
+)
+const nameAfter = (t: string) => t.replace(NAME_AFTER_RE, (m, trig: string, sp: string, name: string) => (NOT_A_NAME.has(name.toLowerCase()) ? m : `${trig}${sp}<name>`))
+// the OS build ("Darwin 25.6.0", "Linux 6.18.44-x", "Windows_NT 10.0.19045") says which machine; the family stays
+const OS_BUILD_RE = /\b(Darwin|Linux|Windows_NT|Windows|macOS)\s+\d[\w.+~-]*/g
+
 // anonymise: the whole rule set; name: only the home / user / project / path rules, for a file name (a date-slug draft name is long
 // and looks like a secret, but it is not one: the secret and hash rules never see it); missed: the final check
 export type Anonymiser = { anonymise: (t: string) => string; name: (t: string) => string; missed: (t: string) => string[] }
@@ -105,9 +147,33 @@ async function projectNames(h: Host, home: string): Promise<[string, string][]> 
   return pairs.filter(([n]) => n.length >= 3).sort((a, b) => b[0].length - a[0].length)
 }
 
+// The branch names the machine knows: the worktree registry (keys `<project>/<branch>`, a key's `~2` suffix cut, and each entry's
+// `branch`) and the thread records. [verbatim, masked] pairs, longest first; the folder form (slashes as dashes) is masked too.
+async function branchNames(h: Host, home: string): Promise<[string, string][]> {
+  const seen = new Map<string, string>()
+  const add = (b: unknown) => {
+    const x = typeof b === 'string' ? b.trim().replace(/~\d+$/, '') : ''
+    if (!branchLike(x)) return
+    seen.set(x, maskBranch(x))
+    const dir = x.replace(/\//g, '-')
+    if (dir !== x) seen.set(dir, maskBranchDir(dir))
+  }
+  const reg = await readJson<Record<string, { branch?: unknown } | null>>(h, `${leanDir(home)}/worktrees.json`, {})
+  for (const [k, v] of Object.entries(reg && typeof reg === 'object' && !Array.isArray(reg) ? reg : {})) {
+    add(v?.branch)
+    const i = k.indexOf('/')
+    if (i > 0) add(k.slice(i + 1))
+  }
+  for (const e of await h.fs.list(threadsDir(home)).catch(() => [])) add((await readJson<{ branch?: unknown }>(h, `${threadsDir(home)}/${e.name}/thread.json`, {}))?.branch)
+  return [...seen].sort((a, b) => b[0].length - a[0].length)
+}
+
 export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
   const home = await homeDir(h)
   const projects = await projectNames(h, home)
+  const branches = await branchNames(h, home)
+  // a branch name as a word (a `/` before it is fine: registry keys and worktree paths), never inside a longer name
+  const branchRe = (b: string) => new RegExp(`(?<![A-Za-z0-9._-])${esc(b)}(?![A-Za-z0-9_-])(?!\\.[A-Za-z0-9])`, 'g')
   const user = home.split('/').pop() ?? ''
   const userOk = user.length >= 4 && !GENERIC_USERS.has(user.toLowerCase())
   const homeRe = home.length > 1 ? new RegExp(`${esc(home)}(?![A-Za-z0-9._-])`, 'g') : null
@@ -142,6 +208,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
   const anonymise = (input: string): string => {
     let t = input.replace(/[\u0001\u0002\u0003]/g, '')
     for (const re of SECRET_RES) t = t.replace(re, (m, g1) => (typeof g1 === 'string' ? `${g1}<secret>` : '<secret>'))
+    t = t.replace(OS_BUILD_RE, '$1')
     t = t.replace(URL_RE, u => {
       const core = u.replace(/[.,;:!?]+$/, '') // sentence punctuation after a URL is not part of it
       return (REPO_URL.test(core) ? core : '<url>') + u.slice(core.length)
@@ -151,7 +218,14 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     t = t.replace(SCP_RE, '<url>').replace(EMAIL_RE, '<email>')
     t = t.replace(IP_RE, '<ip>').replace(HOST_RE, m => (HOST_OK.test(m) ? m : '<host>'))
     t = t.replace(GH_PATH, (m, org: string, repo?: string) => (ghKept(org, repo) ? m : 'github.com/<org>/<repo>'))
+    // branch names: the ones the machine knows first (before the project rule can change a name that holds a project's), then a worktree
+    // folder, then whatever follows the word "branch"
+    for (const [b, m] of branches) t = t.replace(branchRe(b), m)
+    t = t.replace(WORKTREE_PATH_RE, (_m, p: string, rest: string) => p + maskBranchDir(rest))
+    t = t.replace(AFTER_BRANCH_RE, (_m, lead: string, list: string) => lead + maskList(list))
     t = names(t)
+    t = t.replace(LABEL_BRANCH_RE, '$1<branch>')
+    t = nameAfter(t)
     t = t.replace(ID_WORD_RE, '$1$2<id>').replace(ID_FIELD_RE, '$1<id>').replace(/#\d+\b/g, '#<id>').replace(ID_KEY_RE, '<id>')
     t = t.replace(QUOTED_RE, q => q.replace(BARE_ID_RE, '<id>'))
     t = t.replace(HEX_RE, '<sha>')
@@ -178,6 +252,10 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     if (/dev\.azure\.com\/(?!<org>)[^/\s]/.test(t) || /\b(?!<org>)[A-Za-z0-9-]+\.visualstudio\.com/.test(t)) out.push('azure organisation')
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
     if (new RegExp(ID_WORD_RE.source, 'i').test(t)) out.push('work item, PR or thread id')
+    // a branch name that survived: one the machine knows, one after the word "branch", or an unmasked worktree folder
+    if (branches.some(([b]) => branchRe(b).test(tn)) || Array.from(t.matchAll(AFTER_BRANCH_RE)).some(m => (m[2]!.match(new RegExp(BRANCH_NAME, 'g')) ?? []).some(branchLike)) || Array.from(t.matchAll(WORKTREE_PATH_RE)).some(m => !m[2]!.includes('<'))) out.push('branch name')
+    if (Array.from(t.matchAll(NAME_AFTER_RE)).some(m => /^(?:reply|replied|asked)/i.test(m[1]!) && !NOT_A_NAME.has(m[3]!.toLowerCase()))) out.push('person name')
+    if (/\b(?:Darwin|Linux|Windows_NT)\s+\d+\.\d+/.test(t)) out.push('OS build')
     return [...new Set(out)]
   }
   return { anonymise, name, missed }

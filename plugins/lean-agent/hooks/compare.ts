@@ -36,7 +36,8 @@ export function parseTokens(s: string): number | null {
   return Math.round(n * (m[2] ? (m[2].toLowerCase() === 'k' ? 1e3 : 1e6) : 1))
 }
 
-export type Item = { name: string; source: string; tokens: number }
+// `tracked`: a memory file that git tracks (a team file, shared through the repo); set by markTracked, undefined = not asked
+export type Item = { name: string; source: string; tokens: number; tracked?: boolean }
 export type Ctx = { total: number | null; model: string; rows: Record<string, number>; lists: Record<string, Item[]> }
 const cells = (l: string) => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim())
 
@@ -186,6 +187,27 @@ export function bySource(ctx: Col['ctx'], list: string): [string, number, number
   return Object.entries(g).map(([k, v]) => [k, v[0], v[1]] as [string, number, number]).sort((a, b) => b[1] - a[1])
 }
 
+// Each memory file /context lists is marked tracked or untracked (`git ls-files` in its own folder): a tracked CLAUDE.md is the team's,
+// shared through the repo, so trimming it is a PR there and `learn --gaps` is no advice for it. A name that is no absolute path (or git
+// cannot answer) counts as untracked: the advice then stays what it was.
+export async function markTracked(h: Host, home: string, cols: Col[]): Promise<void> {
+  const seen = new Map<string, boolean>()
+  for (const c of cols) {
+    for (const it of c.ctx?.lists['memory files'] ?? []) {
+      // the path is the item's name (or, in a layout where the first cell is the type, its source)
+      const raw = [it.name, it.source].find(x => x.startsWith('/') || x.startsWith('~/')) ?? it.name
+      const p = raw.startsWith('~/') ? `${home}${raw.slice(1)}` : raw
+      if (!p.startsWith('/') || p.endsWith('/')) { it.tracked = false; continue }
+      if (!seen.has(p)) {
+        const dir = p.slice(0, p.lastIndexOf('/')) || '/'
+        const r = await h.process.run(['git', '-C', dir, 'ls-files', '--error-unmatch', '--', p.slice(p.lastIndexOf('/') + 1)], { timeoutMs: 10_000 }).catch(() => null)
+        seen.set(p, r?.exitCode === 0)
+      }
+      it.tracked = seen.get(p)
+    }
+  }
+}
+
 // Suggestions computed from the numbers, each with the concrete step.
 export async function suggestions(h: Host, project: string, slug: string, cols: Col[], who: 'desk' | 'thread' = 'desk'): Promise<string[]> {
   const out: string[] = []
@@ -224,7 +246,7 @@ export async function suggestions(h: Host, project: string, slug: string, cols: 
     }
   }
   const mem = [...(clean?.ctx?.lists['memory files'] ?? [])].sort((a, b) => b.tokens - a.tokens).filter(x => x.tokens > 1500).slice(0, 3)
-  for (const f of mem) out.push(`memory file ${shortName(f.name)} is ~${fmtTok(f.tokens)} tokens in every session: move area-specific parts into path rules (learn ${slug} --gaps)`)
+  for (const f of mem) out.push(f.tracked ? `memory file ${shortName(f.name)} is ~${fmtTok(f.tokens)} tokens in every session; team file (tracked in the repo): trimming needs a PR in the repo (a learned rule that repeats its lines would load them twice)` : `memory file ${shortName(f.name)} is ~${fmtTok(f.tokens)} tokens in every session: move area-specific parts into path rules (learn ${slug} --gaps)`)
   const rs = await rulesStats(h, slug).catch(() => null)
   if (rs && rs.never.length && !rs.verified) out.push(`${rs.never.length} learned rule(s): ${unverifiedLine(slug, rs)} (not a reason to trim)`)
   else if (rs && rs.neverConfirmed.length) out.push(`${rs.neverConfirmed.length} learned rule(s) never loaded since they were written (${rs.neverConfirmed.slice(0, 4).join(', ')}${rs.neverConfirmed.length > 4 ? ', ...' : ''}): learn ${slug} --trim`)
@@ -254,7 +276,7 @@ export function renderReport(r: Report, redact: (s: string) => string): string {
     const sk = bySource(c.ctx, 'skills').slice(0, 6)
     if (sk.length) out.push(`Skills in ${c.name}, by source: ${sk.map(([s, t, n]) => `${s} ${fmtTok(t)} (${n})`).join(', ')}`)
     const mem = (c.ctx?.lists['memory files'] ?? []).slice(0, 6)
-    if (mem.length) out.push(`Memory files in ${c.name}: ${mem.map(f => `${shortName(f.name)} ${fmtTok(f.tokens)}`).join(', ')}`)
+    if (mem.length) out.push(`Memory files in ${c.name}: ${mem.map(f => `${shortName(f.name)} ${fmtTok(f.tokens)}${f.tracked === undefined ? '' : f.tracked ? ' (tracked)' : ' (untracked)'}`).join(', ')}`)
     const mcp = bySource(c.ctx, 'mcp tools').slice(0, 6)
     if (mcp.length) out.push(`MCP servers in ${c.name} (definition size, an estimate: mostly deferred, not first-turn cost): ${mcp.map(([s, t, n]) => `${s} ${fmtTok(t)} (${n})`).join(', ')}`)
     if (c.loaded) out.push(`Loaded in ${c.name} (project profile; MCP servers outside it are deferred, still found by ToolSearch): ${c.loaded}`)
@@ -360,6 +382,7 @@ export async function overhead(h: Host, root: string, name: string, o: { model?:
     const r = await claude(h, m, 'clean without MCP', p.path, [...JSON_ARGS(model, PROMPT), '--max-turns', '1', ...off, '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}'], { env: { CLAUDE_CODE_PLUGIN_DIRS: '' } })
     if (r?.out && !r.out.error && r.out.input) attribution.push(`MCP servers: ${fmtTok(clean.input! - r.out.input)} tokens (${fmtTok(clean.input)} -> ${fmtTok(r.out.input)} with MCP off)`)
   }
+  await markTracked(h, home, cols).catch(() => undefined)
   const rep: Report = { project: p.slug, model, cols, attribution, suggestions: await suggestions(h, p.path, p.slug, cols, o.who), cost: m.cost, skipped: m.skipped, ts: await h.clock.now() }
   const md = renderReport(rep, redactor(home, p.path))
   const get = (n: string) => cols.find(c => c.name === n)?.input ?? null

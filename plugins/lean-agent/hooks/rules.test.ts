@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { addGap, checkStale, globRe, pathsIn, recordLearn, rulesStats, rulesUpdateCheck, syncRules, unverifiedLine } from './rules'
+import { addGap, alwaysLoaded, checkRules, checkStale, dupLines, globRe, pathsIn, recordLearn, recordRule, rulesStats, rulesUpdateCheck, syncRules, unverifiedLine } from './rules'
 import { setNotice, takeNotice } from './notices'
 import { threadTool } from './delivery'
 
@@ -177,4 +177,75 @@ test('lean_rules tool: sync, record and stale through the thread tool; bad input
   expect((await threadTool(h.host, 't1', 'lean_rules', { action: 'record', area: 'billing', globs: ['a/**'], sha: 's', lines: 3 })).ok).toBe(true)
   expect((await threadTool(h.host, 't1', 'lean_rules', { action: 'sync', repo: 'relative' })).ok).toBe(false)
   expect((await threadTool(h.host, 't1', 'lean_rules', { action: 'sync', project: '../x', repo: '/repo' })).ok).toBe(false)
+})
+
+const TEAM = '# Build\n- Run `yarn test` before every commit, from the repo root.\n- Never edit the generated files under src/gen by hand.\n- Short line.\n'
+const dupWorld = () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ proj: { path: '/repo' } }))
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', project: 'proj' }))
+  h.files.set('/repo/CLAUDE.md', TEAM)
+  return h
+}
+const ruleOf = (...body: string[]) => `---\npaths:\n  - "services/billing/**"\n---\n# billing\n${body.join('\n')}\n<!-- lean-agent: learned abc 2026-01-01 -->\n`
+
+test('always-loaded files: the repo CLAUDE.md (tracked or not), .claude/CLAUDE.md, CLAUDE.local.md and the user memory; lines compare by words', async () => {
+  const h = dupWorld()
+  h.files.set('/repo/.claude/CLAUDE.md', 'Use pnpm for installs, never npm.')
+  h.files.set('/repo/CLAUDE.local.md', 'My local scratch note about the staging database.')
+  h.files.set('/h/.claude/CLAUDE.md', '- Answer in plain words, no filler sentences.')
+  expect((await alwaysLoaded(h.host, '/h', 'proj')).map(f => f.name)).toEqual(['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md', '~/.claude/CLAUDE.md (user memory)'])
+  expect((await alwaysLoaded(h.host, '/h', 'nope')).map(f => f.name)).toEqual(['~/.claude/CLAUDE.md (user memory)']) // an unregistered project: only the user's
+  const files = await alwaysLoaded(h.host, '/h', 'proj')
+  const d = dupLines(ruleOf('- Run `yarn test` before every commit, from the repo root.', '* never edit the GENERATED files under src/gen by hand', '1. Use pnpm for installs, never npm.', '- answer in plain words, no filler sentences', '- Short line.', '- The billing service rounds half up.'), files)
+  expect(d.map(x => `${x.file}: ${x.line}`)).toEqual([
+    'CLAUDE.md: - Run `yarn test` before every commit, from the repo root.',
+    'CLAUDE.md: * never edit the GENERATED files under src/gen by hand',
+    '.claude/CLAUDE.md: 1. Use pnpm for installs, never npm.',
+    '~/.claude/CLAUDE.md (user memory): - answer in plain words, no filler sentences',
+  ])
+  // a heading, a comment, the frontmatter and short lines are never compared; a rule line that is only PART of a CLAUDE.md line counts
+  expect(dupLines(ruleOf('Run `yarn test` before every commit'), files)).toHaveLength(1)
+  expect(dupLines('---\npaths:\n  - "Run yarn test before every commit, from the repo root."\n---\n# Run yarn test before every commit, from the repo root.\n<!-- Run yarn test before every commit, from the repo root. -->\n', files)).toEqual([])
+})
+
+test('record refuses a rule that repeats an always-loaded file (nothing is recorded); other lines are fine; covered_by needs no file', async () => {
+  const h = dupWorld()
+  h.files.set(`${SRC}/rules/billing.md`, ruleOf('- Run `yarn test` before every commit, from the repo root.', '- The billing service rounds half up, never down.'))
+  const r = await recordRule(h.host, 'proj', 'billing', { globs: ['services/billing/**'], sha: 's' })
+  expect(r).toMatch(/^NOT recorded billing: 1 rule line\(s\) already appear in CLAUDE\.md, which every session loads/)
+  expect(r).toContain('"- Run `yarn test` before every commit, from the repo root."')
+  expect(r).toContain('A tracked CLAUDE.md is the team\'s: trimming it needs a PR in the repo')
+  expect(h.files.has(`${SRC}/learn.json`)).toBe(false) // not recorded
+  // through the tool: a refusal is not ok
+  const t = await threadTool(h.host, 't1', 'lean_rules', { action: 'record', area: 'billing', globs: ['services/billing/**'], sha: 's' })
+  expect(t.ok).toBe(false)
+  expect(t.text).toContain('NOT recorded billing')
+  // the thread removes the line: recorded
+  h.files.set(`${SRC}/rules/billing.md`, ruleOf('- The billing service rounds half up, never down.'))
+  const ok = await threadTool(h.host, 't1', 'lean_rules', { action: 'record', area: 'billing', globs: ['services/billing/**'], sha: 's' })
+  expect(ok.ok).toBe(true)
+  expect(ok.text).toContain('recorded billing: 2 lines')
+  // every line repeats: the advice is covered_by
+  h.files.set(`${SRC}/rules/all.md`, ruleOf('- Run `yarn test` before every commit, from the repo root.'))
+  expect(await recordRule(h.host, 'proj', 'all', { globs: ['a/**'], sha: 's' })).toContain('record the area with covered_by')
+  expect(await recordRule(h.host, 'proj', 'all', { globs: ['a/**'], sha: 's', coveredBy: 'CLAUDE.md' })).toContain('covered by CLAUDE.md')
+  // a CLAUDE.md that is not there, or an unregistered project: nothing to repeat
+  const h2 = setup()
+  h2.files.set(`${SRC}/rules/billing.md`, ruleOf('- Run `yarn test` before every commit, from the repo root.'))
+  expect(await recordRule(h2.host, 'proj', 'billing', { globs: ['a/**'], sha: 's' })).toContain('recorded billing')
+})
+
+test('lean_rules check reports rule lines that duplicate an always-loaded file', async () => {
+  const h = dupWorld()
+  h.files.set('/h/.claude/CLAUDE.md', 'Prefer small commits with clear messages always.')
+  h.files.set(`${SRC}/rules/billing.md`, ruleOf('- Run `yarn test` before every commit, from the repo root.', '- Prefer small commits with clear messages always.', '- The billing service rounds half up, never down.'))
+  h.files.set(`${SRC}/rules/web.md`, ruleOf('- The web app uses the design tokens of the shared package.'))
+  const lines = (await checkRules(h.host, 'proj')).lines
+  const billing = lines.find(l => l.startsWith('billing.md'))!
+  expect(billing).toContain('WARN: 2 line(s) repeat CLAUDE.md, ~/.claude/CLAUDE.md (user memory) (loaded twice; remove them from the rule:')
+  expect(billing).toContain('"- Run `yarn test` before every commit, from the r…"') // (the quoted lines are cut)
+  expect(lines.find(l => l.startsWith('web.md'))).toMatch(/ ok$/)
+  const viaTool = await threadTool(h.host, 't1', 'lean_rules', { action: 'check' })
+  expect(viaTool.text).toContain('repeat CLAUDE.md')
 })

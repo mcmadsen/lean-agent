@@ -3,8 +3,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { applyPin, checkDeskModel, deskModelText, readDeskModel } from './deskmodel'
-import { fix } from './doctor'
-import { modelMismatches } from './stats'
+import { check, fix } from './doctor'
+import { modelMismatches, modelRows } from './stats'
 import { resetLocks } from './threads'
 import { resetViewCache } from './view'
 
@@ -270,6 +270,47 @@ test('doctor: "started before setup pinned the model" only when the live desk se
   expect(await deskLine(spent([desk(NOON - 7_200_000)], { at: NOON - 3_600_000, model: 'opus' }))).toBe(chose) // the record is for another pin
   expect(await deskLine(spent([desk(NOON - 7_200_000, 'claude-sonnet-5-5')], { at: NOON - 3_600_000, model: 'sonnet' }))).toContain('the app chose another model') // it runs the pin now: no "started before"
   expect(await deskLine(spent([desk(NOON - 100, 'claude-sonnet-5-5')]))).toBe(`${chose} (the live desk session runs sonnet now)`) // the spend is of an earlier session
+})
+
+test('doctor: spend on the model the app started the desk on is an info note, not FIX, once lean-agent switched the session to the pin', async () => {
+  const note = `the app started the desk on ${OPUS}; lean-agent switched it to sonnet ($0.65 spent on ${OPUS} today)`
+  // the switch is recorded when the session was really moved (verified), and only then
+  const h = spent([desk(NOON - 100, 'claude-sonnet-5-5')])
+  expect(await deskLine(h)).toContain('the app chose another model') // no record yet: still FIX
+  const e = engine([modelRow(), effortRow()], { models: ['claude-sonnet-5-5'] })
+  expect((await checkDeskModel(h.host, e.engine, OPUS, true)).kind).toBe('set')
+  expect(JSON.parse(h.files.get(`${L}/desk/model-set.json`)!)).toEqual({ from: OPUS, to: 'sonnet', at: NOON })
+  expect(await deskLine(h)).toBeUndefined() // not a FIX row any more
+  expect((await modelRows(h.host)).info).toEqual([note])
+  expect((await modelRows(h.host)).fix).toEqual([])
+  // doctor shows it as a note and says nothing is unexpected
+  const rows = await check(h.host, '/p')
+  expect(rows).toContain(`note ${note}`)
+  expect(rows).toContain('ok   no session on an unexpected model today')
+  expect(rows.filter(r => r.startsWith('FIX ')).join('\n')).not.toContain('the desk spent')
+  // a switch that did not take (the row was written but the model stayed) leaves no record
+  const n = spent([])
+  const stuck = engine([modelRow(), effortRow()], { models: [OPUS] })
+  expect((await checkDeskModel(n.host, stuck.engine, OPUS, true)).kind).toBe('unsettable')
+  expect(n.files.has(`${L}/desk/model-set.json`)).toBe(false)
+  expect(await deskLine(n)).toContain('the app chose another model')
+  // spend on ANOTHER model than the one switched from stays FIX
+  const o = spent([])
+  o.files.set(`${L}/desk/model-set.json`, JSON.stringify({ from: 'claude-haiku-5-5', to: 'sonnet', at: NOON - 1000 }))
+  expect(await deskLine(o)).toContain('the app chose another model')
+  // a record of two days ago does not explain today's spend
+  const y = spent([])
+  y.files.set(`${L}/desk/model-set.json`, JSON.stringify({ from: OPUS, to: 'sonnet', at: NOON - 2 * 86_400_000 }))
+  expect(await deskLine(y)).toContain('the app chose another model')
+  // a later session that could not be set (model.json is there) is a FIX again
+  const u = spent([])
+  u.files.set(`${L}/desk/model-set.json`, JSON.stringify({ from: OPUS, to: 'sonnet', at: NOON - 1000 }))
+  u.files.set(stateFile, JSON.stringify({ running: OPUS, pin: PIN, at: NOON }))
+  expect(await deskLine(u)).toContain('the app chose another model')
+  // the pin changed since (the record is for another pin)
+  const p = spent([])
+  p.files.set(`${L}/desk/model-set.json`, JSON.stringify({ from: OPUS, to: 'opus', at: NOON - 1000 }))
+  expect(await deskLine(p)).toContain('the app chose another model')
 })
 
 test('doctor fix: the pin time is recorded only when setup changes the pin', async () => {

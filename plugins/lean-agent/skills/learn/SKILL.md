@@ -14,6 +14,10 @@ never symlink (symlinked rule folders do not load).
 **Modes**
 - `--gaps` (the default when the repo has its own `CLAUDE.md` or `.claude/rules`): few files, ONLY what those docs miss,
   plus the contracts between areas. Most areas end as "covered by docs" (step 4) and get no rule.
+  The repo's `CLAUDE.md` (tracked by git or not), `.claude/CLAUDE.md`, `CLAUDE.local.md` and the user's `~/.claude/CLAUDE.md` load in
+  every session, so a rule line that repeats one of their lines loads twice: never write such a line. `lean_rules` `record` REFUSES
+  a rule that repeats them (it names the lines; remove them, or record the area with `covered_by`) and `check` reports them. A
+  tracked `CLAUDE.md` is the team's file: this skill never trims it; say "trimming needs a PR in the repo".
 - `--full` (the default when the repo has no such docs): every area gets a rule.
 - `--area <dir>`: only that area, in either mode. `--verify`: step 5. `--trim`: step 6.
 

@@ -19,7 +19,8 @@ Both modes run in the mod: you call one tool and show its answer. Nothing is mea
 - Read the table to the user as it is, then the suggestions: each names the concrete step (a plugin or MCP server to leave out
   of the project profile, desk: `lean_thread` `profile` with `mcp` / `plugins` (outside it a server is deferred, not removed, and a
   plugin is switched off in the thread's `enabledPlugins`; a thread asks the desk), a memory file to
-  move into path rules with `learn <project> --gaps`, rules that never loaded with `learn <project> --trim`, gaps that look
+  move into path rules with `learn <project> --gaps` (only an untracked one: the report marks each memory file tracked or untracked,
+  and a tracked, team-shared `CLAUDE.md` gets "trimming needs a PR in the repo" instead, no `--gaps` advice), rules that never loaded with `learn <project> --trim`, gaps that look
   like script candidates). Do not apply any of them without the user's yes.
 - The per-server and per-plugin sizes are `/context` definition sizes, most of them deferred by the engine: NOT first-turn cost
   (the "One source off at a time" lines are the measured effect). A server or plugin the project's threads really called is

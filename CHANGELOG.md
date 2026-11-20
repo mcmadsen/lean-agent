@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+
+
 ### Changed
 - **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
   budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the
@@ -24,6 +26,50 @@
   **Restart desk** moved to the header (from 80 % of the limit) and to the "desk over its limit" card.
 - **A minimized widget** (`placement: "widget"`, Claude desktop) draws a glance only, with no button: running and blocked threads,
   how many need you, desk context in percent, today's spend. A narrow body (under 50 columns) gets shorter rows and wrapping buttons.
+
+### Fixed
+- **Desk push with `pr` now works on Azure DevOps.** The PR host is picked from the push remote's URL (as the `pr` skill does):
+  GitHub keeps `gh pr create`; `dev.azure.com/<org>/<project>/_git/<repo>`, the old `<org>.visualstudio.com` form and both ssh forms
+  open the PR with `az repos pr create --org https://dev.azure.com/<org> --project .. --repository .. --source-branch .. --target-branch ..`
+  (argv, no shell; `az` is found on PATH or in `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`; it uses the user's `az login`, never a
+  token) and the PR link is read from its JSON. When `az` is missing or fails, the reply gives the create-PR link
+  (`.../_git/<repo>/pullrequestcreate?sourceRef=<branch>&targetRef=<base>`, URL-encoded) and says "az repos pr create needs az + az login"
+  instead of advising to install `gh`. An already open PR is found with `az repos pr list` and reported as open.
+- **An unregistered worktree no longer blocks the desk's push.** A thread that made its worktree with plain `git worktree add` got
+  "tN has no registered worktree". The push now adopts it when it is a linked worktree of the project's own repository (`git worktree list`),
+  on a branch, with HEAD equal to the approved sha, and no registry entry (of any thread) has it; it is registered for the thread
+  (`adopted`) and every other gate (branch, review, approval) still applies. Several candidates are named, never guessed.
+- **A taken registry key no longer fails silently** ("The registry has no free slot for this path"). New `lean_worktree` tool for threads
+  (`register`, `list`; `hooks/worktreereg.ts`) replaces hand-editing `worktrees.json`: a key whose recorded path is gone or no longer a
+  worktree is replaced; a key held by another live worktree gets a suffixed key (`<project>/<branch>~2`); the same worktree of another
+  thread, a damaged file and a failed write are refusals that say why. The review skill's ready-to-push step registers first.
+- **A tracked, team-shared `CLAUDE.md` is no "memory file" to trim.** `compare` marks every memory file tracked or untracked
+  (`git ls-files` in its folder, shown as `(tracked)` / `(untracked)` in the report); a tracked one gets "team file: trimming needs a PR
+  in the repo", no `learn --gaps` advice. `lean_rules` `record` now refuses a rule whose lines already appear in an always-loaded file
+  (the repo's `CLAUDE.md`, tracked or not, `.claude/CLAUDE.md`, `CLAUDE.local.md`, the user's `~/.claude/CLAUDE.md`; it names the lines,
+  and `covered_by` is the way out when nothing else is left), and `lean_rules` `check` reports such lines (the rule would load them twice).
+- **The feedback export leaked branch names, a colleague's first name and the OS build.** Blocked-thread lines kept "Branch
+  infra/<words>", a branch inside a registry key and a worktree path, and "did not post the reply to <Name>"; the environment text kept
+  "Darwin 25.6.0". Now a branch name is masked after the word branch/Branch, in worktree folders (`.../worktrees/<project>/<folder>`),
+  in registry keys, and wherever the worktree registry's own branches appear (checked first, so a branch that holds a project's name
+  is still masked as a branch); a first segment that is a branch type (`bugfix/`, `feature/`, `infra/`, `release/` ...) stays, the
+  rest becomes `<branch>`, any other first segment is masked too (it may be a person), and default branches are left. A capitalised
+  word after "reply to", "asked by", "from" or "to" becomes `<name>` unless it is a product or common word. "Darwin 25.6.0" becomes
+  "Darwin" (also Linux, Windows_NT, macOS). The final check refuses to write the file when a known branch, a branch after the word
+  "branch", an unmasked worktree folder, a name after "reply to" / "asked by" or an OS build survives.
+- **Push and registry hardening (from the strict review of the above).** A worktree is the project's by its git common dir, not by the
+  folder it sits in, so one made with `git worktree add ../x` keeps working on the second push after it was adopted or registered (the
+  main checkout itself is refused); an adopted worktree gets the project's own `guards.push-deny` list; adoption happens only when the
+  thread has no live registered worktree and the registry is written only once the review and the approval hold (a refused push changes
+  nothing); another thread's worktree is never taken over under a new key, and a shared one keeps its owner while the newcomer gets its
+  own key; `prune` only drops what it saw stale. On Azure DevOps a PR title or body that starts with `@` is padded so `az` never reads it
+  as a file, `@` is no part of a project or repository name, and a URL such as `https://host#@dev.azure.com/..` is not Azure DevOps. The
+  export keeps tool names (Read, Bash ...) after "from" / "to", keeps the file inside a worktree folder, and masks `branch (x/y)` and
+  comma lists of branches. `compare` also reads the memory file's path from the source column when that is where `/context` puts it.
+- **Doctor:** a stale registry entry (folder gone, or git says it is no worktree) is a FIX row and `fix` prunes it; a git that does not
+  answer never makes an entry stale. The desk's spend on the model the app started it on is an info note ("the app started the desk on
+  <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,
+  today only, not when a later session could not be set).
 
 
 ## 1.0.11

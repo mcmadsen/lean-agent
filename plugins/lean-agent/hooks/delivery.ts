@@ -12,6 +12,7 @@ import { reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
 import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
+import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -159,6 +160,11 @@ export const THREAD_TOOLS: Tool[] = [
     name: 'lean_profile',
     description: 'The project profile: which MCP servers and plugins its threads load (the rest is deferred, still found by ToolSearch). show: the profile and what this project\'s threads really used; fill: add what they used (the learn skill does this after learning).',
     inputSchema: obj({ action: { type: 'string', enum: ['show', 'fill'] }, project: { type: 'string', description: 'default: this thread\'s project' } }, ['action']),
+  },
+  {
+    name: 'lean_worktree',
+    description: 'The worktree registry (worktrees.json). register: register this thread\'s worktree (one made by the worktree skill or by plain `git worktree add`; it must be a linked worktree of the project\'s repository, on a branch); a key held by a worktree that is gone is replaced, one held by a live worktree gets a suffixed key, and a refusal says why. list: the entries and which are stale. The desk\'s push needs the thread\'s worktree registered.',
+    inputSchema: obj({ action: { type: 'string', enum: ['register', 'list'] }, path: { type: 'string', description: 'register: absolute path of the worktree\'s top folder' }, project: { type: 'string', description: 'default: this thread\'s project' }, shared: { type: 'boolean', description: 'register: another thread may use it too' } }, ['action']),
   },
 ]
 
@@ -420,7 +426,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         if (str(i.area) !== '_project' && !slugOk(str(i.area))) return { ok: false, text: 'record: the area must be a plain name (letters, digits, . _ -)' }
         const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
         const covered = str(i.covered_by) || str(i.coveredBy) || str(i['covered-by'])
-        return { ok: true, text: await recordRule(h, project, str(i.area), { globs: strs(i.globs) ?? [], sha: str(i.sha), lines: typeof i.lines === 'number' ? i.lines : undefined, relies: strs(i.relies), coveredBy: covered || undefined }) }
+        const text = await recordRule(h, project, str(i.area), { globs: strs(i.globs) ?? [], sha: str(i.sha), lines: typeof i.lines === 'number' ? i.lines : undefined, relies: strs(i.relies), coveredBy: covered || undefined })
+        return { ok: !text.startsWith('NOT recorded'), text } // (a rule that repeats an always-loaded file is refused: rules.ts)
       }
       if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
       if (i.action === 'sync') {
@@ -431,6 +438,21 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (i.action === 'stale') return { ok: true, text: JSON.stringify(await checkStale(h, project, repo)) }
       if (i.action === 'verify') return { ok: true, text: (await verifyRules(h, project, repo, str(i.area) || undefined)).lines.join('\n') }
       return { ok: false, text: `unknown lean_rules action ${String(i.action)}` }
+    }
+    if (name === 'lean_worktree') {
+      const th = await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})
+      if (i.action === 'list') {
+        const { reg, damaged } = await readRegistry(h, home)
+        if (damaged) return { ok: false, text: 'worktrees.json is not a JSON object (damaged)' }
+        const stale = new Map((await staleEntries(h)).map(s => [s.key, s.why]))
+        const rows = Object.entries(reg).map(([k, e]) => `${k} | ${typeof e?.path === 'string' ? e.path : '?'} | ${typeof e?.thread === 'string' ? e.thread : '-'} | ${stale.has(k) ? `STALE: ${stale.get(k)}` : 'ok'}`)
+        return { ok: true, text: rows.length ? rows.join('\n') : 'no worktrees registered' }
+      }
+      if (i.action !== 'register') return { ok: false, text: `unknown lean_worktree action ${String(i.action)}` }
+      const project = str(i.project) || (th.project ?? '')
+      if (!slugOk(project)) return { ok: false, text: 'lean_worktree register needs a project name (this thread has none)' }
+      const r = await registerOwn(h, home, { project, path: str(i.path), thread: id, shared: i.shared === true })
+      return { ok: r.ok, text: r.text }
     }
     if (name === 'lean_profile') {
       const own = (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project ?? ''

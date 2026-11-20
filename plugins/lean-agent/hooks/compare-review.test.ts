@@ -48,7 +48,7 @@ test('the saved report and history never carry a path: memory files above the pr
   expect(r.ok).toBe(true)
   const md = h.files.get(`${L}/compare/2026-11-18-proj.md`)!
   for (const bad of ['/work/acme', '/repo', '/h/', '/home/someone', 'SECRET-CONTENT', 'acme']) expect(md).not.toContain(bad)
-  expect(md).toContain('Memory files in clean: …/CLAUDE.md 1.8k, …/CLAUDE.md 900, …/CLAUDE.md 400')
+  expect(md).toContain('Memory files in clean: …/CLAUDE.md 1.8k (untracked), …/CLAUDE.md 900 (untracked), …/CLAUDE.md 400 (untracked)')
   expect(md).toContain('desk turn (spawn failed in …/x: ENOENT')
   expect(h.files.get(`${L}/compare/history.jsonl`)).not.toMatch(/\/work|\/repo|\/home/)
 })

@@ -7,6 +7,7 @@ import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskChoice, modelFamily, threadChoice } from './models'
+import { readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
 
@@ -181,11 +182,20 @@ export async function spendLine(h: Host): Promise<string | null> {
 // threads' recorded ones (a desk started before setup pinned it, a thread from before 1.0.2), and live sessions whose listed
 // model differs (`claude agents --json`, when it reports one). Returns one sentence each.
 const family = modelFamily
+// `info`: spend of today on the model the app started the desk on, when lean-agent switched that session to the pin (deskmodel.ts keeps
+// the record): nothing is wrong now, so doctor shows a note, never FIX
 export async function modelMismatches(h: Host): Promise<string[]> {
+  return (await modelRows(h)).fix
+}
+export async function modelRows(h: Host): Promise<{ fix: string[]; info: string[] }> {
   const home = await homeDir(h)
   const now = await h.clock.now()
   const out: string[] = []
+  const info: string[] = []
   const desk = (await deskChoice(h, home)).model
+  // switched today, and the switch is not undone by a later session that could not be set (deskmodel.ts keeps model.json for that)
+  const sw = await readDeskSwitch(h)
+  const switched = sw && family(sw.to) === desk && dayOf(sw.at) === dayOf(now) && !(await readDeskModel(h)) ? sw : null
   const allowed = new Set<string>()
   const def = await threadChoice(h, home, {})
   if (typeof def !== 'string') allowed.add(family(def.model))
@@ -212,7 +222,10 @@ export async function modelMismatches(h: Host): Promise<string[]> {
   const rm = ro.days[dayOf(now)]?.rmm ?? {} // the sessions' own requests: a worker's model is chosen per call and is no mismatch
   for (const [k, a] of Object.entries(rm)) {
     const [role, model = ''] = k.split('|')
-    if (role === 'desk' && family(model) !== desk) out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: ${deskWhy}`)
+    if (role === 'desk' && family(model) !== desk) {
+      if (switched && family(switched.from) === family(model)) info.push(`the app started the desk on ${model}; lean-agent switched it to ${desk} (${usd(a[0])} spent on ${model} today)`)
+      else out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: ${deskWhy}`)
+    }
     if (role === 'thread' && allowed.size && !allowed.has(family(model))) out.push(`threads spent ${usd(a[0])} today on ${model}, but none was started on ${[...allowed].join('/')} only: a thread from before 1.0.2 or a model given by hand; close it and Start again`)
   }
   for (const a of listing ?? []) {
@@ -221,6 +234,6 @@ export async function modelMismatches(h: Host): Promise<string[]> {
     if (t?.model && family(a.model) !== family(t.model)) out.push(`live session ${t.id} runs ${a.model}, lean-agent started it on ${t.model}`)
     else if (!t && a.cwd.replace(/\/$/, '') === deskDir(home) && family(a.model) !== desk) out.push(`the live desk session runs ${a.model}, lean-agent pins ${desk}`)
   }
-  return out
+  return { fix: out, info }
 }
 export { addTo }

@@ -9,7 +9,8 @@ import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, skewText } from './skew'
-import { modelMismatches } from './stats'
+import { modelRows } from './stats'
+import { pruneStale, staleEntries } from './worktreereg'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction, manualNote } from './deskcompact'
 import { reportFailures } from './delivery'
@@ -108,6 +109,13 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
   } catch {
     /* no threads yet */
   }
+  // worktrees.json entries whose folder is gone or is no worktree any more (the registry's key then blocks a new one): dropped
+  try {
+    const dropped = await pruneStale(h)
+    if (dropped.length) lines.push(`worktree registry: dropped ${dropped.length} stale entr${dropped.length === 1 ? 'y' : 'ies'} (${dropped.map(s => `${s.key}: ${s.why}`).join('; ')})`)
+  } catch (e) {
+    lines.push(`worktree registry: stale entries not pruned (${String((e as Error)?.message ?? e).slice(0, 100)})`)
+  }
   return { lines }
 }
 
@@ -149,9 +157,14 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const bigGlobs = await overCapGlobs(h).catch(() => [] as string[])
   for (const g of bigGlobs.slice(0, 5)) row(false, g)
   if (bigGlobs.length > 5) row(false, `${bigGlobs.length - 5} more rule path pattern(s) over the glob caps (lean_rules check names them)`)
-  const odd = await modelMismatches(h).catch(() => [] as string[])
-  for (const m of odd) row(false, m)
-  if (!odd.length) out.push('ok   no session on an unexpected model today')
+  const rows = await modelRows(h).catch(() => ({ fix: [] as string[], info: [] as string[] }))
+  for (const m of rows.fix) row(false, m)
+  for (const m of rows.info) out.push(`note ${m}`) // the desk was switched to the pin: spend on the app's model is history, not a fault
+  if (!rows.fix.length) out.push('ok   no session on an unexpected model today')
+  // stale worktree registry entries (the key blocks a new worktree of that branch); `fix` drops them
+  const stale = await staleEntries(h).catch(() => [])
+  if (stale.length) row(false, `worktrees.json has ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}: ${stale.slice(0, 5).map(s => `${s.key} (${s.why}${s.path ? `: ${s.path}` : ''})`).join('; ')}${stale.length > 5 ? `; ${stale.length - 5} more` : ''}. Run fix to drop them`)
+  else out.push('ok   no stale worktree registry entry')
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

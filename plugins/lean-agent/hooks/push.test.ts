@@ -2,13 +2,13 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
-import { compareUrl, firstError, repoOf } from './push'
+import { adoCreateLink, adoOf, adoPrUrl, compareUrl, firstError, repoOf } from './push'
 
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string; wtList?: string; registry?: Record<string, unknown> }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -18,6 +18,8 @@ async function setup(o: Opts = {}) {
   h.git.handler = a => {
     const s = a.join(' ')
     log.push(a)
+    if (s.includes('worktree list')) return o.wtList ? { exitCode: 0, stdout: o.wtList } : { exitCode: 1, stdout: '' }
+    if (s.includes('--show-toplevel')) return { exitCode: 0, stdout: a[1] + '\n' }
     if (s.includes('--git-common-dir')) return { exitCode: 0, stdout: (o.wtCommon && s.includes(WT) ? o.wtCommon : '/r/app/.git') + '\n' }
     if (s.includes('ls-remote')) return o.lsFail ? { exitCode: 128, stdout: '', stderr: 'fatal: unable to access remote' } : { exitCode: 0, stdout: `ref: refs/heads/${o.lsDefault ?? 'main'}\tHEAD\n${SHA}\tHEAD\n` }
     if (s.includes('rev-parse')) return { exitCode: 0, stdout: (o.head ?? SHA) + '\n' }
@@ -34,13 +36,18 @@ async function setup(o: Opts = {}) {
   }
   const ghCalls: { argv: string[]; cwd?: string; body: string; env?: Record<string, string>; timeoutMs?: number }[] = []
   h.exec.handler = (argv, c) => {
-    if (argv[1] === '--version') return { exitCode: o.gh === false ? 127 : 0, stdout: 'gh version 2\n' }
+    const isAz = /(^|\/)az$/.test(argv[0]!)
+    if (argv[1] === '--version') return { exitCode: (isAz ? o.az : o.gh) === false ? 127 : 0, stdout: 'version 2\n' }
     ghCalls.push({ argv, cwd: c.cwd, body: c.stdin ?? '<none>', env: c.env, timeoutMs: c.timeoutMs })
+    if (isAz) {
+      if (argv[3] === 'list') return { exitCode: 0, stdout: o.azList ?? '[]' }
+      return o.azFailure ? { exitCode: 1, stdout: '', stderr: o.azFailure } : { exitCode: 0, stdout: o.azOut ?? JSON.stringify({ pullRequestId: 12, repository: { webUrl: 'https://dev.azure.com/org1/00000000-aaaa/_git/repo1' } }) }
+    }
     return o.ghFailure ? { exitCode: 1, stdout: '', stderr: o.ghFailure } : { exitCode: 0, stdout: (o.ghUrl ?? 'https://github.com/o/r/pull/7') + '\n' }
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: o.state ?? 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
-  h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
+  h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify(o.registry ?? { 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
   if (o.review !== false) await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   const pushes = () => log.filter(a => a.includes('push'))
@@ -60,7 +67,8 @@ test('push refuses with the precise reason before anything leaves the machine, a
     ['a draft that is not a boolean', {}, { pr: { title: 't', draft: 'yes' } }, 'true or false'],
     ['no worktree registered', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', '{}')],
     ['a worktree of another thread', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, branch: 'feat', thread: 't2' } }))],
-    ['a worktree outside the project', {}, {}, 'does not belong to project app', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/elsewhere/feat', branch: 'feat', thread: 't1' } }))],
+    ['a worktree of another repository, outside the project', {}, {}, 'is not a worktree of the repository of project app', s => { s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/elsewhere/feat', branch: 'feat', thread: 't1' } })); const old = s.h.git.handler; s.h.git.handler = (a: string[], c: any) => (a.join(' ').includes('--git-common-dir') && a[1] === '/elsewhere/feat' ? { exitCode: 0, stdout: '/other/.git\n' } : old(a, c)) }],
+    ['the main checkout registered as a worktree', {}, {}, 'is the main checkout of project app', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/r/app', branch: 'feat', thread: 't1' } }))],
     ['a worktree of another repository (its config is the thread\'s own)', { wtCommon: '/h/.lean-agent/worktrees/app/feat/.git' }, {}, 'is not a worktree of the repository of project app'],
     ['a project without a folder', {}, {}, 'not a registered project with a folder', s => void s.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: {} }))],
     ['the default branch of the remote is unknown', { defaultBranch: '', lsFail: true }, {}, 'default branch of origin is unknown'],
@@ -275,4 +283,232 @@ test('compare URLs and first error lines are read from the output', () => {
   expect(compareUrl('Everything up-to-date')).toBeNull()
   expect(firstError({ stderr: 'hint: x\nfatal: could not read Username\nmore' })).toBe('fatal: could not read Username')
   expect(firstError({ stderr: '', stdout: '' })).toBe('no output')
+})
+
+const ADO_ORIGIN = 'https://dev.azure.com/org1/proj1/_git/repo1'
+const ADO_LINK = 'https://dev.azure.com/org1/proj1/_git/repo1/pullrequestcreate?sourceRef=feat&targetRef=main'
+
+test('adoOf reads org, project and repository from every Azure DevOps remote form, and nothing else', () => {
+  const want = { org: 'org1', project: 'proj1', repo: 'repo1' }
+  for (const url of [
+    'https://dev.azure.com/org1/proj1/_git/repo1',
+    'https://org1@dev.azure.com/org1/proj1/_git/repo1',
+    'https://dev.azure.com/org1/proj1/_git/repo1/',
+    'git@ssh.dev.azure.com:v3/org1/proj1/repo1',
+    'ssh://git@ssh.dev.azure.com/v3/org1/proj1/repo1',
+    'ssh://git@ssh.dev.azure.com:22/v3/org1/proj1/repo1',
+    'https://org1.visualstudio.com/proj1/_git/repo1',
+    'https://org1.visualstudio.com/DefaultCollection/proj1/_git/repo1',
+    'https://org1@org1.visualstudio.com/proj1/_git/repo1',
+    'org1@vs-ssh.visualstudio.com:v3/org1/proj1/repo1',
+  ]) expect([url, adoOf(url)]).toEqual([url, want])
+  // an encoded name is decoded; a project-less url names the project like the repository
+  expect(adoOf('https://dev.azure.com/org1/My%20Proj/_git/my%20repo')).toEqual({ org: 'org1', project: 'My Proj', repo: 'my repo' })
+  expect(adoOf('https://dev.azure.com/org1/_git/repo1')).toEqual({ org: 'org1', project: 'repo1', repo: 'repo1' })
+  for (const bad of ['https://github.com/o/r', 'git@github.com:o/r.git', '/srv/git/r', '', 'https://dev.azure.com/org1/proj1', 'https://dev.azure.com/org1/proj1/_git/', 'https://dev.azure.com/-org/proj1/_git/repo1', 'https://dev.azure.com/org1/-p/_git/repo1', 'https://dev.azure.com/org1/p%0Aq/_git/repo1', 'https://dev.azure.com/org1/p%2Fq/_git/repo1', 'https://dev.azure.com/org1/p%40q/_git/repo1', 'https://evil.example#@dev.azure.com/org1/proj1/_git/repo1', 'https://evil.example?x=@dev.azure.com/org1/proj1/_git/repo1', 'x#y@ssh.dev.azure.com:v3/org1/proj1/repo1', 'https://example.com/dev.azure.com/org1/proj1/_git/repo1', 'git@ssh.dev.azure.com:v3/org1/proj1']) expect([bad, adoOf(bad)]).toEqual([bad, null])
+})
+
+test('the create-PR link is URL-encoded, and the PR link is read from az JSON', () => {
+  const a = { org: 'org1', project: 'My Proj', repo: 'my repo' }
+  expect(adoCreateLink(a, 'feature/a b&c', 'main')).toBe('https://dev.azure.com/org1/My%20Proj/_git/my%20repo/pullrequestcreate?sourceRef=feature%2Fa%20b%26c&targetRef=main')
+  const b = { org: 'org1', project: 'proj1', repo: 'repo1' }
+  expect(adoPrUrl('{"pullRequestId": 7, "repository": {"webUrl": "https://dev.azure.com/org1/guid/_git/repo1/"}}', b)).toBe('https://dev.azure.com/org1/guid/_git/repo1/pullrequest/7')
+  expect(adoPrUrl('{"pullRequestId": 7}', b)).toBe('https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/7') // no webUrl: built
+  expect(adoPrUrl('WARNING: x\n[{"pullRequestId": 9}]', b)).toBe('https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/9') // a notice first; a list
+  expect(adoPrUrl('{"repository": {"webUrl": "https://x"}}', b)).toBeNull()
+  expect(adoPrUrl('{"pullRequestId": "7; rm"}', b)).toBeNull()
+  expect(adoPrUrl('not json', b)).toBeNull()
+  expect(adoPrUrl('[]', b)).toBeNull()
+})
+
+test('Azure DevOps remote: push, then az repos pr create (argv, no shell, the user\'s az login), PR id read from its JSON', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN } })
+  const r = await s.push({ pr: { title: 'Fix the thing', body: 'What changed.\n\n- tested' } })
+  expect(r).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12` })
+  expect(s.ghCalls).toHaveLength(1)
+  expect(s.ghCalls[0]!.argv).toEqual(['az', 'repos', 'pr', 'create', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'main', '--title=Fix the thing', '--description=What changed.\n\n- tested', '--output', 'json'])
+  expect(s.ghCalls[0]).toMatchObject({ cwd: WT, timeoutMs: 120_000, env: { GIT_TERMINAL_PROMPT: '0' } })
+  expect(JSON.stringify(s.ghCalls)).not.toMatch(/gh|token|--pat|AZURE_DEVOPS_EXT_PAT/)
+  expect(s.h.calls.some(c => c.argv[0] === 'gh')).toBe(false) // gh is never looked for
+  const hist = JSON.parse(s.history().trim())
+  expect(hist).toMatchObject({ ok: true, pr: 'https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12', compare: ADO_LINK })
+  expect(JSON.parse(s.inbox().trim()).text).toBe(`the desk pushed ${SHA} to origin/feat; PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12`)
+  // draft, an explicit base, the ssh and the old url forms, no body: no --description
+  const b = await setup({ urls: { origin: 'git@ssh.dev.azure.com:v3/org1/proj1/repo1' } })
+  await b.push({ pr: { title: 'T', base: 'develop', draft: true } })
+  expect(b.ghCalls[0]!.argv).toEqual(['az', 'repos', 'pr', 'create', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'develop', '--title=T', '--draft', '--output', 'json'])
+  const c = await setup({ urls: { origin: 'https://org1.visualstudio.com/proj1/_git/repo1' } })
+  expect((await c.push({ pr: { title: 'T' } })).ok).toBe(true)
+  expect(c.ghCalls[0]!.argv.slice(4, 10)).toEqual(['--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1'])
+  // the push itself is unchanged
+  expect(s.pushes()).toEqual([['-C', WT, '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  // no PR asked: the reply names the create-PR link (the push output of Azure DevOps names none)
+  const n = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 0, stderr: '' } })
+  expect(await n.push()).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; compare URL ${ADO_LINK}` })
+  expect(n.ghCalls).toEqual([])
+})
+
+test('Azure DevOps remote: a title or body that starts with @ never reaches az as a file reference', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN } })
+  await s.push({ pr: { title: '@~/.ssh/id_rsa', body: '@/etc/hosts\nmore' } })
+  const argv = s.ghCalls[0]!.argv
+  expect(argv).toContain('--title= @~/.ssh/id_rsa')
+  expect(argv).toContain('--description=\n@/etc/hosts\nmore')
+  expect(argv.filter(a => /^--(title|description)=@/.test(a))).toEqual([])
+  // an @ later in the text is untouched
+  const t = await setup({ urls: { origin: ADO_ORIGIN } })
+  await t.push({ pr: { title: 'ping @team', body: 'a @b' } })
+  expect(t.ghCalls[0]!.argv).toContain('--title=ping @team')
+})
+
+test('Azure DevOps remote: az is found in the usual places; missing az names az, never gh, and gives the create-PR link', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN }, az: false })
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain(`pushed ${SHA} to origin/feat`)
+  expect(r.text).toContain('az was not found')
+  expect(r.text).toContain('az repos pr create needs az + az login')
+  expect(r.text).toContain(`open it from ${ADO_LINK}`)
+  expect(r.text).not.toMatch(/\bgh\b/)
+  expect(s.ghCalls).toEqual([])
+  expect(JSON.parse(s.inbox().trim()).text).toBe(`the desk pushed ${SHA} to origin/feat; PR not created (no az), create-PR link ${ADO_LINK}`)
+  expect(JSON.parse(s.history().trim())).toMatchObject({ ok: true, pr: null, compare: ADO_LINK })
+  // a branch with a slash and a base are URL-encoded in the link
+  const t = await setup({ urls: { origin: ADO_ORIGIN }, az: false, branch: 'feature/a-b' })
+  expect((await t.push({ pr: { title: 'T', base: 'release-x' } })).text).toContain('pullrequestcreate?sourceRef=feature%2Fa-b&targetRef=release-x')
+  // not on PATH, but at the Homebrew place
+  const u = await setup({ urls: { origin: ADO_ORIGIN }, az: false })
+  u.h.files.set('/opt/homebrew/bin/az', '')
+  expect((await u.push({ pr: { title: 'T' } })).text).toContain('PR https://dev.azure.com/org1/00000000-aaaa/_git/repo1/pullrequest/12')
+  expect(u.ghCalls[0]!.argv[0]).toBe('/opt/homebrew/bin/az')
+})
+
+test('Azure DevOps remote: a failing az keeps the pushed state visible, names az + az login and the link; an open PR is found', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: "ERROR: Please run 'az login' to setup account.\nmore" })
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain(`pushed ${SHA} to origin/feat`)
+  expect(r.text).toContain("the PR step failed at az repos pr create: ERROR: Please run 'az login' to setup account.")
+  expect(r.text).toContain('az repos pr create needs az + az login')
+  expect(r.text).toContain(`open the PR from ${ADO_LINK}`)
+  expect(r.text).not.toMatch(/\bgh\b/)
+  expect(JSON.parse(s.history().trim())).toMatchObject({ ok: false, step: 'az repos pr create', compare: ADO_LINK })
+  // az exits 0 but prints no id
+  const t = await setup({ urls: { origin: ADO_ORIGIN }, azOut: '{}' })
+  expect((await t.push({ pr: { title: 'T' } })).text).toContain('az printed no pull request id')
+  // a PR for that branch pair is already open: az does not name it, the list does
+  const u = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: 'ERROR: TF401179: An active pull request for the source and target branch already exists.', azList: '[{"pullRequestId": 5}]' })
+  expect(await u.push({ pr: { title: 'T' } })).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; PR already open: https://dev.azure.com/org1/proj1/_git/repo1/pullrequest/5` })
+  expect(u.ghCalls[1]!.argv).toEqual(['az', 'repos', 'pr', 'list', '--org', 'https://dev.azure.com/org1', '--project', 'proj1', '--repository', 'repo1', '--source-branch', 'feat', '--target-branch', 'main', '--status', 'active', '--output', 'json'])
+  // ... and when the list finds none, it is the failure with the link
+  const v = await setup({ urls: { origin: ADO_ORIGIN }, azFailure: 'ERROR: TF401179: An active pull request for the source and target branch already exists.' })
+  expect((await v.push({ pr: { title: 'T' } })).ok).toBe(false)
+  // a push that failed creates no PR for Azure DevOps either
+  const w = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 1, stderr: 'fatal: nope' } })
+  expect((await w.push({ pr: { title: 'T' } })).ok).toBe(false)
+  expect(w.ghCalls).toEqual([])
+})
+
+const LIST = (...wts: [string, string, string][]) => ['worktree /r/app\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n', ...wts.map(([p, head, br]) => `worktree ${p}\nHEAD ${head}\n${br ? `branch refs/heads/${br}` : 'detached'}\n`)].join('\n')
+const registry = (s: Awaited<ReturnType<typeof setup>>) => JSON.parse(String(s.h.files.get('/h/.lean-agent/worktrees.json')))
+
+test('an unregistered linked worktree at the approved sha is adopted by the push; the other gates still apply', async () => {
+  // made with plain `git worktree add`, outside the project's folders, never registered
+  const a = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  const r = await a.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(a.pushes()).toEqual([['-C', '/w/feat', '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  expect(registry(a)).toEqual({ 'app/feat': { path: '/w/feat', repo: '/r/app', branch: 'feat', thread: 't1', adopted: true } })
+  // the project's own repository is asked, read-only
+  expect(a.log).toContainEqual(['-C', '/r/app', 'worktree', 'list', '--porcelain'])
+  // no review: adopted (it is registered for the thread), but nothing is pushed
+  const b = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']), review: false })
+  expect((await b.push()).text).toContain('no green review record')
+  expect(b.pushes()).toEqual([])
+  expect(registry(b)).toEqual({}) // a refused push changes nothing: the registry is written only once the review and approval hold
+  // the second push of that worktree (re-approved) finds it registered, though it lives outside the project's folders
+  await writeApproval(a.h.host, { project: 'app', sha: SHA, thread: 't1' })
+  const log2 = a.log.length
+  expect((await a.push()).ok).toBe(true)
+  expect(a.pushes()).toHaveLength(2)
+  expect(a.log.slice(log2).filter(x => x.includes('worktree'))).toEqual([]) // registered: no search for another
+  // a refused approval does not register either
+  const e = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']), approve: false })
+  expect((await e.push()).text).toContain('no valid approval')
+  expect(registry(e)).toEqual({})
+  // the project's own guard list applies to an adopted worktree (it sits outside the project's folders)
+  const g = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  g.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', guards: { 'push-deny': ['feat*'] } } }))
+  expect((await g.push()).text).toContain("guard 'feat*'")
+  expect(g.pushes()).toEqual([])
+  expect(registry(g)).toEqual({})
+  // a protected branch is refused as for a registered worktree
+  const c = await setup({ registry: {}, wtList: LIST(['/w/rel', SHA, 'release/1.0']), branch: 'release/1.0' })
+  expect((await c.push()).text).toContain('protected branch')
+  // registered worktrees keep working as before and are never searched for another
+  const d = await setup()
+  await d.push()
+  expect(d.log.filter(x => x.includes('worktree'))).toEqual([])
+})
+
+test('an unregistered worktree is NOT adopted unless it is the one linked worktree at that sha on a branch', async () => {
+  const none: [string, Opts, string][] = [
+    ['HEAD is another commit', { wtList: LIST(['/w/feat', 'f'.repeat(40), 'feat']) }, 'no registered worktree'],
+    ['detached', { wtList: LIST(['/w/feat', SHA, '']), branch: '' }, 'no registered worktree'],
+    ['git cannot list', {}, 'no registered worktree'],
+    ['only the main checkout is at the sha', { wtList: `worktree /r/app\nHEAD ${SHA}\nbranch refs/heads/feat\n` }, 'no registered worktree'],
+    ['registered for another thread (never taken over)', { registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) }, 'no registered worktree'],
+    ['a prunable entry', { wtList: LIST(['/w/feat', SHA, 'feat']).replace('branch refs/heads/feat', 'branch refs/heads/feat\nprunable gitdir file points to non-existent location') }, 'no registered worktree'],
+    ['two candidates (ambiguous, named)', { wtList: LIST(['/w/a', SHA, 'feat'], ['/w/b', SHA, 'feat2']) }, '2 unregistered worktrees are at'],
+  ]
+  for (const [name, opts, want] of none) {
+    const s = await setup({ registry: {}, ...opts })
+    const r = await s.push()
+    expect([name, r.ok, r.text]).toEqual([name, false, expect.stringContaining(want)])
+    expect([name, s.pushes()]).toEqual([name, []])
+    expect([name, s.history()]).toEqual([name, '']) // nothing consumed
+    if (name.startsWith('registered for another')) expect(registry(s)['app/feat'].thread).toBe('t2')
+  }
+})
+
+test('a thread whose own registered worktree moved past the approved sha is told so, not given another thread\'s worktree', async () => {
+  const s = await setup({ head: 'f'.repeat(40), wtList: LIST(['/w/other', SHA, 'feat2']) })
+  s.h.files.set(`${WT}/.git`, 'x') // its own worktree is live, at another commit
+  const old = s.h.git.handler
+  s.h.git.handler = (a: string[], c: any) => (a[1] === '/w/other' && a.includes('rev-parse') && !a.includes('--git-common-dir') && !a.includes('--show-toplevel') ? { exitCode: 0, stdout: SHA + '\n' } : old(a, c))
+  const r = await s.push()
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain(`HEAD of ${WT} is ffffffff, not ${SHA.slice(0, 8)}`)
+  expect(s.pushes()).toEqual([])
+  expect(Object.keys(registry(s))).toEqual(['app/feat'])
+  // its registered worktree is gone (removed): the unregistered one at the sha is adopted
+  const t = await setup({ wtList: LIST(['/w/other', SHA, 'feat']) })
+  const oldT = t.h.git.handler
+  t.h.git.handler = (a: string[], c: any) => (a[1] === WT && a.includes('rev-parse') && !a.includes('--git-common-dir') ? { exitCode: 128, stdout: '', stderr: 'fatal: cannot change to the folder' } : oldT(a, c))
+  const r2 = await t.push()
+  expect(r2.ok).toBe(true)
+  expect(t.pushes()[0]![1]).toBe('/w/other')
+})
+
+test('adopting under a key that another live worktree holds registers a suffixed key, never silently fails', async () => {
+  const s = await setup({ registry: { 'app/feat': { path: '/w/other', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  s.h.files.set('/w/other/.git', 'gitdir: x') // the other worktree exists
+  const r = await s.push()
+  expect(r.ok).toBe(true)
+  expect(registry(s)['app/feat'].path).toBe('/w/other')
+  expect(registry(s)['app/feat~2']).toMatchObject({ path: '/w/feat', thread: 't1', adopted: true })
+  // the recorded path is gone: the entry is replaced
+  const t = await setup({ registry: { 'app/feat': { path: '/w/gone', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  expect((await t.push()).ok).toBe(true)
+  expect(registry(t)['app/feat']).toMatchObject({ path: '/w/feat', thread: 't1' })
+  expect(Object.keys(registry(t))).toEqual(['app/feat'])
+})
+
+test('a GitHub remote still uses gh, whatever the host is called', async () => {
+  const s = await setup({ urls: { origin: 'https://github.com/o/r' } })
+  await s.push({ pr: { title: 'T' } })
+  expect(s.ghCalls[0]!.argv[0]).toBe('gh')
+  const t = await setup({ urls: { origin: 'https://example.com/dev.azure.com/org1/proj1/_git/repo1' } })
+  await t.push({ pr: { title: 'T' } })
+  expect(t.ghCalls[0]!.argv[0]).toBe('gh')
 })

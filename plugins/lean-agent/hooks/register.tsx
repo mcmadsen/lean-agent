@@ -141,7 +141,7 @@ const SCHEMA = {
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
     reason: { type: 'string', description: 'approve-push: why, in a few words' },
-    pr: { type: 'object', description: 'push: open a pull request after the push succeeded (gh pr create from the thread\'s worktree)', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string', description: 'default: the repo\'s default branch' }, draft: { type: 'boolean' } }, required: ['title'] },
+    pr: { type: 'object', description: 'push: open a pull request after the push succeeded (gh pr create, or az repos pr create for an Azure DevOps remote, from the thread\'s worktree)', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string', description: 'default: the repo\'s default branch' }, draft: { type: 'boolean' } }, required: ['title'] },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
@@ -350,7 +350,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create from the thread\'s worktree, once per approval; a thread never pushes). A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes). A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
