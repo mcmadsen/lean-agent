@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.20
 
 ### Added
 - **Stall watchdog.** A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued messages stayed unread that long, is `stalled`: red in the pane and in `lean_thread list` (which names the last activity time), ONE desk notice + toast per stall ("t7 has done nothing for 25 min, 3 messages unread: wake or restart it"), and a reminder line in the desk's context once per desk turn while it lasts. The thread's own hooks write `activity.json` in its folder (tool calls of the thread or of its workers, reports, prompts), so a thread waiting on a worker that still works is not stalled; a session waiting for your answer never is. `threads.stallRestart` (default false): when true the mod restarts a stalled thread itself (same path as the context restart) and says so.
