@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **A thread's direct report finds the desk again after a desk restart.** A report refused with "no live session on this machine has
+  id <uuid>" (the desk had restarted, the thread still held the old id in `desk.json`) fell back to the inbox and kept sending to the dead
+  id. The send now looks up the desk's live session (`claude agents --json`, the session in the desk folder, the newest when several)
+  when it is refused or when no id is recorded, writes it to `desk.json` for every thread, and sends once more; the result line says
+  "the desk had a new session". No live desk session = the refusal stands and the inbox has the row, as before.
 - **With `attribution` off a thread no longer follows Claude Code's own "end commits with Co-Authored-By / Claude-Session" reminder.**
   The reminder comes from the engine's attribution setting, which a thread's CLAUDE.md ("no trailers") could not outvote. The thread's
   `.claude/settings.json` now carries `attribution: {commit: "", pr: "", sessionUrl: false}` (empty text hides the trailer and the

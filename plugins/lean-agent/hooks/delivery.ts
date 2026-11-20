@@ -2,7 +2,7 @@
 // Desk -> thread: threads/tN/inbox.jsonl (a line's id is its 1-based position). The thread reads lines past
 // max(thread.json.delivered, consumed.json.n) and marks them consumed, so each line is delivered once.
 // Thread -> desk: desk/inbox.jsonl (reports, questions), read marker desk/inbox-read.json.
-import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
+import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
@@ -176,6 +176,29 @@ export const ASK_MAX = 8000
 const OPTIONS_MAX = 1000
 export const reportFile = (home: string, r: { ts: number; from: string; kind: 'report' | 'ask' }) => `${deskState(home)}/reports/${r.ts}-${r.from}-${r.kind}.md` // (the kind: a report and a question of one thread in one millisecond never share a file)
 
+// The desk's CURRENT session id, looked up when desk.json has none or the send says the recorded one is gone (a desk restart, a resume, an
+// older mod that never recorded it): the live session `claude agents --json` lists in the desk folder (the newest when several). '' = none.
+export async function liveDeskSid(h: Host, home: string): Promise<string> {
+  const r = await h.process.run(['claude', 'agents', '--json'], { timeoutMs: 20_000 }).catch(() => null)
+  if (!r || r.exitCode !== 0) return ''
+  let v: any
+  try {
+    v = JSON.parse(r.stdout)
+  } catch {
+    return ''
+  }
+  const list: any[] = Array.isArray(v) ? v : Array.isArray(v?.agents) ? v.agents : Array.isArray(v?.sessions) ? v.sessions : []
+  const desk = await realPath(h, deskDir(home))
+  const rows: { sid: string; at: number }[] = []
+  for (const a of list) {
+    const sid = String(a?.sessionId ?? a?.session_id ?? '')
+    if (!sid || /^(stopped|exited|dead|failed|error)$/i.test(String(a?.status ?? ''))) continue
+    const cwd = typeof a?.cwd === 'string' ? a.cwd.replace(/(.)\/+$/, '$1') : ''
+    if (cwd && (cwd === desk || (await realPath(h, cwd)) === desk)) rows.push({ sid, at: Number(a?.startedAt ?? a?.started_at ?? 0) || 0 })
+  }
+  return rows.sort((a, b) => b.at - a.at)[0]?.sid ?? ''
+}
+
 // the text of a full-text file (a report or a question, with its options)
 export const reportBody = (rec: { from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }) =>
   rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
@@ -241,7 +264,15 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!send) return ''
   const worth = rec.kind === 'ask' || rec.state === 'done' || rec.state === 'blocked' || important
   if (!worth) return ''
-  const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
+  let sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
+  let renewed = false // the desk's session id was looked up now (none recorded, or the recorded one was refused)
+  if (!sid) {
+    sid = await liveDeskSid(h, home)
+    if (sid) {
+      await recordDeskSid(h, sid).catch(() => undefined)
+      renewed = true
+    }
+  }
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
   // a long text: its full text goes to its own file first (the cut line points at it, by absolute path). `from` must be a thread id: it
   // is part of the file name. No file (bad name, write failed): the cut line is unkeyed and the row stays unread.
@@ -256,7 +287,18 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
     if (keyed) await setKey(h, home, key, true)
-    const r = await send(sid, line)
+    let r = await send(sid, line)
+    // refused ("no live session on this machine has id ..."): the desk was restarted since it recorded its id. Look up its current session
+    // once, keep that id for every thread, and send again; no live desk = the refusal stands and the inbox has the row.
+    if (r && r.isDelivered === false && !renewed) {
+      const live = await liveDeskSid(h, home)
+      if (live && live !== sid) {
+        await recordDeskSid(h, live).catch(() => undefined)
+        sid = live
+        renewed = true
+        r = await send(live, line)
+      }
+    }
     if (r && r.isDelivered === false) {
       if (keyed) await setKey(h, home, key, false)
       // refused: nothing points at the file, and the unread row hands the full text over at the next prompt (a send that THREW may have
@@ -264,7 +306,8 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
       if (file) await h.process.run(['rm', '-f', file]).catch(() => undefined)
       return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
     }
-    return !cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)'
+    const moved = renewed ? ' [the desk had a new session: found it and sent there]' : ''
+    return (!cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)') + moved
   } catch (e) {
     if (keyed) await setKey(h, home, key, false).catch(() => undefined)
     return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`
