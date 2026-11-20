@@ -22,7 +22,7 @@ export const stopRecordText = (tokens: number, limit: number) => `context ${kTok
 
 export async function readStop(h: Host, home: string, id: string, sid: string): Promise<StopRec | null> {
   const r = await readJson<Partial<StopRec> | null>(h, stopFile(home, id), null)
-  if (!r || typeof r !== 'object' || !sid || r.sid !== sid || typeof r.tokens !== 'number') return null
+  if (!r || typeof r !== 'object' || r.sid !== sid || typeof r.tokens !== 'number') return null // (an unknown session id '' is a key too: a turn end without one must not write a record every turn)
   return { sid, at: Number(r.at) || 0, tokens: r.tokens, limit: Number(r.limit) || 0, notices: Number(r.notices) || 0, pending: Array.isArray(r.pending) ? r.pending : [] }
 }
 export const writeStop = (h: Host, home: string, id: string, rec: StopRec) => writeJson(h, stopFile(home, id), rec)

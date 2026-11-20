@@ -64,9 +64,10 @@ const firstOf = (mk: Marker, sid: string) => !!(mk.last && sid && sid !== mk.las
 
 // The hard stop (1.0.19, contextstop.ts): the context is at or over the limit. The snapshot, then ONE record to the desk per session (a second
 // call for the same session writes nothing); a thread with work left is also marked for the desk's restart. Never throws.
-export async function hardStop(h: Host, id: string, o: { sid: string; tokens: number; limit: number; since: number; tasks?: unknown }): Promise<TurnOut['action']> {
+export async function hardStop(h: Host, id: string, o0: { sid: string; tokens: number; limit: number; since: number; tasks?: unknown }): Promise<TurnOut['action']> {
   try {
     const home = await homeDir(h)
+    const o = o0.sid ? o0 : { ...o0, sid: (await readJson<{ sid?: string } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null))?.sid ?? '' } // no session id from the engine: the thread's recorded one
     const prev = await readStop(h, home, id, o.sid)
     if (prev) return 'none'
     const inbox = `${deskState(home)}/inbox.jsonl`

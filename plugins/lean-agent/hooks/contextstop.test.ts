@@ -126,3 +126,22 @@ test('mod: a long turn is checked every 10 tool calls through session.usage(), a
   expect(inbox(h)).toHaveLength(1)
   expect(inbox(h)[0].text).toBe('context 121k over the limit 120k: state saved, restart me')
 })
+
+test('hard stop: the 2nd, 3rd... turn end over the limit writes no further record, and every tool call but lean_report is refused each time', async () => {
+  for (const sid of [S1, '']) {
+    const h = setup()
+    let action = ''
+    for (const tokens of [121_000, 140_000, 175_000, 202_000]) {
+      const out = await threadTurnEnd(h.host, 't1', { sid, tokens, since: 0 })
+      expect(out.stop).toEqual({ tokens, limit: 120_000 })
+      if (!action) action = out.action
+      else expect(out.action).toBe('none')
+      const gate = { sid: S1, tokens, limit: 120_000 }
+      for (const tool of ['Bash', 'Read', 'Write', 'Edit', 'Agent', 'mcp__lean-agent__lean_run', 'mcp__lean-agent__lean_thread', 'mcp__lean-agent__lean_ask']) expect(await stopGate(h.host, 't1', gate, { tool })).toEqual({ deny: stopLine(tokens, 120_000) })
+      expect(await stopGate(h.host, 't1', gate, { tool: 'mcp__lean-agent__lean_report', text: 'branch fix-x, 3 commits, tests green', state: 'working' })).toBeNull()
+    }
+    expect(action).toBe('checkpoint')
+    expect(inbox(h)).toHaveLength(1) // one record for four turn ends
+    expect(inbox(h)[0].text).toBe('context 121k over the limit 120k: state saved, restart me')
+  }
+})
