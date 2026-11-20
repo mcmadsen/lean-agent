@@ -17,6 +17,7 @@ const PANE = { plugin: 'lean-agent', component: 'Pane', requestId: 'lean-agent',
 const withProps = (props: Record<string, unknown>, surface = 'desktop') => ({ ...PANE, surface, props: { ...PANE.props, ...props } }) as any
 
 function world(on: any = null, agents: any[] = []) {
+  opened.length = 0
   resetLocks()
   resetViewCache()
   const h = fakeHost(on)
@@ -26,9 +27,17 @@ function world(on: any = null, agents: any[] = []) {
     // the mod's own store beneath the pane: the review key is the one the spec signs with (see `review`), nothing else is kept
     on('store.get', (_: any, e: any) => ({ value: e.key === 'review.key' ? KEY : undefined }))
     on('store.set', () => ({ value: undefined }))
+    // the engine's answer to $.ui.open: placed; what a button opened is kept for the specs
+    on('ui.open', (_: any, e: any) => {
+      opened.push({ id: e.id, title: e.title })
+      return { value: { isPlaced: true } }
+    })
   }
   return h
 }
+const opened: { id: string; title?: string }[] = []
+// the panes a button opened (the desk's own pane, opened at the session start, is not one of them)
+const byButton = () => opened.filter(o => o.id !== 'lean-agent')
 const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
 const texts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
 // A review record is signed with a key in the mod's own store. The pane runs in the engine's instance of the plugin (its own store, which
@@ -179,7 +188,8 @@ test('Needs you: absent when nothing waits; otherwise approvals, questions, read
   expect((await ui.findAll({ type: 'Button', text: /^(confirm )?push/i })).length).toBe(0) // a ready report has no push button: the desk pushes
   expect((await ui.findAll({ type: 'Button' })).filter((b: any) => /push/i.test(String(b.key))).length).toBe(0)
   await ui.press({ key: 'pane-t2' })
-  expect(await ui.find({ type: 'Text', text: /t2: the thread detail pane comes in this release/ })).toBeTruthy() // the stub says so until the pane is merged
+  expect(byButton()).toEqual([{ id: 'lean-agent-thread-t2', title: 't2 · synthetic t2' }]) // the question's Open button opens that thread's own pane
+  expect(await ui.find({ type: 'Text', text: /t2 opened in its own pane/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -204,7 +214,9 @@ test('a thread card: id and the whole title, one state word, model, branch, verd
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // working: no Close
   expect(await ui.find({ type: 'Button', key: 'resume-t1' })).toBeFalsy()
   await ui.press({ key: 'view-t1' })
-  expect(await ui.find({ type: 'Text', text: /t1: the thread detail pane comes in this release/ })).toBeTruthy()
+  expect(byButton().map(o => o.id)).toEqual(['lean-agent-thread-t1']) // Open on a card opens that thread's pane, not another
+  expect(byButton()[0]!.title).toContain('t1 · ')
+  expect(await ui.find({ type: 'Text', text: /t1 opened in its own pane/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -291,6 +303,7 @@ test('every section full: needs, cards, inbox, goals, closed and More all draw, 
   await ui.press({ key: 'sec-more' })
   expect(await ui.find({ type: 'Text', text: /proj · open/ })).toBeTruthy()
   await ui.press({ key: 'new-thread' })
-  expect(await ui.find({ type: 'Text', text: /The new-thread form comes in this release/ })).toBeTruthy()
+  expect(byButton()).toEqual([{ id: 'lean-agent-new-thread', title: 'New thread' }]) // the footer button opens the form
+  expect(await ui.find({ type: 'Text', text: /new thread form opened/ })).toBeTruthy()
   await ui.unmount()
 })

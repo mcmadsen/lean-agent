@@ -283,7 +283,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // a card's "Open" button: the thread's own detail pane (panelinks.ts)
     const openPaneOne = (id: string) => async () => {
       try {
-        const r: any = await openThreadPane(host, e.surface, id)
+        const r: any = await openThreadPane($, e.surface, id)
         notice = r && typeof r.text === 'string' ? short(r.text, 200) : ''
         if (r && r.ok === false) lastError = notice
       } catch (err) {
@@ -293,7 +293,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     }
     const newThreadPress = async () => {
       try {
-        const r: any = await openNewThread(host, e.surface)
+        const r: any = await openNewThread($, e.surface)
         notice = r && typeof r.text === 'string' ? short(r.text, 200) : ''
         if (r && r.ok === false) lastError = notice
       } catch (err) {
