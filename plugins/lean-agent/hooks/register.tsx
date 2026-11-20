@@ -880,8 +880,8 @@ export const register: Register = on => {
     const r: any = yield* next(e)
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
-      if (role.kind === 'thread' && !e.agentId && lastSid) await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '') // the first request of the session: its real base
-      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}) }, r?.usage?.model ?? e.model, r?.usage)
+      const fresh = role.kind === 'thread' && !e.agentId && !!lastSid && (await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '')) // the first request of the session: its real base, and its cost is the session's start (a restart's price)
+      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}), ...(fresh ? { fresh: true as const } : {}) }, r?.usage?.model ?? e.model, r?.usage)
       if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
     } catch {
       /* a ledger write that fails never stops the turn */

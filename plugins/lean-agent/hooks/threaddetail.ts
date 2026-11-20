@@ -10,7 +10,7 @@ import type { Rollup } from './ledger'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
 import { resolveRange } from './reviewprep'
-import { costBadge, threadCostsToday } from './stats'
+import { costBadge, costLine, threadCostsToday } from './stats'
 import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { isRunning, isWorking, listAgents, needsYou } from './threads'
@@ -57,6 +57,7 @@ export type ThreadDetail = {
   review?: ReviewInfo
   cost: { today: number; total: number } | null
   costBadge?: string // "$6.20", "$21.30!" over the alert; absent when the thread spent nothing today
+  costLine?: string // "today $6.20 (reviews $2.10, restarts $0.90)"
   reports: Report[] // newest first, at most REPORTS_MAX
   reportsTotal: number
   queued: { ts: number; from?: string; text: string }[]
@@ -224,7 +225,10 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   await guard('cost', async () => {
     d.cost = await costOf(h, id, now)
     const c = (await threadCostsToday(h))[id]
-    if (c) d.costBadge = costBadge(c) // the header's badge, "!" over the alert
+    if (c) {
+      d.costBadge = costBadge(c) // the header's badge, "!" over the alert
+      d.costLine = costLine(c)
+    }
   })
   await guard('context', async () => {
     if (t.keep === true) d.keep = true

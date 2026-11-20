@@ -206,7 +206,7 @@ test('a thread card: id and the whole title, one state word, model, branch, verd
   const ui = await $.ui.mount(PANE as any)
   const all = await texts(ui)
   expect(all).toContain(`t1 ${title}`) // not cut
-  expect(all).toContain('sonnet/high · working · $0.42 today · feat/synthetic-x · review green') // ONE word for the state, then the cost badge, agents, branch, verdict
+  expect(all).toContain('sonnet/high · working · today $0.42 · feat/synthetic-x · review green') // ONE word for the state, then the cost badge, agents, branch, verdict
   expect(all.some(t => /^busy$|\[running\]/.test(t))).toBe(false)
   expect(all).toContain('Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.') // the last report, one line
   expect(all.some(t => /^idle · no review$/.test(t) || /idle · no review/.test(t))).toBe(true) // t2: no report, no model recorded

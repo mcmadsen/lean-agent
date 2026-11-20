@@ -27,6 +27,16 @@
   and is not put back in that session; a fallback (`auto`) and a resume pass. ONE line per session reaches the model; the pane notice carries the count
   ("the app chose opus 4 times this session; lean-agent set sonnet each time"). The engine cannot tell the app's default from the app's model menu
   (both `sdk`), so the doctor's desk row says that, and that the question is asked once per session.
+- **The cost of long unattended work** (field: one feature thread spent about $215 in a day, mostly review passes and context restarts).
+  - Review policy by script: the FULL review (two independent passes when the risk is high) is for "ready to push"; at a milestone the default is ONE light
+    pass. `lean_review prepare` at level `light` answers "already reviewed at this milestone (...): skip" instead of preparing another pass when the head
+    already has a record ("sha range unchanged") or fewer than `review.minLines` (default 60) lines changed since the last pass; a second `full` prepare for
+    a head that already has a full record answers with that record (green or not) and starts no passes. A `since` the caller names is always prepared.
+    Config `review.perMilestone` (default true; false prepares every time). The first line of the prepare text carries `summary`: level, passes, model and
+    the expected cost ("LIGHT review, 1 pass (sonnet), expected ~$0.35").
+  - A per-thread daily spend line, "today $12.40 (reviews $5.10, restarts $0.90)", on the pane card, in the thread pane and as `today` in `lean_thread
+    list`: from the ledger, reviewer agents' cost, and the first request of each fresh session (new ledger field `fresh`, written by the thread's mod; a
+    session that begins within 10 minutes of the thread's creation is its start, not a restart). Functions `costLine`, `threadSpendLine` in stats.ts.
 
 
 ## 1.0.19

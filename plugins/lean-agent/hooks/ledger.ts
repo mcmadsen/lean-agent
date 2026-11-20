@@ -25,7 +25,7 @@ export const dayOf = (ts: number) => new Date(ts).toISOString().slice(0, 10)
 
 // ---- rows ------------------------------------------------------------------------------------------------------
 // effort / tmodel: a thread's row carries the effort and model the thread was started with (absent on older rows and on 0.45 rows)
-export type Norm = { ts: number; role: string; tN: string; agent: string; model: string; in: number; out: number; cr: number; cw: number; usd: number; legacy: boolean; effort?: string; tmodel?: string }
+export type Norm = { ts: number; role: string; tN: string; agent: string; model: string; in: number; out: number; cr: number; cw: number; usd: number; legacy: boolean; effort?: string; tmodel?: string; fresh?: true }
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
 const shortAgent = (a: string) => a.replace(/^lean-agent:/, '')
@@ -35,7 +35,7 @@ export function normalizeRow(o: unknown): Norm | null {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null
   const r = o as Record<string, any>
   if (typeof r.ts === 'number' && Number.isFinite(r.ts) && Math.abs(r.ts) <= 8.64e15 && typeof r.usd === 'number') { // (a ts that is no date would throw in dayOf: a damaged row)
-    return { ts: r.ts, role: str(r.role) || 'unknown', tN: str(r.tN) || '-', agent: shortAgent(str(r.agent)) || 'main', model: str(r.model) || '?', in: num(r.in), out: num(r.out), cr: num(r.cache_read), cw: num(r.cache_write), usd: r.usd, legacy: false, ...(str(r.effort) ? { effort: str(r.effort) } : {}), ...(str(r.tmodel) ? { tmodel: str(r.tmodel) } : {}) }
+    return { ts: r.ts, role: str(r.role) || 'unknown', tN: str(r.tN) || '-', agent: shortAgent(str(r.agent)) || 'main', model: str(r.model) || '?', in: num(r.in), out: num(r.out), cr: num(r.cache_read), cw: num(r.cache_write), usd: r.usd, legacy: false, ...(str(r.effort) ? { effort: str(r.effort) } : {}), ...(str(r.tmodel) ? { tmodel: str(r.tmodel) } : {}), ...(r.fresh === true ? { fresh: true as const } : {}) }
   }
   if (typeof r.ts === 'string' && ('cost_usd' in r || (r.usage && typeof r.usage === 'object'))) {
     const iso = /(?:Z|[+-]\d\d:?\d\d)$/.test(r.ts) ? r.ts : `${r.ts}Z` // 0.45 wrote naive times: read as UTC

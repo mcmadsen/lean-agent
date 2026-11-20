@@ -7,7 +7,7 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNotices } from './notices'
 import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
-import { costBadge, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
+import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
@@ -41,7 +41,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
+export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -318,7 +318,7 @@ export async function loadView(h: Host): Promise<View> {
         ...(sha ? { sha } : {}),
         review,
         cost: v.spend?.byThread[t.id] ?? 0,
-        ...(costs[t.id] ? { costBadge: costBadge(costs[t.id]!), costOver: costs[t.id]!.over } : {}),
+        ...(costs[t.id] ? { costBadge: costBadge(costs[t.id]!), costLine: costLine(costs[t.id]!), costOver: costs[t.id]!.over } : {}),
         ready: t.state === 'open' && isDone && review === 'green' && !pushed && !claimsPushed(lr?.text ?? ''),
         recTs: lr?.ts ?? 0,
         id: t.id,

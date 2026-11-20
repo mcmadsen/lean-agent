@@ -26,7 +26,8 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
 
 export type Config = { budget?: { daily?: unknown; threadDaily?: unknown } /* budgetalert.ts: alerts, not caps */; dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean }; deskTokens?: number; notify?: { toast?: boolean; sound?: boolean } /* notify.ts: toasts for the desk (default on); sound is accepted, no clip is bundled */; toolResultChars?: number; refusals?: { repeat?: number } /* refusals.ts: how often one refusal pattern repeats before the doctor names it (default 3) */; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
 // effort / tmodel: a thread's row carries the effort and the model the thread was started with (thread.json); `model` is what answered
-export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
+// fresh: the first main-loop request of a thread session (what a restart costs before any work; stats.ts threadSpendLine)
+export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; fresh?: true; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
 // ---- alert thresholds (config.json `budget`): these only warn the desk, they never refuse a request (dailyCapUsd does that) ---------------
 export const DEFAULT_DAILY_USD = 25
@@ -49,7 +50,7 @@ export const ledgerFile = (home: string) => `${leanDir(home)}/${LEDGER}`
 export const readConfig = (h: Host, home: string) => readJson<Config>(h, `${leanDir(home)}/config.json`, {})
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10)
 
-export async function record(h: Host, ctx: { role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string }, model: string, u: Usage | null | undefined): Promise<Row | null> {
+export async function record(h: Host, ctx: { role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; fresh?: true }, model: string, u: Usage | null | undefined): Promise<Row | null> {
   if (!u) return null
   const home = await homeDir(h)
   const row: Row = {

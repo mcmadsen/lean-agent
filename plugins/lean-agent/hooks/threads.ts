@@ -26,6 +26,7 @@ import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
 import { dismissAction } from './dismiss'
 import { threadToolsArgv } from './orchestrate'
+import { threadSpendLine } from './stats'
 import { baseLine, readBase } from './base'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
@@ -718,7 +719,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
     const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
     const cv = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }

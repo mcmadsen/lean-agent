@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { dayOf, normalizeRow, rotateLedger, syncRollup } from './ledger'
 import { logRuleLoad, recordRule, rulesStats } from './rules'
-import { modelMismatches, modelRows, spendLine, statsText } from './stats'
+import { costLine, modelMismatches, modelRows, spendLine, statsText, threadCostsToday, threadSpendLine } from './stats'
 import { resetLocks } from './threads'
 import { record, spentToday } from './budget'
 
@@ -408,4 +408,28 @@ test('a recorded row leaves out zero token counts and is still read', async () =
   const line = h.files.get(`${L}/ledger.jsonl`)!.trim()
   expect(JSON.parse(line)).toEqual({ ts: NOON, role: 'desk', model: 'sonnet', out: 1000, usd: 0.015 })
   expect((await syncRollup(h.host)).days[dayOf(NOON)]!.t.slice(0, 3)).toEqual([0.015, 0, 1000])
+})
+
+test('a thread\'s daily spend line: reviewer passes and the first request of each restarted session are split out of today\'s total', async () => {
+  const h = setup()
+  h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'p', state: 'open', sid: '', created: NOON - 3 * 3_600_000, lastWake: 0, delivered: 0 }))
+  const rows = [
+    row(NOON - 3 * 3_600_000 + 1000, { usd: 0.4, fresh: true }), // the thread's own first session: not a restart
+    row(NOON - 2 * 3_600_000, { usd: 6 }),
+    row(NOON - 90 * 60_000, { usd: 2, agent: 'lean-agent:reviewer' }),
+    row(NOON - 80 * 60_000, { usd: 3.1, agent: 'reviewer' }),
+    row(NOON - 60 * 60_000, { usd: 0.9, fresh: true }), // a restart
+    row(NOON - 50 * 60_000, { usd: 0.5, agent: 'worker-haiku' }),
+    row(NOON - DAY, { usd: 9, agent: 'reviewer' }), // yesterday
+  ]
+  h.files.set(`${L}/ledger.jsonl`, rows.join(''))
+  const c = (await threadCostsToday(h.host)).t1!
+  expect(Math.round(c.usd * 100)).toBe(1290)
+  expect(Math.round(c.reviews! * 100)).toBe(510)
+  expect(Math.round(c.restarts! * 100)).toBe(90)
+  expect(costLine(c)).toBe('today $12.90 (reviews $5.10, restarts $0.90)')
+  expect(await threadSpendLine(h.host, 't1')).toBe('today $12.90 (reviews $5.10, restarts $0.90)')
+  expect(await threadSpendLine(h.host, 't7')).toBeNull()
+  expect(costLine({ usd: 3, over: false })).toBe('today $3.00') // no split: nothing in brackets
+  expect(costLine({ usd: 25, over: true, reviews: 1 })).toBe('today $25.00! (reviews $1.00)')
 })
