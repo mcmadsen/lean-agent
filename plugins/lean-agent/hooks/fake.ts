@@ -3,7 +3,7 @@
 // ops beneath the plugin. Not used by the mod itself.
 export type Call = { argv: string[]; cwd?: string; stdin?: string; env?: Record<string, string>; timeoutMs?: number }
 
-export function fakeHost(on: any, opts: { home?: string } = {}) {
+export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean } = {}) {
   const home = opts.home ?? '/h'
   const files = new Map<string, string>()
   const links = new Map<string, string>()
@@ -29,7 +29,7 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
   const clock = { t: 1_000_000 }
   const ok = (stdout = '') => ({ exitCode: 0, stdout, stderr: '' })
   const impl = {
-    env: (name: string) => (name === 'HOME' ? home : undefined),
+    env: (name: string) => (name === 'HOME' ? home : name === 'LEAN_ORCHESTRATE' && !opts.orchestrate ? '0' : undefined), // the execution model (orchestrate.ts) is off in specs unless one opts in
     read: (path: string) => { const t = files.get(res(path)); if (t === undefined) throw new Error('ENOENT ' + path); return t },
     write: (path: string, text: string) => { writes.push(path); files.set(path, text) },
     exists: (path: string) => files.has(res(path)) || dirs().has(res(path)),
@@ -91,6 +91,8 @@ export function fakeHost(on: any, opts: { home?: string } = {}) {
     store: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => { store.set(k, v) } },
   }
   // and the engine's ops, for specs that go through a registered tool
+  // (the engine's host gives the mod only $HOME, so a session spec switches the execution model off through the config file)
+  if (on && !opts.orchestrate) files.set(`${home}/.lean-agent/config.json`, '{"lean":{"orchestrate":false}}')
   if (on) {
     on('env.get', (_: any, e: any) => ({ value: impl.env(e.name) }))
     on('fs.read', (_: any, e: any) => ({ value: impl.read(e.path) }))

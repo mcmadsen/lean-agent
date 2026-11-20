@@ -65,6 +65,18 @@ the data (the PATCH of a PR thread's status above is a write, not a harmless rea
   user's answer is read from the engine's typed `AskUserQuestion` result; if a real result does not carry it the desk says so and the
   pane's Approve / Deny is the decision.
 
+### Added
+- **Execution model** (`lean.orchestrate`, default on; see [README](README.md#execution-model)): the guard makes the desk a router
+  (project reads, searches, edits and Agent are refused: "the desk routes: …"; its tool results are cut to `deskToolResultChars`), a
+  thread an orchestrator (own Edit/Write on project files, greps and most Bash refused; `threads.directReads` small direct reads per
+  turn), and every other step one small, haiku-by-default worker job: `why-sonnet:` line for sonnet, brief ≤ `workers.briefChars`,
+  `workers.steps` tool calls per worker, `threads.workers` at once, a worker never spawns workers, Agent results cut to
+  `agentResultChars` with the full text saved. Small workers and reviewer passes are exempt from the user's `agents.cap`.
+- `lean_run`: test / build runs with the output in a file; the thread gets exit code, failing test names and the last 40 lines.
+- `hooks/preflight.ts`: the preflight pack (`preflightText`) of a thread's fresh start, computed by script.
+- `lean_doctor context`: tokens by tool and size bucket, the top 10 results, delegated against direct, Haiku share, from the transcript.
+- Worker and reader agent definitions: one step, `split: <rest>`, ≤ 30 lines, no nested agents.
+
 ## 1.0.14
 
 ### Added

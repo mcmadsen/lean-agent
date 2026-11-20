@@ -42,7 +42,11 @@ import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { finishedText, resetFinish, sweepFinished } from './finish'
-import { capResult, resetCap } from './cap'
+import { capResult, capTo, resetCap } from './cap'
+import { isSmall, loadOrch, orchEnd, orchTurnStart } from './orchestrate'
+import type { OCtx } from './orchestrate'
+import { runSummary, runText } from './runjob'
+import { contextReport } from './contextstat'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
@@ -139,7 +143,10 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals'] }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context'] }, session: { type: 'string', description: 'context: a session id (default: the newest session transcript)' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+// execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
+const RUN = 'lean_run'
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' } }, required: ['command'] } }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -345,6 +352,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       // (lean_profile is used once per learn run: behind ToolSearch, so it adds nothing to a thread's first turn)
       for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: t.name === 'lean_profile' })
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
+      await registerOnce($, { ...RUN_SPEC, isDeferred: false } as any)
     })
     // what this thread was started with: its profile (tool.describe defers the MCP servers outside it), model and effort (ledger rows)
     await step('thread profile', async () => {
@@ -608,6 +616,7 @@ export const register: Register = on => {
   // fallback when the hook is not delivered: a cheap compare of the session's directory
   on('turn.start', async ($, e: any, next) => {
     if (!e.agentId) busySince = (await $.clock.now()) || 1
+    if (!e.agentId && role.kind === 'thread') orchTurnStart(`${threadsDir(await homeDir(hostOf($)))}/${role.id}`) // the direct reads of a turn (threads.directReads) start at 0
     await redetect($)
     await showSkew($)
     if (!e.agentId && role.kind === 'desk') {
@@ -835,6 +844,7 @@ export const register: Register = on => {
         if (o.ok) dropSetupCheck()
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
       }
+      if (e.action === 'context') return { result: await contextReport(host, await homeDir(host), typeof e.session === 'string' && e.session ? e.session : undefined) } as any
       if (e.action === 'dismiss-old-desk') {
         const o = await dismissOldDesk(host)
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
@@ -843,6 +853,18 @@ export const register: Register = on => {
       return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env, dismiss-old-desk or refusals', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
+    }
+  })
+
+  on('tool.call', { tool: `mcp__lean-agent__${RUN}` as const }, async ($, e: any) => {
+    if (role.kind !== 'thread') await redetect($, undefined, true)
+    if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: RUN, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
+    try {
+      const home = await homeDir(hostOf($))
+      const r = await runSummary(hostOf($), { command: String(e.command ?? ''), cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : undefined, home })
+      return { result: runText(r), ...(r.exit === 0 ? {} : { isError: true as const }) } as any
+    } catch (err) {
+      return { result: `lean_run refused: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }
   })
 
@@ -878,6 +900,7 @@ export const register: Register = on => {
       await logRefusal(host, { text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }).catch(() => undefined) // for the feedback export
       return { deny: why } as any
     }
+    const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
@@ -890,8 +913,15 @@ export const register: Register = on => {
       r = await next(audited ? foregroundCall(e) : e)
     } finally {
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
+      if (octx) orchEnd(octx, e) // a worker's slot (threads.workers) is free again
     }
     await feedbackOf(host, e, r).catch(() => undefined)
+    // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
+    if (octx && r?.deny === undefined && !e.agentId) {
+      const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))
+      if (oc.on && role.kind === 'desk') r = await capTo(host, 'desk', r, oc.deskChars).catch(() => r)
+      else if (oc.on && role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) r = await capTo(host, role.id, r, oc.agentChars).catch(() => r)
+    }
     // an oversized Bash or MCP result of a thread's main loop is cut before it enters the conversation (cap.ts); the full text is a file
     if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
