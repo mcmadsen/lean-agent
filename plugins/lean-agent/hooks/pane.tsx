@@ -24,7 +24,7 @@ export const VERSION = '1.0.11'
 const NOTE_MS = 30_000 // the one-time "lean-agent set the model" line is drawn this long, then only the header chip carries it
 const GROUP_ROWS = 20 // rows drawn in one unfolded inbox group
 const NARROW = 50 // a body narrower than this (cells) gets the short forms
-const TONE: Record<GoalTone, string> = { working: 'green', waiting: 'yellow', stuck: 'red', quiet: 'gray' }
+const TONE: Record<GoalTone, string> = { working: 'success', waiting: 'warning', stuck: 'error', quiet: 'inactive' }
 
 let lastError = ''
 let lastRefresh = ''
@@ -147,7 +147,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         <Box flexDirection="column">
           <Text bold>lean-agent</Text>
           <Text color={stuck ? 'error' : 'success'}>{`${working} running · ${stuck} blocked`}</Text>
-          <Text color={needN ? 'warning' : undefined} dimColor={!needN}>{`${needN} need you`}</Text>
+          <Text color={needN ? 'warning' : undefined} dimColor={!needN}>{`${needN} need${needN === 1 ? 's' : ''} you`}</Text>
           <Text dimColor>{`desk context ${dpct} · today ${v?.spend ? `$${v.spend.today.toFixed(2)}` : 'n/a'}`}</Text>
           {errors.length > 0 && <Text color="error">{`error: ${short(errors[0]!, 60)}`}</Text>}
         </Box>
@@ -433,7 +433,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const gOpen = ui.rows[`g${g.from}`] ?? g.unread.length > 0 // a thread with something unread is open, the others folded
       const all = ui.rows[`all${g.from}`] === true
       const shownRead = all ? g.read.slice(0, GROUP_ROWS) : g.read.slice(0, READ_SHOWN)
-      const label = `${gOpen ? '▾' : '▸'} ${g.from}${g.title ? ` ${short(g.title, narrow ? 16 : 40)}` : ''} (${g.unread.length ? `${g.unread.length} unread` : 'read'}${g.read.length ? `, ${g.read.length} read` : ''})`
+      const label = `${gOpen ? '▾' : '▸'} ${g.from}${g.title ? ` ${short(g.title, narrow ? 16 : 40)}` : ''} (${g.unread.length ? `${g.unread.length} unread${g.read.length ? `, ${g.read.length} read` : ''}` : `${g.read.length} read`})`
       const newest = [...g.unread, ...g.read].reduce((p, a) => (a.n > p.n ? a : p))
       return (
         <Box key={`grp-${g.from}`} flexDirection="column">
@@ -661,7 +661,7 @@ export async function paneRole($: any, role: { kind: string; id?: string }): Pro
     cancels.push(() => t.cancel())
     // toasts for what needs the user and for done reports (notify.ts, no model); the first pass only records what is already there
     const tick = () => notifyTick(hostOf($), (text: string) => $.ui.toast(text)).then(() => undefined, () => undefined)
-    await tick()
+    void tick() // (not awaited: the session start must not wait for a second look at every thread)
     const n = $.clock.every(15_000, tick)
     cancels.push(() => n.cancel())
   } else if (role.kind === 'thread' && role.id) {

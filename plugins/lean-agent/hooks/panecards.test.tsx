@@ -96,6 +96,41 @@ test('view: a thread\'s branch, commit, review verdict, cost today and "ready to
   expect(v.needs[0]!.notify).toBe(true)
 })
 
+test('view: the newest report that names a commit decides; an older commit\'s green verdict is never shown for a newer one', async () => {
+  const h = world()
+  thr(h, 't1')
+  await writeReview(h.host, { green: true, sha: SHA, project: 'proj', branch: 'feat/old-line' })
+  inbox(
+    h,
+    { ts: 100, from: 't1', kind: 'report', text: `Checked, commit ${SHA.slice(0, 7)}, not pushed.`, state: 'working' },
+    { ts: 200, from: 't1', kind: 'report', text: 'Done. Branch: feat/new-line, commit 7654321, not pushed.', state: 'done' },
+  )
+  const row = (await loadView(h.host)).threads[0]!
+  expect([row.review, row.sha, row.ready, row.branch]).toEqual(['none', undefined, false, 'feat/new-line']) // 7654321 has no record
+})
+
+test('view: a push the desk recorded in the thread\'s history ends "ready to push" (the desk inbox never hears of it)', async () => {
+  const h = world()
+  thr(h, 't1')
+  await writeReview(h.host, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
+  inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Done. Branch: feat/synthetic-x, commit ${SHA.slice(0, 7)}, not pushed.`, state: 'done' })
+  expect((await loadView(h.host)).needs.map(n => n.kind)).toEqual(['push'])
+  h.files.set(`${L}/threads/t1/history.jsonl`, line({ ts: 5, kind: 'push', sha: SHA, ok: false }) + line({ ts: 6, kind: 'push', sha: SHA, ok: true }))
+  const v = await loadView(h.host)
+  expect(v.threads[0]!.ready).toBe(false)
+  expect(v.needs).toEqual([])
+  expect(v.threads[0]!.review).toBe('green') // the card still says what the review was
+})
+
+test('view: a failed push is still ready, a push of another commit changes nothing', async () => {
+  const h = world()
+  thr(h, 't1')
+  await writeReview(h.host, { green: true, sha: SHA, project: 'proj' })
+  inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Done, commit ${SHA.slice(0, 7)}, not pushed.`, state: 'done' })
+  h.files.set(`${L}/threads/t1/history.jsonl`, line({ ts: 5, kind: 'push', sha: SHA, ok: false }) + line({ ts: 6, kind: 'push', sha: '1234567' + '9'.repeat(33), ok: true }))
+  expect((await loadView(h.host)).threads[0]!.ready).toBe(true)
+})
+
 test('view: a record whose signature does not verify is "not green", whatever it says', async () => {
   const h = world()
   thr(h, 't1')
@@ -150,7 +185,7 @@ test('Needs you: absent when nothing waits; otherwise approvals, questions, read
 
 // ---- thread cards ------------------------------------------------------------------------------------------------------
 test('a thread card: id and the whole title, one state word, model, branch, verdict, cost, the last report on one line, its buttons', async ($, on) => {
-  const title = 'Make the hub understand every extension point that the synthetic plugin exposes, then document each of them in the guide'
+  const title = 'Rename the synthetic widget registry across all four example modules, then update every example that mentions the old name'
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1), title, model: 'sonnet', effort: 'high' })
   thr(h, 't2', { state: 'open' })
@@ -185,7 +220,7 @@ test('widget placement: a glance (running, blocked, needs you, desk context, bud
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0) // clicks may not reach a widget
   const all = await texts(ui)
   expect(all).toContain('1 running · 1 blocked')
-  expect(all).toContain('1 need you')
+  expect(all).toContain('1 needs you')
   expect(all).toContain('desk context n/a · today $1.50')
   expect(all.some(t => /Threads|Inbox|Goals/.test(t))).toBe(false) // a glance, not the pane
   await ui.unmount()

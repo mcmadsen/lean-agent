@@ -6,7 +6,8 @@
 // the engine plays only a plugin's own bundled clip (`$.audio.play({ asset })`) and this plugin ships no audio file, so there is no
 // sound to play. (Speech, `$.audio.speak`, needs the platform's synthesizer and would read thread titles aloud: not done.)
 //
-// Once per event: the keys already toasted are kept in desk/notify-seen.json (the newest SEEN_MAX). The first run on a home has no file:
+// Once per event: the keys already toasted are kept in desk/notify-seen.json while their event lasts (a key is forgotten when its event
+// is over, so a thread that waits on a prompt twice is two events; the newest SEEN_MAX at most). The first run on a home has no file:
 // it records what is there without a toast (an install must not announce a month of old reports). While toasts are off the keys are
 // still recorded, so turning them on later announces only what happens after.
 import { readConfig } from './budget'
@@ -51,7 +52,12 @@ export async function notifyTick(h: Host, toast: (text: string) => void, view?: 
     const first = !file
     const seen = new Set<string>(Array.isArray(file?.keys) ? file.keys.filter((k): k is string => typeof k === 'string') : [])
     const fresh = events.filter(e => !seen.has(e.key))
-    if (fresh.length || first) await writeJson(h, seenFile(home), { keys: [...seen, ...fresh.map(e => e.key)].slice(-SEEN_MAX) })
+    // A key whose event is over is forgotten, so the same kind of event can come again (a thread that waits on a prompt, resumes, and
+    // waits again is two events). Not while the view is incomplete (a failed listing makes events vanish for a moment and come back).
+    const complete = !v.errors.some(m => /^(agents|threads|answers|questions|scripts):/.test(m))
+    const now = new Set(events.map(e => e.key))
+    const kept = [...seen].filter(k => !complete || now.has(k))
+    if (fresh.length || first || kept.length !== seen.size) await writeJson(h, seenFile(home), { keys: [...kept, ...fresh.map(e => e.key)].slice(-SEEN_MAX) })
     if (first || !cfg.toast || !fresh.length) return []
     const shown = fresh.slice(0, PER_TICK).map(e => e.text)
     if (fresh.length > PER_TICK) shown.push(`+${fresh.length - PER_TICK} more: see the lean-agent pane`)

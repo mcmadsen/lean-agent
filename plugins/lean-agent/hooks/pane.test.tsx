@@ -241,7 +241,7 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   expect(await ui.find({ type: 'Text', text: /2 read message\(s\) older than 7 days are archived/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /fresh/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▸ t2 two \(read, 9 read\)/ })).toBeTruthy() // nothing unread: folded
+  expect(await ui.find({ type: 'Button', text: /▸ t2 two \(9 read\)/ })).toBeTruthy() // nothing unread: folded
   await ui.press({ key: 'grp-btn-t2' })
   const drawn = async () => (await ui.findAll({ type: 'Button', text: /recent/ })).length
   expect(await drawn()).toBe(5) // the last 5 read rows

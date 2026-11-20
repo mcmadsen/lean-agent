@@ -13,7 +13,9 @@ const inbox = (h: any, ...recs: unknown[]) => h.files.set(`${L}/desk/inbox.jsonl
 function world() {
   resetViewCache()
   const h = fakeHost(null)
-  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: '[]' } : { exitCode: 0, stdout: '' })
+  const agents: any[] = []
+  let agentsFail = false
+  h.claude.handler = (a: string[]) => (a[0] === 'agents' ? (agentsFail ? { exitCode: 2, stdout: '' } : { exitCode: 0, stdout: JSON.stringify(agents) }) : { exitCode: 0, stdout: '' })
   thr(h, 't1')
   thr(h, 't2')
   const toasts: string[] = []
@@ -21,7 +23,7 @@ function world() {
     resetViewCache()
     return notifyTick(h.host, t => toasts.push(t))
   }
-  return { h, toasts, tick }
+  return { h, toasts, tick, agents, failAgents: (b: boolean) => { agentsFail = b } }
 }
 
 const th = (o: Partial<ThreadRow>): ThreadRow => ({ id: 't1', title: 'x', state: 'open', run: 'idle', last: '', resumable: false, working: false, done: false, asking: false, blocked: false, needsYou: false, lastReport: '', review: 'none', cost: 0, ready: false, recTs: 5, ...o })
@@ -64,6 +66,26 @@ test('a question, an approval and a blocked thread each toast once; a new blocke
   expect(w.toasts).toHaveLength(4)
 })
 
+test('a thread that waits on a prompt, resumes and waits again is two events; a failed listing in between is not one', async () => {
+  const w = world()
+  const SID = '11111111-2222-3333-4444-555555555555'
+  thr(w.h, 't1', { sid: SID })
+  const row = (waiting: boolean) => ({ sessionId: SID, name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1, ...(waiting ? { waitingFor: 'permission prompt' } : {}) })
+  await w.tick() // first pass
+  w.agents.push(row(true))
+  expect(await w.tick()).toEqual(['blocked: t1 waits on a prompt in its own session'])
+  expect(await w.tick()).toEqual([]) // still the same wait
+  w.failAgents(true) // `claude agents` fails for a tick: the wait is not over, so it is not announced again
+  expect(await w.tick()).toEqual([])
+  w.failAgents(false)
+  expect(await w.tick()).toEqual([])
+  w.agents[0] = row(false) // answered: the event is over
+  expect(await w.tick()).toEqual([])
+  w.agents[0] = row(true) // the next prompt
+  expect(await w.tick()).toEqual(['blocked: t1 waits on a prompt in its own session'])
+  expect(w.toasts).toHaveLength(2)
+})
+
 test('config notify.toast false: no toast, and what happened meanwhile is not announced when it is turned on again; sound does nothing', async () => {
   const w = world()
   await w.tick()
@@ -104,6 +126,7 @@ test('the desk starts the pass at once (it only records) and every 15 s; a due t
   }
   inbox(w.h, { ts: 100, from: 't1', kind: 'report', text: 'old news', state: 'done' })
   const cancels = await paneRole($, { kind: 'desk' })
+  await new Promise(r => (globalThis as any).setTimeout(r, 50)) // the first pass is not awaited by the start: let it finish
   expect(every.map(t => t.ms)).toEqual([5_000, 15_000])
   expect(shown).toEqual([]) // the first pass only recorded
   inbox(w.h, { ts: 200, from: 't2', kind: 'report', text: 'new news', state: 'done' })

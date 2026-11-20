@@ -15,6 +15,7 @@ import { deskChoice } from './models'
 import { contextSize, deskNote, deskTokens } from './deskcompact'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
+import { slugOk } from './rules'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
@@ -89,7 +90,7 @@ async function reviewShas(h: Host, home: string, project: string, cache: Reviews
   return names
 }
 async function reviewOf(h: Host, home: string, project: string, sha: string, cache: Reviews): Promise<{ verdict: Verdict; branch?: string; full?: string }> {
-  if (!project || !/^[\w.-]+$/.test(project)) return { verdict: 'none' }
+  if (!slugOk(project)) return { verdict: 'none' }
   const full = (await reviewShas(h, home, project, cache)).find(s => s.startsWith(sha))
   if (!full) return { verdict: 'none' }
   const rec = await readJson<Partial<Review> | null>(h, reviewFile(home, project, full), null)
@@ -184,8 +185,10 @@ export async function loadView(h: Host): Promise<View> {
     const pa = await paneAck(h, home)
     const isUnread = (n: number) => n >= pa.upTo && !pa.ns.includes(n)
     v.unread = recs.filter((_, n) => isUnread(n)).length
-    v.answers = recs
-      .map((rec, n) => ({ n, rec, unread: isUnread(n) }))
+    const all = recs.map((rec, n) => ({ n, rec, unread: isUnread(n) }))
+    v.archived = all.filter(a => archivedRow(a, now)).length // (counted over every record, not only the ones handed on)
+    v.answers = all
+      .filter(a => !archivedRow(a, now))
       .sort((a, b) => Number(b.unread) - Number(a.unread) || b.n - a.n)
       .slice(0, ANSWERS_MAX)
   })
@@ -214,7 +217,9 @@ export async function loadView(h: Host): Promise<View> {
   for (const r of recs) {
     owner.set(r.from, r.text)
     lastRec.set(r.from, r)
-    recsOf.set(r.from, [...(recsOf.get(r.from) ?? []), r])
+    const mine = recsOf.get(r.from)
+    if (mine) mine.push(r)
+    else recsOf.set(r.from, [r])
   }
   // spend first: a thread card shows what the thread cost today
   await guard('budget', async () => {
@@ -246,27 +251,34 @@ export async function loadView(h: Host): Promise<View> {
       let branch: string | undefined
       let sha: string | undefined
       let review: Verdict = 'none'
-      for (const r of [...(recsOf.get(t.id) ?? [])].slice(-6).reverse()) {
+      let full: string | undefined
+      // the NEWEST report that names a commit decides: a newer commit without a review record is "no review", never an older commit's verdict
+      for (const r of [...(recsOf.get(t.id) ?? [])].reverse()) {
         if (r.kind !== 'report') continue
         branch ??= branchIn(r.text)
-        for (const c of shasIn(r.text)) {
+        const named = shasIn(r.text)
+        if (!named.length) continue
+        for (const c of named) {
           const o = await reviewOf(h, home, t.project, c, reviews)
           if (!o.full) continue
+          full = o.full
           sha = o.full.slice(0, 7)
           review = o.verdict
           branch = o.branch ?? branch
           break
         }
-        if (sha) break
+        break
       }
       const isDone = !!lr && lr.kind === 'report' && lr.state === 'done'
+      // the desk's push is recorded in the thread's history (push.ts), not in the desk inbox: a pushed commit is not "ready to push"
+      const pushed = isDone && review === 'green' && !!full && (await readJsonl<{ kind?: string; ok?: boolean; sha?: string }>(h, `${threadsDir(home)}/${t.id}/history.jsonl`).catch(() => [])).some(x => x?.kind === 'push' && x.ok === true && typeof x.sha === 'string' && x.sha.length >= 7 && full!.startsWith(x.sha))
       v.threads.push({
         lastReport: flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
         ...(branch ? { branch } : {}),
         ...(sha ? { sha } : {}),
         review,
         cost: v.spend?.byThread[t.id] ?? 0,
-        ready: t.state === 'open' && isDone && review === 'green' && !claimsPushed(lr?.text ?? ''),
+        ready: t.state === 'open' && isDone && review === 'green' && !pushed && !claimsPushed(lr?.text ?? ''),
         recTs: lr?.ts ?? 0,
         id: t.id,
         title: t.title,
@@ -309,8 +321,12 @@ export async function loadView(h: Host): Promise<View> {
     }
   })
   // the header chip (the pinned model and effort, or what it really runs when that is another) and the context bar
+  // (the model lookup is guarded on its own: the size, the limit and the "cannot compact" note, with its Restart desk button, never depend on it)
+  let pin: { model: string; effort: string } = { model: '', effort: '' }
+  await guard('desk model pin', async () => {
+    pin = await deskChoice(h, home)
+  })
   await guard('desk', async () => {
-    const pin = await deskChoice(h, home)
     v.desk = { context: contextSize(), limit: await deskTokens(h), model: deskRuns || pin.model, effort: deskRuns ? '' : pin.effort, note: deskNote() }
   })
   // what the mod set is information, not an error: a dim line at the top, not a red one (and not counted in a thread's status line)
@@ -318,10 +334,7 @@ export async function loadView(h: Host): Promise<View> {
   if (setNote) v.deskModelSet = setNote
   v.errors.push(...(await readNotices(h)).filter(n => n !== deskModelNote && n !== setNote))
   // the inbox by thread, read rows older than a week hidden (they stay in inbox.jsonl)
-  const g = groupInbox(v.answers, now, new Map(v.threads.map(t => [t.id, t.title] as const)))
-  v.inbox = g.groups
-  v.archived = g.archived
-  v.answers = v.answers.filter(a => !archivedRow(a, now))
+  v.inbox = groupInbox(v.answers, now, new Map([...v.closed, ...v.threads].map(t => [t.id, t.title] as const))).groups
   v.needs = needsOf(v)
   return v
 }
