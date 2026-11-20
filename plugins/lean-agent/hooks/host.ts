@@ -43,7 +43,7 @@ export function hostOf($: any): Host {
       ),
     },
     env: { get: () => $.env.get('HOME') }, // the only variable the mod reads (the engine wants it as a literal)
-    clock: { now: () => $.clock.now() },
+    clock: { now: () => $.clock.now(), sleep: (ms: number) => Promise.resolve($.clock.sleep(ms)).then(() => undefined) },
     store: { get: (k: string) => $.store.get(k), set: (k: string, v: unknown) => $.store.set(k, v) },
   }
 }

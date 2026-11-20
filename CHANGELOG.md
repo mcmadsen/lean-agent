@@ -3,6 +3,23 @@
 ## Unreleased
 
 ### Added
+- **A thread says which lean-agent code it runs, and the desk shows it when that is not the installed one.** A thread restarted from the
+  pane while 1.0.11 was installed loaded the review skill from the cached 1.0.9 folder, its `lean_review` only took 1.0.9's fields, its
+  refusals said "(lean-agent 1.0.9)", and nothing told the desk: `thread.json` `version` is the version the DESK saw installed when it
+  started the session, not what the session loaded. Now the thread's own mod writes `running` (`version`, `sid`, `at`) into `thread.json`
+  at its session start (once per session; a desk save keeps it; the record of an older session is ignored). `lean_thread` `list` adds
+  `running 1.0.9, installed 1.0.11` to a thread's line when they differ (and `codeVersion` / `skew` to its data); a start, restart or
+  reopen waits up to 8 s for the new session's report and adds the same words and "ask it for nothing the running version lacks" to
+  its reply; `resume` trusts what the session reported (a session that really runs older code is replaced by a fresh one, not resumed);
+  the doctor has a `FIX thread tN running X, installed Y` row per skewed thread (a newer, dev copy is a note) with the cause and what the
+  user can do. The desk guide says not to ask such a thread for features its version lacks and to restart it once the cause is fixed
+  (and never to restart a service itself).
+- **Finding (README "Troubleshooting").** lean-agent causes none of it: a thread's `settings.json` only switches other plugins off (no
+  `enabledPlugins` pin on lean-agent, no `--plugin-dir`), and the plugin cache keeps every installed version's folder. The most likely
+  cause is the background service behind `claude --bg`, which keeps the plugin state it loaded at its own start and hands it to every
+  session it starts until it is restarted (`claude plugin update` itself says "restart required to apply"). Established from the code and
+  the CLI help, not reproduced. The doctor row tells the user to quit and reopen the Claude app when no thread is working, then restart the
+  thread; lean-agent never restarts a service itself.
 - **A subagent cap that leaves room for the review.** `config.json` `agents.cap` (a whole number; absent or 0 = lean-agent sets none) is
   the most subagents a thread's own loop may start in one session (the session id in thread.json; a restart counts from zero again,
   the count is `threads/<tN>/subagents.json`). Reviewer passes (`lean-agent:reviewer`, up to 6 per session) and the review's

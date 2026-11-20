@@ -1,6 +1,6 @@
 import type { Register } from 'claude-code'
 
-import { recordSid, resolveRole, roleReport } from './role'
+import { recordRunning, recordSid, resolveRole, roleReport } from './role'
 import type { Role } from './role'
 import { deskClaudeMd, leanThread, listAgents } from './threads'
 import { limitFromUsage, limitTick, readLimit, sameReset, writeLimit } from './limits'
@@ -452,7 +452,10 @@ async function settle($: any, host: Host, dir: string, root: string, useRoot = t
     lastSid = typeof sid === 'string' ? sid : ''
     if (!startDir) startDir = dir
     r = await resolveRole(host, { cwd: dir, root, sid: lastSid, current: role, useRoot })
-    if (r.kind === 'thread') await recordSid(host, r.id, lastSid).catch(() => false)
+    if (r.kind === 'thread') {
+      await recordSid(host, r.id, lastSid).catch(() => false)
+      await recordRunning(host, r.id, lastSid, VERSION).catch(() => false) // which code this session runs, for the desk (skew.ts runningOf)
+    }
     if (r.kind === 'desk' && lastSid) await recordDeskSid(host, lastSid).catch(() => undefined) // threads send their reports straight to it
   })
   if (ok) {

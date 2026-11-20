@@ -12,7 +12,7 @@ export type Host = {
   }
   process: { run: (argv: readonly string[], init?: any) => Promise<{ exitCode: number; stdout: string; stderr: string }> }
   env: { get: (n: string) => Promise<string | undefined> }
-  clock: { now: () => Promise<number> }
+  clock: { now: () => Promise<number>; sleep?: (ms: number) => Promise<void> } // sleep: a real wait; a host without it (the specs') never waits
   store: { get: (k: string) => Promise<unknown>; set: (k: string, v: unknown) => Promise<void> } // the mod's own key-value store (not a file)
 }
 
