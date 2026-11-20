@@ -6,10 +6,14 @@
 // A key is `<project>/<branch>`; when that key already belongs to ANOTHER live worktree the entry gets `<key>~2`, `~3` ... (git forbids `~`
 // in a branch name, so a suffixed key never collides with a real one, and `startsWith('<project>/')` readers still see it). A key whose
 // recorded path no longer exists, or is not a worktree any more, is replaced. A refusal always says why.
-import { homeDir, leanDir, realPath, writeJson } from './state'
+//
+// A worktree registered to another thread that is CLOSED (or whose thread folder is gone) is taken over by the next thread that registers
+// it (lean_worktree register) or pushes it (the desk's push): the entry moves to that thread, marked `adopted` with the former owner in
+// `from`. A worktree of a thread that is open, parked or closing is never taken over: the refusal names the owner and its state.
+import { homeDir, leanDir, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 
-export type WtEntry = { path?: unknown; repo?: unknown; branch?: unknown; thread?: unknown; shared?: unknown; adopted?: unknown }
+export type WtEntry = { path?: unknown; repo?: unknown; branch?: unknown; thread?: unknown; shared?: unknown; adopted?: unknown; from?: unknown }
 export const registryFile = (home: string) => `${leanDir(home)}/worktrees.json`
 const MAX_SUFFIX = 20
 
@@ -82,8 +86,23 @@ export async function linkedWorktrees(h: Host, repo: string): Promise<Linked[]> 
   return out
 }
 
+// What the thread that owns an entry is: its recorded state (open, parked, closing, closed), `gone` when its folder no longer exists,
+// `unreadable` when thread.json or the id is no use. Only closed and gone can be taken over; a guess is never one of them.
+export async function ownerState(h: Host, home: string, id: string): Promise<string> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return 'unreadable'
+  const file = `${threadsDir(home)}/${id}/thread.json`
+  try {
+    if (!(await h.fs.exists(file))) return 'gone'
+    const v = JSON.parse(String(await h.fs.read(file)))
+    return v && typeof v === 'object' && typeof v.state === 'string' && v.state ? v.state : 'unreadable'
+  } catch {
+    return 'unreadable'
+  }
+}
+const takeable = (st: string) => st === 'closed' || st === 'gone'
+
 export type RegInput = { project: string; path: string; repo: string; branch: string; thread: string; adopted?: boolean; shared?: boolean }
-export type RegResult = { ok: boolean; key?: string; text: string }
+export type RegResult = { ok: boolean; key?: string; text: string; from?: string }
 
 let tail: Promise<unknown> = Promise.resolve()
 const serial = <T>(f: () => Promise<T>): Promise<T> => {
@@ -101,13 +120,22 @@ async function doRegister(h: Host, o: RegInput): Promise<RegResult> {
   const real = await realPath(h, o.path)
   const base = `${o.project}/${o.branch}`
   const notes: string[] = []
-  // the same worktree under ANY key (its branch may have changed since): another thread's, not shared, is never taken over
+  // the same worktree under ANY key (its branch may have changed since): another thread's, not shared, is taken over only when that
+  // thread is closed (or gone); an open, parked or closing owner is named in the refusal
   let sharedPath = false
+  const replaced: string[] = [] // keys of closed threads' entries for this very worktree: they move to this thread
+  const formerOwners: string[] = []
   for (const [k, e] of Object.entries(reg)) {
     if (!e || typeof e !== 'object' || !abs(e.path) || (await realPath(h, e.path)) !== real) continue
-    if (typeof e.thread === 'string' && e.thread && e.thread !== o.thread && e.shared !== true) return { ok: false, key: k, text: `worktree NOT registered: ${e.path} is ${e.thread}'s (${k}, not shared); make a new worktree, or ask the user to mark it shared` }
+    if (typeof e.thread === 'string' && e.thread && e.thread !== o.thread && e.shared !== true) {
+      const st = await ownerState(h, home, e.thread)
+      if (!takeable(st)) return { ok: false, key: k, text: `worktree NOT registered: ${e.path} is ${e.thread}'s (${k}, not shared) and ${e.thread} is ${st}: ask ${e.thread} to close it and register again, make a new worktree, or ask the user to mark it shared` }
+      replaced.push(k)
+      if (!formerOwners.includes(e.thread)) formerOwners.push(e.thread)
+    }
     if (e.shared === true) sharedPath = true
   }
+  const from = formerOwners.join(', ')
   for (let n = 1; n <= MAX_SUFFIX; n++) {
     const key = n === 1 ? base : `${base}~${n}`
     const cur = reg[key]
@@ -115,8 +143,8 @@ async function doRegister(h: Host, o: RegInput): Promise<RegResult> {
     if (!cur || typeof cur !== 'object') take = true
     else if (abs(cur.path) && (await realPath(h, cur.path)) === real) {
       // the same worktree: a refresh of this thread's own entry; a shared one of another thread stays as it is (it keeps its thread, so
-      // it can still push) and this thread gets an entry of its own under the next key
-      if (typeof cur.thread === 'string' && cur.thread && cur.thread !== o.thread) { notes.push(`${key} is ${cur.thread}'s shared entry`); continue }
+      // it can still push) and this thread gets an entry of its own under the next key; a closed thread's entry is this thread's now
+      if (typeof cur.thread === 'string' && cur.thread && cur.thread !== o.thread && !replaced.includes(key)) { notes.push(`${key} is ${cur.thread}'s shared entry`); continue }
       take = true
     } else if (!abs(cur.path) || isStale(await worktreeState(h, cur.path))) {
       notes.push(`replaced the stale entry ${key}${abs(cur.path) ? ` (${cur.path} is gone or no longer a worktree)` : ' (no usable path)'}`)
@@ -126,14 +154,16 @@ async function doRegister(h: Host, o: RegInput): Promise<RegResult> {
     }
     if (!take) continue
     const prev = reg[key] && typeof reg[key] === 'object' ? reg[key]! : {}
-    reg[key] = { ...(prev.path && abs(prev.path) && (await realPath(h, prev.path)) === real ? prev : {}), path: o.path, repo: o.repo, branch: o.branch, thread: o.thread, ...(o.adopted ? { adopted: true } : {}), ...(o.shared || sharedPath ? { shared: true } : {}) }
+    reg[key] = { ...(prev.path && abs(prev.path) && (await realPath(h, prev.path)) === real ? prev : {}), path: o.path, repo: o.repo, branch: o.branch, thread: o.thread, ...(o.adopted || from ? { adopted: true } : {}), ...(from ? { from } : {}), ...(o.shared || sharedPath ? { shared: true } : {}) }
+    for (const k of replaced) if (k !== key) delete reg[k] // a closed thread's entry under another key (the branch was renamed since)
     try {
       await writeJson(h, registryFile(home), reg)
     } catch (e) {
       return { ok: false, key, text: `worktree NOT registered: ${registryFile(home)} could not be written (${String((e as Error)?.message ?? e).slice(0, 120)})` }
     }
     if (n > 1) notes.push(`registered under ${key}`)
-    return { ok: true, key, text: `registered ${key} -> ${o.path}${notes.length ? ` (${notes.join('; ')})` : ''}` }
+    if (from) notes.push(`took over the registration from ${from}, a closed thread`)
+    return { ok: true, key, text: `registered ${key} -> ${o.path}${notes.length ? ` (${notes.join('; ')})` : ''}`, ...(from ? { from } : {}) }
   }
   return { ok: false, text: `worktree NOT registered: ${base} and its ${MAX_SUFFIX - 1} suffixed keys are all taken by live worktrees; run doctor (stale entries) or remove one` }
 }
@@ -210,4 +240,54 @@ export async function unregisteredAt(h: Host, home: string, repo: string, sha: s
   if (hits.length === 1) return { one: hits[0] }
   if (hits.length > 1) return { why: `${hits.length} unregistered worktrees are at ${sha.slice(0, 8)} (${hits.map(w => w.path).join(', ')}): register the right one (lean_worktree register)` }
   return {}
+}
+
+// The desk's push, second chance: a live linked worktree of the project's repository at `sha`, on a branch, that is registered to OTHER
+// threads only, all of them closed (or gone). Read-only: the registry is written by registerWorktree once the push's gates hold. A
+// worktree of an open, parked or closing thread, a shared one, or one registered without a thread is never a candidate: `why` says so.
+export async function takeoverCandidate(h: Host, home: string, repo: string, sha: string, self: string): Promise<{ one?: Linked & { from: string }; why?: string }> {
+  const { reg, damaged } = await readRegistry(h, home)
+  if (damaged) return {}
+  const hits: (Linked & { from: string })[] = []
+  let why = ''
+  for (const w of await linkedWorktrees(h, repo)) {
+    if (w.head !== sha || !w.branch) continue
+    const real = await realPath(h, w.path)
+    const owners: string[] = []
+    let odd = ''
+    for (const e of Object.values(reg)) {
+      if (!e || typeof e !== 'object' || !abs(e.path) || (await realPath(h, e.path)) !== real) continue
+      if (e.shared === true) odd = `${w.path} is a shared worktree: it is never taken over`
+      else if (typeof e.thread !== 'string' || !e.thread) odd = odd || `${w.path} is registered without a thread: run lean_worktree register from ${self}`
+      else if (!owners.includes(e.thread)) owners.push(e.thread)
+    }
+    if (!owners.length && !odd) continue // nobody's: the adopt step's business
+    if (owners.includes(self)) continue // this thread's own entry (already looked at)
+    if (odd) { why = why || odd; continue }
+    let blocked = ''
+    for (const o of owners) {
+      const st = await ownerState(h, home, o)
+      if (!takeable(st)) blocked = blocked || `${w.path} is registered to ${o} (${st}), so it is not taken over: ask ${o} to close it, or run lean_worktree register from ${self} after ${o} closed`
+    }
+    if (blocked) { why = why || blocked; continue }
+    if ((await worktreeState(h, w.path)) === 'live') hits.push({ ...w, from: owners.join(', ') })
+  }
+  if (hits.length === 1) return { one: hits[0]! }
+  if (hits.length > 1) return { why: `${hits.length} worktrees of closed threads are at ${sha.slice(0, 8)} (${hits.map(w => w.path).join(', ')}): register the right one (lean_worktree register)` }
+  return why ? { why } : {}
+}
+
+// doctor: worktrees whose registered thread is closed or gone (live ones only: a gone folder is a stale entry). An info row, nothing is re-owned
+// here: the next push for that branch (or lean_worktree register) takes it over, which needs a thread that works on the branch.
+export async function closedOwnerRows(h: Host): Promise<string[]> {
+  const home = await homeDir(h)
+  const { reg } = await readRegistry(h, home)
+  const hits: string[] = []
+  for (const [key, e] of Object.entries(reg)) {
+    if (!e || typeof e !== 'object' || !abs(e.path) || typeof e.thread !== 'string' || !e.thread || e.shared === true) continue
+    const st = await ownerState(h, home, e.thread)
+    if (takeable(st) && (await worktreeState(h, e.path)) === 'live') hits.push(`${key} (${e.thread}, ${st === 'gone' ? 'thread gone' : 'closed'}: ${e.path})`)
+  }
+  if (!hits.length) return ['ok   no worktree is registered to a closed thread']
+  return [`note ${hits.length} worktree${hits.length === 1 ? ' is' : 's are'} registered to a closed thread: ${hits.slice(0, 5).join('; ')}${hits.length > 5 ? `; ${hits.length - 5} more` : ''}. The next push for that branch takes it over; or prune it if the branch is gone (remove the worktree, then doctor fix drops the entry)`]
 }

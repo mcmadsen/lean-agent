@@ -675,6 +675,7 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.
+- **A push is refused because the branch's worktree is registered to a closed thread**: nothing to fix by hand. The push takes the registration over for the pushing thread by script (live linked worktree of the project, HEAD at the approved sha, all push gates green); `lean_worktree register` from the thread does the same. A worktree of an open, parked or closing thread is never taken over: ask that thread to close it. `doctor` lists worktrees owned by closed threads.
 
 ## Development
 

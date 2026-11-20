@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadTool } from './delivery'
-import { isWorktree, linkedWorktrees, pruneStale, readRegistry, registerOwn, registerWorktree, staleEntries, unregisteredAt } from './worktreereg'
+import { closedOwnerRows, isWorktree, linkedWorktrees, pruneStale, readRegistry, registerOwn, registerWorktree, staleEntries, takeoverCandidate, unregisteredAt } from './worktreereg'
 
 const FILE = '/h/.lean-agent/worktrees.json'
 const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 
-type Opts = { registry?: unknown; notWt?: string[]; foreign?: string[]; branch?: Record<string, string>; list?: string }
+// threads: other threads' recorded state (thread.json); a thread not listed has no folder (gone)
+type Opts = { registry?: unknown; notWt?: string[]; foreign?: string[]; branch?: Record<string, string>; list?: string; threads?: Record<string, string> }
 // project app at /r/app; worktrees "exist" when a file sits inside them
 function setup(o: Opts = {}) {
   const h = fakeHost(null)
@@ -21,6 +22,7 @@ function setup(o: Opts = {}) {
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  for (const [id, state] of Object.entries(o.threads ?? {})) h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ id, title: 'x', project: 'app', state, sid: '', created: 1, lastWake: 0, delivered: 0 }))
   if (o.registry !== undefined) h.files.set(FILE, typeof o.registry === 'string' ? o.registry : JSON.stringify(o.registry))
   const live = (p: string) => void h.files.set(`${p}/.git`, 'gitdir: x')
   const reg = () => JSON.parse(String(h.files.get(FILE)))
@@ -78,11 +80,11 @@ test('a key held by a LIVE worktree gets a suffixed key; the live entry is untou
 })
 
 test('the same worktree of another thread is refused with the reason, unless it is shared', async () => {
-  const s = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2' } } })
+  const s = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2' } }, threads: { t2: 'open' } })
   s.live('/w/a')
   const r = await registerWorktree(s.h.host, input('/w/a'))
   expect(r.ok).toBe(false)
-  expect(r.text).toContain("worktree NOT registered: /w/a is t2's (app/feat, not shared)")
+  expect(r.text).toContain("worktree NOT registered: /w/a is t2's (app/feat, not shared) and t2 is open")
   expect(s.reg()['app/feat'].thread).toBe('t2')
   const sh = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2', shared: true } } })
   sh.live('/w/a')
@@ -95,12 +97,96 @@ test('the same worktree of another thread is refused with the reason, unless it 
   expect((await registerWorktree(sh.h.host, input('/w/a'))).key).toBe('app/feat~2')
   expect(Object.keys(sh.reg())).toEqual(['app/feat', 'app/feat~2'])
   // another thread's worktree is never taken over under a NEW key either (its branch may have changed since it was registered)
-  const moved = setup({ registry: { 'app/old-name': { path: '/w/a', branch: 'old-name', thread: 't2' } } })
+  const moved = setup({ registry: { 'app/old-name': { path: '/w/a', branch: 'old-name', thread: 't2' } }, threads: { t2: 'parked' } })
   moved.live('/w/a')
   const mr = await registerWorktree(moved.h.host, input('/w/a', { branch: 'new-name' }))
   expect(mr.ok).toBe(false)
-  expect(mr.text).toContain("/w/a is t2's (app/old-name, not shared)")
+  expect(mr.text).toContain("/w/a is t2's (app/old-name, not shared) and t2 is parked")
   expect(Object.keys(moved.reg())).toEqual(['app/old-name'])
+})
+
+test('a worktree registered to a CLOSED (or vanished) thread is taken over by register: the entry moves, the former owner is kept in from', async () => {
+  const s = setup({ registry: { 'app/feat': { path: '/w/a', repo: '/r/app', branch: 'feat', thread: 't2' } }, threads: { t2: 'closed' }, branch: { '/w/a': 'feat' } })
+  s.live('/w/a')
+  const r = await registerWorktree(s.h.host, input('/w/a'))
+  expect(r).toMatchObject({ ok: true, key: 'app/feat', from: 't2' })
+  expect(r.text).toContain('took over the registration from t2')
+  expect(s.reg()).toEqual({ 'app/feat': { path: '/w/a', repo: '/r/app', branch: 'feat', thread: 't1', adopted: true, from: 't2' } })
+  // the owner's thread folder is gone: the same
+  const gone = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't9' } } })
+  gone.live('/w/a')
+  expect(await registerWorktree(gone.h.host, input('/w/a'))).toMatchObject({ ok: true, from: 't9' })
+  expect(gone.reg()['app/feat']).toMatchObject({ thread: 't1', from: 't9' })
+  // the closed thread's entry sits under another key (its branch was renamed): it moves, no second entry stays behind
+  const renamed = setup({ registry: { 'app/old-name': { path: '/w/a', branch: 'old-name', thread: 't2' }, 'app/other': { path: '/w/o', branch: 'other', thread: 't2' } }, threads: { t2: 'closed' } })
+  renamed.live('/w/a')
+  expect(await registerWorktree(renamed.h.host, input('/w/a', { branch: 'new-name' }))).toMatchObject({ ok: true, key: 'app/new-name', from: 't2' })
+  expect(Object.keys(renamed.reg())).toEqual(['app/other', 'app/new-name'])
+  // a shared entry of a closed thread stays its own; a thread that is closing, unreadable or has a damaged id is never taken over
+  for (const [name, threads, entry] of [['closing', { t2: 'closing' }, {}], ['unreadable', {}, {}], ['bad id', {}, { thread: '../t2' }]] as const) {
+    const n = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2', ...entry } }, threads })
+    n.live('/w/a')
+    if (name === 'unreadable') n.h.files.set('/h/.lean-agent/threads/t2/thread.json', '{ not json')
+    const x = await registerWorktree(n.h.host, input('/w/a'))
+    expect([name, x.ok]).toEqual([name, false])
+    expect([name, n.reg()['app/feat'].path]).toEqual([name, '/w/a'])
+    expect(n.reg()['app/feat'].from).toBeUndefined()
+  }
+  // a damaged registry is still never rewritten
+  const d = setup({ registry: '{ not json', threads: { t2: 'closed' } })
+  d.live('/w/a')
+  expect((await registerWorktree(d.h.host, input('/w/a'))).ok).toBe(false)
+  expect(d.h.files.get(FILE)).toBe('{ not json')
+})
+
+test('takeoverCandidate: only a live linked worktree at the sha whose owners are all closed; an open owner is named; nothing is written', async () => {
+  const list = `worktree /r/app\nHEAD ${'1'.repeat(40)}\nbranch refs/heads/main\n\nworktree /w/a\nHEAD ${SHA}\nbranch refs/heads/feat\n`
+  const reg = { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2' } }
+  const s = setup({ list, registry: reg, threads: { t2: 'closed' } })
+  s.live('/w/a')
+  const before = String(s.h.files.get(FILE))
+  expect(await takeoverCandidate(s.h.host, '/h', '/r/app', SHA, 't1')).toEqual({ one: { path: '/w/a', head: SHA, branch: 'feat', from: 't2' } })
+  expect(String(s.h.files.get(FILE))).toBe(before)
+  // owner open / parked: named with its state and what to do
+  for (const st of ['open', 'parked']) {
+    const o = setup({ list, registry: reg, threads: { t2: st } })
+    o.live('/w/a')
+    const c = await takeoverCandidate(o.h.host, '/h', '/r/app', SHA, 't1')
+    expect(c.one).toBeUndefined()
+    expect(c.why).toContain(`/w/a is registered to t2 (${st})`)
+    expect(c.why).toContain('ask t2 to close it, or run lean_worktree register from t1 after t2 closed')
+  }
+  // another commit, the thread's own entry, an unregistered worktree, a shared one, a folder that is not live: no candidate
+  expect(await takeoverCandidate(s.h.host, '/h', '/r/app', 'f'.repeat(40), 't1')).toEqual({})
+  expect(await takeoverCandidate(s.h.host, '/h', '/r/app', SHA, 't2')).toEqual({})
+  expect(await takeoverCandidate(setup({ list, registry: {} }).h.host, '/h', '/r/app', SHA, 't1')).toEqual({})
+  const shared = setup({ list, registry: { 'app/feat': { ...reg['app/feat'], shared: true } }, threads: { t2: 'closed' } })
+  shared.live('/w/a')
+  expect((await takeoverCandidate(shared.h.host, '/h', '/r/app', SHA, 't1')).why).toContain('shared worktree')
+  expect(await takeoverCandidate(setup({ list, registry: reg, threads: { t2: 'closed' } }).h.host, '/h', '/r/app', SHA, 't1')).toEqual({}) // /w/a does not exist
+  expect(await takeoverCandidate(setup({ list, registry: '{ nope' }).h.host, '/h', '/r/app', SHA, 't1')).toEqual({})
+})
+
+test('doctor row: live worktrees of closed threads are listed (thread, path), an info row; stale or open ones are not', async () => {
+  const s = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2' }, 'app/mine': { path: '/w/m', branch: 'mine', thread: 't1' }, 'app/gone': { path: '/w/gone', branch: 'gone', thread: 't2' }, 'app/open': { path: '/w/p', branch: 'p', thread: 't3' }, 'app/sh': { path: '/w/s', branch: 's', thread: 't2', shared: true } }, threads: { t2: 'closed', t3: 'open' } })
+  for (const p of ['/w/a', '/w/m', '/w/p', '/w/s']) s.live(p)
+  const rows = await closedOwnerRows(s.h.host)
+  expect(rows).toHaveLength(1)
+  expect(rows[0]).toMatch(/^note 1 worktree is registered to a closed thread: app\/feat \(t2, closed: \/w\/a\)\./)
+  expect(rows[0]).toContain('The next push for that branch takes it over; or prune it if the branch is gone')
+  expect(rows[0]).not.toContain('/w/gone') // a gone folder is a stale entry, reported by its own row
+  expect(rows[0]).not.toContain('t3')
+  const none = setup({ registry: { 'app/p': { path: '/w/p', branch: 'p', thread: 't3' } }, threads: { t3: 'open' } })
+  none.live('/w/p')
+  expect(await closedOwnerRows(none.h.host)).toEqual(['ok   no worktree is registered to a closed thread'])
+  // nothing is changed by the row
+  const before = String(s.h.files.get(FILE))
+  await closedOwnerRows(s.h.host)
+  expect(String(s.h.files.get(FILE))).toBe(before)
+  // a vanished thread folder is named as such
+  const gone = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't9' } } })
+  gone.live('/w/a')
+  expect((await closedOwnerRows(gone.h.host))[0]).toContain('t9, thread gone')
 })
 
 test('prune drops only the entries it saw stale: one replaced meanwhile (same key, another path) stays', async () => {

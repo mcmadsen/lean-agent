@@ -10,7 +10,7 @@ import type { Host } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { DEFAULT_PUSH_DENY, PROTECTED, guardedBy } from './guard'
 import type { Inbox, Out, Thread } from './threads'
-import { registerWorktree, unregisteredAt, worktreeState } from './worktreereg'
+import { registerWorktree, takeoverCandidate, unregisteredAt, worktreeState } from './worktreereg'
 
 export type PrInput = { title?: unknown; body?: unknown; base?: unknown; draft?: unknown }
 
@@ -235,6 +235,9 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   // thread) has: the facts the worktree skill's adopt checks. Every gate below still applies to it, and the registry is written only
   // once the review and the approval hold (just before the approval is consumed): a refused push changes nothing.
   let adopt: { path: string; branch: string } | null = null
+  // The same checks decide a takeover: a worktree registered to another thread is the pushing thread's when every owner is closed (or its
+  // thread folder gone); an open, parked or closing owner is named in the refusal. Written by registerWorktree at the same point as the adopt.
+  let takeover: { path: string; branch: string; from: string } | null = null
   if (!wt) {
     let liveMine = 0
     for (const w of mine) if ((await worktreeState(h, w.path)) === 'live') liveMine++
@@ -245,6 +248,13 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
         const refused2 = await pick([{ path: un.one.path, branch: un.one.branch, thread: id }])
         if (refused2) return refused2
         if (wt) adopt = { path: un.one.path, branch: un.one.branch }
+      } else {
+        const tk = await takeoverCandidate(h, home, pj.path, sha, id)
+        if (tk.one) {
+          const refused3 = await pick([{ path: tk.one.path, branch: tk.one.branch, thread: id }])
+          if (refused3) return refused3
+          if (wt) takeover = { path: tk.one.path, branch: tk.one.branch, from: tk.one.from }
+        } else if (tk.why && !seen) return err(`not pushed: ${tk.why}`)
       }
     }
   }
@@ -288,11 +298,23 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const r = await registerWorktree(h, { project: t.project, path: adopt.path, repo: pj.path, branch: adopt.branch, thread: id, adopted: true })
     if (!r.ok) return err(`not pushed: ${r.text}; the approval is kept`)
   }
-  if (!(await takeApproval(h, t.project, sha, id))) return err(`not pushed: the approval for ${short} was just used by another push`)
+  let took = ''
+  if (takeover) {
+    const r = await registerWorktree(h, { project: t.project, path: takeover.path, repo: pj.path, branch: takeover.branch, thread: id, adopted: true })
+    if (!r.ok) return err(`not pushed: ${r.text}; the approval is kept`)
+    took = `took over the registration of ${takeover.path} from ${r.from ?? takeover.from}`
+    try {
+      await appendJsonl(h, `${threadsDir(home)}/${id}/history.jsonl`, { ts: await h.clock.now(), kind: 'takeover', project: t.project, path: takeover.path, branch: takeover.branch, from: r.from ?? takeover.from, text: took })
+    } catch {
+      /* the registry is the record; the reply says it too */
+    }
+  }
+  if (!(await takeApproval(h, t.project, sha, id))) return err(`not pushed: the approval for ${short} was just used by another push${took ? `; ${took}` : ''}`)
 
   const where = `${remote}/${branch}`
   // from here on the approval is used: every outcome is recorded and the thread is told
-  const finish = async (res: Out, kind: string, extra: Record<string, unknown>, tell: string): Promise<Out> => {
+  const finish = async (res0: Out, kind: string, extra: Record<string, unknown>, tell: string): Promise<Out> => {
+    const res: Out = took ? { ...res0, text: `${res0.text}; ${took}` } : res0
     const notes: string[] = []
     try {
       await appendJsonl(h, `${threadsDir(home)}/${id}/history.jsonl`, { ts: await h.clock.now(), kind, sha, project: t.project, remote, branch, ok: res.ok, text: res.text.slice(0, 600), ...extra })

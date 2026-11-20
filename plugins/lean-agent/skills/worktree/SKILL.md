@@ -34,7 +34,11 @@ Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch 
   `git -C <path> branch --show-current`, add the registry entry `{path, repo, branch, thread: <this thread>, adopted: true}`
   (refuse when the entry exists for another thread), run `lean_rules` `sync` for it, then **dependencies**. `lean_worktree`
   `register` with `path` does all of the registry part: it checks the path is the top folder of a LINKED worktree of the project's own
-  repository on a branch, refuses another thread's entry, and handles a taken key as above. `rm` of an adopted
+  repository on a branch, refuses another thread's entry, and handles a taken key as above. **A path registered to a CLOSED thread (or
+  one whose thread no longer exists) is replaced**: the entry moves to the registering thread (`adopted: true`, the former owner in
+  `from`) and the answer says so; a path owned by an open, parked or closing thread is refused with the owner and its state named
+  (ask it to close it, then register again). The desk's `push` does the same by script when the worktree at the approved sha is a live
+  linked worktree of the project owned by a closed thread, so a successor thread never has to edit `worktrees.json`. `rm` of an adopted
   worktree needs the user's yes; it was not created here. The desk's `push` also adopts a worktree nobody registered when it is a linked
   worktree of the project's repository and its HEAD is the approved sha (and no entry has it), so a forgotten registration no longer
   blocks it; register anyway so the branch is listed.

@@ -8,7 +8,7 @@ const SHA = 'abc1234def5678abc1234def5678abc1234def56'
 const WT = '/h/.lean-agent/worktrees/app/feat'
 const PUSH_OUT = "remote: Create a pull request for 'feat' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/feat\nTo github.com:o/r.git\n"
 
-type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string; wtList?: string; registry?: Record<string, unknown> }
+type Opts = { head?: string; branch?: string; defaultBranch?: string; lsDefault?: string; lsFail?: boolean; wtCommon?: string; remoteCfg?: string; pushResult?: { exitCode: number; stderr: string }; review?: boolean; approve?: boolean; ghFailure?: string; gh?: boolean; ghUrl?: string; urls?: Record<string, string>; state?: string; az?: boolean; azFailure?: string; azOut?: string; azList?: string; wtList?: string; registry?: Record<string, unknown>; threads?: Record<string, string>; live?: string[] }
 
 // a registered app project, thread t1 with its worktree, a green review and an approval for SHA: every gate open
 async function setup(o: Opts = {}) {
@@ -47,6 +47,9 @@ async function setup(o: Opts = {}) {
   }
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: o.state ?? 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  // other threads' recorded state (a thread not listed has no folder); `live` = folders that exist
+  for (const [id, state] of Object.entries(o.threads ?? {})) h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ id, title: 'x', project: 'app', state, sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  for (const p of o.live ?? []) h.files.set(`${p}/.git`, 'gitdir: x')
   h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify(o.registry ?? { 'app/feat': { path: WT, repo: '/r/app', branch, thread: 't1' } }))
   if (o.review !== false) await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
@@ -457,7 +460,7 @@ test('an unregistered worktree is NOT adopted unless it is the one linked worktr
     ['detached', { wtList: LIST(['/w/feat', SHA, '']), branch: '' }, 'no registered worktree'],
     ['git cannot list', {}, 'no registered worktree'],
     ['only the main checkout is at the sha', { wtList: `worktree /r/app\nHEAD ${SHA}\nbranch refs/heads/feat\n` }, 'no registered worktree'],
-    ['registered for another thread (never taken over)', { registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']) }, 'no registered worktree'],
+    ['registered for another thread that is open (never taken over)', { registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']), threads: { t2: 'open' }, live: ['/w/feat'] }, 'registered to t2 (open)'],
     ['a prunable entry', { wtList: LIST(['/w/feat', SHA, 'feat']).replace('branch refs/heads/feat', 'branch refs/heads/feat\nprunable gitdir file points to non-existent location') }, 'no registered worktree'],
     ['two candidates (ambiguous, named)', { wtList: LIST(['/w/a', SHA, 'feat'], ['/w/b', SHA, 'feat2']) }, '2 unregistered worktrees are at'],
   ]
@@ -469,6 +472,78 @@ test('an unregistered worktree is NOT adopted unless it is the one linked worktr
     expect([name, s.history()]).toEqual([name, '']) // nothing consumed
     if (name.startsWith('registered for another')) expect(registry(s)['app/feat'].thread).toBe('t2')
   }
+})
+
+// the field case: tA closed, its worktree still registered to it; the successor thread t1 has none and pushes the approved sha
+const CLOSED = (o: Opts = {}): Opts => ({ registry: { 'app/feat': { path: '/w/feat', repo: '/r/app', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']), threads: { t2: 'closed' }, live: ['/w/feat'], ...o })
+
+test('a worktree registered to a CLOSED thread is taken over by the push (by the script), logged and said; the registry is written after the gates', async () => {
+  const s = await setup(CLOSED())
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('took over the registration of /w/feat from t2')
+  expect(s.pushes()).toEqual([['-C', '/w/feat', '-c', 'push.followTags=false', 'push', '--no-follow-tags', 'origin', `${SHA}:refs/heads/feat`]])
+  expect(registry(s)).toEqual({ 'app/feat': { path: '/w/feat', repo: '/r/app', branch: 'feat', thread: 't1', adopted: true, from: 't2' } })
+  const lines = s.history().trim().split('\n').map(l => JSON.parse(l))
+  expect(lines.map(l => l.kind)).toEqual(['takeover', 'push'])
+  expect(lines[0].text).toBe('took over the registration of /w/feat from t2')
+  expect(lines[1].text).toContain('took over the registration of /w/feat from t2')
+  // the approval was used once
+  expect((await s.push()).text).toContain('no valid approval')
+  // the owner's thread folder is gone: the same
+  const g = await setup(CLOSED({ threads: {} }))
+  expect((await g.push()).ok).toBe(true)
+  expect(registry(g)['app/feat']).toMatchObject({ thread: 't1', from: 't2' })
+  // the second push of the same worktree finds it registered to the thread: no takeover again
+  await writeApproval(s.h.host, { project: 'app', sha: SHA, thread: 't1' })
+  expect((await s.push()).text).not.toContain('took over')
+})
+
+test('a takeover is refused, and the registry and history stay as they were, when any gate fails', async () => {
+  const bad: [string, Opts, string, ((s: Awaited<ReturnType<typeof setup>>) => void)?][] = [
+    ['owner open', CLOSED({ threads: { t2: 'open' } }), 'registered to t2 (open), so it is not taken over: ask t2 to close it, or run lean_worktree register from t1 after t2 closed'],
+    ['owner working (an open thread whose session runs)', CLOSED({ threads: { t2: 'open' } }), 'registered to t2 (open)'],
+    ['owner parked', CLOSED({ threads: { t2: 'parked' } }), 'registered to t2 (parked)'],
+    ['owner closing', CLOSED({ threads: { t2: 'closing' } }), 'registered to t2 (closing)'],
+    ['HEAD is another commit', CLOSED({ head: 'f'.repeat(40) }), `HEAD of /w/feat is ffffffff, not ${SHA.slice(0, 8)}`],
+    ['git list shows another commit', CLOSED({ wtList: LIST(['/w/feat', 'f'.repeat(40), 'feat']) }), 'no registered worktree'],
+    ['not a linked worktree of the project (another repository)', CLOSED(), 'is not a worktree of the repository of project app', s => { const old = s.h.git.handler; s.h.git.handler = (a: string[], c: any) => (a.join(' ').includes('--git-common-dir') && a[1] === '/w/feat' ? { exitCode: 0, stdout: '/other/.git\n' } : old(a, c)) }],
+    ['not in the project\'s worktree list (the main checkout is no linked worktree)', CLOSED({ wtList: `worktree /r/app\nHEAD ${SHA}\nbranch refs/heads/feat\n` }), 'no registered worktree'],
+    ['the folder is gone', CLOSED({ live: [] }), 'no registered worktree'],
+    ['no green review', CLOSED({ review: false }), 'no green review record'],
+    ['no approval', CLOSED({ approve: false }), 'no valid approval'],
+    ['a protected branch', CLOSED({ branch: 'release/1.0', wtList: LIST(['/w/feat', SHA, 'release/1.0']) }), 'protected branch'],
+    ['a guarded branch', CLOSED(), "guard 'feat*'", s => void s.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', guards: { 'push-deny': ['feat*'] } } }))],
+    ['a shared worktree', CLOSED({ registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2', shared: true } } }), 'shared worktree: it is never taken over'],
+    ['registered without a thread', CLOSED({ registry: { 'app/feat': { path: '/w/feat', branch: 'feat' } } }), 'registered without a thread'],
+    ['a thread.json that does not parse', CLOSED(), 'registered to t2 (unreadable)', s => void s.h.files.set('/h/.lean-agent/threads/t2/thread.json', '{ nope')],
+  ]
+  for (const [name, opts, want, mutate] of bad) {
+    const s = await setup(opts)
+    mutate?.(s)
+    const before = String(s.h.files.get('/h/.lean-agent/worktrees.json'))
+    const r = await s.push({ pr: { title: 'T' } })
+    expect([name, r.ok, r.text]).toEqual([name, false, expect.stringContaining(want)])
+    expect([name, s.pushes()]).toEqual([name, []])
+    expect([name, s.ghCalls]).toEqual([name, []])
+    expect([name, String(s.h.files.get('/h/.lean-agent/worktrees.json'))]).toEqual([name, before]) // the registry is byte for byte as it was
+    expect([name, s.history()]).toEqual([name, ''])
+  }
+  // fix the cause and the same approval pushes (nothing was consumed)
+  const s = await setup(CLOSED({ threads: { t2: 'open' } }))
+  expect((await s.push()).ok).toBe(false)
+  s.h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', title: 'x', project: 'app', state: 'closed', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  expect((await s.push()).ok).toBe(true)
+})
+
+test('a damaged registry file is never rewritten by the push', async () => {
+  const s = await setup(CLOSED())
+  s.h.files.set('/h/.lean-agent/worktrees.json', '{ not json')
+  const r = await s.push()
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('damaged')
+  expect(s.h.files.get('/h/.lean-agent/worktrees.json')).toBe('{ not json')
+  expect(s.pushes()).toEqual([])
 })
 
 test('a thread whose own registered worktree moved past the approved sha is told so, not given another thread\'s worktree', async () => {
