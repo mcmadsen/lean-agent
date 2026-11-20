@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.12
 
 ### Added
 - **Expensive models need your approval, and only your press in the pane gives it** ([README: Expensive models](README.md#agents)). Opus
