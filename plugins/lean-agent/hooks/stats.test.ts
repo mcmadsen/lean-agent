@@ -256,7 +256,8 @@ test('stats text: spend today and 7 days, caps, tables by model / role x model /
   h.files.set(`${L}/ledger.jsonl`, ledger)
   h.files.set(`${L}/config.json`, JSON.stringify({ dailyCapUsd: { desk: 25, thread: 100 } }))
   const t = await statsText(h.host)
-  expect(t.split('\n')[0]).toBe('lean-agent stats: last 7 day(s) to 2026-11-18')
+  expect(t.split('\n')[0]).toMatch(/^plan window: /) // the plan window leads (windows.ts)
+  expect(t.split('\n')[1]).toBe('lean-agent stats: last 7 day(s) to 2026-11-18')
   expect(t).toContain('spend: today $98.00 (13 req) · 7d $98.75 (15 req)')
   expect(t).toContain('caps today: desk $20.00 of $25.00 · thread $78.00 of $100.00 · plain $0.00 of no cap')
   expect(t).toContain('daily: 11-12 $0.00 · 11-13 $0.00 · 11-14 $0.00 · 11-15 $0.25 · 11-16 $0.50 · 11-17 $0.00 · 11-18 $98.00')
@@ -271,8 +272,8 @@ test('stats text: spend today and 7 days, caps, tables by model / role x model /
   expect(t).toContain('ledger: 16 row(s) in 1 file(s), 1 pre-1.0 (0.45: cost_usd, no role), 1 unparsable line(s) skipped')
   expect(t).toContain('worker feedback (feedback.jsonl): 0 row(s)')
   // a one-day window and a bad value
-  expect((await statsText(h.host, { days: 1 })).split('\n')[0]).toBe('lean-agent stats: last 1 day(s) to 2026-11-18')
-  expect((await statsText(h.host, { days: -3 })).split('\n')[0]).toContain('last 7 day(s)')
+  expect((await statsText(h.host, { days: 1 })).split('\n')[1]).toBe('lean-agent stats: last 1 day(s) to 2026-11-18')
+  expect((await statsText(h.host, { days: -3 })).split('\n')[1]).toContain('last 7 day(s)')
   expect(await spendLine(h.host)).toBe('$98.00 · 7d $98.75')
 })
 

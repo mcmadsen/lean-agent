@@ -680,6 +680,32 @@ cost. So a thread's context is capped, at turn end, and a thread can opt in to k
 - **Config** (`~/.lean-agent/config.json`, tokens, whole numbers of at least 10000; anything else, a string included, is ignored and the
   default applies): `threadTokens` (default 120000), `threadWarnTokens` (default 100000).
 
+## The store is the memory
+
+A session started from scratch must know what it needs from the old one through lean-agent, so sessions stay small and replaceable.
+Everything here is done by script (the thread's or the desk's mod), never by a model turn.
+
+- **State snapshot.** At every main-thread turn end the thread's mod writes `<thread folder>/state.json` atomically: branch, HEAD,
+  `git status --short`, diff stat, files edited this turn, task list (what the thread wrote with its task tools), last report, open
+  questions and the context size. The handover of a fresh session includes it (and the preflight text when `hooks/preflight.ts`
+  registers one with `setPreflight`).
+- **See the handover.** `lean_doctor handover tN` prints exactly what a fresh session would get: the sections, the tokens of each, and
+  what is missing (no goal, no notes, no snapshot). The handover is cut to `handoverTokens` (config, default 6000): the least needed text
+  goes first (remembered items, notes, queued messages, older reports), the newest stays, and every cut line names the file with the full text.
+- **Automatic restart at the context limit** (config `threads.autoRestart`, default true). At a turn end over `threadTokens` with work left
+  (not after done, blocked or a question) the thread's mod writes the snapshot and a record to the desk inbox ("context 205k over the limit:
+  checkpointed, restart me"). The desk's timer restarts the thread once its session has been idle 20 s: a fresh session with the task-first
+  handover, the old one removed, a notice and a toast with the size and the estimated cost. Never mid-turn; one automatic restart per
+  thread per 10 minutes; a fresh session that starts over the limit stops and asks you; only while the desk runs. The check when the next
+  message arrives stays as the fallback.
+- **Answers from the store.** `lean_thread find <words|PR|branch|project>` lists matching lines with thread id and source file.
+  `lean_thread ask tN "<question>"` answers from the store by script when lines match, else starts a FRESH small session (haiku, low;
+  config `ask.model`, `ask.effort`) with the handover and the question; the big old session is never resumed. `lean_thread report tN`
+  gives a script summary: state, sha, review verdict, open questions, counts and the path of the full text.
+- **Plan window.** Each session's mod snapshots the 5 hour and 7 day rate-limit windows to `desk/windows.json`. `lean_doctor stats` leads with
+  `5h window: 78% used, resets 14:20 (in 1h 13m) | 7d: 41%` and the snapshot age. The desk notices at 80 % and 90 % (once per window) and
+  names the working threads. Above `window.holdAbove` (config, default 85) the replies of `new` and `start` carry a warning; nothing is refused.
+
 ## Guards
 
 All fail closed (a guard that throws denies):

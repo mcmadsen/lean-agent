@@ -88,6 +88,28 @@ the data (the PATCH of a PR thread's status above is a write, not a harmless rea
   budgets 5 / 8 / 3 / 5 (`workers.stepsByJob`, `workers.steps` the ceiling, `workers.requireJob`), and a retry rule per (thread, brief):
   the second identical brief needs `why-sonnet:`, the third is refused.
 
+The store is the memory: a session started from scratch knows what it needs from the old one through lean-agent, so sessions stay small
+and replaceable. All by script, no model turn.
+
+- State snapshot: at every main-thread turn end the thread's own mod writes `<thread folder>/state.json` atomically (branch, HEAD,
+  `git status --short`, diff stat, files edited this turn, task list, last report, open questions, context tokens). The handover carries it
+  as "State at the end of the last turn"; a `preflightText` provider registers with `setPreflight` (handover.ts).
+- `lean_doctor handover tN` prints exactly what a fresh session would get: the sections with their token sizes and what is missing (no goal,
+  no notes, no snapshot). The handover is trimmed to config `handoverTokens` (default 6000), the least needed first, newest kept; every
+  cut line names the file with the full text.
+- Automatic restart at the context limit: at a turn end over `threadTokens` with work left (not after done, blocked or a question) the
+  thread's mod writes the snapshot and a mod-authored record to the desk inbox; the desk's 30 s timer restarts the thread by script once its
+  session has been idle 20 s (fresh session, task-first prompt, old session removed), with a notice and a toast with size and estimated cost.
+  Never mid-turn, one automatic restart per thread per 10 minutes, a fresh session that starts over the limit stops and asks the user, only
+  while the desk runs. Config `threads.autoRestart` (default true). The check at the next message stays.
+- `lean_thread find <words|PR|branch|project>` (script search over titles, goals, branches, reports, notes, remembered items and snapshots),
+  `lean_thread ask tN "<q>"` (from the store by script when lines match, else a FRESH haiku/low session with the handover, config
+  `ask.model` / `ask.effort`; the big old session is never resumed) and `lean_thread report tN` (state, sha, review verdict, open
+  questions, counts, path of the full text).
+- Plan window: sessions snapshot `rateLimits` to `desk/windows.json`; `lean_doctor stats` leads with "5h window: 78% used, resets 14:20 (in
+  1h 13m) | 7d: 41%" and the snapshot age (`windowLine(h)` is exported from stats.ts for the pane); the desk notices at 80 % and 90 % once
+  per window, naming the working threads; above config `window.holdAbove` (default 85) `new` and `start` replies carry a warning.
+
 ## 1.0.14
 
 ### Added

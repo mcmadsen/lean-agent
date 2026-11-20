@@ -2,8 +2,9 @@
 // session runs older lean-agent code). Built by the mod from what lean-agent already keeps; the old conversation is never resumed.
 import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { deskState, reportBody, reportFile } from './delivery'
+import { deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
+import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import type { Inbox, Thread } from './threads'
 
 export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
@@ -58,7 +59,7 @@ async function ensureReportFiles(h: Host, home: string, recs: DeskRec[]): Promis
   return none
 }
 
-export type Handover = { prompt: string; worktree?: string; branch?: string }
+export type Handover = { prompt: string; worktree?: string; branch?: string; parts?: Part[]; missing?: string[] }
 
 // The first words of a restart, wake or handover prompt are the task: a model that reads "continue" plus a status check answers the
 // status check and ends its turn. A status request is answered as a side effect (one short lean_report), never as the whole turn.
@@ -91,26 +92,116 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const wt = mine[mine.length - 1]
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const goal = (typeof goals?.[t.id]?.text === 'string' ? goals[t.id]!.text!.trim() : '') || (t.lastGoal ?? '').trim()
-  const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
+  const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask') && !(r as { mod?: boolean }).mod)
   // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
   const hist = reportHistory(recs, REPORT_BUDGET, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
-  const parts = [
-    resumeLead(taskLine(goal, brief, t.title)),
-    `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`,
-    `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`,
-    `## Brief\n${cut(brief, BRIEF_MAX)}`,
-    where && `## Where the work lives\n${where}`,
-    goal && `## Goal\n${goal}`,
-    hist.lines.length && `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})\n${hist.lines.join('\n')}`,
-    notes && `## Your notes (end of notes.md)\n${cut(notes, NOTES_MAX, true)}`,
-    mem.length && `## What you asked to remember\n${mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n')}`,
-    queued.length && `## Messages from the desk that were queued for you\n${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}`,
-  ].filter(Boolean)
-  const prompt = parts.join('\n\n')
-  return { prompt: cutPrompt(prompt), worktree: wt?.path, branch: wt?.branch }
+  const now = await h.clock.now()
+  const snap = await readSnapshot(h, home, t.id)
+  const pre = await preflightOf(h, home, t)
+  const inbox = `${deskState(home)}/inbox.jsonl`
+  const parts: Part[] = [
+    { name: 'lead', body: resumeLead(taskLine(goal, brief, t.title)), mode: 'fixed' },
+    { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
+    { name: 'check', body: `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
+    { name: 'brief', head: '## Brief', body: cut(brief, BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
+    { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
+    { name: 'goal', head: '## Goal', body: goal, mode: 'fixed' },
+    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now) : '', file: snapshotFile(home, t.id), mode: 'head' },
+    { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
+    { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
+    { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
+    { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },
+    { name: 'queued', head: '## Messages from the desk that were queued for you', body: queued.length ? `${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
+  ]
+  const missing = [!goal && 'no goal (goal-set tN "<line>")', !notes && `no notes (${dir}/notes.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
+  const sized = fitParts(parts, (await handoverTokens(h, home)) * 4)
+  return { prompt: cutPrompt(sized.map(partText).filter(Boolean).join('\n\n')), worktree: wt?.path, branch: wt?.branch, parts: sized, missing }
+}
+
+// ---- the size budget -------------------------------------------------------------------------------------------------------------
+export const HANDOVER_TOKENS = 6_000 // config handoverTokens: the handover is cut to about this many tokens (four characters a token)
+export async function handoverTokens(h: Host, home: string): Promise<number> {
+  const cfg = await readJson<{ handoverTokens?: unknown } | null>(h, `${leanDir(home)}/config.json`, null)
+  const n = Number(cfg?.handoverTokens)
+  return Number.isFinite(n) && n >= 500 ? Math.round(n) : HANDOVER_TOKENS
+}
+
+export type Part = { name: string; head?: string; body: string; file?: string; mode: 'fixed' | 'head' | 'tail' | 'lines'; cut?: boolean }
+export const partText = (p: Part): string => (p.body ? (p.head ? `${p.head}\n${p.body}` : p.body) : '')
+const CUT_ORDER = ['remembered', 'notes', 'queued', 'reports', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
+const FLOOR = 300 // a section is never cut below this many characters
+const noteOf = (p: Part) => `\n…(cut to fit the handover budget: full text in ${p.file ?? 'its source'})`
+const total = (parts: Part[]) => parts.reduce((n, p) => n + (p.body ? partText(p).length + 2 : 0), 0)
+
+// Trim to `maxChars`: sections lose text in CUT_ORDER, newest kept first (a list drops its oldest lines, notes keep their end);
+// every cut names the file with the full text. The fixed lines and the goal are never cut.
+export function fitParts(parts: Part[], maxChars: number): Part[] {
+  const out = parts.map(p => ({ ...p }))
+  for (const name of CUT_ORDER) {
+    if (total(out) <= maxChars) break
+    const p = out.find(x => x.name === name && x.body)
+    if (!p) continue
+    if (p.mode === 'lines') {
+      const ls = p.body.split('\n')
+      let dropped = 0
+      while (ls.length > 1 && total(out) + (dropped ? 0 : noteOf(p).length) > maxChars) {
+        ls.shift()
+        p.body = ls.join('\n')
+        dropped++
+      }
+      if (dropped) {
+        p.body += noteOf(p)
+        p.cut = true
+      }
+    } else {
+      const excess = total(out) - maxChars
+      const take = Math.min(Math.max(0, p.body.length - FLOOR), excess + noteOf(p).length)
+      if (take <= 0) continue
+      p.body = p.mode === 'tail' ? '…' + p.body.slice(take) + noteOf(p) : p.body.slice(0, p.body.length - take) + '…' + noteOf(p)
+      p.cut = true
+    }
+  }
+  return out
+}
+
+// The preflight text of the thread (hooks/preflight.ts, added by another change). A hooks module cannot import() lazily, and a static
+// import of a file that does not exist would fail the load: so that module registers itself with `setPreflight(preflightText)` (one line
+// at its top level); until it does, or when it fails, the section is empty.
+export type PreflightFn = (h: Host, home: string, t: Thread) => Promise<string> | string
+let preflight: PreflightFn | null = null
+export const setPreflight = (fn: PreflightFn | null) => {
+  preflight = fn
+}
+async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
+  try {
+    const s = preflight ? await preflight(h, home, t) : ''
+    return typeof s === 'string' ? s.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+// `lean_doctor handover tN`: exactly what a fresh session would get, the tokens of each section, what is missing.
+export async function handoverReport(h: Host, home: string, id: string): Promise<string> {
+  const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
+  if (!t || typeof t !== 'object') return `no thread ${id}`
+  const queued = (await unconsumed(h, home, id).catch(() => ({ msgs: [] as Inbox[] }))).msgs
+  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued)
+  const budget = await handoverTokens(h, home)
+  const tok = (s: string) => Math.ceil(s.length / 4)
+  const rows = (ho.parts ?? []).filter(p => p.body).map(p => `  ${p.name.padEnd(10)} ~${String(tok(partText(p))).padStart(5)} tokens${p.cut ? `  (cut: full text in ${p.file})` : ''}`)
+  const all = tok(ho.prompt)
+  return [
+    `handover for ${id} (${t.title}): ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
+    'sections:',
+    ...rows,
+    ho.missing?.length ? `missing: ${ho.missing.join('; ')}` : 'missing: nothing',
+    '--- the prompt, as a fresh session gets it ---',
+    ho.prompt,
+  ].join('\n')
 }
 
 // The cap is in characters AND in bytes: the prompt is one argv string, and with 3-byte characters (CJK, emoji) 80,000 characters
