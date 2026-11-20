@@ -1,13 +1,35 @@
 ---
 name: review
-description: Strict review of the current branch's diff in ordered passes with the read-only reviewer agent (inputs computed by script, enforcement by the lean_review tool), then a recorded verdict for the HEAD commit; a green record is what unlocks `git push`. Use before any push or when asked to review.
-argument-hint: [base-branch]
-roles: thread
+description: Every review runs through here. On the desk `/lean-agent:review <pr|branch|sha|url> [base]` starts a review thread; in a thread it reviews the worktree's diff (or someone else's ref, read-only) in ordered passes with the read-only reviewer agent, then records a verdict for the sha; a green record of your own HEAD unlocks `git push`. Use for any review request, before any push.
+argument-hint: <pr | branch | sha | url> [base]
+roles: desk, thread
 ---
 
 # Review and push gate
 
-Run in a thread, in the repo or worktree to push. A push needs `lean_review` to have recorded a green verdict for the
+**Every review of code runs through this skill**, with a recorded result: never review a PR, branch or commit by hand (no skill, no reviewer
+pass and no record is exactly what this exists to prevent). Direct call: `/lean-agent:review <pr|branch|sha|url> [base]`.
+
+## Desk
+
+The desk never reviews itself (it has no reviewer agents and no review tool): it starts the thread that does.
+1. Read the argument: a number or a pull request URL is `review: {pr}`; a hex sha (7 to 40 characters) is `{sha}`; anything else is a
+   branch, `{branch}`; a second word is `base` (the branch it goes into; default the project's default branch). No argument: ask
+   which PR, branch or sha.
+2. The project is the registered one the repo belongs to (`lean_thread` `projects`; a URL's repo name matches the project's origin).
+   When two fit or none does, ask the user; never guess.
+3. `lean_thread` action `new` with `project` and `review` (`{pr | branch | sha, base?}`). Pass no `text` and no `model`: the mod builds the
+   brief from its own template (load this skill, prepare at level full, run the passes, record, report) and the thread runs on sonnet / high
+   (a haiku is raised to sonnet, and the reply says so). Add `text` only for an extra instruction from the user.
+4. Say the thread id and that its done report carries the evidence (record sha, level, passes, verdicts, findings by severity) from the
+   mod's store; a review thread cannot report done without a record. A user who asks to review a thread's OWN work: that thread runs this
+   skill (`send` it the request); the desk does not.
+
+## Thread
+
+Run in a thread, in the repo or worktree to push. With no argument, or only a base, review this worktree as below. With a PR, branch, sha or
+URL of someone else's work (a review thread the desk started has one in its brief), follow "External review" below, then the steps 2 to 9
+with `ref`. A push needs `lean_review` to have recorded a green verdict for the
 full HEAD sha (registered projects only); any new commit changes the sha, so the review must be redone after every change.
 **A thread never runs `git push` or `gh pr create` itself**: its own permission check judges the command in a session that
 never heard the user's yes (it was said to the desk), so it refuses. After a green review, `lean_report` "ready to push
@@ -102,3 +124,16 @@ tool's refusal: do what it says.
    missing entries (same prompt, the refusal text added), or fix the open findings, then record again for the same or the new sha.
    Never record green for a sha you did not review, and never without the reviewer's JSON.
 9. Say the verdict in one line (green or not, the model, open findings by severity). Private projects are never pushed whatever the record says.
+
+### External review
+
+A ref that is not this worktree's work (another person's branch or PR) is read-only: `lean_review` `prepare` with `ref` (a PR number or URL,
+a branch, tag or sha of the project's origin; `base` optional, default main / master / develop) and `level` `"full"`. The mod fetches it from
+the origin into its own scratch repository and resolves both ends to shas; the user's tree, branches and refs are never touched, and neither
+are yours. The prepare text names the scratch path as the checkout (`git -C <scratch> ...`, same `allow-cmd:` line for the reviewer) and prints
+the head sha. Run the reviewer passes exactly as in step 5 (and 3, 4); fix nothing (it is not your code), edit nothing, push nothing. Then
+`lean_review` `record` with `mode: "external"`, `sha` = the head sha prepare printed, `base` = the base you gave (or omit it), `passes`,
+`review` / `reviews`. An external record is NEVER green and never counts for the push gate; the answer says so. The mod remembers the head sha
+you prepared: a review thread's `lean_report` done is refused until a full-level record exists for it, and the mod appends the evidence
+(record sha, level, passes, per-pass verdicts, findings by severity) to your report from its store. Report: the verdict, the findings by severity
+with `file:line`, in the user's words, never an approval of a merge. Posting comments on the PR only when the user asked (the `pr` skill).

@@ -39,6 +39,7 @@ import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
+import { reviewReport } from './reviewevidence'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
@@ -148,6 +149,7 @@ const SCHEMA = {
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
     reason: { type: 'string', description: 'approve-push: why, in a few words. new/start/reopen/restart/resume with an expensive model (opus): why sonnet is not enough (required; the thread does NOT start, the request waits in the pane for the user\'s Approve)' },
+    review: { type: 'object', description: 'new: start a REVIEW thread (it runs lean-agent:review at level full and cannot report done without a lean_review record): exactly one of pr (number or URL), branch or sha, plus base (optional); needs project; sonnet/high by default (haiku is raised to sonnet)', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
     pr: { type: 'object', description: 'push: open a pull request after the push succeeded (gh pr create, or az repos pr create for an Azure DevOps remote, from the thread\'s worktree)', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string', description: 'default: the repo\'s default branch' }, draft: { type: 'boolean' } }, required: ['title'] },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start/reopen/restart: default sonnet. Never choose opus yourself: only when the user asked for it, with a reason; it still needs the user\'s Approve press in the pane' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
@@ -823,11 +825,15 @@ export const register: Register = on => {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` as const }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
+      // a review thread's done report needs a lean_review record of the sha it reviewed; the evidence is appended from the store (reviewevidence.ts)
+      const gate = t.name === 'lean_report' && typeof e.text === 'string' && !e.agentId ? await reviewReport(hostOf($), role.id, String(e.state ?? ''), e.text).catch(() => null) : null
+      if (gate && !gate.ok) return { result: gate.text, isError: true } as any
+      const gated = gate ? { ...e, text: gate.text } : e
       // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
       const out = t.name === 'lean_compare'
         ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread', role.id)
         // every other tool: a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
-        : await threadTool(hostOf($), role.id, t.name, e, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
+        : await threadTool(hostOf($), role.id, t.name, gated, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       // a thread that reports done is asked once per session whether a step could have been a script (never a worker's call)
       const ask = t.name === 'lean_report' && out.ok && e.state === 'done' && !e.agentId ? doneQuestion(role.id) : null

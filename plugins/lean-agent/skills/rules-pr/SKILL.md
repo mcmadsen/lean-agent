@@ -2,10 +2,16 @@
 name: rules-pr
 description: Turn what lean-agent learned about a project into a DRAFT pull request that improves the project's own CLAUDE.md files and .claude/rules, so the whole team benefits and the always-loaded text shrinks. Run in a thread, never the desk. Use for "propose a rules PR for <project>", "upstream the learned rules", "optimise the project's Claude files", or after such a PR merged (step 8).
 argument-hint: <project> [--min-sessions N] [--min-days N]
-roles: thread
+roles: desk, thread
 ---
 
 # Rules PR
+
+## Desk
+
+`/lean-agent:rules-pr <project> [flags]` runs in a thread, never on the desk: `lean_thread` action `new` with `project` and `text` "Run lean-agent:rules-pr for <project> <flags>; report the draft PR link". No project: ask which (`lean_thread` `projects`).
+
+## Thread
 
 Run in a thread. The project's learned rules (`~/.lean-agent/<project>/rules/`), its load log, the review lessons and the workers'
 missing-context reports become a draft PR on the project's repo. **Scripts over models**: `lean_rules` `pr-plan` computes every

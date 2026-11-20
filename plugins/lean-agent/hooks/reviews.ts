@@ -8,7 +8,9 @@ import type { Host } from './state'
 import { slugOk } from './rules'
 import { sha256 } from './sha'
 
-export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; base?: string; branch?: string; model?: string; ts?: number; sig?: string }
+// level / mode / verdicts / counts are display data for the evidence a review thread's report carries (reviewevidence.ts); only project, sha
+// and green are signed. mode 'external': a review of someone else's branch or PR (reviewext.ts): never green, never counts for the push gate.
+export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; base?: string; branch?: string; model?: string; level?: 'light' | 'full'; mode?: 'external'; verdicts?: string[]; counts?: Record<string, number>; ts?: number; sig?: string }
 export const reviewFile = (home: string, project: string, sha: string) => `${leanDir(home)}/${project}/reviews/${sha}.json`
 const KEY = 'review.key'
 const LEGACY = (home: string) => `${leanDir(home)}/review.key`
@@ -65,6 +67,17 @@ export async function writeReview(h: Host, r: Review): Promise<string> {
   const file = reviewFile(home, r.project, r.sha)
   await writeJson(h, file, { ...r, green, ts: await h.clock.now(), sig })
   return file
+}
+
+// the record of a sha when its HMAC matches its own green flag (a forged or hand-edited green/not-green flag is no record), else null
+export async function readReview(h: Host, project: string, sha: string): Promise<Review | null> {
+  if (!/^[0-9a-f]{7,64}$/.test(sha) || !slugOk(project)) return null
+  const rec = await readJson<Partial<Review> | null>(h, reviewFile(await homeDir(h), project, sha), null)
+  if (!rec || typeof rec.sig !== 'string' || !rec.sig || rec.sha !== sha || rec.project !== project) return null
+  const key = await secret(h, false)
+  if (!key) return null
+  const want = await sign(key, project, sha, rec.green === true)
+  return rec.sig === want ? (rec as Review) : null
 }
 
 // true only for a green record whose HMAC matches

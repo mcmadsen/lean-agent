@@ -4,6 +4,8 @@ import type { Host } from './state'
 import { homeDir } from './state'
 import { readConfig } from './budget'
 import { writeReview } from './reviews'
+import { externalOf, fetchExternal, noteExternal } from './reviewext'
+import { noteReviewed } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, prepText, prepare, refOk, resolveRange } from './reviewprep'
 import type { Range } from './reviewprep'
@@ -53,6 +55,8 @@ async function preparedLevel(h: Host, project: string, sha: string): Promise<Lev
 // The two arguments this file adds to the lean_review tool's inputSchema (delivery.ts spreads them into its properties)
 export const REVIEW_EXTRA_PROPS = {
   level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (the default: ONE cheap sonnet pass on correctness, behaviour and reuse at an intermediate checkpoint; it never records green) or full (the strict review the push gate needs: every pass, two runs for a high-risk diff; ask for it only before "ready to push")' },
+  ref: { type: 'string', description: 'prepare: review SOMEONE ELSE\'s work: a PR number or URL, a branch or a sha of the project\'s origin, read read-only into a scratch repository (never the user\'s tree); base optional. Record it with mode: "external"' },
+  mode: { type: 'string', enum: ['external'], description: 'record: external = the review of a ref prepare read (ref): the record is NOT green and never counts for the push gate' },
   worktree: { type: 'string', description: 'prepare, record (the same one on both sides): absolute path of a registered worktree of the project to review (default: the calling thread\'s own registered worktree, else the project\'s path)' },
 }
 
@@ -127,10 +131,15 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const level = levelArg(i.level)
   if (!level) return { ok: false, text: `prepare: level must be "light" (one cheap pass at a checkpoint, never green) or "full" (the strict review the push gate needs), not ${JSON.stringify(str(i.level).slice(0, 20))}` }
   const light = level === 'light'
-  const checkout = await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
-  if (str(i.worktree) && !checkout) return { ok: false, text: `prepare: worktree ${JSON.stringify(str(i.worktree).slice(0, 200))} is not a live registered worktree of ${project} (lean_worktree register it first); nothing was computed` } // (never fall back to another checkout silently)
-  const range = await resolveRange(h, project, str(i.base) || undefined, str(i.head) || undefined, checkout)
+  const refAsked = str(i.ref)
+  const ext = refAsked ? await fetchExternal(h, project, refAsked, str(i.base) || undefined) : null
+  if (typeof ext === 'string') return { ok: false, text: `prepare: ${ext}` }
+  const checkout = ext ? ext.path : await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
+  if (!ext && str(i.worktree) && !checkout) return { ok: false, text: `prepare: worktree ${JSON.stringify(str(i.worktree).slice(0, 200))} is not a live registered worktree of ${project} (lean_worktree register it first); nothing was computed` } // (never fall back to another checkout silently)
+  const range = await resolveRange(h, project, ext ? ext.base : str(i.base) || undefined, ext ? ext.head : str(i.head) || undefined, checkout)
   if (typeof range === 'string') return { ok: false, text: `prepare: ${range}` }
+  if (ext) await noteExternal(h, project, ext)
+  await noteReviewed(h, thread, project, range.head) // a review thread's report gate looks for a record of this sha (reviewevidence.ts)
   const branch = str(i.branch)
   const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
@@ -163,7 +172,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const cut = specs ? ` -- . ${specs}` : ''
   const co = range.path
   const lines: string[] = []
-  lines.push(`Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
+  if (ext) lines.push(`EXTERNAL REVIEW of ${ext.label} (someone else's work, read read-only from a scratch repository; the user's tree is never touched). Record it with mode: "external" and the head sha below: it is recorded NOT green and never counts for the push gate. Do not edit anything and do not push.`)
+  lines.push(ext ? `Scratch repository (every git command is git -C this path, never cd): ${co}` : `Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
   lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${co} diff ${range.mb}...${range.head}${cut} (code before the change: git -C ${co} show ${range.mb}:<path>)`)
   const grants = [`git -C ${co} diff ${range.mb}...${range.head}`, `git -C ${co} log ${range.mb}..${range.head}`, `git -C ${co} show ${range.head}`, `git -C ${co} merge-base ${range.mb} ${range.head}`, ...(rereview ? [`git -C ${co} diff ${earlier!.sha}...${range.head}`] : [])]
   lines.push(`allow-cmd: ${grants.join(', ')}`)
@@ -218,9 +228,12 @@ async function doMerge(h: Host, project: string, i: any): Promise<Out> {
 async function doRecord(h: Host, project: string, i: any, thread: string): Promise<Out> {
   const sha = str(i.sha)
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, text: 'review needs the full commit sha (git rev-parse HEAD)' }
-  const wantGreen = i.green === true
+  const external = str(i.mode) === 'external'
+  const wantGreen = i.green === true && !external // an external review (someone else's ref) is never green, and says so below
+  const extNote = external ? ' [external review: recorded NOT green by design; it never counts for the push gate]' : ''
   let raw: unknown
   let merged: string | null = null
+  let verdicts: string[] | undefined
   if (i.reviews !== undefined) {
     const two = twoRuns(i.reviews)
     if (typeof two === 'string') {
@@ -229,10 +242,11 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
     }
     const m = mergeRuns(normalize(two.a), normalize(two.b))
     raw = roundTrip(m.result)
+    verdicts = [normalize(two.a).verdict, normalize(two.b).verdict]
     merged = `merged from 2 reviewer runs (${m.info.both} finding(s) by both [2/2], ${m.info.only} by one run [1/2])`
   } else raw = parseResult(i.review)
   const strings = Array.isArray(i.findings) ? i.findings.filter((x: unknown): x is string => typeof x === 'string') : undefined
-  const rec: Review = { project, sha, green: false, passes: Number(i.passes) || undefined, findings: strings }
+  const rec: Review = { project, sha, green: false, passes: Number(i.passes) || undefined, findings: strings, ...(external ? { mode: 'external' as const } : {}) }
   const model = str(i.model)
   if (model) rec.model = model
   if (!raw || typeof raw !== 'object') {
@@ -246,8 +260,13 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const branch = str(i.branch)
   // the same checkout prepare read (the thread's own worktree): generated-file marks and the lists must be the same on both sides
   const askedWt = str(i.worktree)
-  const checkout = await checkoutOf(h, project, thread, branch, askedWt)
-  const range = askedWt && !checkout ? `worktree ${JSON.stringify(askedWt.slice(0, 200))} is not a live registered worktree of ${project}` : await resolveRange(h, project, base || undefined, sha, checkout)
+  const ext = external ? await externalOf(h, project, sha) : null
+  if (external && !ext) {
+    const file = await writeReview(h, rec)
+    return { ok: true, text: `recorded not green: an external record needs lean_review prepare with ref for this sha first (the scratch repository it read is remembered by the mod); recorded NOT green in ${file}${extNote}` }
+  }
+  const checkout = ext ? ext.path : await checkoutOf(h, project, thread, branch, askedWt)
+  const range = ext ? await resolveRange(h, project, ext.base, sha, ext.path) : askedWt && !checkout ? `worktree ${JSON.stringify(askedWt.slice(0, 200))} is not a live registered worktree of ${project}` : await resolveRange(h, project, base || undefined, sha, checkout)
   if (typeof range === 'string') {
     const file = await writeReview(h, rec)
     return { ok: !wantGreen, text: `${wantGreen ? 'green refused' : 'recorded not green'}: ${range} (base is needed to compute the new symbols and edited tests); recorded NOT green in ${file}` }
@@ -277,19 +296,23 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   // HEAD~1, which would shrink the range and with it the symbols and tests that need entries)
   if (failed) v.reasons.unshift('git could not produce the diff (an error or a timeout): nothing was checked, so no green')
   if (range.mb === range.head) v.reasons.unshift(`the range is empty (the merge base of ${base || 'the default branch'} is the head itself): base must be the branch this work goes into`)
-  if (base && !(await namedRef(git, base))) v.reasons.unshift(`base ${base} is not a branch or tag name: pass the branch the work goes into (a sha or HEAD~n would shrink the range that is checked)`)
+  if (base && !ext && !(await namedRef(git, base))) v.reasons.unshift(`base ${base} is not a branch or tag name: pass the branch the work goes into (a sha or HEAD~n would shrink the range that is checked)`)
   if (light) v.reasons.unshift('this was a LIGHT review (one cheap pass at a checkpoint): it never records green. Before "ready to push" run lean_review prepare with level: "full", run the reviewer passes it asks for and record that')
   v.green = v.reasons.length === 0
   const green = wantGreen && v.green
   rec.green = green
-  rec.base = base || range.base
+  rec.level = light ? 'light' : 'full'
+  rec.verdicts = verdicts ?? [res.verdict || 'none']
+  rec.counts = {}
+  for (const f of v.open) rec.counts[f.severity || 'unknown'] = (rec.counts[f.severity || 'unknown'] ?? 0) + 1
+  rec.base = ext ? ext.base : base || range.base
   if (branch) rec.branch = branch
   rec.findings = v.open.map(findingLine)
   const file = await writeReview(h, rec)
-  await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
+  if (!ext) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   const tail = [v.open.length ? `open findings:\n${v.open.map(findingLine).join('\n')}` : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : ''].filter(Boolean).join('\n')
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}` }
-  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}` }
+  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}` }
 }
 
 async function doDecline(h: Host, project: string, i: any): Promise<Out> {
