@@ -1,5 +1,6 @@
 // Which lean-agent code a THREAD's session runs: its own mod records it, the desk shows "running X, installed Y" when they differ.
 import { expect, test } from 'claude-code/testing'
+import { notesOf, problemsOf, setupText } from './setup'
 import { fakeHost } from './fake'
 import { check } from './doctor'
 import { recordRunning } from './role'
@@ -150,7 +151,18 @@ test('the doctor names a thread that runs an older plugin than installed, the ca
   await recordRunning(h.host, 't1', S1, '1.0.9')
   expect(await skewedThreads(h.host, ROOT)).toEqual([{ id: 't1', run: '1.0.9', installed: '1.0.11' }, { id: 't2', run: '1.0.99', installed: '1.0.11' }])
   const out = (await check(h.host, ROOT)).join('\n')
-  expect(out).toContain('FIX  thread t1 running 1.0.9, installed 1.0.11: its session loaded the older plugin; do not ask it for what 1.0.11 added, and restart it once the cause below is fixed')
+  expect(out).toContain('FIX  thread t1 running 1.0.9, installed 1.0.11: its session loaded the older plugin; do not ask it for what 1.0.11 added. cause: lean-agent pins no version')
+  expect(out).not.toContain('below')
+  // the cause and the advice are in the FIX row itself (the fix text prints FIX rows only)
+  const lines = await check(h.host, ROOT)
+  const fixText = setupText({ fixed: [], checked: lines, problems: problemsOf(lines), notes: notesOf(lines) }, true)
+  expect(fixText).toContain('thread t1 running 1.0.9, installed 1.0.11')
+  expect(fixText).toContain('quit and reopen the Claude app') // what `lean_doctor fix` prints names the cause and the advice
+  expect(fixText).not.toContain('below')
+  const row = out.split('\n').find(l => l.startsWith('FIX  thread t1'))!
+  expect(row).toContain('lean-agent pins no version')
+  expect(row).toContain('quit and reopen the Claude app')
+  expect(row).toContain('restart the thread from the pane')
   expect(out).toContain('note thread t2 running 1.0.99, installed 1.0.11: a newer copy than the installed plugin')
   expect(out).toContain('lean-agent pins no version')
   expect(out).toContain('quit and reopen the Claude app')
