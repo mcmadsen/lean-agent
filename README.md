@@ -170,7 +170,7 @@ Top to bottom (the desk's pane; any other session sees only the way to the desk 
    100 %) with **Restart desk** beside it from 80 %, and the version and refresh time, small and dim. The one-time line "lean-agent set
    sonnet / high" is drawn for 30 seconds after it first appears; after that the chip says "(set by lean-agent)".
 2. **Needs you (N)**, only when something waits: a thread blocked on an approval (**Open tN** opens its own session, where you
-   answer), an unanswered thread question, a report that is ready to push (its sha and branch, review green, not yet pushed: "ask the
+   answer; the card goes away as soon as the thread works again), an unanswered thread question, a report that is ready to push (its sha and branch, review green, not yet pushed: "ask the
    desk to push"; there is no push button, the desk pushes), a blocked thread or one waiting on a prompt, a script waiting for your
    Adopt / Reject, and the desk over its context limit. Each is a card with its button.
 3. **Threads.** One bordered card per open thread, coloured by state (green working, yellow asking / approval / waiting / paused,
@@ -195,6 +195,18 @@ to push, a blocked thread) or reports done. A script decides, no model is involv
 is there. `config.json`: `{ "notify": { "toast": true, "sound": false } }`; `toast: false` silences it. `sound` does nothing yet: the
 engine plays only an audio file the plugin bundles, and lean-agent ships none (speech would read thread titles aloud, so it is not
 used either).
+
+### Approvals of a thread's denied action
+
+When Claude Code's permission check denies an action in a thread (a PR reply, a work item update), the thread reports `blocked` with the
+exact action and the pane shows "tN needs your yes in its own session". You answer **in that session** (**Open tN**). The desk never
+asks you for it with a question and never passes a yes on with `send`: Claude Code's permission check is not bypassed by a model or a
+message, and the classifier reads a relayed yes as the model undermining oversight. A plugin hook cannot carry the decision either:
+`PermissionRequest` answers asks that go to a person, a classifier's denial is not one, and `PermissionDenied` can only say `retry`,
+which runs the same check again (read from the engine's typings, not measured live; details in the changelog). The card exists only
+while the thread is really blocked: not working, and no tool call since its report. A thread reports `blocked` with an `approval`
+only for what the permission check denied, never for something it decides itself (a subagent cap, a model choice). An expensive model
+is the pane's Approve, a push the desk's `approve-push`.
 
 ## Skills
 

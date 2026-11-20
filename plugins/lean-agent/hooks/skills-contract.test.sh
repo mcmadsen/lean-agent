@@ -104,6 +104,15 @@ grep -q 'Never choose opus' "$root/templates/front-desk.md" || fail "front-desk.
 grep -q "worker-opus" "$root/templates/thread.md" && grep -q "only when the user asks" "$root/templates/thread.md" || fail "thread.md must say worker-opus is only for when the user asks"
 need thread 'never choose opus'
 need review 'always sonnet'
+# a thread's approval of a denied action (hooks/approvals.ts): the user answers in the thread's own session. No hook carries a decision for the
+# user (a classifier's denial is no ask a PermissionRequest hook hears, PermissionDenied only retries: see the changelog), so no module registers
+# one, and the desk is told where the user answers, never to ask it with AskUserQuestion or relay a yes with send
+hooked=$(grep -lE "on\([[:space:]]*['\"]classic\.Permission(Request|Denied)" $mods | while read -r f; do basename "$f"; done | tr '\n' ' ')
+[ -z "$hooked" ] || fail "no module may register a PermissionRequest / PermissionDenied hook: a hook cannot carry the user's yes past a denial (found in: $hooked)"
+grep -q 'does NOT satisfy it' "$root/templates/front-desk.md" || fail "front-desk.md must say a relayed yes does not satisfy the permission check"
+grep -q 'do not ask them to approve it with a question' "$root/templates/front-desk.md" || fail "front-desk.md must say an approval of a denied action is not asked with AskUserQuestion"
+grep -q 'never `send` a yes' "$root/skills/thread/SKILL.md" || fail "the thread skill must say a yes is never sent to a thread"
+grep -q 'decide yourself' "$root/templates/thread.md" || fail "thread.md must say approval is never for something the thread decides itself"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)

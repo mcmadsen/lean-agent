@@ -2,6 +2,7 @@
 import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { approvalOf, deskState, unconsumed } from './delivery'
+import { liveApproval } from './approvals'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNotices } from './notices'
@@ -292,6 +293,7 @@ export async function loadView(h: Host): Promise<View> {
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
       const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
+      const apv = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
       v.threads.push({
         ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
         unread: truth.unread,
@@ -315,9 +317,9 @@ export async function loadView(h: Host): Promise<View> {
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
         asking: asking.has(t.id) || lr?.kind === 'ask',
-        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
+        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv), // not once its approval ended: it carried on
         needsYou: !!ag?.needsYou && !paused,
-        ...(lr && t.state === 'open' && approvalOf(lr) ? { approval: approvalOf(lr) } : {}), // its last record is a blocked report that waits for the user's yes
+        ...(apv ? { approval: apv } : {}),
         ...(paused ? { pausedUntil: paused.resetAt } : {}),
         ...(typeof t.finished === 'number' && t.finished > 0 ? { finished: true } : {}), // reported done and was stopped: the next message starts a new session
       })

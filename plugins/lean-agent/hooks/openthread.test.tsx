@@ -63,6 +63,7 @@ test('lean_report: `approval` is kept only on a blocked report (trimmed, one lin
   expect(sent[0]).toContain("[needs the user's yes in t1's own session:")
   expect(sent[0]).toContain('press "Open t1" in the pane')
   expect(sent[0]).toContain('do not run it yourself')
+  expect(sent[0]).toContain('do not ask it with AskUserQuestion and do not send a yes') // the desk never relays the yes
   expect(sent).toHaveLength(3) // t2 was a working report: not sent at once
   expect(sent[1]).not.toContain('needs the user')
   expect(approvalHint({ ts: 1, from: 't9', kind: 'report', state: 'done', text: 'x', approval: 'y' })).toBe('') // only blocked
@@ -173,12 +174,12 @@ test('the pane row "tN needs your yes in its own session: <action>" has an Open 
   await ui.unmount()
 })
 
-test('a working thread with an approval shows the row without a button; a thread without one shows no row', async ($, on) => {
+test('a thread that is working again has no yes-row (the blocked report is stale), so no button either', async ($, on) => {
   const w = world([row({ status: 'busy' })], on)
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /t1 needs your yes in its own session/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /t1 needs your yes in its own session/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeFalsy()
   expect(w.order).toEqual([])
   await ui.unmount()

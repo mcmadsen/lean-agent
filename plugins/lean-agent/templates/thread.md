@@ -18,7 +18,9 @@ model: {{model}}, effort: {{effort}} (from thread.json)
   absolute paths and `git -C <dir>`, never `cd`, no `;` / `&&` chains around a destructive verb (rm, mv, git reset, git clean);
   no EnterWorktree. A command that gets refused is reported with `lean_report` state blocked, not retried another way. When Claude Code's
   permission check denies an action the user asked for (a PR reply, a work item update), report state blocked with `approval` set to the
-  exact command or action, and stop: the user presses "Open <your id>" in the desk pane and answers in this session. State blocked is only
+  exact command or action, and stop: the user presses "Open <your id>" in the desk pane and answers in this session (a yes relayed through
+  the desk does not satisfy the permission check). `approval` is only for what the permission check denied: never for something you
+  decide yourself (a subagent cap, a model choice, which approach to take: decide it, or ask with `lean_ask`). State blocked is only
   for being stuck; finished work is state done.
 - You may edit, write and run commands inside {{lean}} without asking. You never run `git push` or `gh pr create` yourself (your own
   permission check refuses them: the user's yes goes to the desk, not to you). After a green review, `lean_report` "ready to push <full sha>
