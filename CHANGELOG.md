@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added (thread context limit and keep mode, [README](README.md#thread-context-limit-and-keep-mode))
+- **Thread context limit, restart at turn end.** Config `threadTokens` (default 120000). The thread's own mod records its context size
+  after every turn (`session.measure`, `$.session.usage()` `context.tokens`) in `threads/tN/context.json` (atomic). When the next
+  `send`, `wake`, `resume` or chaser message finds an idle or done session over the limit, a NEW session starts with the handover
+  instead of a resume ("context was 142k (limit 120k): started a new session with the handover ... ~$0.05 first turn, estimate"). A
+  working session is never touched; a session with no size of its own (older thread, failed write, record of an older session id) counts
+  as under the limit. New module `hooks/threadcontext.ts`.
+- **Context in the pane and the list**: `ctx 108k/120k` on the card, the thread pane and `lean_thread list` (dim, yellow above
+  `threadWarnTokens`, default 100000 or 83% of the limit, red over the limit; `ctx unknown` when nothing is recorded).
+- **Keep mode** (opt-in): `keep: true` on `lean_thread new` / `start`, `lean_thread keep tN on|off`, a "Keep session" choice on the
+  new-thread form. A thread in keep mode that reported done is resumed for follow-ups ("resumed (keep mode): context 85k, cached
+  re-read ~$0.04, estimate") until its context passes the limit, then the restart applies.
+
+### Changed
+- A done thread's next message now says "new session (not in keep mode)"; a resume says the context size and the estimated cached
+  re-read cost when the size is known. The desk's tick does not finish a thread in keep mode.
+- The thread guide and the desk guide explain the limit, the pane warning and keep mode.
+
 ### Fixed (thread sessions, [README](README.md#thread-sessions-what-running-means-wake-names-leftovers))
 - **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and
   the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`, default 10, no tool call or

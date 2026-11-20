@@ -22,6 +22,7 @@ import { doneSession, finishedText } from './finish'
 import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, profileText, readLoaded, readProfile, removeProfile, resolveLoaded, startUsage, writeLoaded, writeProfile } from './profile'
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
+import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -43,6 +44,7 @@ export type Thread = {
   version?: string // the lean-agent version the DESK saw installed when the session was last started or resumed (what the session really runs is `running`)
   running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
   finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
+  keep?: boolean // keep mode (threadcontext.ts): after a done report the session is RESUMED for follow-ups until its context passes the limit
   gen?: number // how many sessions this thread has had (1 = the first): the name of the session is "tN · title", "tN · title (2)" ... (threadstate.ts sessionName)
   req0?: number // the thread's request count in the ledger when its session was started or woken: a session that ended its turn at once added at most two
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
@@ -211,7 +213,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -461,7 +463,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
-  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}) }
+  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}) }
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -603,9 +605,20 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   }
   // A session that reported done is over (finish.ts): its conversation is never resumed. Marked finished, or its last report is done
   // and the session is idle (the desk's tick has not stopped it yet): a NEW session starts with the handover, queued messages included.
-  if (t.finished || (!opts.limit && (await doneSession(h, home, t)))) {
-    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', 'Its previous session reported done and was finished; this message starts a new session.', {})
-    return fresh(r) ? { ...r, text: `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
+  // Two rules decide fresh or resume (threadcontext.ts decide): a recorded context over the limit (checked here, at the next message, never
+  // mid-turn: this session is idle or done) and the done rule, which keep mode lifts until the context passes the limit. A session with no
+  // recorded size of its own is under the limit. A usage-limit resume is mid-turn (the session was blocked inside a turn): no size check.
+  const limits = await threadLimits(h)
+  const size = opts.limit ? null : (await readContext(h, home, t))?.tokens ?? null
+  const isDone = !!t.finished || (!opts.limit && (await doneSession(h, home, t)))
+  const dec = decide({ done: isDone, keep: t.keep === true, tokens: size, limit: limits.limit })
+  if (dec.act === 'fresh') {
+    const over = dec.cause === 'context'
+    const why = over ? `Its context was ${size} tokens (limit ${limits.limit}): this message starts a new session with the handover.` : 'Its previous session reported done and was finished; this message starts a new session.'
+    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', why, {})
+    if (!fresh(r)) return r
+    const head = over ? `${t.id} ${overText(size!, limits.limit)}` : `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only); ${notKeepText}`
+    return { ...r, text: `${head}. ${r.text}`, data: { ...(r.data as object), resumed: false } }
   }
   // a resume continues the model the session was started on, and cannot change it: when that is expensive and not approved for the thread
   // (an older thread, or a model asked for before the rule) a NEW session on sonnet starts with the handover instead (queued messages included)
@@ -637,11 +650,13 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   t.lastWake = now
   t.delivered = upTo
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
+  if (dec.act === 'resume' && dec.why === 'keep') delete t.finished // keep mode switched on after a finish: the session works again
   await save(h, home, t)
   // the name a resumed session keeps is the one it was started with (`--resume` takes no -n): read back, said when it is not the thread's
   const bad = nameProblem(after.find(a => a.sid === t.sid), sessionName(t.id, t.title, t.gen ?? 1))
   const named = bad ? ` · the app lists it as "${bad.slice(0, 60)}": Claude Code cannot rename a background session (the doctor says more)` : ''
-  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}${named}` }
+  const kept = dec.act === 'resume' && (dec.why === 'keep' || size !== null) ? ` · ${resumedText(dec.why, size, t.model ?? 'sonnet')}` : '' // which rule applied and its estimated cost (said when the size is known or keep mode decided)
+  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}${named}${kept}` }
 }
 
 async function list(h: Host, home: string, root = ''): Promise<Out> {
@@ -650,6 +665,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
   const installed = await installedVersion(h, root)
   const now0 = await h.clock.now()
   const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes
+  const ctxLimits = await threadLimits(h)
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) // the last report of each thread (a [working] one can be stale)
   const out: unknown[] = []
   let ents: { name: string }[] = []
@@ -677,9 +693,10 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
     const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(truth ? { live: truth.word, unread: truth.unread, liveText: truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    const cv = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -758,6 +775,17 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.lastWake >= rec.resumedAt) return { ok: true, text: `${id} was already resumed for this usage limit`, data: { resumed: false } }
           return await wake(h, home, t, { force: true, lead: LIMIT_PROMPT, limit: true })
         }
+        case 'keep': {
+          // `keep tN on|off`: keep mode (threadcontext.ts); without on/off it only says what is set
+          const limits = await threadLimits(h)
+          if (i.on === undefined) return { ok: true, text: keepText(id, t.keep === true, limits), data: { keep: t.keep === true } }
+          if (i.on) t.keep = true
+          else delete t.keep
+          const disk = (await load(h, home, id)) ?? t
+          const { keep: _was, ...rest } = disk
+          await save(h, home, { ...rest, ...(i.on ? { keep: true } : {}) })
+          return { ok: true, text: keepText(id, i.on, limits), data: { keep: i.on } }
+        }
         case 'finish': {
           // only the desk's tick calls this (not in the tool's schema; finish.ts picks the candidates): the thread's last report is done.
           // Checked again here, inside the lock. A session that is still working (a final step after the report) is left alone and
@@ -766,6 +794,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.state !== 'open') return err(`${id} is ${t.state}: not finished`)
           if (t.finished) return { ok: true, text: `${id} is already finished`, data: { finished: false } }
           if (!t.sid) return { ok: true, text: `${id} has no session`, data: { finished: false } }
+          if (t.keep === true) return { ok: true, text: `${id} is in keep mode: its session is kept after a done report`, data: { finished: false } }
           if (!(await doneSession(h, home, t))) return { ok: true, text: `${id}: its last report is not done: nothing finished`, data: { finished: false } }
           const listed = await agents(h)
           if (!listed) return err(`${id}: cannot list sessions (claude agents failed), so it is not finished`)
@@ -797,6 +826,13 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
           const bad = addNeeds(t, i.needs)
           if (bad) return err(bad)
+          if (i.keep !== undefined && (t.keep === true) !== (i.keep === true)) {
+            // keep mode named on a start is stored at once (also when the start itself turns out to be refused or the session runs)
+            const { keep: _was, ...rest } = (await load(h, home, id)) ?? t
+            if (i.keep === true) t.keep = true
+            else delete t.keep
+            await save(h, home, { ...rest, ...(i.keep === true ? { keep: true } : {}) }) // (only the keep flag: needs added above stay unsaved until a session starts)
+          }
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
           const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined

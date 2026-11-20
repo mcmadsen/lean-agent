@@ -15,6 +15,8 @@ import { isRunning, isWorking, listAgents, needsYou } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import type { AgentRow, Inbox, Thread } from './threads'
+import { ctxOf } from './threadcontext'
+import type { CtxView } from './threadcontext'
 
 export const REPORTS_MAX = 10 // reports drawn (newest first)
 export const DIFF_FILES_MAX = 12 // files named in the diff stat; the rest is "+N more"
@@ -43,6 +45,8 @@ export type ThreadDetail = {
   working: boolean // never closed or restarted behind the user's back: an unreadable listing counts as working
   needsYou: boolean
   finished: boolean
+  keep?: boolean // keep mode (threadcontext.ts)
+  ctx?: CtxView // the context size of the current session: text "ctx 108k/120k" | "ctx unknown", level (dim ok, yellow warn, red over)
   approval: string
   worktree?: { path: string; branch?: string; exists: boolean }
   head?: string
@@ -216,6 +220,10 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   })
   await guard('cost', async () => {
     d.cost = await costOf(h, id, now)
+  })
+  await guard('context', async () => {
+    if (t.keep === true) d.keep = true
+    if (t.sid) d.ctx = await ctxOf(h, home, t) // "ctx 108k/120k" | "ctx unknown" and its level (threadcontext.ts)
   })
   await guard('reports', async () => {
     const all = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask') && typeof r.text === 'string')
