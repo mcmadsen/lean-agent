@@ -95,7 +95,7 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', a
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
     expect((await ui.find({ type: 'Text', text: /ship it/ }))?.text).toContain('t1')
-    expect(await ui.find({ type: 'Text', text: /1\.0\.12/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /1\.0\.13/ })).toBeTruthy()
     await ui.unmount()
   }
   const ui = await $.ui.mount(PANE as any)

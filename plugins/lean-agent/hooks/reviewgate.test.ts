@@ -399,7 +399,7 @@ test('lean_review record: a high-risk diff needs TWO reviewer runs: one block is
   // with the commits of the range known, the refusal says how many and names the never-reviewed oldest one
   const git = h.git.handler
   const first = 'd'.repeat(40)
-  h.git.handler = (a: string[]) => (a.join(' ').includes('rev-list') ? { exitCode: 0, stdout: `${first}\n${H2}\n` } : git(a))
+  h.git.handler = (a: string[], c: Parameters<typeof git>[1]) => (a.join(' ').includes('rev-list') ? { exitCode: 0, stdout: `${first}\n${H2}\n` } : git(a, c))
   const named = await tool(h, { sha: H2, base: 'main', green: true, review: runA })
   expect(named.text).toContain('(2 commits; the oldest, dddddddd, was never reviewed)')
   h.git.handler = git

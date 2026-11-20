@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.13
 
 ### Fixed
 - **A restart, start or resume that names no model no longer waits for approval of an opus the thread was only recorded on.** It starts

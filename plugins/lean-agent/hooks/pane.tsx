@@ -23,7 +23,7 @@ import { denyRequest, grantModelApproval, removeRequest } from './expensive'
 import type { ModelRequest } from './expensive'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.12'
+export const VERSION = '1.0.13'
 const NOTE_MS = 30_000 // the one-time "lean-agent set the model" line is drawn this long, then only the header chip carries it
 const GROUP_ROWS = 20 // rows drawn in one unfolded inbox group
 const NARROW = 50 // a body narrower than this (cells) gets the short forms
