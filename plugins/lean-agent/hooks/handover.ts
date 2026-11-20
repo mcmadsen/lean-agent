@@ -1,8 +1,8 @@
 // The handover prompt of a fresh session for an existing thread (a reopen, or a resume that must start fresh because the old
 // session runs older lean-agent code). Built by the mod from what lean-agent already keeps; the old conversation is never resumed.
-import { leanDir, readJson, readJsonl, threadsDir } from './state'
+import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { deskState } from './delivery'
+import { deskState, reportBody, reportFile } from './delivery'
 import type { DeskRec } from './delivery'
 import type { Inbox, Thread } from './threads'
 
@@ -19,21 +19,43 @@ const flat = (s: string) => s.replace(/\r/g, '').trim()
 const cut = (s: string, n: number, tail = false) => (s.length <= n ? s : tail ? '…' + s.slice(s.length - n) : s.slice(0, n) + '…')
 
 // The reports of one thread, oldest first, inside the budget: the newest whole, older ones newest-first while they fit.
-export function reportHistory(recs: DeskRec[], budget = REPORT_BUDGET): { lines: string[]; omitted: number } {
-  const line = (r: DeskRec, max: number) => `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(flat(r.text), max)}`
+// `pathOf`: where the FULL text of a report is (desk/reports/<file>); a line that is cut names it, so the new session can Read the rest
+// instead of guessing. `cutRecs` are the reports whose line was cut (the caller makes sure their file exists).
+export function reportHistory(recs: DeskRec[], budget = REPORT_BUDGET, pathOf?: (r: DeskRec) => string): { lines: string[]; omitted: number; cutRecs: DeskRec[] } {
+  const cutRecs: DeskRec[] = []
+  const line = (r: DeskRec, max: number) => {
+    const text = flat(r.text)
+    const isCut = text.length > max
+    return `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(text, max)}${isCut && pathOf ? ` (cut: full text in ${pathOf(r)})` : ''}`
+  }
   const kept: string[] = []
   let used = 0
   let omitted = 0
   for (let i = recs.length - 1; i >= 0; i--) {
-    const l = line(recs[i]!, i === recs.length - 1 ? NEWEST_REPORT_MAX : OLD_REPORT_MAX)
+    const r = recs[i]!
+    const max = i === recs.length - 1 ? NEWEST_REPORT_MAX : OLD_REPORT_MAX
+    const l = line(r, max)
     if (kept.length && used + l.length > budget) {
       omitted = i + 1
       break
     }
     kept.unshift(l)
+    if (flat(r.text).length > max) cutRecs.unshift(r)
     used += l.length
   }
-  return { lines: kept, omitted }
+  return { lines: kept, omitted, cutRecs }
+}
+
+// Make sure the full text of every cut report is in desk/reports/<ts>-<from>-<kind>.md (the file a long direct send wrote; a short
+// report, or one pruned after 30 days, has none): written now when missing. Returns the reports that still have no file (a write failed).
+async function ensureReportFiles(h: Host, home: string, recs: DeskRec[]): Promise<Set<DeskRec>> {
+  const none = new Set<DeskRec>()
+  for (const r of recs) {
+    const path = reportFile(home, r)
+    if (await h.fs.exists(path).catch(() => false)) continue
+    await atomicWrite(h, path, reportBody(r)).catch(() => none.add(r))
+  }
+  return none
 }
 
 export type Handover = { prompt: string; worktree?: string; branch?: string }
@@ -52,7 +74,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const goal = (typeof goals?.[t.id]?.text === 'string' ? goals[t.id]!.text!.trim() : '') || (t.lastGoal ?? '').trim()
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
-  const hist = reportHistory(recs)
+  // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
+  const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
+  const hist = reportHistory(recs, REPORT_BUDGET, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const parts = [

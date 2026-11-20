@@ -176,6 +176,10 @@ export const ASK_MAX = 8000
 const OPTIONS_MAX = 1000
 export const reportFile = (home: string, r: { ts: number; from: string; kind: 'report' | 'ask' }) => `${deskState(home)}/reports/${r.ts}-${r.from}-${r.kind}.md` // (the kind: a report and a question of one thread in one millisecond never share a file)
 
+// the text of a full-text file (a report or a question, with its options)
+export const reportBody = (rec: { from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }) =>
+  rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
+
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return
   const home = await homeDir(h)
@@ -245,8 +249,7 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   let file: string | undefined
   if (first.cut && /^t\d+$/.test(rec.from)) {
     const path = reportFile(home, rec)
-    const body = rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
-    file = await atomicWrite(h, path, body).then(() => path, () => undefined)
+    file = await atomicWrite(h, path, reportBody(rec)).then(() => path, () => undefined)
     if (file) await pruneReports(h, home, file)
   }
   const { line, cut, keyed } = file ? directLine(rec, file) : first

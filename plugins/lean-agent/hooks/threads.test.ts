@@ -701,6 +701,38 @@ test('a huge report and queue cannot blow the handover past one argv string; a c
   expect(prompt).toContain('older messages omitted')
 })
 
+test('an older report cut in the handover names the file with its full text, written when the desk never made one', async () => {
+  const { h, state, bg, call } = fresh()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const long = 'L'.repeat(1200)
+  const rows = [
+    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (700) and the desk never wrote a file: the handover does
+    { ts: 12, from: 't1', kind: 'report', text: `middle ${long}`, state: 'working' }, // cut, the desk's own file already exists
+    { ts: 13, from: 't1', kind: 'report', text: 'short one', state: 'working' }, // whole: no pointer
+    { ts: 14, from: 't1', kind: 'report', text: 'last one', state: 'done' },
+  ]
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
+  h.files.set('/h/.lean-agent/desk/reports/12-t1-report.md', 'the desk wrote this')
+  await call({ action: 'close', tN: 't1' })
+  state.rows = []
+  await call({ action: 'reopen', tN: 't1' })
+  const prompt = bg[1]![bg[1]!.length - 1]!
+  expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/11-t1-report.md)')
+  expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/12-t1-report.md)')
+  expect(h.files.get('/h/.lean-agent/desk/reports/11-t1-report.md')).toBe(`# Report from t1 (working)\n\nearly ${long}\n`)
+  expect(h.files.get('/h/.lean-agent/desk/reports/12-t1-report.md')).toBe('the desk wrote this') // never overwritten
+  expect(h.files.has('/h/.lean-agent/desk/reports/13-t1-report.md')).toBe(false) // a report that is whole needs no file
+  expect(prompt.split('\n').find(l => l.includes('short one'))).not.toContain('cut:')
+})
+
+test('reportHistory names the full-text path of a cut line only when asked, and reports which were cut', () => {
+  const recs = [{ ts: 1, from: 't1', kind: 'report' as const, text: 'x'.repeat(900), state: 'working' }, { ts: 2, from: 't1', kind: 'ask' as const, text: 'last?', state: undefined }]
+  expect(reportHistory(recs).lines[0]).not.toContain('full text in')
+  const r = reportHistory(recs, REPORT_BUDGET, x => `/d/reports/${x.ts}.md`)
+  expect(r.lines[0]).toContain('(cut: full text in /d/reports/1.md)')
+  expect(r.cutRecs.map(x => x.ts)).toEqual([1])
+})
+
 test('the handover keeps the newest report whole and cuts older ones to the budget', () => {
   const recs = Array.from({ length: 40 }, (_, n) => ({ ts: n, from: 't1', kind: 'report' as const, text: `report ${n} ` + 'x'.repeat(900), state: 'working' }))
   recs.push({ ts: 99, from: 't1', kind: 'report', text: 'FINAL ' + 'y'.repeat(5000), state: 'done' })

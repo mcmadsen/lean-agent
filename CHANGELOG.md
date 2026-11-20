@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Fixed
+- **A restart brief says where the full text of a cut report is.** Earlier reports in the handover are cut to 700 characters (the newest
+  is whole up to 20,000) and used to end in "..." with nothing to follow. A cut line now ends in `(cut: full text in
+  <home>/.lean-agent/desk/reports/<ts>-<thread>-<kind>.md)`; the handover writes that file when the desk never did (a short report, or
+  one pruned after 30 days), never overwrites one that exists, and names the inbox row instead when a file cannot be written.
 - **The read-only agents no longer open with a refused `cd <dir> && cat ...`.** `reader-sonnet`, `reader-haiku` and `explorer` now say up
   front "absolute paths only, never `cd`" (use `/abs/path/file` or `git -C /abs/repo ...`); the skills contract check fails when one of
   them loses the sentence.
