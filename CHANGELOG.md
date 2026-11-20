@@ -3,109 +3,106 @@
 ## Unreleased
 
 ### Added
-
+- **Thread status is the truth.** "Running" is what `claude agents --json --all` says, not a recorded flag. `lean_thread list`, the pane
+  cards, the thread pane and the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`,
+  default 10, no tool call or inbox read) | done / parked. A `send` to an idle or stuck session says "queued, session idle: wake or
+  restart it" and never "running"; `wake` replaces a stuck session whose turn ended and wakes an idle one even with nothing queued;
+  a session that is still working is never stopped by send, wake or resume (only `restart` replaces it). A `[working]` report of a
+  session that is not running is marked stale, and a start that ended its turn without a tool call is reported loudly ("started, but it
+  ended its turn at once: wake it with the task"). See [README](README.md#thread-sessions-what-running-means-wake-names-leftovers).
+- **Session names**: every fresh start and restart is named `tN · title` (with "(2)", "(3)" after restarts) and the name is read back
+  from `claude agents`. Claude Code has no command to rename a background session, so an old one is left (the doctor row says so).
+  A restart or fresh start says what the new session costs ("handover about N tokens, ~$X first turn, estimate").
+- **Thread context limit, restart at turn end.** Config `threadTokens` (default 120000). The thread's own mod records its context size
+  after every turn in `threads/tN/context.json`. When the next `send`, `wake`, `resume` or chaser message finds an idle or done session
+  over the limit, a NEW session starts with the handover instead of a resume ("context was 142k (limit 120k): started a new session ...
+  ~$0.05 first turn, estimate"). A working session is never touched; a session with no size of its own counts as under the limit.
+  New module `hooks/threadcontext.ts`. See [README](README.md#thread-context-limit-and-keep-mode).
+- **Context in the pane and the list**: `ctx 108k/120k` on the card, the thread pane and `lean_thread list` (dim, yellow above
+  `threadWarnTokens`, default 100000 or 83% of the limit, red over the limit; `ctx unknown` when nothing is recorded). The card's
+  status line is one line: state word, today's cost badge, ctx, agents N/cap, branch, review verdict.
+- **Keep mode** (opt-in): `keep: true` on `lean_thread new` / `start`, `lean_thread keep tN on|off`, a "Keep session" choice on the
+  new-thread form. A thread in keep mode that reported done is resumed for follow-ups until its context passes the limit, then the
+  restart applies. The desk's tick does not finish a thread in keep mode.
+- **Review cost: two levels and an expected cost.** `lean_review prepare` takes `level`: `light` (the default) is ONE sonnet pass on
+  correctness, behaviour and reuse and never records green; `full` is the strict review (every pass, two runs for a high-risk diff)
+  the push gate needs, asked for only before "ready to push". The level a sha was prepared at is kept in the mod's store, so a light
+  pass cannot be recorded green by leaving the level out. `level` and `worktree` are in the registered tool's schema, so a thread can
+  ask for `full`. `prepare` prints `expected review cost ~$1.20 (2 passes, sonnet; ...)`: the median of this project's earlier reviewer
+  passes in the ledger, else a stated default of $1.50 a pass. New modules `reviewcost.ts`, `reviewexclude.ts`.
+- **Generated files are left out of a review**: out of the file lists, the risk, the line count and the diff the reviewer reads (it gets
+  `':(exclude,literal)path'` pathspecs; a change that edits `.gitattributes` cannot mark its own files). Files marked
+  `linguist-generated`, `*.snap`, golden / fixtures / `__snapshots__` paths, lockfiles, minified bundles and `config.json`
+  `review.exclude` globs; the prepare text says how many files and lines. The prompt carries the thread's registered worktree
+  (`git -C <worktree> ...`) and the `allow-cmd:` line for it.
+- **Readers and the reviewer run more read-only commands**: unquoted globs whose every match is inside the allowed folders,
+  `2>/dev/null`, `rg`/`grep` with no path (cwd inside the roots), and `sort` (no `-o`), `uniq` (one operand), `cut`, `tr`, `nl`.
+  `xargs`, `cd`, any other redirect, `;`, `&&`, `$(...)` and paths outside the roots stay refused.
+- **Budget alerts by default** (`config.json` `budget.daily` 25 USD and `budget.threadDaily` 20 USD, `"off"` allowed): a desk notice and
+  a toast at 50% and 80% of the daily budget (once per day per level; today's spend, the top 3 threads and their models) and when one
+  thread passes its daily alert; the chaser asks a stale expensive thread what the spend bought. The thread cards show today's cost
+  with a `!` when it is over the alert (`threadCostsToday` / `costBadge`, stats.ts).
+- **`lean_script record-audit`** (name, sha, verdict adopt|adapt|reject, network / deletes / secrets / generalises, reads, writes,
+  hardcoded, changes, reason) for the audit thread or the thread that started the auditor: checked like an auditor's reply (stored
+  sha, every flag answered, the mod's own rules on top) and only after the mod saw an auditor call with the exact brief for that text
+  go through. A verdict passed on this way never adopts by itself.
+- **Restart desk remembers the desk it replaced and keeps asking you to archive it.** No engine call closes a session, and the desk is a
+  Desktop session that `claude rm` / `claude stop` (background sessions) are not assumed to reach. The restart records the old desk's
+  id and title (`desk/old-desk.json`) before the new desk opens; the new desk's first notice, then once per desk turn, and the doctor
+  name it and say "archive it in the Claude app (right-click, Archive)" until `claude agents --json --all` no longer lists it as an
+  active row (also ends 7 days after the restart). A desk session never listed there cannot be checked: the reminder ends 24 h after
+  the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact id is listed
+  as a background-kind session that is not working and runs in the desk folder; the result is logged. Never the new desk, never
+  `--discard-unpushed` / `--force-remove-worktree`, never a stop of the app or a service.
+- New doctor row "stale thread sessions" (`hooks/threadsessions.ts`); `doctor fix` removes them the way a restart does.
 
 ### Changed
-- The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with
-  AskUserQuestion and never relayed with `send` (a relayed yes does not satisfy the permission check). A thread no longer reports
-  `blocked` with an `approval` for something it decides itself (a subagent cap, a model choice).
-- A worker whose edit is refused for a path outside its `allow-edit` grant is told to stop and report that path.
-- Doctor: "the desk spent $X on opus today" counts only spend after lean-agent pinned the model (earlier spend today is a note), and
-  "opus is N% of spend" is a FIX only while a thread is on opus now, naming only those threads; otherwise a note.
-- A done thread's next message now says "new session (not in keep mode)"; a resume says the context size and the estimated cached
-  re-read cost when the size is known. The desk's tick does not finish a thread in keep mode.
-- The thread guide and the desk guide explain the limit, the pane warning and keep mode.
-
-### Fixed
-- **A stale "needs your yes" card no longer stays after the thread carried on.** The card existed for as long as the blocked report was
-  the thread's last record, so a thread that went on after the user answered in its session (or that decided the matter itself) still
-  showed "tN needs your yes in its own session ... (it is working: wait)". It now exists only while the thread is really blocked: the
-  session is not working, and it has made no tool call since it reported (the mod notes the first one, `approvals.ts`); the generic
-  "tN is blocked" row, its toast and the red state word end with it. Limits: any later tool call of the thread's main loop counts, so a
-  desk wake or chaser message that makes a blocked thread call a tool also ends the card (the thread's own report is then what is
-  left); the notes live in the mod store, which the expensive-model requests already share between a thread's session and the desk,
-  but this was not run live. The thread detail does not know the usage-limit pause, so a paused thread keeps its card in the pane and
-  loses it in the detail.
-- **A session started in a thread's folder is that thread, whatever its session id.** The role is decided by the folder first (the desk
-  folder is the desk, `~/.lean-agent/threads/tN` is thread tN) and by the session id second; an unknown id in a thread folder never
-  becomes a desk, and is recorded in the thread's `sids`. (A session id that another open thread holds still wins over a thread folder.)
-  This is the part of "Open tN opened a new desk" that could be fixed without running the app.
-- **"Open tN" no longer implies the right session opened.** After the link is handed to the system opener the reply says: if a new desk
-  opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it from a
-  terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
-- **A script audit's verdict is no longer lost when the auditor ran in the background.** The mod recorded the verdict only from the
-  auditor's own Agent reply, which a background call does not have (1.0.12 forces the foreground; unverified in the engine). New
-  `lean_script record-audit` (name, sha, verdict adopt|adapt|reject, network / deletes / secrets / generalises, reads, writes, hardcoded,
-  changes, reason) for the audit thread or the thread that started the auditor: checked like a reply (stored sha, every flag answered,
-  the mod's own rules on top) and only after the mod saw an auditor call with the exact brief for that text go through. A verdict passed
-  on this way never adopts by itself (an `adopt` waits for your Adopt / Reject; adapt and reject take effect). `audit` says "Audit started;
-  verdict not recorded yet", `show` says "audited, waiting for the verdict" (not "unaudited") until it arrives, and the desk starts only
-  one audit thread per script text. `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line
-  for that text instead of "was never audited" ("verdict taken from the audit thread's report", logged); a network flag still needs
-  your explicit adopt.
-
-### Added (thread context limit and keep mode, [README](README.md#thread-context-limit-and-keep-mode))
-- **Thread context limit, restart at turn end.** Config `threadTokens` (default 120000). The thread's own mod records its context size
-  after every turn (`session.measure`, `$.session.usage()` `context.tokens`) in `threads/tN/context.json` (atomic). When the next
-  `send`, `wake`, `resume` or chaser message finds an idle or done session over the limit, a NEW session starts with the handover
-  instead of a resume ("context was 142k (limit 120k): started a new session with the handover ... ~$0.05 first turn, estimate"). A
-  working session is never touched; a session with no size of its own (older thread, failed write, record of an older session id) counts
-  as under the limit. New module `hooks/threadcontext.ts`.
-- **Context in the pane and the list**: `ctx 108k/120k` on the card, the thread pane and `lean_thread list` (dim, yellow above
-  `threadWarnTokens`, default 100000 or 83% of the limit, red over the limit; `ctx unknown` when nothing is recorded).
-- **Keep mode** (opt-in): `keep: true` on `lean_thread new` / `start`, `lean_thread keep tN on|off`, a "Keep session" choice on the
-  new-thread form. A thread in keep mode that reported done is resumed for follow-ups ("resumed (keep mode): context 85k, cached
-  re-read ~$0.04, estimate") until its context passes the limit, then the restart applies.
-
-
-### Fixed (thread sessions, [README](README.md#thread-sessions-what-running-means-wake-names-leftovers))
-- **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and
-  the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`, default 10, no tool call or
-  inbox read) | done / parked. A `send` to an idle or stuck session says "queued, session idle: wake or restart it" and never
-  "running" (a send within 30 s of a wake queues and says so; a later one wakes the idle session); `wake` replaces a stuck session
-  whose turn ended (stop, handover session) and wakes an idle one even with nothing queued, instead of refusing "recorded as
-  running"; a session that is still working is never stopped by send, wake or resume (only `restart` replaces it, even when it looks
-  stuck). A `[working]` report of a session that is not running is marked stale; a start that ended its turn without a tool call is
-  reported loudly ("started, but it ended its turn at once: wake it with the task"). The listed `state` (working / idle) now beats a
-  `status` that still says busy.
+- **Approvals are answered in the thread's own session.** The desk is told that an approval of a thread's denied action is answered in
+  the thread's session (the pane's Open tN), never asked with AskUserQuestion and never relayed with `send`: a relayed yes does not
+  satisfy the permission check. A thread no longer reports `blocked` with an `approval` for something it decides itself (a subagent
+  cap, a model choice). The honest limit: no hook can carry a desk yes past a classifier denial. `classic.PermissionRequest` only
+  answers an ask that goes to a person, and in auto mode what the classifier refuses is a verdict, not an ask; `classic.PermissionDenied`
+  can only let the model retry the same call through the same check; a hook could wait minutes for the user's answer, but that changes
+  nothing. So the planned grant flow (signed single-use grants) was not built. An expensive model (the pane's Approve) and a push
+  (`approve-push`) are unchanged. (Read from the engine's plugin-authoring typings; not run against a live auto-mode session.)
 - **Restart, wake and the handover put the task first**: "Resume the work now (task: ...). Answer status requests with a short
   lean_report as a side effect, never as the whole turn." A status request mid-work gets a one-line report without ending the turn.
-- **Session names**: every fresh start and restart passes `-n "tN · title"` with the generation ("(2)", "(3)" after restarts); the name
-  is read back from `claude agents` and a mismatch is said. Claude Code has no command to rename a background session, so it is left
-  (the doctor row says so).
-- **Superseded sessions are closed**: after a fresh session replaces an old one, `claude rm <old id>` (never `--discard-unpushed`,
-  never `--force-remove-worktree`, never a live or working process, never the new session; a refusal is logged and left). Config
-  `threads.removeOld` (default true). New doctor row "stale thread sessions" (`hooks/threadsessions.ts`); `doctor fix` removes them
-  the same way.
+- A done thread's next message says "new session (not in keep mode)"; a resume says the context size and the estimated cached re-read
+  cost when the size is known.
+- The thread guide: light review at intermediate checkpoints and `level: "full"` only before "ready to push"; a worker whose edit is
+  refused for a path outside its `allow-edit` grant stops and reports that exact path. The thread and desk guides explain the context
+  limit, the pane warning and keep mode.
+- Doctor: "the desk spent $X on opus today" counts only spend after lean-agent pinned the model (earlier spend today is a note), and
+  "opus is N% of spend" is a FIX only while a thread is on opus now, naming only those threads; otherwise a note.
+- `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line for that text instead of "was
+  never audited" (logged); a network flag still needs your explicit adopt. `audit` says "Audit started; verdict not recorded yet",
+  `show` says "audited, waiting for the verdict", and the desk starts only one audit thread per script text.
 - The thread `CLAUDE.md` no longer keeps a stale `model:` line after a model change (regenerated at every fresh start) and says that
   tools starting the shell in the worktree are fine while the thread itself never `cd`s.
-- A restart or fresh start reply says what the new session costs: "new session: handover about N tokens (~$X first turn, estimate);
-  the old session's conversation is not resumed".
 
-### Investigated: can the desk carry the user's yes for a thread's denied action? No.
-The question: a thread reports `blocked` with an `approval` (an action Claude Code's permission check denied in the thread's session);
-could the user answer at the desk (AskUserQuestion) and a plugin hook carry that decision into the thread, so nobody has to press
-"Open tN"? Read from the engine's own plugin-authoring typings (`claude-code.d.ts`, Claude Code 2.1.328); nothing here was checked
-against a live auto-mode session.
-- **(a) Fails: no hook can carry a decision past a classifier denial.** `classic.PermissionRequest` answers an *ask* that goes to a
-  person (the dialog, a host's callback, a hook's own ask: `ToolCheckResult.plugin`); its result (`PermissionRequestDecision`) is
-  allow or deny. In auto mode the classifier settles the ordinary asks, and what it refuses is a verdict, not an ask: the typings say
-  "its block still refuses" even on a call a hook asked about, and `tool.judge` runs *after* every check only a person may answer, so
-  a PermissionRequest hook is not consulted for it. `classic.PermissionDenied` (input: `tool_name`, `tool_input`, `tool_use_id`,
-  `reason`) does fire for a denial, but its only result is `retry: true`: it lets the model try the same call again, through the same
-  check, so the classifier judges it again and no decision travels. A desk "send yes" is not one either (the classifier reads a relayed
-  approval as the model undermining oversight). The actions threads report as `approval` are exactly these denials.
-- **(b) A hook can wait, but it does not help.** A hook's budget is 10 s of its *own* time; the clock stops while a `$` call it made is in
-  flight, except `$.clock` waits, which count. So a hook can wait minutes by polling with `$.process.run` (a call may run up to ten
-  minutes) and reading the mod store between polls. Nothing documents a longer ceiling; none was measured.
-- **(c) The desk's mod can read the human's answer to an AskUserQuestion.** `classic.PostToolUse` for `AskUserQuestion` carries
-  `tool_input.questions` and `tool_response.answers` (question text to the chosen label; multi-select comma-joined; `response` and
-  `annotations` for typed text), plus `tool_use_id`. Only a human can produce that tool result.
-- **Decision:** because (a) fails, the grant part (a PermissionRequest hook in the thread, `approve-action`, signed single-use grants) is
-  not built: it would be a flow that cannot work. Approvals stay in the thread's own session (the pane's **Open tN**), and the desk says
-  where the user answers instead of asking them with AskUserQuestion. An expensive model (the pane's Approve) and a push
-  (`approve-push`) are unchanged.
+### Fixed
+- **A stale "needs your yes" card no longer stays after the thread carried on.** The card now exists only while the thread is really
+  blocked: the session is not working, and it has made no tool call since it reported (the mod notes the first one, `approvals.ts`);
+  the generic "tN is blocked" row, its toast and the red state word end with it. Limits: any later tool call of the thread's main loop
+  counts, so a desk wake or chaser message that makes a blocked thread call a tool also ends the card (the thread's own report is then
+  what is left); the notes live in the mod store, shared between a thread's session and the desk, but this was not run live. The thread
+  detail does not know the usage-limit pause, so a paused thread keeps its card in the pane and loses it in the detail.
+- **"Open tN" opened a new desk.** A session started in a thread's folder is that thread, whatever its session id: the role is decided
+  by the folder first (the desk folder is the desk, `~/.lean-agent/threads/tN` is thread tN) and by the session id second; an unknown
+  id in a thread folder never becomes a desk and is recorded in the thread's `sids`. (A session id that another open thread holds still
+  wins over a thread folder.) This is the part that could be fixed without running the app.
+- **"Open tN" no longer implies the right session opened.** After the link is handed to the system opener the reply says: if a new
+  desk opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it
+  from a terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
+- **A script audit's verdict is no longer lost when the auditor ran in the background.** The mod recorded the verdict only from the
+  auditor's own Agent reply, which a background call does not have. A verdict passed with `record-audit` never adopts by itself (an
+  `adopt` waits for your Adopt / Reject; adapt and reject take effect).
 
+### Removed
+- **Superseded thread sessions**: after a fresh session replaces an old one, the old one is removed from the app's list with
+  `claude rm <old id>` (never `--discard-unpushed`, never `--force-remove-worktree`, never a live or working process, never the new
+  session; a refusal is logged and left). Config `threads.removeOld` (default true) turns that off.
+- The desk no longer asks an approval of a thread's denied action with AskUserQuestion, and "running" is no longer claimed from a recorded flag.
 
 ## 1.0.13
 
