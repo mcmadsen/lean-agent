@@ -158,14 +158,23 @@ export async function threadChoices(h: Host, home: string, tme: Dim, threadUsd: 
 }
 
 // "Today $x · 7d $y" for the pane footer and a thread's status line; null when there is no ledger at all
-export async function spendLine(h: Host): Promise<string | null> {
+export type Spend = { today: number; week: number; byThread: Record<string, number> }
+// today and the last 7 days in usd, and today's usd per thread (`tN`); null when there is no ledger at all
+export async function spendNumbers(h: Host): Promise<Spend | null> {
   const home = await homeDir(h)
   if (!(await h.fs.exists(`${leanDir(home)}/ledger.jsonl`).catch(() => false)) && !(await h.fs.exists(`${leanDir(home)}/rollup.json`).catch(() => false))) return null
   const now = await h.clock.now()
   const ro = await syncRollup(h, now)
   const w = zero()
   for (const d of lastDays(now, STATS_DAYS)) if (ro.days[d]) merge(w, ro.days[d]!.t)
-  return `$${(ro.days[dayOf(now)]?.t[0] ?? 0).toFixed(2)} · 7d $${w[0].toFixed(2)}`
+  const today = ro.days[dayOf(now)]
+  return { today: today?.t[0] ?? 0, week: w[0], byThread: Object.fromEntries(Object.entries(today?.tN ?? {}).map(([k, a]) => [k, a[0]])) }
+}
+
+export const spendText = (s: Spend): string => `$${s.today.toFixed(2)} · 7d $${s.week.toFixed(2)}`
+export async function spendLine(h: Host): Promise<string | null> {
+  const s = await spendNumbers(h)
+  return s ? spendText(s) : null
 }
 
 // Sessions on a model lean-agent did not configure: spend today per role x model against the desk's pinned model and the
