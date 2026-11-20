@@ -9,7 +9,7 @@
   cannot be recorded green by leaving the level out. `prepare` prints `expected review cost ~$1.20 (2 passes, sonnet; ...)`: the median of
   this project's earlier reviewer passes in the ledger, else a stated default of $1.50 a pass. New modules `reviewcost.ts`, `reviewexclude.ts`.
 - **Generated files are left out of a review**: out of the file lists, the risk, the line count and the diff the reviewer reads (it
-  gets `':!path'` pathspecs). Files marked `linguist-generated` in `.gitattributes`, `*.snap`, golden / fixtures / `__snapshots__` paths,
+  gets `':(exclude,literal)path'` pathspecs; a change that edits `.gitattributes` cannot mark its own files). Files marked `linguist-generated` in `.gitattributes`, `*.snap`, golden / fixtures / `__snapshots__` paths,
   lockfiles, minified bundles and `config.json` `review.exclude` globs; the prepare text says how many files and lines. The prompt
   carries the thread's registered worktree (`git -C <worktree> ...`) and the `allow-cmd:` line for it.
 - **Budget alerts by default** (`config.json` `budget.daily` 25 USD and `budget.threadDaily` 20 USD, `"off"` allowed): a desk notice and a

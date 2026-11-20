@@ -34,7 +34,7 @@ tool's refusal: do what it says.
    `projects.json`), `base`, `branch`, and `level`: omit it (= `light`) at a checkpoint, pass `"full"` only for the review before "ready
    to push". It reads your registered worktree (`worktree` names another registered one). It computes from the diff, leaving out
    generated files (`.gitattributes` linguist-generated, `*.snap`, golden / fixtures / `__snapshots__` paths, lockfiles, minified
-   bundles and the globs of config `review.exclude`: the text says how many files and lines, and the `':!path'` pathspecs that keep them
+   bundles and the globs of config `review.exclude`: the text says how many files and lines, and the `':(exclude,literal)path'` pathspecs that keep them
    out of the reviewer's own `git diff`): new symbols and files, edited tests whose assertions change
    (renamed, flipped, deleted, skipped), new parameters with defaults, new module-level state, changed or removed exported symbols,
    the user's declines for this branch, and on a later pass the open findings and the delta since the last reviewed sha. The first

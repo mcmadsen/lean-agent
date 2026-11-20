@@ -37,7 +37,8 @@ export async function reviewerPassCosts(h: Host, project: string, text: string):
       projectOf.set(r.tN, p)
     }
     if (p !== project) continue
-    const key = `${r.tN}/${String(r.agentId ?? r.ts)}`
+    if (typeof r.agentId !== 'string' || !r.agentId) continue // a row that names no subagent cannot be told apart as a pass: it would count as one each
+    const key = `${r.tN}/${r.agentId}`
     const cur = passes.get(key) ?? { ts: r.ts, usd: 0 }
     cur.usd += r.usd
     cur.ts = Math.max(cur.ts, r.ts)

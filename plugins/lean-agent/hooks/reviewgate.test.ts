@@ -548,17 +548,17 @@ test('lean_review prepare: generated files are left out of the lists, the line c
   expect(meta.lines).toBe(1) // only src/a.ts counts
   expect(meta).toMatchObject({ runs: 1 }) // 900 golden lines with "token"/"secret" words are no risk
   expect(r.text).toContain('Generated files left out of the lists, the risk and the line count: 5 files, 905 lines (test/golden/out.json,')
-  expect(r.text).toContain("git -C /r/app diff " + MB + '...' + H2 + " -- . ':!test/golden/out.json'")
-  expect(r.text).toContain("':!pnpm-lock.yaml'")
-  expect(r.text).toContain("':!src/gen.ts'")
-  expect(r.text).toContain("':!docs/x.txt'")
+  expect(r.text).toContain("git -C /r/app diff " + MB + '...' + H2 + " -- . ':(exclude,literal)test/golden/out.json'")
+  expect(r.text).toContain("':(exclude,literal)pnpm-lock.yaml'")
+  expect(r.text).toContain("':(exclude,literal)src/gen.ts'")
+  expect(r.text).toContain("':(exclude,literal)docs/x.txt'")
   expect(r.text).not.toContain('genned')
   expect(r.text).toContain('aa1 (src/a.ts:1)')
   // nothing generated: no pathspec, no sentence
   const plain = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
   const p = await tool(plain, { action: 'prepare', base: 'main', level: 'full' })
   expect(p.text).not.toContain('Generated files')
-  expect(p.text).not.toContain("':!")
+  expect(p.text).not.toContain("':(exclude")
   expect(prepMeta(p).excluded).toEqual({ files: 0, lines: 0 })
   // git check-attr does not answer: the built-in and config rules still apply, and the text says the attributes were not read
   const noAttr = setup({ '*': diff }, { '*': added })
@@ -566,6 +566,15 @@ test('lean_review prepare: generated files are left out of the lists, the line c
   const n = await tool(noAttr, { action: 'prepare', base: 'main', level: 'full' })
   expect(prepMeta(n).excluded.files).toBe(4)
   expect(n.text).toContain('git check-attr did not answer')
+  // the change must not mark its own files generated: with a .gitattributes among the changed files the attribute rule is not applied
+  const self = setup({ '*': diff + newFileDiff('.gitattributes', 'src/gen.ts linguist-generated') }, { '*': added + 'A\t.gitattributes\n' })
+  const sg = self.git.handler
+  self.git.handler = (a: string[], c: Parameters<typeof sg>[1]) => (a.includes('check-attr') ? { exitCode: 0, stdout: 'src/gen.ts: linguist-generated: set\n' } : sg(a, c))
+  const s = await tool(self, { action: 'prepare', base: 'main', level: 'full' })
+  expect(prepMeta(s).excluded.files).toBe(3) // golden, min.js, lockfile (by name); src/gen.ts stays reviewed
+  expect(s.text).toContain('genned')
+  expect(s.text).toContain('a .gitattributes is among the changed files')
+  expect(s.text).toContain('say so in "missing"')
 })
 
 test('reviewexclude: the built-in rules and the config globs', () => {
@@ -597,6 +606,11 @@ test('lean_review prepare: the reviewer prompt carries the thread\'s own worktre
   // an explicit worktree must be a registered one of this project
   expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/w/app-t2' })).text).toContain('git -C /w/app-t2 diff')
   expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/etc' })).text).toContain('git -C /r/app diff')
+  // record reads the same checkout as prepare (the generated-file marks and the lists must agree)
+  h.calls.length = 0
+  await tool(h, { sha: H2, base: 'main', review: { ...base, reuse: reuseOf('plain1') } })
+  expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[2] === '/w/app-t1' && c.argv.includes('merge-base'))).toBe(true)
+  expect(h.calls.some(c => c.argv[0] === 'git' && c.argv[2] === '/r/app' && c.argv.includes('merge-base'))).toBe(false)
   // a worktree that is gone, or a thread without one: the project's registered path
   h.files.delete('/w/app-t1/.keep')
   expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('git -C /r/app diff')

@@ -353,6 +353,6 @@ export async function prepare(h: Host, r: Range, from: string = r.mb, exclude: s
   const p = await analyzeDiff(diff, async f => (await git('show', `${from}:${f}`)) ?? '', newFiles)
   // the biggest excluded files first: those are the ones worth keeping out of the reviewer's own `git diff`
   const files = [...gen.files.keys()].sort((a, b) => (cut.per.get(b) ?? 0) - (cut.per.get(a) ?? 0) || a.localeCompare(b))
-  if (files.length) p.excluded = { files, lines: cut.lines, ...(gen.attrFailed ? { attrFailed: true } : {}) }
+  if (files.length) p.excluded = { files, lines: cut.lines, ...(gen.attrFailed ? { attrFailed: true } : {}), ...(gen.attrSkipped ? { attrSkipped: true } : {}) }
   return { prep: truncated ? { ...p, truncated } : p, diff, failed: raw === null || names === null }
 }

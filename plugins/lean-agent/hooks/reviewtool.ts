@@ -214,7 +214,7 @@ async function doMerge(h: Host, project: string, i: any): Promise<Out> {
   return { ok: true, text: `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).\nPass this block, unchanged, as review to lean_review record (or pass the two blocks as reviews):\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\`` }
 }
 
-async function doRecord(h: Host, project: string, i: any): Promise<Out> {
+async function doRecord(h: Host, project: string, i: any, thread: string): Promise<Out> {
   const sha = str(i.sha)
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, text: 'review needs the full commit sha (git rev-parse HEAD)' }
   const wantGreen = i.green === true
@@ -243,7 +243,8 @@ async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   }
   const base = str(i.base)
   const branch = str(i.branch)
-  const range = await resolveRange(h, project, base || undefined, sha)
+  // the same checkout prepare read (the thread's own worktree): generated-file marks and the lists must be the same on both sides
+  const range = await resolveRange(h, project, base || undefined, sha, await checkoutOf(h, project, thread, branch, ''))
   if (typeof range === 'string') {
     const file = await writeReview(h, rec)
     return { ok: !wantGreen, text: `${wantGreen ? 'green refused' : 'recorded not green'}: ${range} (base is needed to compute the new symbols and edited tests); recorded NOT green in ${file}` }
@@ -316,6 +317,6 @@ export async function reviewTool(h: Host, project: string, i: any, thread = ''):
     return { ok: r.ok, text: r.text }
   }
   if (action === 'decline') return doDecline(h, project, i)
-  if (action === 'record') return doRecord(h, project, i)
+  if (action === 'record') return doRecord(h, project, i, thread)
   return { ok: false, text: `unknown lean_review action ${action}` }
 }

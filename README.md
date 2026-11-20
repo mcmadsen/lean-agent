@@ -314,7 +314,7 @@ out of the record call; a full review never takes a light pass for "the last rev
 `expected review cost ~$1.20 (2 passes, sonnet; median of 5 earlier reviewer passes on this project)`: the median cost of this
 project's earlier reviewer passes in the usage ledger, else a stated default of $1.50 a pass. It carries the thread's own registered
 worktree (every reviewer command is `git -C <worktree> ...`) and the `allow-cmd:` line for it. **Generated files are left out** of the
-file lists, the risk, the line count and the diff the reviewer reads (it gets `':!path'` pathspecs for them): files marked
+file lists, the risk, the line count and the diff the reviewer reads (it gets `':(exclude,literal)path'` pathspecs for them; a change that edits `.gitattributes` cannot mark its own files, and `record` reads the same worktree `prepare` did): files marked
 `linguist-generated` in `.gitattributes`, `*.snap`, paths under `golden` / `fixtures` / `__snapshots__`, lockfiles (`package-lock.json`,
 `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`), minified bundles and the globs of `config.json`
 `review.exclude` (`{"review": {"exclude": ["docs/api/**", "*.gen.ts"]}}`); the text says how many files and lines were left out.

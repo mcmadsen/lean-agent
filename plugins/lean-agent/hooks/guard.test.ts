@@ -627,6 +627,7 @@ test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg wit
   const as = (t: string, cwd = wt) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, t, 'x1')
   const ok = ['cat *.md', 'ls src/*.ts', 'wc -l src/*.ts', 'head -3 *.md', 'cat /h/code/app/lib/*.ts', 'ls /h/code/app/lib/t*.ts', 'cat src/s?b/c.ts', 'cat src/*/c.ts', 'cat src/[ab].ts', 'wc -l z/*', 'ls -d */', 'rg foo src/*.ts', 'grep -n foo *.md',
     'rg foo src 2>/dev/null', 'ls /h/code/app/nope 2>/dev/null', 'cat a.md 2>/dev/null | head -3', 'rg foo 2>/dev/null | sort | uniq -c | sort -rn', 'cat nothing/*.zzz', // a glob with no match stays a literal word
+    'cat a.md | wc -l *.md', 'ls .gitignore*', "cat a.md | tr -d '\\n' | sort *.md", "sort '*.md'", // (a quoted * is a plain name)
     'rg foo', 'rg -n foo', 'rg foo | sort', 'grep foo', 'grep -rn foo', 'grep -c foo', 'rg -c foo 2>/dev/null',
     'sort a.md', 'sort -u a.md b.md', 'sort -rn -k2,2 a.md', 'sort -t, -k1 a.md', 'cat a.md | sort | uniq', 'uniq a.md', 'uniq -c a.md', 'cat a.md | uniq -d', 'sort *.md', 'cut -d, -f1 a.md', "cut -d ' ' -f 2- a.md", 'cat a.md | cut -c1-10', "cat a.md | tr -d '\\n'", 'cat a.md | tr a-z A-Z', "cat a.md | tr -s ' '", 'nl a.md', 'nl -ba a.md', 'nl *.md', 'cat a.md | nl -ba', 'rg -l foo src | sort | head -5', 'ls src/*.ts | wc -l']
   for (const t of ['lean-agent:reader-haiku', 'lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
@@ -634,6 +635,10 @@ test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg wit
     'ls; ls', 'ls && ls', 'ls || ls', 'cat $(ls)', 'cat `ls`', 'cat "$(ls)"', 'cat ${HOME}/x', 'cat *.md; rm x', 'cat *.md && rm x', 'cat *.md &', 'cat < a.md',
     'cat /etc/*', 'cat /*', 'ls /h/*', 'cat /h/.ssh/*', 'cat ../*', 'cat src/../*', 'cat ../../etc/*', 'ls /h/code/*', 'cat /h/code/app/../*', 'cat /h/.lean-agent/../.ssh/*', 'cat lnk/*', 'cat lnk/esc*', 'cat l*/*', 'cat lnk/e*/.keep', 'cat */*', 'ls -d /h/.*', 'cat -*',
     'sort -o out a.md', 'sort -oout a.md', 'sort --output=out a.md', 'sort --output out a.md', 'sort -T /tmp a.md', 'sort --random-source=/etc/passwd -R a.md', 'sort --files0-from=x', 'sort --compress-program=sh a.md', 'sort /etc/passwd', 'sort ../x',
+    'uniq *.md', 'cat a.md | uniq *.md', 'uniq a.m*', // (a glob that expands to two names would make the second one uniq's OUTPUT file)
+    'cat .*', 'ls .*', 'ls .?', 'ls ..*', 'rg x .*/.*/.*/.*', 'ls src/.*', 'cat .*/x', // (older shells expand .* to . and .., which climbs out of the roots)
+    'sort [!]]o a.md', 'cat []a]', 'cat [!]]', 'cat [[:alpha:]]', 'cat src/[]]', 'cat [a-z[:digit:]]', // (a bracket set that is sized differently by the shell)
+    'rg foo | wc -l /etc/*', 'rg foo | sort *.md > out',
     'uniq a.md b.md', 'uniq /etc/passwd', 'uniq -c a.md out', 'cut -f1 /etc/passwd', 'tr', 'tr a b c', 'tr -d', 'tr a b /etc/passwd', 'tr a-z *', 'nl /etc/passwd', 'nl -h x --output=y a.md',
     'xargs ls', 'rg -l foo | xargs cat', 'cd src', 'cd /h && ls', 'awk 1 a.md', 'find . -name *.ts', 'sed -n 1p *.md', 'jq . *.json', 'stat *.md', 'diff *.md', 'git log *.ts', 'git -C /h/code/app diff -- *.ts', 'rg *.ts', 'rg foo -g *.ts src', 'grep -e *x src', 'rg -t * x']
   for (const t of ['lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')

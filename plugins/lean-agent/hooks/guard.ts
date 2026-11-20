@@ -427,7 +427,8 @@ const SEARCH_CMDS = new Set(['rg', 'grep', 'find', 'ls', 'wc', 'head', 'tail', '
 // and the text filters of a pipeline (sort without -o, uniq with at most one operand, cut, tr, nl; xargs, awk and the rest stay refused)
 const MORE_CMDS = new Set(['sed', 'stat', 'file', 'diff', 'jq', 'tree', 'sort', 'uniq', 'cut', 'tr', 'nl'])
 // the commands whose plain file operands may be an unquoted glob (readers and the reviewer; the words are expanded and checked by globOk)
-const GLOB_CMDS = new Set(['rg', 'grep', 'ls', 'wc', 'head', 'tail', 'cat', 'sort', 'uniq', 'cut', 'nl'])
+// (never uniq: its second operand is the OUTPUT file, and a glob can expand to two names)
+const GLOB_CMDS = new Set(['rg', 'grep', 'ls', 'wc', 'head', 'tail', 'cat', 'sort', 'cut', 'nl'])
 export const builtinMore = (t?: string): boolean => {
   const n = ownName(t) ?? ''
   return /^reader-/.test(n) || n === 'reviewer'
@@ -603,6 +604,9 @@ async function globOk($: Host, ctx: Ctx, roots: string[], marked: string): Promi
   const pat = marked.slice(1)
   if (!pat || pat.startsWith('-') || pat.split('/').includes('..')) return false
   const parts = pat.split('/')
+  // a bracket set the scan above cannot size exactly (`[]a]`, `[!]]`, `[[:alpha:]]`: a `]` or `[` inside the set) matches one character in the
+  // shell but more in segRe: refused, not guessed
+  if (/\[[!^]?\]|\[[^\]]*\[/.test(pat)) return false
   const first = parts.findIndex(hasGlob)
   if (first < 0) return pathOk($, ctx, roots, pat)
   const lead = parts.slice(0, first).join('/') // '' = the cwd, or the root for an absolute pattern
@@ -618,6 +622,9 @@ async function globOk($: Host, ctx: Ctx, roots: string[], marked: string): Promi
       if (!roots.some(r => within(real, r))) return false
       const names = await $.fs.list(real).catch(() => [] as { name: string; kind: string }[])
       const re = segRe(parts[k]!)
+      // a segment led by a literal dot (`.*`, `.?`, `..*`) matches `.` and `..` in older shells (bash before 5.2, macOS bash 3.2), which a
+      // directory listing never shows: `.*/.*/.*` would climb out of the roots
+      if (parts[k]!.startsWith('.') && (re.test('.') || re.test('..'))) return false
       for (const n of names) {
         if (!re.test(n.name)) continue
         if (++seen > GLOB_MAX) return false

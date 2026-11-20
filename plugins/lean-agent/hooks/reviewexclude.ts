@@ -39,9 +39,12 @@ async function attributed(h: Host, repo: string, names: string[]): Promise<{ hit
   return { hit, failed: false }
 }
 
-export type Excluded = { files: string[]; lines: number; attrFailed?: boolean } // files: the biggest first
+export type Excluded = { files: string[]; lines: number; attrFailed?: boolean; attrSkipped?: boolean } // files: the biggest first
 // the files of `names` a review leaves out, with the reason of each
-export async function generatedFiles(h: Host, repo: string, names: string[], globs: string[]): Promise<{ files: Map<string, string>; attrFailed: boolean }> {
+// The change under review must not mark its own files generated: when a .gitattributes is among the changed files the attribute rule is not
+// applied at all (attrSkipped), whatever it says; the by-name rules and the user's own config globs still are.
+export async function generatedFiles(h: Host, repo: string, names: string[], globs: string[]): Promise<{ files: Map<string, string>; attrFailed: boolean; attrSkipped: boolean }> {
+  const attrSkipped = names.some(n => base(n) === '.gitattributes')
   const files = new Map<string, string>()
   const res = globs.map(g => [g, globRe(g)] as const)
   const left: string[] = []
@@ -53,9 +56,9 @@ export async function generatedFiles(h: Host, repo: string, names: string[], glo
       else left.push(n)
     }
   }
-  const a = left.length ? await attributed(h, repo, left) : { hit: new Set<string>(), failed: false }
+  const a = left.length && !attrSkipped ? await attributed(h, repo, left) : { hit: new Set<string>(), failed: false }
   for (const n of a.hit) files.set(n, '.gitattributes linguist-generated')
-  return { files, attrFailed: a.failed }
+  return { files, attrFailed: a.failed, attrSkipped }
 }
 
 // the diff text without the sections of `drop`, and how many added/removed lines were dropped (in all, and per file)
@@ -80,10 +83,12 @@ export function dropSections(diff: string, drop: Set<string>): { diff: string; l
 export const EXCLUDE_SPECS = 40
 export function excludeSpecs(ex: Excluded | undefined): string {
   if (!ex?.files.length) return ''
-  return ex.files.filter(f => !/['\n\r]/.test(f)).slice(0, EXCLUDE_SPECS).map(f => `':!${f}'`).join(' ') // (a name with a quote could not be written as one plain word)
+  // :(exclude,literal): a `*`, `?` or `[` in a file name is that character, not a glob that could hide more than the file
+  return ex.files.filter(f => !/['\n\r]/.test(f)).slice(0, EXCLUDE_SPECS).map(f => `':(exclude,literal)${f}'`).join(' ') // (a name with a quote could not be written as one plain word)
 }
 export function excludedText(ex: Excluded | undefined): string {
   if (!ex?.files.length) return ''
-  const shown = ex.files.slice(0, 5).join(', ')
-  return `Generated files left out of the lists, the risk and the line count: ${ex.files.length} file${ex.files.length === 1 ? '' : 's'}, ${ex.lines} line${ex.lines === 1 ? '' : 's'} (${shown}${ex.files.length > 5 ? ', ...' : ''}). Do not review them${ex.attrFailed ? ' (git check-attr did not answer, so .gitattributes marks were not applied)' : ''}.`
+  const shown = ex.files.slice(0, 15).join(', ')
+  const notes = [ex.attrFailed ? 'git check-attr did not answer, so .gitattributes marks were not applied' : '', ex.attrSkipped ? 'a .gitattributes is among the changed files, so its marks were not applied (the change must not mark its own files generated)' : ''].filter(Boolean)
+  return `Generated files left out of the lists, the risk and the line count: ${ex.files.length} file${ex.files.length === 1 ? '' : 's'}, ${ex.lines} line${ex.lines === 1 ? '' : 's'} (${shown}${ex.files.length > 15 ? ', ...' : ''}). Do not review them; if one of them is hand-written code (named like a fixture or snapshot but holding logic), say so in "missing"${notes.length ? ` (${notes.join('; ')})` : ''}.`
 }
