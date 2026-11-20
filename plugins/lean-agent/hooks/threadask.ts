@@ -103,7 +103,7 @@ export async function askText(h: Host, home: string, id: string, question: strin
   const cwd = `${deskState(home)}/ask`
   await mkdirp(h, cwd).catch(() => undefined)
   const run = deps.run ?? (async (p, m, e, c) => {
-    const r = await h.process.run(['claude', '-p', '--model', m, '--effort', e, '--', p], { cwd: c, timeoutMs: 120_000 })
+    const r = await h.process.run(['claude', '-p', '--model', m, '--effort', e, '--tools', '', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--max-budget-usd', '0.25', '--', p], { cwd: c, timeoutMs: 120_000 })
     return { ok: r.exitCode === 0, text: (r.stdout || r.stderr).trim() }
   })
   const r = await run(prompt, model, effort, cwd).catch(e => ({ ok: false, text: String((e as Error)?.message ?? e) }))

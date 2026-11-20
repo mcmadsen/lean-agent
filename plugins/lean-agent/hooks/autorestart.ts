@@ -102,7 +102,18 @@ export type Notice = { id: string; text: string }
 // "new session: handover about 3.2k tokens (~$0.01 first turn, estimate)" taken out of the reply of a start, or ''
 const costOf = (text: string) => /handover about [^(]*\(~\$[\d.]+[^)]*\)/.exec(text)?.[0] ?? ''
 
+let ticking = false // one tick at a time: a restart can take longer than the timer's period
 export async function autoRestartTick(h: Host, deps: RestartDeps): Promise<Notice[]> {
+  if (ticking) return []
+  ticking = true
+  try {
+    return await tickOnce(h, deps)
+  } finally {
+    ticking = false
+  }
+}
+
+async function tickOnce(h: Host, deps: RestartDeps): Promise<Notice[]> {
   const home = await homeDir(h)
   if (!(await autoRestartOn(h, home))) return []
   const ents = await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])
@@ -116,7 +127,7 @@ export async function autoRestartTick(h: Host, deps: RestartDeps): Promise<Notic
     const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
     const now = await h.clock.now()
     const drop = () => writeJson(h, markerFile(home, id), { ...mk, pending: undefined })
-    if (!t || t.state !== 'open' || t.sid !== p.sid) {
+    if (!t || t.state !== 'open' || t.sid !== p.sid || t.finished) {
       await drop() // parked, closed, or already another session: the checkpoint is stale
       continue
     }

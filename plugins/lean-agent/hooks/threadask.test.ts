@@ -78,6 +78,9 @@ test('ask: no matching line starts a FRESH small session (haiku / low) with the 
   expect(calls).toHaveLength(1)
   expect(calls[0]!.slice(0, 5)).toEqual(['-p', '--model', 'haiku', '--effort', 'low'])
   expect(calls[0]!.some(x => x === '--resume' || x === '--bg')).toBe(false)
+  // a fresh session with no limits would be a tool-capable session fed untrusted notes: no tools, no MCP, no skills, not saved, a budget
+  for (const f of ['--tools', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--max-budget-usd']) expect(calls[0]).toContain(f)
+  expect(calls[0]![calls[0]!.indexOf('--tools') + 1]).toBe('')
   const prompt = calls[0]![calls[0]!.length - 1]!
   expect(prompt).toContain('Question: zebra quantum entanglement')
   expect(prompt).toContain('--- handover of t1 ---')

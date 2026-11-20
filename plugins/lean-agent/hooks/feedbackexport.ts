@@ -208,6 +208,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     let t = input.replace(/[\u0001\u0002\u0003]/g, '')
     for (const re of SECRET_RES) t = t.replace(re, (m, g1) => (typeof g1 === 'string' ? `${g1}<secret>` : '<secret>'))
     t = t.replace(OS_BUILD_RE, '$1')
+    t = maskMcp(t)
     t = t.replace(URL_RE, u => {
       const core = u.replace(/[.,;:!?]+$/, '') // sentence punctuation after a URL is not part of it
       return (REPO_URL.test(core) ? core : '<url>') + u.slice(core.length)
@@ -445,6 +446,16 @@ function render(c: Collected, at: number, lim: Limits): string {
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
 }
 const bytes = (s: string) => new TextEncoder().encode(s).length
+// MCP server names can be company names: a server outside the well-known public ones is masked wherever a refusal or missing-tool row names it
+const MCP_PUBLIC = new Set(['azure-devops', 'github', 'sentry', 'datadog', 'linear', 'slack', 'atlassian', 'notion', 'lean-agent', 'claude-in-chrome'])
+const mcpName = (n: string) => (MCP_PUBLIC.has(n.toLowerCase()) ? n : '<server>')
+export const maskMcp = (t: string): string =>
+  t
+    .replace(/\bmcp__([A-Za-z0-9-]+)__([A-Za-z0-9_-]*)/g, (m, s: string, tool: string) => (MCP_PUBLIC.has(s.toLowerCase()) ? m : `mcp__<server>__${tool ? '<tool>' : ''}`))
+    .replace(/\bmcp (?!server|servers|tool|tools|<)([A-Za-z0-9._-]{2,})/gi, (_m, n: string) => `mcp ${mcpName(n)}`)
+    .replace(/\bserver ([A-Za-z0-9._-]{2,}) is not granted/g, (_m, n: string) => `server ${mcpName(n)} is not granted`)
+    .replace(/(allow-mcp(?:-write)?: )([^)\n]*)/g, (_m, lead: string, list: string) => lead + list.split(/\s*,\s*/).map(x => (x === 'none' ? x : mcpName(x))).join(', '))
+
 export function fit(c: Collected, at: number, cap = EXPORT_CAP): string {
   for (const lim of [{ draft: 1e9, top: 1e9 }, { draft: 6000, top: 20 }, { draft: 3000, top: 8 }, { draft: 1200, top: 3 }]) {
     const t = render(c, at, lim)

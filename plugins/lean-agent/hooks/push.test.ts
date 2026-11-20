@@ -463,6 +463,7 @@ test('an unregistered worktree is NOT adopted unless it is the one linked worktr
     ['registered for another thread that is open (never taken over)', { registry: { 'app/feat': { path: '/w/feat', branch: 'feat', thread: 't2' } }, wtList: LIST(['/w/feat', SHA, 'feat']), threads: { t2: 'open' }, live: ['/w/feat'] }, 'registered to t2 (open)'],
     ['a prunable entry', { wtList: LIST(['/w/feat', SHA, 'feat']).replace('branch refs/heads/feat', 'branch refs/heads/feat\nprunable gitdir file points to non-existent location') }, 'no registered worktree'],
     ['two candidates (ambiguous, named)', { wtList: LIST(['/w/a', SHA, 'feat'], ['/w/b', SHA, 'feat2']) }, '2 unregistered worktrees are at'],
+    ['ambiguous AND a closed owner\'s worktree at the sha (an ambiguity is never settled by a takeover)', { registry: { 'app/old': { path: '/w/old', repo: '/r/app', branch: 'old', thread: 't2' } }, wtList: LIST(['/w/a', SHA, 'feat'], ['/w/b', SHA, 'feat2'], ['/w/old', SHA, 'old']), threads: { t2: 'closed' }, live: ['/w/old', '/w/a', '/w/b'] }, '2 unregistered worktrees are at'],
   ]
   for (const [name, opts, want] of none) {
     const s = await setup({ registry: {}, ...opts })

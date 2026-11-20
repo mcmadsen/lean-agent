@@ -207,3 +207,28 @@ test('leanThread auto-restart: a new session with the handover (the old one stop
   p.h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', state: 'parked', sid: S1 }))
   expect((await leanThread(p.h.host, ROOT, { action: 'auto-restart', tN: 't1' })).ok).toBe(false)
 })
+
+test('desk tick: two overlapping ticks restart once (a restart can outlast the timer), and a finished thread is never restarted', async () => {
+  const { h } = setup()
+  await end(h)
+  h.clock.t = 1_000_000 + IDLE_MS
+  let n = 0
+  let release!: () => void
+  const gate = new Promise<void>(r => (release = r))
+  const deps = { agents: rows(), restart: async () => (n++, await gate, ok) }
+  const first = autoRestartTick(h.host, deps)
+  for (let i = 0; i < 20; i++) await Promise.resolve() // let the first tick reach its restart
+  expect(await autoRestartTick(h.host, deps)).toEqual([]) // overlaps the first: does nothing
+  release()
+  expect(await first).toHaveLength(1)
+  expect(n).toBe(1)
+  // finished (done report, session stopped): the checkpoint is dropped, nothing restarts
+  const f = setup().h
+  await end(f)
+  const tj = JSON.parse(f.files.get(`${T1}/thread.json`) as string)
+  f.files.set(`${T1}/thread.json`, JSON.stringify({ ...tj, finished: 999 }))
+  f.clock.t = 1_000_000 + IDLE_MS
+  let m = 0
+  expect(await autoRestartTick(f.host, { agents: rows(), restart: async () => (m++, ok) })).toEqual([])
+  expect(m).toBe(0)
+})

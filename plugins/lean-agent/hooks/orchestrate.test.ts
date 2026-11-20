@@ -4,7 +4,7 @@ import { fakeHost } from './fake'
 import { decide } from './guard'
 import { DESK_ROUTE, SPLIT, THREAD_STEP, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart } from './orchestrate'
 import { capTo } from './cap'
-import { runSummary, runText, summarize } from './runjob'
+import { RUN_TIMEOUT_MS, runSummary, runText, summarize } from './runjob'
 import { preflightFor, preflightText } from './preflight'
 import { buildHandover, setPreflight } from './handover'
 import { bucketOf, contextStat, contextText } from './contextstat'
@@ -44,6 +44,11 @@ test('thread: lean tools, git, task tools and its own folder files are allowed',
 
 test('thread: its own Edit / Write on project files, greps, searches and other commands are refused with the one-step line', () => {
   orchReset()
+  // lean-agent's own state is not a way round the model: worktrees (a worker's step), the settings, grants and review records
+  for (const f of ['/h/.lean-agent/worktrees/app/src/a.ts', '/h/.lean-agent/config.json', '/h/.lean-agent/projects.json', '/h/.lean-agent/app/reviews/abc.json']) {
+    expect([f, call(th, { tool: 'Write', file_path: f })]).toEqual([f, THREAD_STEP])
+    expect([f, call(th, { tool: 'Grep', path: f })]).toEqual([f, THREAD_STEP])
+  }
   expect(call(th, { tool: 'Edit', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP)
   expect(call(th, { tool: 'Write', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP)
   expect(call(th, { tool: 'Write', file_path: '/h/.lean-agent/../x' })).toBe(THREAD_STEP)
@@ -200,6 +205,7 @@ test('lean_run: summarize keeps failing names and the last 40 lines; runSummary 
   expect(r.exit).toBe(1)
   expect(r.file).toMatch(/^\/h\/\.lean-agent\/runs\/\d+\.log$/)
   expect(h.calls.at(-1)!.argv.slice(0, 2)).toEqual(['bash', '-c'])
+  expect(h.calls.at(-1)!.timeoutMs).toBe(RUN_TIMEOUT_MS) // a watch mode or a dev server ends instead of hanging the thread
   expect(h.calls.at(-1)!.argv[2]).toContain("cd '/r/app' && ( npm test )")
   const t = runText(r)
   expect(t).toContain('exit 1')

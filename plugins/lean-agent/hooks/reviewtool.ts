@@ -333,7 +333,7 @@ async function doDecline(h: Host, project: string, i: any): Promise<Out> {
 // a refused call on someone else's ref (prepare with ref, record with mode external) is recorded like every refusal (feedback.ts)
 export async function reviewTool(h: Host, project: string, i: any, thread = ''): Promise<Out> {
   const out = await reviewToolRun(h, project, i, thread)
-  if (!out.ok && (str(i?.ref) || str(i?.mode) === 'external')) await logRefusal(h, { role: 'thread', rule: 'external-review-refused', text: out.text.split('\n')[0]!.slice(0, 200), tool: 'lean_review', thread: thread || undefined })
+  if (!out.ok && (str(i?.ref) || str(i?.mode) === 'external')) await logRefusal(h, { role: 'thread', rule: 'external-review-refused', text: 'external review refused (a ref, URL or project that does not fit)', tool: 'lean_review', thread: thread || undefined })
   return out
 }
 async function reviewToolRun(h: Host, project: string, i: any, thread = ''): Promise<Out> {

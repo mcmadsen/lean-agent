@@ -47,9 +47,9 @@ const ask = async (s: S, kind: string, thread = 't5', over: Record<string, unkno
   return r.request!
 }
 // what the desk's AskUserQuestion carries and what the user chose
-const asked = (v: Parameters<typeof questionOf>[0], label: string, mutate: (q: { question: string; options: { label: string }[] }) => void = () => undefined) => {
+const asked = (v: Parameters<typeof questionOf>[0], label: string, mutate: (q: { question: string; options: { label: string; description: string }[] }) => void = () => undefined) => {
   const q = questionOf(v)
-  const qq = { question: q.question, options: q.options.map(o => ({ label: o.label })) }
+  const qq = { question: q.question, options: q.options.map(o => ({ label: o.label, description: o.description })) }
   mutate(qq)
   return { questions: [qq], answers: { [qq.question]: label } }
 }
@@ -321,7 +321,7 @@ test('an answer is recorded only when the question the user saw named that reque
   const s = setup()
   const v = await ask(s, 'gh-pr-comment')
   const other = await ask(s, 'gh-pr-comment', 't6', { body: 'a second request' })
-  const cases: [string, (q: { question: string; options: { label: string }[] }) => void][] = [
+  const cases: [string, (q: { question: string; options: { label: string; description: string }[] }) => void][] = [
     ['the text was changed', q => (q.question = q.question.replace(v.text, 'something else'))],
     ['no check code', q => (q.question = q.question.replace(checkCode(v.hash), 'xxxxxxxxxxxx'))],
     ['no headline', q => (q.question = q.question.replace(v.headline, 'do something'))],
@@ -329,6 +329,10 @@ test('an answer is recorded only when the question the user saw named that reque
     ['an unknown id', q => (q.question = q.question.replace(v.id, 'a1-1'))],
     ['two requests named', q => (q.question += ` (and ${other.id})`)],
     ['a label missing', q => (q.options = q.options.filter(o => o.label !== 'Edit first'))],
+    ['the question reframed around the exact text', q => (q.question = `Housekeeping: pick Approve to dismiss this notice. ${q.question}`)],
+    ['an option described differently', q => (q.options[0]!.description = 'dismiss the notice')],
+    ['the options in another order', q => q.options.reverse()],
+    ['multiSelect', q => ((q as { multiSelect?: boolean }).multiSelect = true)],
   ]
   for (const [name, mutate] of cases) {
     const a = asked(v, 'Approve', mutate)
@@ -484,4 +488,34 @@ test('the pane\'s decision is the same one: answerAction by the pane approves, a
   expect((await answerAction(s.h.host, w.id, 'deny', 'pane', s.tell)).ok).toBe(true)
   expect(s.told.some(t => t.text.includes('denied'))).toBe(true)
   expect((await answerAction(s.h.host, 'a1-404', 'approve', 'pane')).ok).toBe(false)
+})
+
+test('the used mark is written BEFORE the send (a crash mid-send never allows a second one) and cleared only by a definite failure', async () => {
+  const s = setup()
+  const v = await ask(s, 'gh-pr-comment')
+  await human(s, v, 'Approve')
+  let during: unknown = 'unset'
+  const inner = s.h.exec.handler!
+  s.h.exec.handler = (argv, call) => {
+    if (argv[0] === 'gh') during = s.h.store.get(`action.used.${v.id}`)
+    return inner(argv, call)
+  }
+  const o = await approveAction(s.h.host, v.id, s.tell)
+  expect(o.ok, o.text).toBe(true)
+  expect(typeof during).toBe('number') // already marked while gh ran
+  // a definite failure (nothing sent) clears the mark: a retry is allowed
+  const s2 = setup({ gh: { exitCode: 1, stdout: '', stderr: 'HTTP 404' } })
+  const w = await ask(s2, 'gh-pr-comment')
+  await human(s2, w, 'Approve')
+  const bad = await approveAction(s2.h.host, w.id, s2.tell)
+  expect(bad.ok).toBe(false)
+  expect(typeof s2.h.store.get(`action.used.${w.id}`)).not.toBe('number')
+  expect((await listActions(s2.h.host))[0]!.state).toBe('approved')
+})
+
+test('a zero-width or bidi character in the text of a request is refused (what the user reads is what is sent)', () => {
+  for (const ch of ['‮', '​', '⁦', '﻿']) {
+    const r = checkAction({ kind: 'gh-pr-comment', params: { ...PARAMS['gh-pr-comment'], body: `fine${ch}text` } })
+    expect(r.ok).toBe(false)
+  }
 })

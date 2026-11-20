@@ -5,8 +5,10 @@ import { fakeHost } from './fake'
 import { resetLocks } from './threads'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
+import { maskMcp } from './feedbackexport'
 import { groupMissing, missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { reviewTool } from './reviewtool'
+import { fetchExternal } from './reviewext'
 import { readJsonl } from './state'
 import { resetFolderLocks } from './folderlock'
 import { orchReset } from './orchestrate'
@@ -136,7 +138,7 @@ test('a tool that is not available, and a worker\'s split / missing / refused li
   await $.tool.call({ tool: 'WebFetch' } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(7) } as any)
   const miss = (await rows(h)).filter(r => r.kind === 'missing-tool')
-  expect(miss.map(r => r.tool).sort()).toEqual(['WebFetch', 'mcp datadog', 'mcp datadog', 'missing: mcp__datadog__query', 'split: the second half'])
+  expect(miss.map(r => r.tool).sort()).toEqual(['WebFetch', 'mcp datadog', 'mcp datadog', 'missing', 'split'])
   expect(miss.find(r => r.tool === 'WebFetch')).toMatchObject({ role: 'thread', thread: 't1' })
   expect(miss.find(r => r.tool.startsWith('split'))).toMatchObject({ role: 'worker', job: 'lookup' })
   const g = await groupMissing(h.host)
@@ -145,7 +147,8 @@ test('a tool that is not available, and a worker\'s split / missing / refused li
   const t = await exported(h)
   expect(t).toContain('## Missing tools since the last export')
   expect(t).toContain('- (x2) [thread] mcp datadog')
-  expect(t).toContain('[worker] split: the second half (job lookup)')
+  expect(t).toContain('[worker] split (job lookup)')
+  expect(t).not.toContain('the second half') // a worker's own words never reach the export
   expect(await refusalsText(h.host)).toContain('missing tool(s)')
   // missing-tool rows are not counted as guard refusals
   expect(t.split('## Missing tools')[0]).not.toContain('mcp datadog')
@@ -165,5 +168,23 @@ test('the helpers: one record format, rule ids, what counts as a missing tool', 
   expect(ruleOf('lean-agent: strict mode: route this to a thread')).toBe('desk-strict')
   expect(missingWhat('Bash', 'exit code 1: tests failed')).toBeNull()
   expect(missingWhat('mcp__jira__get', 'MCP server jira is not connected')).toBe('mcp jira')
-  expect(workerLines('answer:\nx\nsplit: a\nSplit: b\nrefused: c\nmissing: d')).toEqual(['split: a', 'split: b', 'refused: c'])
+  expect(workerLines('answer:\nx\nsplit: a\nSplit: b\nrefused: c\nmissing: d')).toEqual(['split', 'refused', 'missing'])
+})
+
+test('the export masks MCP server names that are not well-known public ones', () => {
+  expect(maskMcp('lean-agent: mcp__initech-prod-db__run_query refused: server initech-prod-db is not granted for this job (allow-mcp: azure-devops, initech-prod-db)')).toBe(
+    'lean-agent: mcp__<server>__<tool> refused: server <server> is not granted for this job (allow-mcp: azure-devops, <server>)',
+  )
+  expect(maskMcp('mcp initech-prod-db')).toBe('mcp <server>')
+  expect(maskMcp('mcp datadog and mcp server notes')).toBe('mcp datadog and mcp server notes')
+})
+
+test('the external review scratch repository runs git with its own hooks, fsmonitor and ssh command overridden', async () => {
+  const h = fakeHost(null)
+  h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
+  h.git.handler = (argv: string[]) => ({ exitCode: argv.includes('get-url') ? 0 : 1, stdout: argv.includes('get-url') ? 'https://github.com/acme/app.git\n' : '' })
+  await fetchExternal(h.host, 'app', '12')
+  const scratchCalls = h.calls.filter(c => c.argv.includes('-C') && c.argv[c.argv.indexOf('-C') + 1]!.includes('/scratch/'))
+  expect(scratchCalls.length).toBeGreaterThan(0)
+  for (const c of scratchCalls) for (const f of ['core.hooksPath=/dev/null', 'core.fsmonitor=false', 'core.sshCommand=ssh']) expect(c.argv).toContain(f)
 })

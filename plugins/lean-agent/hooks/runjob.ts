@@ -4,6 +4,7 @@ import { dirOf, leanDir, mkdirp } from './state'
 import type { Host } from './state'
 import { analyze } from './shell'
 
+export const RUN_TIMEOUT_MS = 600_000
 export type RunResult = { exit: number; failing: string[]; tail: string; file: string }
 
 const FAIL = /^\s*(FAIL|✗|✖|not ok|FAILED|● )|\bfailed\b.*test|\btest.*\bfailed\b/i
@@ -32,7 +33,7 @@ export async function runSummary(h: Host, a: { command: string; cwd?: string; ho
   const file = `${leanDir(a.home)}/runs/${await h.clock.now()}.log`
   await mkdirp(h, dirOf(file))
   const run = `${a.cwd ? `cd ${q(a.cwd)} && ` : ''}( ${command} ) > ${q(file)} 2>&1`
-  const r = await h.process.run(['bash', '-c', run])
+  const r = await h.process.run(['bash', '-c', run], { timeoutMs: RUN_TIMEOUT_MS }) // a watch mode or a dev server ends instead of hanging the thread
   let log = ''
   try {
     log = String((await h.fs.read(file)) ?? '')

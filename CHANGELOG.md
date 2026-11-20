@@ -169,6 +169,21 @@ and replaceable. All by script, no model turn.
 
 ### Fixed
 
+- **Final review of the 1.0.15 diff** (five single-focus read-only reviews; each claim checked in the code first):
+  - Desk actions: an Approve counts only for the canonical question (text, option labels and descriptions, order, no multiSelect), not for
+    any text that merely contains the request; zero-width and bidi characters are refused in a request; the "used" mark is written before
+    the send and cleared only by a definite failure (a crash or timeout mid-send never allows a second send); the pane offers no Approve for
+    a text it cannot show in full (the desk's question shows all of it).
+  - Execution model: a thread's own Edit / Write / Read / Grep / search inside lean-agent's state no longer reaches the project worktrees,
+    `config.json`, `projects.json`, grants or review records; `lean_run` ends after 10 minutes and is refused to a worker; a worker slot
+    is freed when recording its grants fails.
+  - Automatic restart: one tick at a time, no restart of a finished thread. `lean_thread ask` starts its fresh session with no tools, no MCP,
+    no skills, no saved session and a budget.
+  - Review gate and push: the external-review scratch repository runs git with its own hooks, fsmonitor and ssh command overridden; an
+    ambiguity (several unregistered worktrees at the sha) is never settled by taking over a closed owner's worktree.
+  - Export: a worker's own words are no longer exported (only `split` / `missing` / `refused`); a refused external review logs a fixed
+    text; MCP server names that are not well-known public ones are masked.
+
 - The desk's `push` and `lean_worktree register` take over a worktree registered to a closed thread (or a thread that no longer exists): the
   registry entry moves to the pushing/registering thread (`adopted: true`, former owner in `from`), written only after the push's gates hold,
   logged in the thread's history and said in the reply; a worktree of an open, parked or closing thread is refused with the owner and its

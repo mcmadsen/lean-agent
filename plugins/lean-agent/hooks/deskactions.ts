@@ -58,7 +58,7 @@ export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: st
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
-const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/
+const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/ // control, zero-width and bidi characters: what the user reads is what is sent
 const NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,99}$/
 const GH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9._-]{1,100}$/
 const enc = encodeURIComponent
@@ -337,8 +337,11 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
     const answer = LABEL[a]
     if (!answer) continue // free text, no choice: nothing is decided by it
     const v = await viewOf(h, r, now)
-    const labels = (Array.isArray(q.options) ? (q.options as { label?: unknown }[]) : []).map(o => (typeof o?.label === 'string' ? o.label : ''))
-    if (!v || v.state !== 'pending' || !OPTION_LABELS.every(l => labels.includes(l)) || !text.includes(v.text) || !text.includes(v.headline) || !text.includes(checkCode(v.hash))) {
+    // the question must be the canonical one (questionOf): the desk model may not frame the text or the options differently
+    const canon = v ? questionOf(v) : null
+    const opts = Array.isArray(q.options) ? (q.options as { label?: unknown; description?: unknown }[]) : []
+    const sameOptions = !!canon && opts.length === canon.options.length && canon.options.every((c, i) => opts[i]?.label === c.label && opts[i]?.description === c.description)
+    if (!v || !canon || v.state !== 'pending' || text !== canon.question || !sameOptions || (q as { multiSelect?: unknown }).multiSelect === true) {
       notes.push(`the answer to the question about ${r.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`)
       continue
     }
@@ -410,13 +413,20 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   const { r, plan } = claim
   let sent: Sent
   try {
+    // the used mark is written BEFORE the send (a crash mid-send never allows a second one); only a definite failure clears it again
+    await h.store.set(usedKey(id), await h.clock.now())
+  } catch (e) {
+    inflight.delete(id)
+    return { ok: false, text: `not sent: the used mark could not be written (${oneLine(String((e as Error)?.message ?? e), 120)}); nothing was sent` }
+  }
+  try {
     // the check right before sending: what goes out is exactly what the user saw
     sent = hashOf(renderingOf(plan)) === r.hash ? await send(h, plan) : { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
   } catch (e) {
-    sent = { ok: false, text: `sending failed: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
+    sent = { ok: false, unknown: true, text: `sending failed after it may have started: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
   }
   try {
-    if (sent.ok || sent.unknown) await h.store.set(usedKey(id), await h.clock.now()) // used: a failure that left the request unused is the only retry
+    if (!sent.ok && !sent.unknown) await h.store.set(usedKey(id), null) // a definite failure that sent nothing is the only retry
   } finally {
     inflight.delete(id)
   }
@@ -446,7 +456,7 @@ export async function actionListText(h: Host, tell?: Tell): Promise<string> {
     if (now > r.exp && !(await usedOf(h, r.id))) {
       const a = await answerOf(h, r)
       if (!a) {
-        await dropOne(h, r.id)
+        await exclusive(() => dropOne(h, r.id))
         if (tell) await tell(r.thread, `Your request ${r.id} (${r.kind}) expired unanswered (2 h): send it again if it is still needed, or continue without it.`).catch(() => undefined)
       }
     }

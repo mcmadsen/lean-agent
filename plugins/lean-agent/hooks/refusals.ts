@@ -124,12 +124,12 @@ export function missingWhat(tool: string, resultText: string): string | null {
   const s = serverOf(tool)
   return s ? `mcp ${s}` : tool.slice(0, 80) || null
 }
-// the answer lines of a worker that could not finish its step: `split: ...`, `missing: ...`, `refused: ...` (at most three, shortened)
+// the answer lines of a worker that could not finish its step: `split: ...`, `missing: ...`, `refused: ...` (the keywords found, never the text)
 export function workerLines(text: string): string[] {
   const out: string[] = []
   for (const l of text.split('\n')) {
     const m = /^\s*(split|missing|refused):\s*(\S.*)$/i.exec(l)
-    if (m) out.push(`${m[1]!.toLowerCase()}: ${m[2]!.trim().slice(0, 80)}`)
+    if (m && !out.includes(m[1]!.toLowerCase())) out.push(m[1]!.toLowerCase()) // the keyword only: a worker's own words can name a client or a path
     if (out.length >= 3) break
   }
   return out

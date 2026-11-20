@@ -986,6 +986,7 @@ export const register: Register = on => {
   on('tool.call', { tool: `mcp__lean-agent__${RUN}` as const }, async ($, e: any) => {
     if (role.kind !== 'thread') await redetect($, undefined, true)
     if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: RUN, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
+    if (e.agentId) return { result: "lean_run is the thread's own tool: a worker runs its one step with its own tools", isError: true } as any
     try {
       const home = await homeDir(hostOf($))
       const r = await runSummary(hostOf($), { command: String(e.command ?? ''), cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : undefined, home })
@@ -1042,7 +1043,14 @@ export const register: Register = on => {
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
-    if (gcall) await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
+    if (gcall) {
+      try {
+        await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
+      } catch (err) {
+        if (octx) orchEnd(octx, e) // the slot the guard counted is free again: the call never ran
+        throw err
+      }
+    }
     // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
     const forced = audited && wantsBackground(e)

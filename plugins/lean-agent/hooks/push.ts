@@ -248,7 +248,7 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
         const refused2 = await pick([{ path: un.one.path, branch: un.one.branch, thread: id }])
         if (refused2) return refused2
         if (wt) adopt = { path: un.one.path, branch: un.one.branch }
-      } else {
+      } else if (!un.why) { // an ambiguity (several unregistered worktrees at the sha) is never settled by taking one over
         const tk = await takeoverCandidate(h, home, pj.path, sha, id)
         if (tk.one) {
           const refused3 = await pick([{ path: tk.one.path, branch: tk.one.branch, thread: id }])

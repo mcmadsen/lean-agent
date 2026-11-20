@@ -591,7 +591,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!mr && mr.origin === 'tool' && <Button key={`model-sonnet-${mr.id}`} label="Start on sonnet instead" onPress={onSonnet(mr)} />}
             {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
             {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
-            {!!ar && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
+            {!!ar && !(ar.state === 'pending' && ar.text.length > 400) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
             {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
             {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
           </Box>

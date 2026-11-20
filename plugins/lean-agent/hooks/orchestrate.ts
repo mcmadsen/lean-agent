@@ -85,7 +85,14 @@ const normPath = (p: string, cwd?: string): string => {
   }
   return '/' + out.join('/')
 }
-const inLean = (ctx: OCtx, p: string) => under(normPath(p, ctx.cwd), `${ctx.home}/.lean-agent`)
+// lean-agent's own state, for a direct read or edit: not the project worktrees (that is a worker's step) and not the settings, grants or
+// review records (a thread that wrote them could switch the model off or forge a record)
+const LEAN_PROTECTED = /^\/(worktrees\/|config\.json$|projects\.json$|grants\.json$|approvals|[^/]+\/reviews(\/|$))/
+const inLean = (ctx: OCtx, p: string) => {
+  const abs = normPath(p, ctx.cwd)
+  const root = `${ctx.home}/.lean-agent`
+  return under(abs, root) && !LEAN_PROTECTED.test(abs.slice(root.length))
+}
 
 const GIT_OK = new Set(['status', 'log', 'add', 'commit', 'worktree', 'branch', 'rev-parse', 'remote', 'push', 'fetch', 'switch', 'show', 'diff'])
 const DIFF_OK = /^--(stat|shortstat|numstat|name-only|name-status)(=.*)?$/

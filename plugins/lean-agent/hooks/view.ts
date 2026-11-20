@@ -411,7 +411,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   // a thread's request for a remote write: the exact text is on the card; the thread's own "blocked" row is not shown on top of it
   const asking = new Set((v.actionRequests ?? []).map(r => r.thread))
   for (const r of v.actionRequests ?? []) {
-    const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : `${r.thread} wants to ${r.headline}: ${r.text.length > 400 ? `${r.text.slice(0, 399)}…` : r.text}`
+    const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : `${r.thread} wants to ${r.headline}: ${r.text.length > 400 ? `${r.text.slice(0, 399)}… (${r.text.length} characters: the pane shows only the start, so it is approved in the desk's question, which shows all of it)` : r.text}`
     out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text, notify: r.state === 'pending', action: r })
   }
   for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true })

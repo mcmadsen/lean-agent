@@ -133,3 +133,16 @@ test('a thread\'s own AskUserQuestion is never an answer: the guard refuses it a
   expect(r.deny).toBeDefined()
   expect((await listActions(w.host))[0]!.state).toBe('pending')
 })
+
+test('a text the card cannot show in full has no Approve in the pane (the desk question shows all of it); Deny stays', async ($, on) => {
+  const w = world(on)
+  const long = await addActionRequest(w.host, 't5', { ...REPLY, params: { ...REPLY.params, body: `${BODY} ${'more words '.repeat(60)}` } })
+  expect(long.ok, long.text).toBe(true)
+  const v = long.request!
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await has(ui, /Needs you \(1\)/)).toBe(true)
+  expect(!!(await ui.find({ type: 'Button', key: `action-approve-${v.id}` }))).toBe(false)
+  expect(!!(await ui.find({ type: 'Button', key: `action-deny-${v.id}` }))).toBe(true)
+  await ui.unmount()
+})

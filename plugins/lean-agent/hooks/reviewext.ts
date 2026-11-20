@@ -28,6 +28,9 @@ export function parseExt(raw: string): (ExtRef & { repo?: string }) | string {
 const repoName = (url: string) => (url.replace(/\/+$/, '').replace(/\.git$/i, '').split(/[/:]/).pop() ?? '').toLowerCase()
 const extKey = (project: string) => `review.ext.${project}`
 
+// the scratch repository is inside lean-agent's state, where a thread can write: its own config and hooks must never run
+const SAFE = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.sshCommand=ssh', '-c', 'protocol.ext.allow=never']
+
 export async function fetchExternal(h: Host, project: string, rawRef: string, baseIn?: string): Promise<External | string> {
   const parsed = parseExt(rawRef)
   if (typeof parsed === 'string') return parsed
@@ -44,9 +47,9 @@ export async function fetchExternal(h: Host, project: string, rawRef: string, ba
   const stamp = `${await h.clock.now()}-${Math.random().toString(36).slice(2, 8)}`
   const HEADREF = `refs/ext/head-${stamp}`
   const BASEREF = `refs/ext/base-${stamp}`
-  if ((await run(['git', '-C', scratch, 'init', '--bare', '-q'], 15_000)) === null) return `could not prepare the scratch repository ${scratch}`
-  const fetch = (src: string, dst: string) => run(['git', '-C', scratch, 'fetch', '--no-tags', '-q', '--force', '--', url, `${src}:${dst}`])
-  const sha = async (r: string) => run(['git', '-C', scratch, 'rev-parse', '--verify', '--end-of-options', `${r}^{commit}`], 15_000)
+  if ((await run([...SAFE, '-C', scratch, 'init', '--bare', '-q'], 15_000)) === null) return `could not prepare the scratch repository ${scratch}`
+  const fetch = (src: string, dst: string) => run([...SAFE, '-C', scratch, 'fetch', '--no-tags', '-q', '--force', '--', url, `${src}:${dst}`])
+  const sha = async (r: string) => run([...SAFE, '-C', scratch, 'rev-parse', '--verify', '--end-of-options', `${r}^{commit}`], 15_000)
   // the head: a PR's head ref (else its merge ref), a branch, or a sha
   let head: string | null = null
   let label = ''
