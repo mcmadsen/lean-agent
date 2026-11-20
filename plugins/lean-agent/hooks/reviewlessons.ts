@@ -127,7 +127,7 @@ export async function readLessons(h: Host, project: string): Promise<Lesson[]> {
 }
 const writeLessons = async (h: Host, home: string, project: string, all: Lesson[]) => atomicWrite(h, lessonFile(home, project), all.map(l => JSON.stringify(l)).join('\n') + (all.length ? '\n' : ''))
 const live = (all: Lesson[]) => all.filter(l => !l.dropped)
-const removedByUser = (all: Lesson[]) => all.filter(l => l.dropped && l.droppedWhy === 'removed') // (a line the user removed is not learned again)
+const removedByUser = (all: Lesson[]) => all.filter(l => l.dropped && (l.droppedWhy === 'removed' || l.droppedWhy === 'upstreamed')) // (a line the user removed, or that now lives in the repo's own files, is not learned again)
 const nextId = (all: Lesson[]) => all.reduce((m, l) => Math.max(m, l.id), 0) + 1
 
 type Meta = { lastImport?: number; imported?: number; from?: string[] }

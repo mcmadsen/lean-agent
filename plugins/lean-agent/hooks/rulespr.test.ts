@@ -61,7 +61,7 @@ const INFRA = '# infra\n- Run `pnpm test` before every commit so the suite stays
 
 const lesson = (id: number, family: string, text: string) => JSON.stringify({ id, family, topic: 'other', text, paths: [], keywords: [], source: 'x', added: '2026-01-01' })
 
-function setup(opts: { log?: boolean; git?: boolean } = {}) {
+function setup(opts: { log?: boolean; git?: boolean; tracked?: string[]; failOthers?: boolean; failIgnored?: boolean } = {}) {
   const h = fakeHost(null)
   h.clock.t = NOW
   const f = (p: string, t: string) => h.files.set(p, t)
@@ -101,12 +101,14 @@ function setup(opts: { log?: boolean; git?: boolean } = {}) {
   h.git.handler = (a0: string[]) => {
     const a = a0[0] === '-C' ? a0.slice(2) : a0
     if (opts.git === false) return { exitCode: 128, stdout: '' }
+    const tracked = [...TRACKED, ...(opts.tracked ?? [])]
+    const list = (names: string[]) => ({ exitCode: 0, stdout: names.join(a.includes('-z') ? '\0' : '\n') + (a.includes('-z') ? '\0' : '\n') }) // (-z: NUL separated, as git does)
     if (a[0] === 'ls-files') {
-      if (a.includes('--ignored')) return { exitCode: 0, stdout: 'CLAUDE.local.md\n' }
-      if (a.includes('--others')) return { exitCode: 0, stdout: [...TRACKED, '.claude/rules/draft.md', '.claude/rules/lean-agent/billing.md'].join('\n') + '\n' }
-      return { exitCode: 0, stdout: TRACKED.join('\n') + '\n' }
+      if (a.includes('--ignored')) return opts.failIgnored ? { exitCode: 128, stdout: '' } : list(['CLAUDE.local.md'])
+      if (a.includes('--others')) return opts.failOthers ? { exitCode: 128, stdout: '' } : list([...tracked, '.claude/rules/draft.md', '.claude/rules/lean-agent/billing.md'])
+      return list(tracked)
     }
-    if (a[0] === 'ls-tree') return { exitCode: 0, stdout: TRACKED.join('\n') + '\n' }
+    if (a[0] === 'ls-tree') return a.includes('nope') ? { exitCode: 128, stdout: '' } : list(tracked)
     if (a[0] === 'rev-parse') return { exitCode: 0, stdout: 'abc\n' }
     if (a[0] === 'worktree') return { exitCode: 0, stdout: 'worktree /repo\nHEAD a\nbranch refs/heads/main\n\n' }
     if (a[0] === 'grep') return { exitCode: SYMBOLS.has(a[a.indexOf('-e') + 1]!) ? 0 : 1, stdout: '' }
@@ -282,13 +284,19 @@ test('retire-upstreamed: a dry run lists, apply retires rules and lessons into a
   expect(dry.text).toContain('would retire lesson #1')
   expect(dry.text).toContain('nothing changed')
   expect(h.files.has(`${L}/proj/rules/infra.md`)).toBe(true)
-  const r = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', apply: true })
+  // apply works from a ref only (what was merged), never from a working tree
+  const refused = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', apply: true })
+  expect(refused.ok).toBe(false)
+  expect(refused.text).toContain('needs ref')
+  expect(h.files.has(`${L}/proj/rules/infra.md`)).toBe(true)
+  const r = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', apply: true, ref: 'origin/main' })
   expect(r.ok).toBe(true)
   expect(r.text).toContain('retired rule infra.md')
   expect(h.files.has(`${L}/proj/rules/infra.md`)).toBe(false)
-  expect(h.files.get(`${L}/proj/rules-pr/retired/2026-06-20/rules/infra.md`)).toBe(INFRA) // the backup is the file as it was
+  const backup = `${L}/proj/rules-pr/retired/2026-06-20-${Math.floor(NOW / 1000)}` // (timestamped: a second apply the same day cannot overwrite it)
+  expect(h.files.get(`${backup}/rules/infra.md`)).toBe(INFRA) // the backup is the file as it was
   expect(h.files.has(`${L}/proj/rules/billing.md`)).toBe(true) // 1 of 4 lines in the repo: it stays
-  expect(JSON.parse(h.files.get(`${L}/proj/rules-pr/retired/2026-06-20/lessons.json`)!).map((l: any) => l.id)).toEqual([1])
+  expect(JSON.parse(h.files.get(`${backup}/lessons.json`)!).map((l: any) => l.id)).toEqual([1])
   const lessons = h.files.get(`${L}/proj/review-lessons.jsonl`)!.split('\n').filter(Boolean).map(x => JSON.parse(x))
   expect(lessons.find((l: any) => l.id === 1)).toMatchObject({ dropped: '2026-06-20', droppedWhy: 'upstreamed' }) // soft: lessons-undo brings it back
   expect(JSON.parse(h.files.get(`${L}/proj/learn.json`)!).areas.infra.coveredBy).toBe('CLAUDE.md')
@@ -298,4 +306,111 @@ test('retire-upstreamed: a dry run lists, apply retires rules and lessons into a
   // the merged state can be checked at a ref instead of the working tree
   const at = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', ref: 'origin/main' })
   expect(at.text).toContain('at origin/main')
+  // a bad ref says so (it is not "not a git checkout")
+  const bad = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', ref: 'nope' })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('git ls-tree nope failed')
+  expect((await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', repo: 'relative' })).ok).toBe(false)
+})
+
+test('a dry run names the lines of a rule that are NOT in the repo and would go with it', async () => {
+  const h = setup()
+  const five = `${INFRA}- Always round amounts to whole cents before comparing two prices.\n- Never commit generated files to the repository.\n- Tell the release channel before and after every production deploy window.\n`
+  h.files.set(`${L}/proj/rules/infra.md`, five)
+  const dry = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', ref: 'origin/main' })
+  expect(dry.text).toContain('would retire rule infra.md') // 4 of 5 lines: at the share
+  expect(dry.text).toContain('1 line(s) are NOT in the repo and go with it: "Tell the release channel')
+  h.files.set(`${L}/proj/rules/infra.md`, `${five}- Staging deploys need the blue-green flag set by the release engineer on call.\n`)
+  const keep = await threadTool(h.host, 't1', 'lean_rules', { action: 'retire-upstreamed', ref: 'origin/main' })
+  expect(keep.text).toContain('keep rule infra.md: 4 of 6 lines are in the repo') // under 80%: it stays
+})
+
+test('two lines with the same words are not duplicates when a number or a negation differs', async () => {
+  const h = setup()
+  h.files.set('/repo/CLAUDE.md', `${CLAUDE}\n- Use 2 spaces for indentation in every source file of the repository.\n- Run the linter before pushing to the shared repository branch.\n`)
+  h.files.set('/repo/.claude/rules/general.md', `${GENERAL}- Use 4 spaces for indentation in every source file of the repository.\n- Never run the linter before pushing to the shared repository branch.\n- Run the linter before pushing to the shared repository branch.\n`)
+  const p = await plan(h)
+  const d = p.duplicates.repoVsRepo.map(x => x.text)
+  expect(d.filter(t => t.includes('spaces'))).toEqual([]) // 2 vs 4
+  expect(d.filter(t => t.startsWith('Never run the linter'))).toEqual([]) // negated
+  expect(d.filter(t => t.startsWith('Run the linter'))).toHaveLength(1) // the identical one is
+})
+
+test('a duplicate whose kept copy is in a section the plan moves is not removed (the instruction would reach no session)', async () => {
+  const h = setup()
+  h.files.set('/repo/.claude/rules/general.md', `${GENERAL}- Ledger rows are created only through LedgerRow.create in services/billing/ledger.ts, never by raw inserts.\n`)
+  const p = await plan(h)
+  expect(p.moves.map(m => m.heading)).toEqual(['Billing service'])
+  expect(p.duplicates.repoVsRepo.map(d => d.text).filter(t => t.startsWith('Ledger rows'))).toEqual([])
+})
+
+test('stale: a path alone is a line to look at, never removed (it may be generated or ignored); a path beside the file counts as found', async () => {
+  const h = setup({ tracked: ['services/billing/CLAUDE.md'] })
+  h.files.set('/repo/CLAUDE.md', `${CLAUDE}\n- Build output goes to \`dist/bundle.js\` and \`build/cache/\` before a release.\n`)
+  const p = await plan(h)
+  const s = p.stale.find(x => x.text.includes('dist/bundle.js'))!
+  expect(s).toMatchObject({ action: 'review', missing: ['dist/bundle.js', 'build/cache/'] })
+  h.files.set('/repo/services/billing/CLAUDE.md', '# Billing\n\n- Start from `ledger.ts` and `money.ts` in this folder before any change to a ledger row.\n- Money helpers live in `services/billing/money.ts` and `src/gone/helper.ts` for the old path.\n')
+  const q = await plan(h)
+  const nested = q.stale.filter(x => x.file === 'services/billing/CLAUDE.md')
+  expect(nested).toHaveLength(1) // line 1: ledger.ts and money.ts are found by name; line 2: one name is gone
+  expect(nested[0]).toMatchObject({ line: 4, missing: ['src/gone/helper.ts'], action: 'review' })
+})
+
+test('the unsafe check covers every kept line: a heading and a code block that name lean-agent never reach a team file', async () => {
+  const h = setup()
+  h.files.set(`${L}/proj/rules/helpers.md`, '---\npaths:\n  - "apps/web/**"\n---\n# helpers\n## Use lean_script for the counting\n- Web components are built from the shared button and the dialog primitives only.\n```sh\nlean_script run count-rows\n```\n```sh\npnpm --filter web build\n```\n')
+  const log = [12, 9, 3, 1].map((d, i) => JSON.stringify({ ts: ago(d), src: 'loader', rule: 'helpers.md', project: 'proj', session: `h${i}`, trigger: 'Read', sha: 'h' })).join('\n')
+  h.files.set(`${L}/logs/rules-loaded.jsonl`, `${h.files.get(`${L}/logs/rules-loaded.jsonl`)}${log}\n`)
+  const u = (await plan(h)).upstream.find(x => x.rule === 'helpers.md')!
+  expect(u.text).toContain('shared button')
+  expect(u.text).toContain('pnpm --filter web build') // a clean code block stays
+  expect(u.text).not.toContain('lean_script')
+  expect(u.dropped.unsafe).toBe(2) // the heading, the block
+  expect(u.unsafe.join('\n')).toContain('names lean-agent')
+})
+
+test('a rule without paths joins the root CLAUDE.md, not a new always-loaded rule file', async () => {
+  const h = setup()
+  h.files.set(`${L}/proj/rules/misc.md`, '# misc\n- Every release note names the migration that comes with the change, if there is one.\n')
+  const log = [12, 9, 3, 1].map((d, i) => JSON.stringify({ ts: ago(d), src: 'loader', rule: 'misc.md', project: 'proj', session: `m${i}`, trigger: 'Read', sha: 'm' })).join('\n')
+  h.files.set(`${L}/logs/rules-loaded.jsonl`, `${h.files.get(`${L}/logs/rules-loaded.jsonl`)}${log}\n`)
+  const u = (await plan(h)).upstream.find(x => x.rule === 'misc.md')!
+  expect(u).toMatchObject({ target: 'CLAUDE.md', merge: true, paths: [] })
+})
+
+test('a move into an existing rule file needs the same paths; otherwise it is not moved and the plan says why', async () => {
+  const same = setup({ tracked: ['.claude/rules/services-billing.md'] })
+  same.files.set('/repo/.claude/rules/services-billing.md', '---\npaths:\n  - "services/billing/**"\n---\n# Billing\n- Amounts are integers in cents.\n')
+  const a = await plan(same)
+  expect(a.moves).toHaveLength(1)
+  expect(a.moves[0]).toMatchObject({ target: '.claude/rules/services-billing.md', merge: true })
+  const other = setup({ tracked: ['.claude/rules/services-billing.md'] })
+  other.files.set('/repo/.claude/rules/services-billing.md', '# Billing\n- Amounts are integers in cents.\n') // no paths: it loads every session
+  const b = await plan(other)
+  expect(b.moves).toEqual([])
+  expect(b.notes.join('\n')).toContain('not moved')
+})
+
+test('a section with an @import or a relative link is not moved: from another folder it would mean something else', async () => {
+  const h = setup()
+  h.files.set('/repo/CLAUDE.md', CLAUDE.replace('owns every ledger write.', 'owns every ledger write; see [the ledger notes](./docs/guide.md) for how.'))
+  expect((await plan(h)).moves).toEqual([])
+})
+
+test('git that cannot list the files completely is an error, never an empty repo (every path would look gone); a failed ignored listing is a note', async () => {
+  const r = await threadTool(setup({ failOthers: true }).host, 't1', 'lean_rules', { action: 'pr-plan' })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('incomplete')
+  const p = await plan(setup({ failIgnored: true }))
+  expect(p.notes.join('\n')).toContain('ignored files could not be listed')
+  expect(p.files.find(f => f.path === 'CLAUDE.local.md')).toBeUndefined()
+})
+
+test('pr-plan reads the files at a ref when given one', async () => {
+  const h = setup()
+  const p = await plan(h, { ref: 'origin/main' })
+  expect(p.ref).toBe('origin/main')
+  expect(p.files.find(f => f.path === 'CLAUDE.md')!.tracked).toBe(true)
+  expect(p.files.some(f => f.path === 'CLAUDE.local.md')).toBe(false) // a ref holds committed files only
 })

@@ -175,8 +175,8 @@ tokens but is never changed), the rule-load log, the review lesson store and the
 
 The PR body carries the table of tokens per session, the moved sections, the added rules with their evidence (sessions, days,
 missing-context counts) and the removed lines. After the PR merged, `lean_rules` `retire-upstreamed` (dry run unless
-`apply: true`; `ref: origin/main` checks the merged state) retires the lean rules and review lessons whose text now lives in the
-repo files into `rules-pr/retired/<date>/` so nothing loads twice; `lean_rules` `check` lists the duplicates that remain.
+`apply: true`, which needs `ref: origin/main`: only merged, committed text counts) retires the lean rules and review lessons whose
+text now lives in the repo files into `rules-pr/retired/<date>-<time>/` so nothing loads twice; `lean_rules` `check` lists the duplicates that remain.
 
 ## Compare
 

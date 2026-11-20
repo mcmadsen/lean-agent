@@ -15,7 +15,8 @@
   `config.json` `rulesPr`), stale lines, recurring missing-context clusters with no rule, and tokens per session before and after.
   It writes `~/.lean-agent/<project>/rules-pr/plan-<date>.json` and `.md`; the same inputs give the same plan.
 - **`lean_rules` `retire-upstreamed`**: after the PR merged, lean rules and review lessons whose text now lives in the repo's files
-  are retired from `~/.lean-agent` into `rules-pr/retired/<date>/` (a dry run unless `apply: true`), so nothing loads twice.
+  are retired from `~/.lean-agent` into `rules-pr/retired/<date>-<time>/` (a dry run unless `apply: true`, which needs `ref`: only
+  merged, committed text counts; the dry run names the lines of a rule that are not in the repo), so nothing loads twice.
   `lean_rules` `check` now reports the duplicates that remain between the repo files and lean-agent's rules and lessons.
 
 ## 1.0.11

@@ -35,10 +35,13 @@ Copy numbers from the plan; never recount, round or estimate them yourself.
 3. **Plan against what you edit.** `lean_rules` `pr-plan` again with `repo` = the worktree path (the plan of step 1 may be for a
    different commit). Read the JSON it names. Everything below uses this plan. Line numbers in it are for the files as they are
    now: after the first edit of a file find a section or line by its heading and text, not by number.
-4. **Remove stale and duplicate lines** (commit 1). `duplicates.repoVsRepo`: delete the line in `file`; the copy in `sameAs`
-   stays. `stale` with `action: remove`: confirm with `git grep` that the names are gone, then delete the line; `review`: find
-   the new name and fix the line, or delete it when the thing is gone, or leave it and list it under "needs a look". A heading
-   left without text goes too. Commit message: `Remove stale and duplicate lines from the Claude files`.
+4. **Remove stale and duplicate lines** (commit 1). The plan matches by words, numbers and negations, not by meaning: read both
+   lines before deleting. `duplicates.repoVsRepo`: delete the line in `file` only when it says the same as the one in `sameAs`
+   and holds nothing that one lacks (a condition, an exception, a number); otherwise leave it. Delete whole lines of a wrapped
+   paragraph, never half. `stale` with `action: remove`: confirm with `git grep` that the names are gone, then delete the line;
+   `review` (a path alone may be generated or ignored: `dist/`, `.env`): find the new name and fix the line, or delete it when the
+   thing is gone, or leave it and list it under "needs a look". A heading left without text goes too. Commit message:
+   `Remove stale and duplicate lines from the Claude files`.
 5. **Move path-specific sections** (commit 2). For each `moves` group by `target`: create (or extend, `merge: true`) the rule
    file with frontmatter `paths:` (a YAML list of the plan's globs, quoted) and the section text, then delete the section from its
    file. Check each glob matches a tracked file (`git -C <worktree> ls-files -- '<glob>'`). Commit: `Move area-specific
@@ -50,9 +53,10 @@ Copy numbers from the plan; never recount, round or estimate them yourself.
    count goes into the PR; a `mechanical` cluster is a script's job, not a rule. A rule file stays short (about 25 lines).
    Commit: `Add area rules the team keeps needing`.
 7. **Check, review, report.**
-   - `lean_rules` `pr-plan` once more with `repo` = the worktree: the new plan's `tokens.alwaysAfter` must not exceed the
-     number you were promised in step 3 (when it does, find which edit added always-loaded text); its `stale` has no
-     `remove` left and `repoVsRepo` is empty.
+   - `lean_rules` `pr-plan` once more with `repo` = the worktree (it replaces today's plan files: the PR body numbers come from
+     this last plan): `tokens.alwaysBefore` of the new plan is the "after" of step 3 within a few tokens (estimates are rounded
+     per line); when it is clearly higher, find which edit added always-loaded text. Its `stale` has no `remove` left and
+     `repoVsRepo` is empty (or only lines you decided to keep).
    - The `review` skill (strict) on the branch against the default branch; fix findings in a new commit and review again.
    - `lean_report` with state `done`, the text starting `ready to push <full sha> (chore/claude-rules-<date>, <PR title>)`, then
      the PR title, `draft: true`, and the PR body between `--- PR body ---` and `--- end ---`. The desk asks the user and pushes;
@@ -84,7 +88,8 @@ Copy numbers from the plan; never recount, round or estimate them yourself.
 8. **After the PR merged** (a later run, when the user says so). The merged text must be in the registered checkout's view of
    the default branch (ask the user to fetch when `git -C <repo> log <ref> -1 -- <a file of the PR>` does not show it).
    `lean_rules` `retire-upstreamed` with `ref` = that branch (`origin/main`): a dry run lists the lean rules and review lessons
-   whose text now lives in the repo files; show it, then again with `apply: true`: they are retired from `~/.lean-agent` into
-   `rules-pr/retired/<date>/` (backup; a lesson is only marked dropped, `lessons-undo` brings it back) and learn will not write
-   the area again. Then `lean_rules` `sync` with `all: true` to remove their copies from the checkouts, and `lean_rules` `check`
+   whose text now lives in the committed repo files, and for each rule the lines that are NOT there and would go with it (read
+   them: if one matters, add it to the repo first); show it to the user, then again with `apply: true` (needs `ref`): they are
+   retired from `~/.lean-agent` into `rules-pr/retired/<date>-<time>/` (backup; a lesson is only marked dropped, reason
+   upstreamed, and not learned again) and learn will not write the area again. Then `lean_rules` `sync` with `all: true` to remove their copies from the checkouts, and `lean_rules` `check`
    (it reports duplicates between the repo files and what is left). Report what was retired.

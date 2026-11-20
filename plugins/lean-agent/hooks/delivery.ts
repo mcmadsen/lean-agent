@@ -138,7 +138,7 @@ export const THREAD_TOOLS: Tool[] = [
     inputSchema: obj({
       action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats', 'check', 'verify', 'pr-plan', 'retire-upstreamed'] },
       project: { type: 'string' },
-      repo: { type: 'string', description: 'absolute path of the checkout or worktree (sync, stale, verify)' },
+      repo: { type: 'string', description: 'absolute path of the checkout or worktree (sync, stale, verify; pr-plan and retire-upstreamed default to the registered project path)' },
       area: { type: 'string', description: 'record: the area (its rule file is rules/<area>.md); verify: only this rule' },
       globs: { type: 'array', items: { type: 'string' }, description: 'record: the paths the area covers (several globs wire an area to the ones it depends on)' },
       sha: { type: 'string' },
@@ -409,7 +409,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         return { ok: true, text: [...(await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines, ...(await lessonLines(h, project).catch(() => [] as string[])), ...(await dupSummary(h, project).catch(() => [] as string[]))].join('\n') }
       }
       if (i.action === 'pr-plan' || i.action === 'retire-upstreamed') {
-        const given = { repo: repo.startsWith('/') ? repo : undefined, ref: str(i.ref) || undefined }
+        if (repo && !repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo as an absolute path (or none: the registered project path is used)` }
+        const given = { repo: repo || undefined, ref: str(i.ref) || undefined }
         if (i.action === 'retire-upstreamed') return retireUpstreamed(h, project, { ...given, apply: i.apply === true })
         const n = (v: unknown) => (typeof v === 'number' ? v : undefined)
         return prPlanTool(h, project, { ...given, minSessions: n(i.min_sessions), minDays: n(i.min_days), minGaps: n(i.min_gaps), windowDays: n(i.window_days) })
