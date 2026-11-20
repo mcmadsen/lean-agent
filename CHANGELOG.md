@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+
+
 ### Changed
 - The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with
   AskUserQuestion and never relayed with `send` (a relayed yes does not satisfy the permission check). A thread no longer reports
@@ -10,6 +12,9 @@
 - A worker whose edit is refused for a path outside its `allow-edit` grant is told to stop and report that path.
 - Doctor: "the desk spent $X on opus today" counts only spend after lean-agent pinned the model (earlier spend today is a note), and
   "opus is N% of spend" is a FIX only while a thread is on opus now, naming only those threads; otherwise a note.
+- A done thread's next message now says "new session (not in keep mode)"; a resume says the context size and the estimated cached
+  re-read cost when the size is known. The desk's tick does not finish a thread in keep mode.
+- The thread guide and the desk guide explain the limit, the pane warning and keep mode.
 
 ### Fixed
 - **A stale "needs your yes" card no longer stays after the thread carried on.** The card existed for as long as the blocked report was
@@ -38,6 +43,20 @@
   one audit thread per script text. `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line
   for that text instead of "was never audited" ("verdict taken from the audit thread's report", logged); a network flag still needs
   your explicit adopt.
+
+### Added (thread context limit and keep mode, [README](README.md#thread-context-limit-and-keep-mode))
+- **Thread context limit, restart at turn end.** Config `threadTokens` (default 120000). The thread's own mod records its context size
+  after every turn (`session.measure`, `$.session.usage()` `context.tokens`) in `threads/tN/context.json` (atomic). When the next
+  `send`, `wake`, `resume` or chaser message finds an idle or done session over the limit, a NEW session starts with the handover
+  instead of a resume ("context was 142k (limit 120k): started a new session with the handover ... ~$0.05 first turn, estimate"). A
+  working session is never touched; a session with no size of its own (older thread, failed write, record of an older session id) counts
+  as under the limit. New module `hooks/threadcontext.ts`.
+- **Context in the pane and the list**: `ctx 108k/120k` on the card, the thread pane and `lean_thread list` (dim, yellow above
+  `threadWarnTokens`, default 100000 or 83% of the limit, red over the limit; `ctx unknown` when nothing is recorded).
+- **Keep mode** (opt-in): `keep: true` on `lean_thread new` / `start`, `lean_thread keep tN on|off`, a "Keep session" choice on the
+  new-thread form. A thread in keep mode that reported done is resumed for follow-ups ("resumed (keep mode): context 85k, cached
+  re-read ~$0.04, estimate") until its context passes the limit, then the restart applies.
+
 
 ### Fixed (thread sessions, [README](README.md#thread-sessions-what-running-means-wake-names-leftovers))
 - **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and

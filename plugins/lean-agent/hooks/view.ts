@@ -22,6 +22,8 @@ import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
 import { slugOk } from './rules'
 import { agentsText } from './guard'
+import { ctxOf, threadLimits } from './threadcontext'
+import type { Level } from './threadcontext'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
@@ -37,7 +39,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -243,6 +245,7 @@ export async function loadView(h: Host): Promise<View> {
   const reviews: Reviews = new Map()
   await guard('threads', async () => {
     const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes // (once per refresh, not per thread)
+    const ctxLimits = await threadLimits(h)
     let ents: { name: string }[] = []
     try {
       ents = await h.fs.list(threadsDir(home))
@@ -296,7 +299,10 @@ export async function loadView(h: Host): Promise<View> {
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
       const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       const apv = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
+      const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
       v.threads.push({
+        ...(cv && cv.tokens !== undefined ? { ctx: cv.text, ctxLevel: cv.level } : {}), // (an unknown size says nothing on the card)
+        ...(t.keep === true ? { keep: true } : {}),
         ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
         unread: truth.unread,
         ...(liveNote ? { liveNote } : {}),

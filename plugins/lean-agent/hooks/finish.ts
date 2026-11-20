@@ -46,7 +46,7 @@ export async function sweepFinished(h: Host, run: (id: string) => Promise<{ ok: 
     }
     for (const e of ents.filter(x => /^t\d+$/.test(x.name)).sort((a, b) => Number(a.name.slice(1)) - Number(b.name.slice(1)))) {
       const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
-      if (!t || t.state !== 'open' || !t.sid || t.finished) continue
+      if (!t || t.state !== 'open' || !t.sid || t.finished || t.keep === true) continue // (keep mode: the session is kept after a done report, threadcontext.ts)
       if (!(await doneSession(h, home, t))) continue
       const now = await h.clock.now()
       const f = failed.get(e.name)

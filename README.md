@@ -463,7 +463,7 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   10 s tick stops its process ("t3 finished: next message starts a new session"; the pane row says so). A thread that reported
   done but is still on a final step is stopped only once it is idle. Any later `send`, `wake`, `resume` or `start` for it starts a
   NEW session with a handover (brief, goal, notes, reports including the done report, queued messages, branch and worktree), never a
-  resume of the old conversation. Nothing checkpoints a thread mid-work.
+  resume of the old conversation (unless the thread is in keep mode, below). Nothing checkpoints a thread mid-work.
 - **Restart buttons** (the pane, instead of any automatic restart): every open thread card has `Restart` (press twice: the second
   press confirms; a working thread's label warns that the current step is lost). It stops the session (only one in the thread's own
   folder) and starts a new one with the handover, same model and effort ("Restarted from the pane."). The desk can do the same with
@@ -492,7 +492,43 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   the header's bar has the same button from 80 % of the limit).
   `lean_doctor check` shows it as a `note` row, not `FIX`. The mod does not send `/compact` itself: no engine call is documented to
   run a slash command in a headless session.
-  The 1.0.6 key `checkpoint.deskTokens` is still read; `checkpoint.threadTokens` and `checkpoint.enabled` do nothing.
+  The 1.0.6 key `checkpoint.deskTokens` is still read; `checkpoint.threadTokens` and `checkpoint.enabled` do nothing (the thread limit
+  below is the top-level `threadTokens`, a different rule: it acts at the next message, never mid-work).
+
+### Thread context limit and keep mode
+
+Two Opus threads averaged about 180k tokens of context per request, and cache reads of a long conversation dominated a whole day's
+cost. So a thread's context is capped, at turn end, and a thread can opt in to keeping its session after it reports done.
+
+- **What is recorded.** The thread's own mod writes its context size at the end of every main-thread turn into the thread's folder
+  (`~/.lean-agent/threads/tN/context.json`: `tokens`, `at`, `sid`; a temp file moved over the old one, so a reader never sees half a
+  file). The engine raises `session.measure` after each turn in which a figure moved; its `context` is what `$.session.usage()`
+  answers, and `context.tokens` is the input tokens the last request was answered over (uncached, cache-written and cache-read
+  together). `Stop` is not used: in the engine's types it is the person pressing Esc or Ctrl+C, not the end of a turn, and the classic
+  `Stop` hook carries no size. Subagent turns do not raise it, so only the thread's own conversation is measured.
+- **What happens at the limit** (`threadTokens`, default 120000): nothing mid-turn, ever. When the NEXT message for the thread arrives
+  (`send`, `wake`, `resume`, the chaser) and the session is idle or done, its recorded size is compared with the limit. Over it (one
+  token over, equal is fine): a NEW session starts with the handover (brief, goal, notes, reports, queued messages, task first)
+  instead of a resume, and the reply says so: "context was 142k (limit 120k): started a new session with the handover (old
+  conversation kept read-only, not resumed) ... handover about 9.0k tokens (~$0.05 first turn, estimate)". A working session is never
+  touched: the message queues as before and the check runs when it is idle or done. A usage-limit resume skips the check (that session
+  was stopped inside a turn, so its last turn-end size is not current).
+- **When the size is not known** (a thread from before this feature, a write that failed, a record made by an older session id of the
+  thread, a damaged file) the session counts as under the limit and is never restarted on a guess; `lean_thread list` says `ctx unknown`.
+- **The warning.** The card, the thread pane and `lean_thread list` show `ctx 108k/120k`: dim up to `threadWarnTokens`, yellow above
+  it, red over the limit (the line then says the next message starts a new session). `threadWarnTokens` defaults to 100000 (83% of
+  `threadTokens`, to the nearest 1000, when only `threadTokens` is set; it never exceeds the limit).
+- **Keep mode** (off by default): `keep: true` on `new` / `start` (the new-thread form has a "Keep session" choice, off), or
+  `lean_thread keep tN on|off`; stored as `keep` in `thread.json`. Without keep a thread that reported done is finished as a session and
+  its next message starts a new one ("new session (not in keep mode)"). With keep it is NOT finished: follow-ups resume the same session
+  ("resumed (keep mode): context 85k, cached re-read ~$0.04 (estimate)") until its context passes the limit, and then the restart above
+  applies (the limit wins over keep). A resume re-reads the whole context from the cache each turn; a new session pays one small
+  uncached handover: keep mode pays off only for many small follow-ups to the same thread.
+- **What it costs.** The numbers are estimates from lean-agent's own price table (`hooks/budget.ts`): a fresh session's handover is
+  priced as uncached input of the model it starts on (about four characters a token), a resume as the recorded context read once from
+  the cache. No model computes anything.
+- **Config** (`~/.lean-agent/config.json`, tokens, whole numbers of at least 10000; anything else, a string included, is ignored and the
+  default applies): `threadTokens` (default 120000), `threadWarnTokens` (default 100000).
 
 ## Guards
 
@@ -525,6 +561,7 @@ Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved fr
 | File | Content |
 |---|---|
 | `threads/tN/thread.json`, `brief.md`, `inbox.jsonl` | a thread, its brief and queued messages |
+| `threads/tN/context.json` | the thread session's context size at its last turn end (`tokens`, `at`, `sid`), written by the thread's own mod |
 | `desk/inbox.jsonl`, `goals.json`, `questions.jsonl` | what threads reported, goals, open questions |
 | `<project>/rules`, `skills`, `gaps.jsonl`, `reviews/`, `learn.json` | per-project learning and reviews |
 | `scripts/candidates/<name>/`, `scripts/<name>/`, `<project>/scripts/<name>/`, `scripts/uses.jsonl`, `decisions.jsonl` | proposed and adopted scripts (script, `meta.json`, recipe `SKILL.md`), their uses and the user's overrides |

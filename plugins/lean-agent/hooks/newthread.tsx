@@ -23,8 +23,11 @@ export const BRIEF_ROWS = 8
 const TITLE_MAX = 80
 const BRIEF_MAX = 20_000
 
-type Form = { title: string; project: string; model: string; effort: string; brief: string; reason: string; errors: string[]; notice: string; busy: boolean; surface?: string }
-const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: DEFAULT, effort: DEFAULT, brief: '', reason: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+// keep: "keep session" (keep mode, threadcontext.ts), off by default; the surface has no checkbox, so it is a two-option choice
+type Form = { title: string; project: string; model: string; effort: string; brief: string; reason: string; keep: boolean; errors: string[]; notice: string; busy: boolean; surface?: string }
+const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: DEFAULT, effort: DEFAULT, brief: '', reason: '', keep: false, errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+export const KEEP_OFF = 'off'
+export const KEEP_ON = 'on'
 // opus (any model that is not haiku or sonnet) needs the user's Approve press in the pane: Start only files the request (expensive.ts)
 export const needsApproval = (model: string) => model !== DEFAULT && isExpensiveModel(model)
 export const APPROVAL_NOTE = 'opus needs your approval: Start creates the thread and a request in "Needs you" on the desk pane; nothing runs on opus until you press Approve there (twice). Say why sonnet is not enough:'
@@ -97,7 +100,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
     try {
       // the same steps as the tool's handler for `new` (register.tsx): a stale parent guide is cleared first, the git hooks refreshed after
       await guardParents(host).catch(() => [])
-      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), ...(f.model !== DEFAULT ? { model: f.model } : {}), ...(f.effort !== DEFAULT ? { effort: f.effort } : {}), ...(needsApproval(f.model) ? { reason: f.reason.trim() } : {}) }), 'start thread', 130_000)
+      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), ...(f.model !== DEFAULT ? { model: f.model } : {}), ...(f.effort !== DEFAULT ? { effort: f.effort } : {}), ...(needsApproval(f.model) ? { reason: f.reason.trim() } : {}), ...(f.keep ? { keep: true } : {}) }), 'start thread', 130_000)
       await ensureGitHooks(host).catch(() => undefined)
       const id = out.ok ? (out.data as Thread | undefined)?.id : undefined
       if (!out.ok || !id) {
@@ -129,6 +132,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
       {needsApproval(form.model) && <Text color="yellow">{APPROVAL_NOTE}</Text>}
       {needsApproval(form.model) && <Input key="reason" label="Reason" placeholder="why sonnet is not enough" value={form.reason} onInput={(v: string) => void (form.reason = v)} onSubmit={(v: string) => void (form.reason = v)} />}
       <Select key="effort" label="Effort" options={effortOptions} value={form.effort} onSelect={(v: string) => void (form.effort = v)} />
+      <Select key="keep" label="Keep session (after a done report, follow-ups resume it until its context passes the limit)" options={[{ value: KEEP_OFF, label: 'off (a done thread gets a new session)' }, { value: KEEP_ON, label: 'on (resume until the context limit)' }]} value={form.keep ? KEEP_ON : KEEP_OFF} onSelect={(v: string) => void (form.keep = v === KEEP_ON)} />
       <Input key="brief" label="Brief" placeholder="what the thread should do" rows={BRIEF_ROWS} value={form.brief} onInput={(v: string) => void (form.brief = v)} onSubmit={(v: string) => void (form.brief = v)} />
       {form.errors.map((m, i) => (
         <Text key={`e-${i}`} color="red">

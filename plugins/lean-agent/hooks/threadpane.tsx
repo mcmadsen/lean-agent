@@ -195,8 +195,9 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
         {id} · {short(d.title, 70)}
       </Text>
       <Text>
-        {`${d.state} · ${runLabel}${d.finished ? ' · finished (the next message starts a new session)' : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'}${d.costBadge ? ` · ${d.costBadge} today` : ''} · project: ${d.project || 'none'}`}
+        {`${d.state} · ${runLabel}${d.finished ? (d.keep ? ' · finished (keep mode: the next message resumes it until the context limit)' : ' · finished (the next message starts a new session)') : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'}${d.costBadge ? ` · ${d.costBadge} today` : ''} · project: ${d.project || 'none'}`}
       </Text>
+      {!!d.ctx && <Text color={d.ctx.level === 'over' ? 'red' : d.ctx.level === 'warn' ? 'yellow' : undefined} dimColor={d.ctx.level === 'ok' || d.ctx.level === 'unknown'}>{`${d.ctx.text}${d.keep ? ' · keep mode: a done session is resumed until the limit' : ''}${d.ctx.level === 'over' ? ' · over the limit: the next message starts a new session' : ''}`}</Text>}
       {!!d.liveNote && <Text color={d.live === 'stuck' ? 'red' : 'yellow'}>{d.liveNote}</Text>}
       {d.needsYou && <Text color="yellow">It waits for you in its own session: press Open session.</Text>}
       {!!d.approval && <Text color="yellow">{`needs your yes: ${short(d.approval, 160)}`}</Text>}

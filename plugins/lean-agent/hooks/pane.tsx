@@ -555,6 +555,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''} · `}</Text> : null}
             <Text bold color={sc.color}>{sc.word}</Text>
             {t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{` · ${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
+            {t.ctx ? <Text color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{` · ${t.ctx}${t.keep ? ' · keep' : ''}`}</Text> : null}
             {t.agents ? <Text dimColor>{` · ${t.agents}`}</Text> : null}
             {t.branch ? <Text dimColor>{` · ${t.branch}`}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>

@@ -15,8 +15,8 @@
 // would be an ordinary user message to the model, not the command, in an engine that does not run commands there. Until the engine
 // documents a headless path, the user types /compact or presses Restart desk.
 //
-// Threads have no size trigger: a thread that reports done is finished as a session (finish.ts), and the pane's Restart button starts
-// a new session of a thread when its context is large.
+// Threads have no compaction: a thread that reports done is finished as a session (finish.ts), a thread whose recorded context is over
+// `threadTokens` gets a new session at its next message (threadcontext.ts), and the pane's Restart button starts one on demand.
 import { atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { readConfig } from './budget'
