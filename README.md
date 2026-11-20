@@ -198,8 +198,10 @@ used either).
 
 ### Approvals of a thread's denied action
 
-When Claude Code's permission check denies an action in a thread (a PR reply, a work item update), the thread reports `blocked` with the
-exact action and the pane shows "tN needs your yes in its own session". You answer **in that session** (**Open tN**). The desk never
+A PR reply or comment, a work item comment or update and a GitHub PR comment no longer wait for this: the thread asks with `action` and
+the desk sends it after your yes (next section). For any other action Claude Code's permission check denies in a thread, the thread
+reports `blocked` with the exact action and the pane shows "tN needs your yes in its own session". You answer **in that session**
+(**Open tN**). The desk never
 asks you for it with a question and never passes a yes on with `send`: Claude Code's permission check is not bypassed by a model or a
 message, and the classifier reads a relayed yes as the model undermining oversight. A plugin hook cannot carry the decision either:
 `PermissionRequest` answers asks that go to a person, a classifier's denial is not one, and `PermissionDenied` can only say `retry`,
@@ -207,6 +209,61 @@ which runs the same check again (read from the engine's typings, not measured li
 while the thread is really blocked: not working, and no tool call since its report. A thread reports `blocked` with an `approval`
 only for what the permission check denied, never for something it decides itself (a subagent cap, a model choice). An expensive model
 is the pane's Approve, a push the desk's `approve-push`.
+
+### Remote writes go through the desk (typed actions)
+
+A thread may not make a remote write itself (Claude Code's permission check or classifier denies it, and the user would have to answer
+in the thread's own session). So it asks, and the desk's mod performs the write after the human said yes, the way `push` already works:
+no model ever bypasses a permission check, and no hook carries a decision.
+
+1. The thread calls `lean_report` (state blocked) with `action: {kind, params, why}`. The kinds are a fixed table
+   (`hooks/deskactions.ts`), nothing else: `ado-pr-reply` {org, project, repo, pr, thread, body}, `ado-pr-comment` {org, project, repo,
+   pr, body}, `ado-workitem-comment` {org, project, id, body}, `ado-workitem-update` {org, project, id, fields: state, assignedTo, tags,
+   title; strings}, `gh-pr-comment` {repo (owner/name), pr, body}. An unknown kind or param is refused with the list; pushes, merges,
+   deletes and settings changes are not in it.
+2. The mod stores the request in its own store, signed (HMAC with the review key, like the push approval): id, thread, kind, params, the
+   exact rendering (method, URL, body) and the sha256 of it. The pane's "Needs you" shows "t5 wants to reply to PR thread 7 on PR 42
+   (org/project/repo): <the exact text>" with **Approve** / **Deny** (two presses each), and the desk's inbox line says what to do.
+3. The desk runs `lean_thread action-list`, which prints the question to ask; the desk asks the user with AskUserQuestion, pasting it:
+   it names the request id, a check code and the exact text, with the options Approve, Deny, Edit first. The mod reads the user's answer
+   from that tool's own result (`answers`, question text to the label chosen) in the desk's `tool.call` hook and records it for that one
+   request, only when the question the user saw carried the id, the check code and the exact text. A model cannot stand in for it: an
+   `answers` field in the call's input is refused, free text is no choice, and a spec reads the sources to keep the answer's writers to
+   the question hook and the pane's press.
+4. `lean_thread approve-action <id>` (desk only) is refused unless a signed human Approve for that request id and text is on record, the
+   request is under 2 h old and unused, and the text derived again from the params still has the signed check code. Single use. A model-made
+   call, another request's answer, a changed text, an expired or already used request are all refused with the reason.
+5. The mod sends it, never a model and never the thread's shell (argv, no shell): Azure DevOps through `az account get-access-token
+   --resource 499b84ac-...` and `curl` with the token and the body on STDIN as a curl config (never in an argument list, a log or an output),
+   GitHub through `gh api` with the body on stdin. It records the result (id / URL, or the error) in the thread's `history.jsonl` and sends
+   the thread a message so it carries on. A failing send leaves the request approved and unused and says why; a connection that broke
+   after the request may have arrived is marked used (never sent twice) and the thread is told the outcome is unknown. Deny tells the
+   thread "denied: report blocked or continue without it"; Edit first sends nothing and the thread makes a NEW request (new id, new check
+   code) with the changed text.
+
+Not run live: the answer is read from the engine's typed `AskUserQuestion` result (`{questions, answers, response?, annotations?}`, as
+`next(e)` of a `tool.call` hook resolves it; the 1.0.14 note that `classic.PostToolUse` carries `tool_response.answers` is the same
+data); the specs drive a stand-in for that tool beneath the plugin. If a real session's result turns out not to carry the answers, the
+desk says so ("could not be read by the mod") and the pane's Approve / Deny on the card is the human's decision instead. Not covered: a
+PR thread's *status* change (fixed / closed) after a reply is outside the five kinds and stays a manual step.
+
+Avoidable blocks: `lean_doctor refusals` groups the guard's recorded refusals by pattern with a count and a one-line fix, and the
+doctor shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). `lean_thread new` takes
+`allowEdit` (absolute paths, at least two levels deep) and `allowCmd` (plain read-only commands): they are written into the brief as the
+exact lines the thread copies into its workers' prompts, for work that needs a path outside the worktree (a repo's `.claude/skills/...`
+file). No allow rule is added to any settings file to get past a classifier, and the guard is not widened for anything that writes or runs
+a program.
+
+### Why a thread gets blocked (measured)
+
+Measured on the feedback exports of three days (7 distinct files, lean-agent 1.0.5 to 1.0.12; the full table is in the changelog under
+"Unreleased"): of 78 guard refusals, 68 were a reader, reviewer or explorer refused a shell command (63 of them under the git-only
+wording that 1.0.9 and 1.0.14 widened; what is left, `cd`, redirects, `;`, `&&`, `$(...)`, `xargs`, paths outside the roots, refuses on
+purpose) and 10 were the desk refused in strict mode (it routes instead). No worker `allow-edit` refusal was recorded. The blocks a
+user had to answer in a thread's own session were 2 remote writes (an Azure DevOps work-item update, a PR thread reply) denied by Claude
+Code's own permission check or classifier, plus 1 push the thread tried itself (the push gate is the desk's). The other `blocked`
+reports were no permission block (an MCP server not signed in, a registry slot, a policy rule of the user's own project). So the
+avoidable ones are the remote writes and the grants a brief forgot.
 
 ## Skills
 

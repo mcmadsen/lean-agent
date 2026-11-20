@@ -9,6 +9,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
+import { actionListText, approveAction, dropActions } from './deskactions'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
@@ -216,7 +217,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[] }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -449,9 +450,35 @@ function needsOf(v: unknown): string[] | string | undefined {
   return names(v)
 }
 
+// Grants named up front on `new` (allowEdit: absolute paths a worker may edit, allowCmd: read-only commands a reader may run): they go into
+// the thread's brief as the exact lines a worker's Agent prompt takes, so the thread does not have to guess a path outside its worktree (a
+// repo's `.claude/skills/...` file is the usual one) and no worker is refused halfway. The guard is not widened by this: a grant still
+// only lives for the Agent call the thread makes with it, and a command with a shell form never rides on one.
+export const GRANTS_MAX = 20
+export function grantsBlock(i: Pick<Input, 'allowEdit' | 'allowCmd'>): string | { error: string } {
+  const list = (v: unknown, what: string): string[] | { error: string } => {
+    if (v === undefined) return []
+    if (!Array.isArray(v) || v.length > GRANTS_MAX || !v.every(x => typeof x === 'string')) return { error: `${what} must be a list of at most ${GRANTS_MAX} strings` }
+    return v.map(x => x.trim()).filter(Boolean)
+  }
+  const edit = list(i.allowEdit, 'allowEdit')
+  if ('error' in edit) return edit
+  const cmds = list(i.allowCmd, 'allowCmd')
+  if ('error' in cmds) return cmds
+  for (const p of edit) {
+    if (!p.startsWith('/') || p.split('/').includes('..') || /[\u0000-\u001f\u007f,]/.test(p) || p.length > 300) return { error: `allowEdit needs absolute paths without "..", commas or control characters (got "${p.slice(0, 60)}")` }
+    if (p.replace(/\/+$/, '').split('/').filter(Boolean).length < 2) return { error: `allowEdit "${p.slice(0, 60)}" is too wide: name a folder or file at least two levels deep (a worktree, a file of it)` }
+  }
+  for (const c of cmds) if (/[\u0000-\u001f\u007f,;&|<>$`]/.test(c) || c.length > 300) return { error: `allowCmd takes one plain read-only command per entry, no commas, ;, &, |, redirects or substitution (got "${c.slice(0, 60)}")` }
+  if (!edit.length && !cmds.length) return ''
+  return `\n\nGrants for your workers (the desk named them for this task: put each line, unchanged, in the Agent prompt of every worker or reader that needs it; a worker is refused anything outside them):\n${edit.length ? `allow-edit: ${edit.join(', ')}\n` : ''}${cmds.length ? `allow-cmd: ${cmds.join(', ')}\n` : ''}`.trimEnd()
+}
+
 async function create(h: Host, root: string, home: string, i: Input, installed = ''): Promise<Out> {
   const title = (i.title ?? '').trim()
   if (!title) return err('new needs a title')
+  const grants = grantsBlock(i)
+  if (typeof grants !== 'string') return err(grants.error) // before any folder exists
   const pre = await threadChoice(h, home, i)
   if (typeof pre === 'string') return err(pre) // a bad model/effort stops here, before any folder exists
   const noReason = reasonProblem(pre.model, i) // an expensive model named without a reason: nothing is created
@@ -470,7 +497,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
-  const brief = (i.text ?? '').trim() || title
+  const brief = ((i.text ?? '').trim() || title) + grants
   await h.fs.write(`${dir}/brief.md`, brief + '\n')
   await save(h, home, t)
   await trustFolder(h, dir)
@@ -727,6 +754,14 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
     if (i.action === 'list') return await list(h, home, root)
     if (i.action === 'profile') return await profileAction(h, home, i)
+    // typed remote writes a thread asked for with lean_report `action` (deskactions.ts): the desk lists them, asks the USER, and sends
+    // only a request the user approved; the thread is told the outcome through its inbox
+    if (i.action === 'action-list' || i.action === 'approve-action') {
+      const tell = (thread: string, text: string): Promise<void> => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined)
+      if (i.action === 'action-list') return { ok: true, text: await actionListText(h, tell) }
+      const o = await approveAction(h, (i.id ?? '').trim(), tell)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
     if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
       const r = await projectsAction(h, i)
       if (i.action !== 'projects') await ensureGitHooks(h).catch(() => undefined) // projects.json changed: the private list follows
@@ -893,6 +928,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           t.state = 'closed'
           await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
+          await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null

@@ -14,6 +14,7 @@ import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
 import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 import { notePending } from './approvals'
+import { ACTION_KINDS, addActionRequest } from './deskactions'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -75,10 +76,15 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 // ---- thread -> desk ------------------------------------------------------------------------------------------
 // approval: a blocked thread's exact command or action that Claude Code's permission check denied and the USER must approve in the
 // thread's own session (the pane shows "tN needs your yes in its own session" with an Open tN button; the desk never performs it)
-export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string }
+// action: a request for the desk to send one of the typed remote writes (deskactions.ts) once the user said yes at the desk
+export type DeskAction = { id: string; kind: string; headline: string }
+export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string; action?: DeskAction }
 export const APPROVAL_MAX = 300
 export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
 export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself, do not ask it with AskUserQuestion and do not send a yes (a relayed yes does not satisfy the permission check)]` : '')
+// what the desk is told about a thread's `action` request: ask the HUMAN with the question from action-list, then approve-action
+export const actionHint = (r: { kind: 'report' | 'ask'; state?: string; from: string; action?: DeskAction }): string =>
+  r.kind === 'report' && r.state === 'blocked' && r.action && /^a\d+-\d+$/.test(r.action.id) ? ` [${r.from} asks the desk to send: ${r.action.headline.replace(/\s+/g, ' ').slice(0, 160)} (request ${r.action.id}). Run lean_thread action-list, ask the USER with AskUserQuestion using the question it prints (it names the exact text), and only after their Approve call lean_thread approve-action ${r.action.id}. Never approve it yourself]` : ''
 export type Tool = { name: string; description: string; inputSchema: unknown }
 
 // what a done report should carry so a fresh session can take over: the fields a text does not mention (a heuristic on words)
@@ -133,7 +139,7 @@ export const THREAD_TOOLS: Tool[] = [
       last: { type: 'number', description: 'prs: how many completed PRs (default 10, at most 30)' },
     }, ['project']),
   },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way; never for something you decide yourself, such as a subagent cap or a model choice)' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way; never for something you decide yourself, such as a subagent cap or a model choice)' }, action: { type: 'object', description: 'state blocked only: a remote write you may not make yourself, for the DESK to send after the user said yes (never try the write yourself, never for a push, merge, delete or settings change). kind is one of: ado-pr-reply {org, project, repo, pr, thread, body}; ado-pr-comment {org, project, repo, pr, body}; ado-workitem-comment {org, project, id, body}; ado-workitem-update {org, project, id, fields: {state, assignedTo, tags, title (strings)}}; gh-pr-comment {repo (owner/name), pr, body}. The desk asks the user with the exact text and sends exactly that; an edited text is a NEW request. You get a message with the result (or "denied")', properties: { kind: { type: 'string', enum: Object.keys(ACTION_KINDS) }, params: { type: 'object' }, why: { type: 'string', description: 'one line: why this write is needed' } }, required: ['kind', 'params'] } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -244,7 +250,7 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
 // The line sent to the desk. `cut`: a report longer than DIRECT_MAX (cut, with a pointer). `keyed`: the line carries the row key, so the
 // row may be marked delivered: always, except a cut report whose full text has no file (`file` = the display path of the written
 // file; none = it could not be written).
-export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }, file?: string): { line: string; cut: boolean; keyed: boolean } {
+export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[]; approval?: string; action?: DeskAction }, file?: string): { line: string; cut: boolean; keyed: boolean } {
   const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
   const max = r.kind === 'ask' ? ASK_MAX : DIRECT_MAX
   const opts = r.options?.length ? r.options.join(' | ') : ''
@@ -252,7 +258,7 @@ export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'
   const cut = textCut || opts.length > OPTIONS_MAX // (the ONE place that decides: tellDesk asks directLine, then writes the file)
   const keyed = !cut || !!file
   const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
-  const tail = `${opts ? ` [options: ${opts.length > OPTIONS_MAX ? `${opts.slice(0, OPTIONS_MAX - 1).replace(/[\ud800-\udbff]$/, '')}…` : opts}]` : ''}${approvalHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
+  const tail = `${opts ? ` [options: ${opts.length > OPTIONS_MAX ? `${opts.slice(0, OPTIONS_MAX - 1).replace(/[\ud800-\udbff]$/, '')}…` : opts}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
   const pointer = file ? `(cut: the full text is in ${file}: Read it; the pane's Answers list has it too)` : '(cut: the full report is in the desk inbox / pane)'
   const body = textCut ? `${flat.slice(0, max - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : cut ? `${flat} ${pointer}` : flat
   return { line: `${head}${body}${tail}${keyed ? ` <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->` : ''}`, cut, keyed }
@@ -291,7 +297,7 @@ async function setKey(h: Host, home: string, key: string, on: boolean): Promise<
 // '' = nothing to add to the tool result (not sent on purpose); else the sentence to append.
 // The row is marked delivered BEFORE the send (a desk that reads its inbox meanwhile must not hand it over a second time) and
 // unmarked again if the send fails or is refused.
-async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[]; approval?: string }, important: boolean): Promise<string> {
+async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[]; approval?: string; action?: DeskAction }, important: boolean): Promise<string> {
   if (!send) return ''
   const worth = rec.kind === 'ask' || rec.state === 'done' || rec.state === 'blocked' || important
   if (!worth) return ''
@@ -427,8 +433,17 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
       // A report is never lost: a failed write is tried once more with the user's home as the working folder (a session whose own folder
       // is gone makes every spawn fail); when that fails too the thread gets the text back with the exact error, to paste to the user
-      const approval = str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
-      const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}) } satisfies DeskRec
+      // an `action` is a typed remote write for the DESK to send after the user's yes (deskactions.ts): checked against the fixed table first,
+      // so a bad kind or param refuses the whole call (nothing is reported) and the thread fixes it
+      let action: DeskAction | undefined
+      if (i.action !== undefined) {
+        if (str(i.state) !== 'blocked') return { ok: false, text: 'lean_report action needs state blocked (you wait for the user\'s yes, given at the desk)' }
+        const made = await addActionRequest(h, id, i.action)
+        if (!made.ok) return { ok: false, text: `lean_report action refused: ${made.text}` }
+        action = { id: made.request!.id, kind: made.request!.kind, headline: made.request!.headline }
+      }
+      const approval = !action && str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
+      const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
       const failed = await writeReport(h, home, rec)
       if (failed) {
         await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
@@ -438,10 +453,11 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
-      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text), ...(approval ? { approval } : {}) }, i.important === true)
+      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text), ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true)
       const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
+      const waits = action ? ` Request ${action.id} (${action.headline}) waits for the user's yes at the desk. Stop and wait: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
       const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
-      return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : base }
+      return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : `${base}${waits ? (base.endsWith('.') ? '' : '.') + waits : ''}` }
     }
     if (name === 'lean_ask') {
       if (!str(i.question)) return { ok: false, text: 'lean_ask needs a question' }
@@ -550,7 +566,7 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
 
 // a done report carries the hint that closing is the desk's job (a thread cannot close itself)
 export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a

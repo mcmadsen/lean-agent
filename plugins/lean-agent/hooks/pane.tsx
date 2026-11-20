@@ -21,6 +21,10 @@ import { notifyTick } from './notify'
 // grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
 import { denyRequest, grantModelApproval, removeRequest } from './expensive'
 import type { ModelRequest } from './expensive'
+// answerAction is called from here and from the desk's AskUserQuestion hook (bindAnswers) and from nowhere else: only the user's press or the
+// user's answer to the desk's question approves a thread's remote write (deskactions.ts)
+import { answerAction, approveAction } from './deskactions'
+import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.14'
@@ -432,6 +436,30 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       await removeRequest(host, r.id)
       tell()
     }
+    // ---- a thread's request for a remote write (deskactions.ts): the same decision as the desk's question, pressed twice. Approve sends it
+    // at once (the mod, once, exactly the text on the card); Deny tells the thread. Nothing here is a model's call. ----
+    const tellAction = (thread: string, text: string) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)
+    const approveWrite = (a: ActionView) =>
+      twoStep(`action:approve:${a.id}`, async () => {
+        resetViewCache()
+        const said = a.state === 'approved' ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction)
+        if (!said.ok) {
+          sayModel(said.text, true)
+          return tell()
+        }
+        const out = await approveAction(host, a.id, tellAction)
+        resetViewCache()
+        sayModel(out.text, !out.ok)
+        tell()
+      })
+    const denyWrite = (a: ActionView) =>
+      twoStep(`action:deny:${a.id}`, async () => {
+        resetViewCache()
+        const out = await answerAction(host, a.id, 'deny', 'pane', tellAction)
+        resetViewCache()
+        sayModel(out.text, !out.ok)
+        tell()
+      })
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
     // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
     // user's decision; a secret or privacy finding is never adopted, whatever is pressed)
@@ -513,6 +541,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const t = n.thread ? v?.threads.find(x => x.id === n.thread) : undefined
       const w = n.script
       const mr = n.request
+      const ar = n.action
       return (
         <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
           <Text color={tone} wrap="wrap">
@@ -529,6 +558,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!mr && mr.origin === 'tool' && <Button key={`model-sonnet-${mr.id}`} label="Start on sonnet instead" onPress={onSonnet(mr)} />}
             {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
             {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
+            {!!ar && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
+            {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
+            {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
           </Box>
         </Box>
       )

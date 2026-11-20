@@ -103,6 +103,19 @@ callers=$(grep -lE 'grantModelApproval[[:space:]]*\(' $mods | while read -r f; d
 writers=$(grep -l 'model\.approvals' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
 [ "$writers" = "expensive.ts " ] || fail "only expensive.ts may touch the model approvals (found in: $writers)"
 [ "$(grep -c 'grantModelApproval(' "$root/hooks/pane.tsx")" = "1" ] || fail "pane.tsx must call grantModelApproval from exactly one place (the Approve press)"
+# typed desk actions (hooks/deskactions.ts): the HUMAN's answer is written only by the desk's AskUserQuestion hook (bindAnswers, which reads the tool
+# result) and by the pane's press; only the desk's lean_thread (threads.ts) and the pane send an approved request; nothing outside deskactions.ts
+# touches the requests, the answers or the used marks; nothing the model can call writes an answer
+callers=$(grep -lE 'answerAction[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may only be called from deskactions.ts (bindAnswers) and the pane's press (callers: $callers)"
+callers=$(grep -lE 'bindAnswers[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts register.tsx " ] || fail "bindAnswers may only be called from the desk's AskUserQuestion hook (callers: $callers)"
+callers=$(grep -lE 'approveAction[[:space:]]*\(' $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts pane.tsx threads.ts " ] || fail "approveAction may only be called from the desk's lean_thread and the pane (callers: $callers)"
+writers=$(grep -lE "action\.(answer|used|requests)" $mods | while read -r f; do basename "$f"; done | sort | tr '\n' ' ')
+[ "$writers" = "deskactions.ts " ] || fail "only deskactions.ts may touch the action requests, answers and used marks (found in: $writers)"
+[ "$(grep -c "tool: 'AskUserQuestion'" "$root/hooks/register.tsx")" = "1" ] || fail "register.tsx must hook the desk's AskUserQuestion exactly once (the user's answer is read from its result)"
+grep -q 'answers belong to the user' "$root/hooks/register.tsx" || fail "register.tsx must refuse an AskUserQuestion whose input carries answers"
 grep -q 'Never choose opus' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk never chooses opus"
 grep -q "worker-opus" "$root/templates/thread.md" && grep -q "only when the user asks" "$root/templates/thread.md" || fail "thread.md must say worker-opus is only for when the user asks"
 need thread 'never choose opus'
@@ -116,6 +129,23 @@ grep -q 'does NOT satisfy it' "$root/templates/front-desk.md" || fail "front-des
 grep -q 'do not ask them to approve it with a question' "$root/templates/front-desk.md" || fail "front-desk.md must say an approval of a denied action is not asked with AskUserQuestion"
 grep -q 'never `send` a yes' "$root/skills/thread/SKILL.md" || fail "the thread skill must say a yes is never sent to a thread"
 grep -q 'decide yourself' "$root/templates/thread.md" || fail "thread.md must say approval is never for something the thread decides itself"
+# the typed desk actions reach the guides: a thread uses `action` instead of trying the write; the desk asks the USER with the exact text, then
+# approve-action; the five kinds are the same list everywhere (the table in hooks/deskactions.ts)
+grep -qF 'Use `action` instead' "$root/templates/thread.md" || fail "thread.md must tell a thread to use action instead of trying the write itself"
+grep -qF 'never try it with `az`, `gh api`, `curl`' "$root/templates/thread.md" || fail "thread.md must forbid trying the remote write with az / gh / curl"
+grep -qF 'ask the user with AskUserQuestion' "$root/templates/front-desk.md" || grep -qF 'Ask the user with AskUserQuestion' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk asks the user with AskUserQuestion for an action request"
+grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-desk.md" || fail "front-desk.md must name the three options"
+grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
+grep -qF 'Never call `approve-action` on your own' "$here/thread/SKILL.md" || fail "the thread skill must say approve-action is never called on the desk's own judgment"
+grep -qF '`action-list`' "$here/thread/SKILL.md" || fail "the thread skill must list action-list"
+grep -qF '`allowEdit?`' "$here/thread/SKILL.md" || fail "the thread skill must list allowEdit / allowCmd on new"
+grep -qF 'allowEdit' "$root/templates/front-desk.md" || fail "front-desk.md must tell the desk to name allowEdit / allowCmd when the work needs a path outside the worktree"
+grep -qF '`refusals`' "$here/doctor/SKILL.md" || fail "the doctor skill must list the refusals action"
+for k in ado-pr-reply ado-pr-comment ado-workitem-comment ado-workitem-update gh-pr-comment; do
+  grep -qF "$k" "$root/templates/thread.md" || fail "thread.md lacks the action kind $k"
+  grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
+done
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "5" ] || fail "the action table (PARAM_KEYS) must hold exactly five kinds"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)
