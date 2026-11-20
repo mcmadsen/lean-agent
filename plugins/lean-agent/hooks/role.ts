@@ -40,16 +40,21 @@ export async function roleBySid($: Host, sid: string): Promise<Role | null> {
   return open.length === 1 ? { kind: 'thread', id: open[0]!.id } : null // two records with one sid: no match, the folder decides
 }
 
-// The ONE role function. Order: a desk stays the desk; the session id (a thread's sid); the role the session already has (sticky: a desk or
-// thread session is never demoted by a cwd change, e.g. a Bash `cd` into the project repo), then the folder (dir, then the
-// root when asked). Only plain -> desk/thread happens on a cwd change.
+// The ONE role function. Order: a desk stays the desk; a thread session keeps its role (sticky: never demoted by a cwd change, e.g. a Bash
+// `cd` into the project repo; a session id another open thread holds moves it there); a session not resolved yet is decided by its FOLDER
+// first (the desk folder is the desk, ~/.lean-agent/threads/tN is thread tN, WHATEVER its session id: the app may resume a thread as a copy
+// with a new id, and an unknown id in a thread folder is that thread, never a desk), then by its session id (a thread's sid, from any folder),
+// then by the root when asked. One exception to folder-first: an id that ANOTHER open thread holds beats a thread folder (the id is proof).
 export async function resolveRole($: Host, o: { cwd: string; root?: string; sid?: string; current?: Role; useRoot?: boolean }): Promise<Role> {
-  if (o.current && o.current.kind !== 'plain' && o.current.kind !== 'thread') return o.current // a desk is never swapped by a sid match
+  if (o.current && o.current.kind === 'desk') return o.current // a desk is never swapped by a sid match
   const bySid = await roleBySid($, o.sid ?? '')
+  if (o.current && o.current.kind === 'thread') return bySid ?? o.current
+  const byDir = await detectRole($, o.cwd)
+  if (byDir.kind === 'desk') return byDir
+  if (byDir.kind === 'thread') return bySid && bySid.kind === 'thread' && bySid.id !== byDir.id ? bySid : byDir
   if (bySid) return bySid
-  if (o.current && o.current.kind !== 'plain') return o.current
-  let r = await detectRole($, o.cwd)
-  if (r.kind === 'plain' && o.useRoot !== false && o.root && o.root !== o.cwd) r = await detectRole($, o.root)
+  let r = byDir
+  if (o.useRoot !== false && o.root && o.root !== o.cwd) r = await detectRole($, o.root)
   return r
 }
 

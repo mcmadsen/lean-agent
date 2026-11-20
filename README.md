@@ -521,6 +521,19 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   was not verified), then restart the thread from the pane; the start reply shows the version it now runs. The doctor shows a
   `FIX thread tN running X, installed Y` row with this advice. lean-agent never restarts a service itself and never tells the desk to.
   Until it is fixed, do not ask that thread for anything its version lacks.
+- **"Open tN" opened a new desk (or a new empty session) instead of the thread** (reported on a Mac with 1.0.12). *Not verified:* whether the
+  app resolves the id of a `claude --bg` session with `claude://resume?session=<id>`; the mod only hands the link to `open` and cannot see
+  what the app shows, so it never says the right session opened (the reply says "if a new desk opened instead, close it" and names the
+  session). What the mod does regardless: a session started in a thread's folder (`~/.lean-agent/threads/tN`) is that thread whatever
+  its session id (it never becomes a desk, and its id is recorded in `thread.json` `sids`); a session in `~/lean-agent-desk` is the desk.
+  *Checks to run on the Mac, and what each result means* (please report the three outputs):
+  1. `claude agents --json` — find the thread's row (its `name` is `tN · <title>`) and note its session id and `cwd`.
+  2. `open "claude://resume?session=<that id>"` by hand, with the thread idle (press "Open tN" does the same after stopping its process).
+     Does the app show that thread's conversation, or a new session?
+  3. `claude agents --json` again — compare: the same id (the app resumed it), a NEW row or id in the thread folder (the app resumed it as a
+     copy: lean-agent now treats that copy as the thread, but its history is the copy's), or a new session in another folder (the link did
+     not resolve the id).
+  Whatever the link does, `claude attach <id>` in a terminal reaches the thread's own session, and the app's session list shows it by name.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A session started in a thread's folder is that thread, whatever its session id.** The role is decided by the folder first (the desk
+  folder is the desk, `~/.lean-agent/threads/tN` is thread tN) and by the session id second; an unknown id in a thread folder never
+  becomes a desk, and is recorded in the thread's `sids`. (A session id that another open thread holds still wins over a thread folder.)
+  This is the part of "Open tN opened a new desk" that could be fixed without running the app.
+- **"Open tN" no longer implies the right session opened.** After the link is handed to the system opener the reply says: if a new desk
+  opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it from a
+  terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
+
 ## 1.0.13
 
 ### Fixed

@@ -93,6 +93,15 @@ test('Open tN: the idle process is stopped and gone first, then the resume link 
   expect(w.h.claudeCalls()).toContainEqual(['stop', SID.slice(0, 8)])
 })
 
+test('Open tN: the reply cannot claim the right session opened: it says what to do if a new desk did, the session\'s name and `claude attach <id>`', async () => {
+  const w = world([row()])
+  const r = await w.open()
+  expect(r.text).toContain('if a new desk opened instead, close it')
+  expect(r.text).toContain("in the app's session list as 't1 · one'")
+  expect(r.text).toContain(`claude attach ${SID}`)
+  expect(r.text).not.toMatch(/the right session (is|was) (shown|opened)/)
+})
+
 test('Open tN: a session that already stopped is not stopped again; Linux uses xdg-open, Windows rundll32', async () => {
   const w = world([row({ pid: undefined, status: undefined, state: 'stopped' })])
   expect((await w.open()).ok).toBe(true)
