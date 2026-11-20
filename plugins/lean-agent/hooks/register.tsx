@@ -694,7 +694,7 @@ export const register: Register = on => {
   // a long Bash result is squeezed after the call; the full text is saved under ~/.lean-agent/output/
   on('tool.call', { tool: 'Bash' }, async ($, e: any, next) => squeezeResult(hostOf($), await next(e)))
 
-  on('tool.call', { tool: `mcp__lean-agent__${TOOL}` }, async ($, e: any) => {
+  on('tool.call', { tool: `mcp__lean-agent__${TOOL}` as const }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: e.tool.replace('mcp__lean-agent__', ''), need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
@@ -707,7 +707,7 @@ export const register: Register = on => {
   })
 
   // scripts over models: thread and desk (propose is a thread's, decide the desk's; scripts.ts checks per action)
-  on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` }, async ($, e: any) => {
+  on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` as const }, async ($, e: any) => {
     if (role.kind !== 'thread' && role.kind !== 'desk') await redetect($, undefined, true)
     const r = role
     if (r.kind !== 'thread' && r.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: SCRIPT_TOOL, need: 'thread', role: r, startDir, sid: lastSid }), isError: true } as any
@@ -739,7 +739,7 @@ export const register: Register = on => {
     return r
   })
 
-  on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` }, async ($, e: any) => {
+  on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` as const }, async ($, e: any) => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: 'lean_doctor', need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
@@ -778,7 +778,7 @@ export const register: Register = on => {
   })
 
   for (const t of THREAD_TOOLS) {
-    on('tool.call', { tool: `mcp__lean-agent__${t.name}` }, async ($, e: any) => {
+    on('tool.call', { tool: `mcp__lean-agent__${t.name}` as const }, async ($, e: any) => {
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here

@@ -39,7 +39,7 @@ const opened: { id: string; title?: string }[] = []
 // the panes a button opened (the desk's own pane, opened at the session start, is not one of them)
 const byButton = () => opened.filter(o => o.id !== 'lean-agent')
 const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
-const texts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
+const texts = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
 // A review record is signed with a key in the mod's own store. The pane runs in the engine's instance of the plugin (its own store, which
 // `world` answers with KEY), the spec's host has another: the same key in both lets the spec write a record the pane verifies.
 const KEY = 'k'.repeat(64)
