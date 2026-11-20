@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
+  budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the
+  haiku agents, `reader-haiku` and the explorer low, threads sonnet / high, the desk opus / high. Nothing in the doctor, `stats` or the
+  specs read an agent's effort, so only the two agent files and the README line changed.
+
 ## 1.0.11
 
 ### Fixed

@@ -134,7 +134,8 @@ Agent definitions in `plugins/lean-agent/agents/`:
 
 Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
 `threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is opus / high (`config.json` `desk.model` / `desk.effort` override);
-`worker-sonnet`, `worker-opus` and `reviewer` run at effort high, `reader-sonnet` at medium, the haiku agents and the explorer at low.
+`worker-sonnet`, `worker-opus` and `reader-sonnet` run at effort medium (a worker does one briefed task; the thread that briefs it
+carries the reasoning), `reviewer` and `auditor` at high (a missed finding costs more than the tokens), the haiku agents and the explorer at low.
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
