@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Fixed
+- **With `attribution` off a thread no longer follows Claude Code's own "end commits with Co-Authored-By / Claude-Session" reminder.**
+  The reminder comes from the engine's attribution setting, which a thread's CLAUDE.md ("no trailers") could not outvote. The thread's
+  `.claude/settings.json` now carries `attribution: {commit: "", pr: "", sessionUrl: false}` (empty text hides the trailer and the
+  PR line, `sessionUrl: false` drops the `Claude-Session` link) and the deprecated `includeCoAuthoredBy: false` for an older engine,
+  written at every start and restart; nothing is set when config.json `attribution` is on. The CLAUDE.md line also names the reminder it
+  overrides ("Attribution for git commits and pull requests") for an engine that ignores the settings.
 - **A restart brief says where the full text of a cut report is.** Earlier reports in the handover are cut to 700 characters (the newest
   is whole up to 20,000) and used to end in "..." with nothing to follow. A cut line now ends in `(cut: full text in
   <home>/.lean-agent/desk/reports/<ts>-<thread>-<kind>.md)`; the handover writes that file when the desk never did (a short report, or

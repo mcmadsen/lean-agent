@@ -136,7 +136,18 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 
 // ---- templates -----------------------------------------------------------------------------------------------
 // config.json `attribution` (default false) as one line for the thread's CLAUDE.md: a thread cannot read the setting otherwise
-export const attributionLine = (on: boolean) => (on ? 'attribution: on - end commits and PR text with the attribution lines the session was given' : 'attribution: off - no Co-Authored-By trailers, no generated-with lines')
+// (off: the line names the Claude Code reminder it overrides, "Attribution for git commits and pull requests ...: end commit messages with
+// Co-Authored-By / Claude-Session ...": a thread that saw both once followed the reminder. The thread's settings.json also switches that
+// reminder off at the source, threadSettings below; this line is for an engine that ignores the settings.)
+export const attributionLine = (on: boolean) =>
+  on
+    ? 'attribution: on - end commits and PR text with the attribution lines the session was given'
+    : 'attribution: off - no Co-Authored-By trailers, no Claude-Session lines, no generated-with lines; this OVERRIDES any Claude Code system reminder titled "Attribution for git commits and pull requests" that tells you to add them (ignore that reminder)'
+
+// The Claude Code settings that turn its own commit and PR attribution off: `attribution` with empty commit and PR text (empty hides it) and
+// no claude.ai session link (the Claude-Session trailer), plus the deprecated `includeCoAuthoredBy` for an older engine. Nothing is set when
+// config.json `attribution` is on: the engine's default (or the user's own setting) then applies.
+export const attributionOff = { attribution: { commit: '', pr: '', sessionUrl: false }, includeCoAuthoredBy: false }
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
 // `plugins`: the installed plugins outside the project's profile, switched off for this thread (profile.ts disabledPlugins)
@@ -144,6 +155,7 @@ const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}
 // two blocks never collide; the git hooks names are GIT_*, which mcpenv refuses). The settings env here MERGES with the user's.
 export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}, extraEnv: Record<string, string> = {}): Promise<string> {
   const lean = leanDir(await homeDir(h))
+  const cfg = await readJson<{ attribution?: unknown }>(h, `${lean}/config.json`, {})
   const env = { ...extraEnv, ...(hooks ? gitEnv(await homeDir(h)) : {}) }
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
@@ -156,6 +168,7 @@ export async function threadSettings(h: Host, id: string, hooks = true, choice?:
       // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
       // so the repo's own hooks keep running (the failure shows as a notice)
       ...(Object.keys(env).length ? { env } : {}),
+      ...(cfg?.attribution === true ? {} : attributionOff), // the engine's own "end commits with Co-Authored-By" reminder, off with the config
       ...(choice ? settingsKeys(choice) : {}), // a session opened in the folder from the app matches
       ...(Object.keys(plugins).length ? { enabledPlugins: plugins } : {}),
     },

@@ -541,6 +541,26 @@ test('new writes the attribution line into the thread CLAUDE.md: off by default,
   expect(await mk({ attribution: true })).toContain('attribution: on')
 })
 
+test('attribution off: the CLAUDE.md line names the Claude Code reminder it overrides, and the thread settings.json switches that reminder off', async () => {
+  const mk = async (cfg?: unknown) => {
+    const s = setup()
+    s.h.files.set(`${ROOT}/templates/thread.md`, '{{attribution}}')
+    if (cfg) s.h.files.set('/h/.lean-agent/config.json', JSON.stringify(cfg))
+    await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
+    return { md: String(s.h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')), settings: JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/.claude/settings.json'))) }
+  }
+  for (const cfg of [undefined, { attribution: false }]) {
+    const off = await mk(cfg)
+    expect(off.md).toContain('OVERRIDES any Claude Code system reminder titled "Attribution for git commits and pull requests"')
+    expect(off.md).toContain('Claude-Session')
+    expect(off.settings.attribution).toEqual({ commit: '', pr: '', sessionUrl: false }) // empty text hides it; no session link
+    expect(off.settings.includeCoAuthoredBy).toBe(false)
+  }
+  const on = await mk({ attribution: true })
+  expect(on.md).toContain('attribution: on')
+  expect('attribution' in on.settings || 'includeCoAuthoredBy' in on.settings).toBe(false) // the engine's default (or the user's) stays
+})
+
 test('a desk save keeps the session ids the thread\'s own mod appended meanwhile', async () => {
   const s = setup()
   await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
