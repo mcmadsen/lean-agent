@@ -1,9 +1,8 @@
 // Thread kind `review`: `lean_thread new` with `review: {pr | branch | sha, base?}` starts a thread whose brief is built from
 // templates/review-brief.md (it names the lean-agent:review skill: load it, prepare at level full, run the passes, record, report).
-// The marker file review.json in the thread's folder says the thread is a review thread; the sha it prepared last lives in the mod's
+// The marker (the mod's store, key review.marker.tN) says the thread is a review thread; the sha it prepared last lives in the mod's
 // store (a session cannot write it), and reviewevidence.ts holds the report to a lean_review record for that sha.
 import type { Host } from './state'
-import { homeDir, threadsDir, readJson, writeJson } from './state'
 
 export type ReviewTarget = { ref: string; label: string; base?: string }
 export type ReviewMarker = { kind: 'review'; project: string; ref: string; base?: string; ts: number }
@@ -55,14 +54,14 @@ export async function newOrReview(h: Host, root: string, i: any, create: (i: any
   const id = (r.data as { id?: string } | undefined)?.id
   if (id) {
     const marker: ReviewMarker = { kind: 'review', project, ref: t.ref, ...(t.base ? { base: t.base } : {}), ts: await h.clock.now() }
-    await writeJson(h, `${threadsDir(await homeDir(h))}/${id}/review.json`, marker).catch(() => undefined)
+    await h.store.set(`review.marker.${id}`, marker).catch(() => undefined) // the mod's store, not a file in the session's own folder
   }
   return { ...r, text: `${r.text}\n${id ?? 'the thread'} is a review thread for ${t.label}: it runs lean-agent:review at level full, records, and cannot report done without a lean_review record for the reviewed sha (the mod appends the evidence).${raised ? ' Review threads run on sonnet: haiku was raised to sonnet.' : ''}` }
 }
 
 export const markerOf = async (h: Host, thread: string): Promise<ReviewMarker | null> => {
-  const m = await readJson<Partial<ReviewMarker> | null>(h, `${threadsDir(await homeDir(h))}/${thread}/review.json`, null)
-  return m && m.kind === 'review' && typeof m.project === 'string' && m.project ? (m as ReviewMarker) : null
+  const m = (await h.store.get(`review.marker.${thread}`).catch(() => undefined)) as Partial<ReviewMarker> | undefined
+  return m && typeof m === 'object' && m.kind === 'review' && typeof m.project === 'string' && m.project ? (m as ReviewMarker) : null
 }
 
 // the sha a thread last prepared: the mod's store, never a session's file
@@ -71,7 +70,7 @@ export async function noteReviewed(h: Host, thread: string, project: string, sha
   if (!/^t\d+$/.test(thread)) return
   await h.store.set(key(thread), { project, sha, ts: await h.clock.now() }).catch(() => undefined)
 }
-export async function reviewedBy(h: Host, thread: string): Promise<{ project: string; sha: string } | null> {
-  const v = (await h.store.get(key(thread)).catch(() => undefined)) as { project?: unknown; sha?: unknown } | undefined
-  return v && typeof v.project === 'string' && typeof v.sha === 'string' ? { project: v.project, sha: v.sha } : null
+export async function reviewedBy(h: Host, thread: string): Promise<{ project: string; sha: string; ts: number } | null> {
+  const v = (await h.store.get(key(thread)).catch(() => undefined)) as { project?: unknown; sha?: unknown; ts?: unknown } | undefined
+  return v && typeof v.project === 'string' && typeof v.sha === 'string' ? { project: v.project, sha: v.sha, ts: typeof v.ts === 'number' ? v.ts : 0 } : null
 }

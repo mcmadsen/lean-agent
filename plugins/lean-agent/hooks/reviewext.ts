@@ -40,26 +40,30 @@ export async function fetchExternal(h: Host, project: string, rawRef: string, ba
   if ('repo' in parsed && parsed.repo && parsed.repo !== repoName(url)) return `that URL is for ${parsed.repo}, but the origin of ${project} is ${repoName(url)}: pass the project the URL belongs to`
   const scratch = `${leanDir(await homeDir(h))}/scratch/ext-${project}`
   await mkdirp(h, scratch).catch(() => undefined)
+  // refs of THIS call (two reviews of one project at once must not read each other's head)
+  const stamp = `${await h.clock.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const HEADREF = `refs/ext/head-${stamp}`
+  const BASEREF = `refs/ext/base-${stamp}`
   if ((await run(['git', '-C', scratch, 'init', '--bare', '-q'], 15_000)) === null) return `could not prepare the scratch repository ${scratch}`
-  const fetch = (src: string, dst: string) => run(['git', '-C', scratch, 'fetch', '--no-tags', '-q', '--force', url, `${src}:${dst}`])
+  const fetch = (src: string, dst: string) => run(['git', '-C', scratch, 'fetch', '--no-tags', '-q', '--force', '--', url, `${src}:${dst}`])
   const sha = async (r: string) => run(['git', '-C', scratch, 'rev-parse', '--verify', '--end-of-options', `${r}^{commit}`], 15_000)
   // the head: a PR's head ref (else its merge ref), a branch, or a sha
   let head: string | null = null
   let label = ''
   if ('pr' in parsed) {
     label = `PR #${parsed.pr}`
-    for (const src of [`refs/pull/${parsed.pr}/head`, `refs/pull/${parsed.pr}/merge`]) if ((await fetch(src, 'refs/ext/head')) !== null && (head = await sha('refs/ext/head'))) break
+    for (const src of [`refs/pull/${parsed.pr}/head`, `refs/pull/${parsed.pr}/merge`]) if ((await fetch(src, HEADREF)) !== null && (head = await sha(HEADREF))) break
   } else if (SHA.test(parsed.ref)) {
     label = `commit ${parsed.ref.slice(0, 10)}`
-    if ((await fetch(parsed.ref, 'refs/ext/head')) !== null) head = await sha('refs/ext/head')
+    if ((await fetch(parsed.ref, HEADREF)) !== null) head = await sha(HEADREF)
   } else {
     label = `branch ${parsed.ref}`
-    if ((await fetch(`refs/heads/${parsed.ref}`, 'refs/ext/head')) !== null || (await fetch(`refs/tags/${parsed.ref}`, 'refs/ext/head')) !== null) head = await sha('refs/ext/head')
+    if ((await fetch(`refs/heads/${parsed.ref}`, HEADREF)) !== null || (await fetch(`refs/tags/${parsed.ref}`, HEADREF)) !== null) head = await sha(HEADREF)
   }
   if (!head) return `cannot read ${label || rawRef} from the origin of ${project} (not there, or git could not reach it): nothing was computed`
   let base: string | null = null
   for (const c of baseIn ? [baseIn] : ['main', 'master', 'develop']) {
-    if ((await fetch(`refs/heads/${c}`, 'refs/ext/base')) !== null && (base = await sha('refs/ext/base'))) break
+    if ((await fetch(`refs/heads/${c}`, BASEREF)) !== null && (base = await sha(BASEREF))) break
   }
   if (!base) return `cannot read the base ${baseIn || '(main, master, develop)'} from the origin of ${project}: pass base`
   return { path: scratch, base, head, label }

@@ -18,12 +18,12 @@ function setup(thread = 't1', marker = true) {
   const h = fakeHost(null)
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set(`${L}/threads/${thread}/thread.json`, JSON.stringify({ id: thread, project: 'app' }))
-  if (marker) h.files.set(`${L}/threads/${thread}/review.json`, JSON.stringify({ kind: 'review', project: 'app', ref: '12', ts: 1 }))
+  if (marker) h.store.set(`review.marker.${thread}`, { kind: 'review', project: 'app', ref: '12', ts: 1 })
   h.git.handler = (a: string[]) => {
     const s = a.join(' ')
     if (s.includes('remote get-url')) return ok('https://git.example/org/app.git\n')
     if (s.includes(' init ') || s.includes(' fetch ')) return ok()
-    if (s.includes('rev-parse')) { const r = a[a.length - 1]!.replace('^{commit}', ''); return ok((r === 'refs/ext/head' ? HEAD : r === 'refs/ext/base' ? BASE : r) + '\n') }
+    if (s.includes('rev-parse')) { const r = a[a.length - 1]!.replace('^{commit}', ''); return ok((r.startsWith('refs/ext/head') ? HEAD : r.startsWith('refs/ext/base') ? BASE : r) + '\n') }
     if (s.includes('merge-base --is-ancestor')) return { exitCode: 1, stdout: '' }
     if (s.includes('merge-base')) return ok(BASE + '\n')
     if (s.includes('--name-status')) return ok('M\tsrc/a.ts\n')
@@ -55,7 +55,7 @@ test('new with review: the brief comes from the template and names the skill; ha
   expect(seen.text).toContain('Review PR #12 of app via lean-agent:review (12 and base "main")')
   expect(seen.text).toContain('From the user: be quick')
   expect(r.text).toContain('haiku was raised to sonnet')
-  expect(JSON.parse(h.files.get(`${L}/threads/t4/review.json`)!)).toMatchObject({ kind: 'review', project: 'app', ref: '12', base: 'main' })
+  expect(h.store.get('review.marker.t4')).toMatchObject({ kind: 'review', project: 'app', ref: '12', base: 'main' })
   seen = undefined
   await newOrReview(h.host, '/root', { action: 'new', title: 'x', project: 'app' }, create)
   expect(seen).toEqual({ action: 'new', title: 'x', project: 'app' })
@@ -71,7 +71,7 @@ test('external prepare reads a PR into a scratch repo (never the project tree) a
   expect(p.text).toContain(SCRATCH)
   expect(p.text).toContain(HEAD)
   const git = h.calls.filter(c => c.argv[0] === 'git').map(c => c.argv.join(' '))
-  expect(git.some(c => c.includes(`-C ${SCRATCH} fetch`) && c.includes('refs/pull/12/head:refs/ext/head'))).toBe(true)
+  expect(git.some(c => c.includes(`-C ${SCRATCH} fetch`) && c.includes('-- https://git.example/org/app.git refs/pull/12/head:refs/ext/head'))).toBe(true)
   expect(git.filter(c => c.includes('-C /r/app'))).toEqual(['git -C /r/app remote get-url origin']) // the project's own checkout is asked its origin, nothing else
   expect(git.some(c => /worktree|checkout|reset|\bpush\b/.test(c))).toBe(false)
   const r = await tool(h, { sha: HEAD, mode: 'external', green: true, base: 'main', passes: 2, review: approve })
@@ -105,6 +105,7 @@ test('report gate: a review thread cannot report done without a record for the r
   const none = await reviewReport(h.host, 't1', 'done', 'looks fine')
   expect(none.ok).toBe(false)
   expect(none.text).toContain('no lean_review prepare')
+  expect((await reviewReport(h.host, 't1', ' done\n', 'looks fine')).ok).toBe(false) // a padded state is the same word (threadTool trims it)
   await tool(h, { action: 'prepare', ref: '12', base: 'main', level: 'full' })
   const noRec = await reviewReport(h.host, 't1', 'done', 'looks fine')
   expect(noRec.ok).toBe(false)
@@ -112,6 +113,10 @@ test('report gate: a review thread cannot report done without a record for the r
   // a record file a session wrote by hand (no valid signature) is no record
   h.files.set(`${L}/app/reviews/${HEAD}.json`, JSON.stringify({ project: 'app', sha: HEAD, green: true, level: 'full', sig: 'x' }))
   expect((await reviewReport(h.host, 't1', 'done', 'looks fine')).ok).toBe(false)
+  await tool(h, { sha: HEAD, mode: 'external', base: 'main', passes: 3 }) // a bare record (no reviewer result) is no review
+  const bare = await reviewReport(h.host, 't1', 'done', 'looks fine')
+  expect(bare.ok).toBe(false)
+  expect(bare.text).toContain('not a full-level review record')
   await tool(h, { sha: HEAD, mode: 'external', base: 'main', passes: 1, review: { ...approve, findings: [{ n: 1, severity: 'minor', category: 'style', path: 'src/a.ts', line: 1, text: 'naming', fix: 'rename' }] } })
   const done = await reviewReport(h.host, 't1', 'done', 'looks fine')
   expect(done.ok).toBe(true)

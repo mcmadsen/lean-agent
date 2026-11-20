@@ -38,7 +38,7 @@ export const notesOf = (lines: string[]): string[] => fixLines(lines).filter(l =
 
 // What "lean-agent is not set up" may say: only rows of the setup itself (desk folder, trust, model line, folder access, opener, launch agent,
 // the 1.0 state). Every other FIX row (a skewed thread, a failed report, a stale worktree entry, a model share ...) is a doctor finding.
-const SETUP_ROW = /^(desk folder|desk model|desk \.claude|desk can open|opener script|launch agent|state is 1\.0)/
+const SETUP_ROW = /^(desk folder|desk model|desk \.claude|desk can(?:not)? open|opener script|launch agent|state is 1\.0)/
 export const missingOf = (problems: string[]): string[] => problems.filter(p => SETUP_ROW.test(p))
 // the `note ` rows of a check: information, nothing to press
 export const infoOf = (lines: string[]): string[] => lines.filter(l => l.startsWith('note ')).map(l => l.replace(/^note\s+/, ''))

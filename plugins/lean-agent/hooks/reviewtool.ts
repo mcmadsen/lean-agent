@@ -139,7 +139,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const range = await resolveRange(h, project, ext ? ext.base : str(i.base) || undefined, ext ? ext.head : str(i.head) || undefined, checkout)
   if (typeof range === 'string') return { ok: false, text: `prepare: ${range}` }
   if (ext) await noteExternal(h, project, ext)
-  await noteReviewed(h, thread, project, range.head) // a review thread's report gate looks for a record of this sha (reviewevidence.ts)
+  if (ext) await noteReviewed(h, thread, project, range.head) // a review thread's report gate looks for a record of this sha (reviewevidence.ts)
   const branch = str(i.branch)
   const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
