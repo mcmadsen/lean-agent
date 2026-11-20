@@ -2,15 +2,47 @@
 
 ## Unreleased
 
+### Added
+- **Stall watchdog.** A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued messages stayed unread that long, is `stalled`: red in the pane and in `lean_thread list` (which names the last activity time), ONE desk notice + toast per stall ("t7 has done nothing for 25 min, 3 messages unread: wake or restart it"), and a reminder line in the desk's context once per desk turn while it lasts. The thread's own hooks write `activity.json` in its folder (tool calls of the thread or of its workers, reports, prompts), so a thread waiting on a worker that still works is not stalled; a session waiting for your answer never is. `threads.stallRestart` (default false): when true the mod restarts a stalled thread itself (same path as the context restart) and says so.
+
 ### Fixed
 - **Automatic context restart no longer fails while the thread is running** (1.0.19 field: three times "tN is running: no new session started" at 124k of 120k, a manual `restart` right after worked). The timer now stops a session that still shows as working exactly as the manual restart does (the hard stop already refuses its tool calls), under the same grace rule (idle 20 s, or `threads.stopGraceMinutes` after the record). A failed automatic restart is retried at every timer tick (at most 5 tries), then ONE desk notice names the reason and offers `restart`.
 - **Hard stop**: a spec pins that the 2nd, 3rd... turn end over the limit writes no further record and that every tool call but `lean_report` is refused; a turn end without an engine session id no longer writes a record every turn (it falls back to the thread's recorded session).
 - **"Done" before the output existed.** A done report is checked by script before it counts: every path in its text that looks like an output file (absolute or `~/...`, with an extension, after words like saved / written / created / at / in, or in backticks) must exist. A missing one makes `lean_report` refuse the done state ("not done: <path> does not exist; write it (a worker's 'written' is not proof) or drop the claim"), recorded in the refusal record (rule `done-output-missing`); nothing reaches the desk, so the auto-close never sees a done report that failed. URLs, paths next to "deleted / removed / renamed" and files git tracks as deleted are not claims.
 - **Doctor `fix` named a cause it never showed** ("thread tX running 1.0.13, installed 1.0.18: ... restart it once the cause below is fixed", no cause listed: `fix` prints FIX rows only). The version-skew row now holds the cause and what you can do itself, and "below" is gone.
-
-### Added
-- **Stall watchdog.** A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued messages stayed unread that long, is `stalled`: red in the pane and in `lean_thread list` (which names the last activity time), ONE desk notice + toast per stall ("t7 has done nothing for 25 min, 3 messages unread: wake or restart it"), and a reminder line in the desk's context once per desk turn while it lasts. The thread's own hooks write `activity.json` in its folder (tool calls of the thread or of its workers, reports, prompts), so a thread waiting on a worker that still works is not stalled; a session waiting for your answer never is. `threads.stallRestart` (default false): when true the mod restarts a stalled thread itself (same path as the context restart) and says so.
-
+- **A thread's base was double what 1.0.19 claimed** (field: "base 62k-63k tokens on every request" with the short tool list; the 31k was measured in a bare
+  container, the rest is the user's own environment). About 31k is the floor; your base depends on your plugins, skills and connectors.
+  - `lean_doctor overhead probe [tN]`: a handful of one-word haiku calls (`claude -p "Reply with the single word ok." --model haiku --output-format json`,
+    prompt first, flags after, a few cents, the output says so) in a thread-shaped folder, each switching one thing off (MCP `--strict-mcp-config`, skills
+    `--disable-slash-commands`, other plugins `enabledPlugins`, your user CLAUDE.md and rules `claudeMdExcludes`, and all of them: the tool list alone). It
+    prints base tokens per variant, names the biggest component and the config line that removes it.
+  - Lean defaults for threads, each with a switch, stated in the start reply ("lean base: plugins lean-agent only, skills lean-agent's only, MCP all
+    available"): `threads.plugins` (default none: a thread loads only lean-agent; an array of names adds more, `"all"` is the old behaviour). Before, other
+    plugins were switched off only when the project had a profile, and then only skill-only plugins (a plugin with hooks, agents or commands never was), so
+    "plugins: all" meant every plugin's text in every request. A plugin that brings an MCP server stays on (switching it off would remove the server).
+    `threads.skills` (default `"lean"`: a thread's skills listing keeps lean-agent's skills, as on the desk; `"all"` lists everything; a user-level skill
+    folder is trimmed from the listing, not hidden from the engine). `threads.mcp`: `"all"` (default, unchanged: connectors available so `allow-mcp:`
+    jobs work), `"project"` (only servers `projects.json` `<name>.mcp` or the profile lists, plus the thread's needs), `"none"`; a server outside the list is
+    deferred (findable through ToolSearch), never removed.
+- **The desk's model pin did not stick** (field: at several prompts of one desk session "the desk was on claude-opus-5-5 (the app chose it); lean-agent set
+  sonnet"). The app picks opus again and again; the pin was put back each time, with one prompt line each time, and opus could run in between.
+  The engine's `PreModelSwitch` says who asked: `command` (`/model`, the `/config` Model row, also lean-agent's own write), `picker`, `sdk` (a headless
+  set_model: the Claude app's default AND its model menu alike), `auto`, `resume`. Now: the pin is put back at `prompt.submit` BEFORE the turn runs
+  whenever the session model is not the pin; the app's choice (`sdk`) of an expensive model is answered with the documented `permissionDecision`: `ask`
+  once per session and model, then `deny` with "type /model opus to switch by hand"; what the person did by hand (`command`, `picker`) is never blocked
+  and is not put back in that session; a fallback (`auto`) and a resume pass. ONE line per session reaches the model; the pane notice carries the count
+  ("the app chose opus 4 times this session; lean-agent set sonnet each time"). The engine cannot tell the app's default from the app's model menu
+  (both `sdk`), so the doctor's desk row says that, and that the question is asked once per session.
+- **The cost of long unattended work** (field: one feature thread spent about $215 in a day, mostly review passes and context restarts).
+  - Review policy by script: the FULL review (two independent passes when the risk is high) is for "ready to push"; at a milestone the default is ONE light
+    pass. `lean_review prepare` at level `light` answers "already reviewed at this milestone (...): skip" instead of preparing another pass when the head
+    already has a record ("sha range unchanged") or fewer than `review.minLines` (default 60) lines changed since the last pass; a second `full` prepare for
+    a head that already has a full record answers with that record (green or not) and starts no passes. A `since` the caller names is always prepared.
+    Config `review.perMilestone` (default true; false prepares every time). The first line of the prepare text carries `summary`: level, passes, model and
+    the expected cost ("LIGHT review, 1 pass (sonnet), expected ~$0.35").
+  - A per-thread daily spend line, "today $12.40 (reviews $5.10, restarts $0.90)", on the pane card, in the thread pane and as `today` in `lean_thread
+    list`: from the ledger, reviewer agents' cost, and the first request of each fresh session (new ledger field `fresh`, written by the thread's mod; a
+    session that begins within 10 minutes of the thread's creation is its start, not a restart). Functions `costLine`, `threadSpendLine` in stats.ts.
 
 ## 1.0.19
 
