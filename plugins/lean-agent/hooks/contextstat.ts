@@ -81,7 +81,7 @@ export function contextText(s: ContextStat, label = ''): string {
 }
 
 // the transcript: <home>/.claude/projects/<folder>/<session>.jsonl, the named session or the newest one
-async function findTranscript(h: Host, home: string, session?: string): Promise<string | null> {
+export async function findTranscript(h: Host, home: string, session?: string): Promise<string | null> {
   const root = `${home}/.claude/projects`
   const script = session ? `ls "${root}"/*/${session.replace(/[^\w-]/g, '')}.jsonl 2>/dev/null | head -1` : `ls -t "${root}"/*/*.jsonl 2>/dev/null | head -1`
   const r = await h.process.run(['bash', '-c', script])
@@ -89,21 +89,25 @@ async function findTranscript(h: Host, home: string, session?: string): Promise<
   return r.exitCode === 0 && p ? p : null
 }
 
+// the records of a transcript file (a damaged line is skipped)
+export async function readRecords(h: Host, file: string): Promise<any[]> {
+  const recs: any[] = []
+  for (const l of String((await h.fs.read(file)) ?? '').split('\n')) {
+    if (!l.trim()) continue
+    try {
+      recs.push(JSON.parse(l))
+    } catch {
+      /* a damaged line is skipped */
+    }
+  }
+  return recs
+}
+
 export async function contextReport(h: Host, home: string, session?: string): Promise<string> {
   try {
     const file = await findTranscript(h, home, session)
     if (!file) return `context: no session transcript found under ${home}/.claude/projects${session ? ` for ${session}` : ''}`
-    const text = String((await h.fs.read(file)) ?? '')
-    const recs: any[] = []
-    for (const l of text.split('\n')) {
-      if (!l.trim()) continue
-      try {
-        recs.push(JSON.parse(l))
-      } catch {
-        /* a damaged line is skipped */
-      }
-    }
-    return contextText(contextStat(recs), `${file.split('/').pop()} `)
+    return contextText(contextStat(await readRecords(h, file)), `${file.split('/').pop()} `)
   } catch (err) {
     return `context failed: ${String((err as Error)?.message ?? err)}`
   }

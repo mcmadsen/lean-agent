@@ -264,6 +264,7 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:worker-sonnet` | ordinary implementation, tests, bug fixes (default) |
 | `lean-agent:worker-opus` | hard design or debugging, only when the user asks for it; never a default, and refused unless the user approved opus for that thread in the pane |
 | `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
+| `lean-agent:reader-mcp` | read-only lookup through ONE MCP server / connector the thread granted for that job (`allow-mcp:`), haiku |
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
 | `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
@@ -298,6 +299,75 @@ share of the window's spend with the threads on it, and `check` has a FIX row wh
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
 and every error kept; the full text is saved under `~/.lean-agent/output/`) and each role sees only the tools it needs.
+
+## Fixed overhead
+
+What every request carries before any work is the cost that repeats. `lean_doctor overhead` (desk; optional `session` id to read a
+transcript) measures it by script, no model, per role: the role's template (CLAUDE.md text), the agent definition, the skills listing
+(name + description of the skills for that role) and lean-agent's own tool schemas, as chars / 4. With a session transcript it adds the first
+request's usage against the measured parts (the rest is the engine's system prompt plus built-in and MCP tool schemas, which no file holds)
+and what the transcript names of MCP (servers, tool names, instructions). This repository's own files (1.0.15, tool schemas estimated from source):
+
+| role | template | agent | skills | lean tools | total |
+|---|---:|---:|---:|---:|---:|
+| desk | 2663 | 0 | 669 | 2788 | 6120 |
+| thread | 2293 | 0 | 1087 | 4510 | 7890 |
+| worker-haiku | 0 | 572 | 0 | 0 | 572 |
+| reader-haiku | 0 | 754 | 0 | 0 | 754 |
+| reader-sonnet | 0 | 781 | 0 | 0 | 781 |
+| worker-sonnet | 0 | 598 | 0 | 0 | 598 |
+| reviewer | 0 | 3099 | 0 | 0 | 3099 |
+| auditor | 0 | 855 | 0 | 0 | 855 |
+
+**Removing tools instead of refusing them.** A refusal at call time leaves the tool's schema in every request. What was found (engine
+types, `claude --help`, the engine binary), and what each way does:
+
+- Agent frontmatter `tools:` is a hard allow-list for a subagent (a call to any other tool is refused, and its schema is not sent); left
+  out, the agent gets every tool its parent has, MCP included. `disallowedTools:` removes names from that, and takes MCP server specs
+  (`mcp__server`, `mcp__server__*`, `mcp__*`). `maxTurns:` is a frontmatter key (a backstop; the guard's step budgets are the rule).
+  `skills:` preloads skills; left out, none. `agents/*.md` carry minimal `tools:` lists (readers and the reviewer / auditor / explorer:
+  Read, Grep, Glob, Bash; workers: + Edit, Write): no Agent, no skill, no MCP tool, nothing else.
+- A deny rule in `settings.json` `permissions.deny` without a pattern takes the tool out of the model's tool list. `hooks/leantools.ts`
+  exports `deskSettings()` (every built-in the desk's strict mode cannot allow, the claude.ai connectors, project MCP servers, cron,
+  bundled skills, the engine's git text, auto-memory) and `threadSettings({ mcp, extraDeny })` (the built-ins a lean-agent thread never
+  calls: plan mode, worktree, cron, task list, the install / suggest / search tools, notebook edit), and `mergeSettings(base, fragment)`.
+- The mod's own `tool.list` hook already cuts the desk's pool (`trimTools`, `config.json` `tools.<role>.drop` on top); that shapes what the
+  model is shown and holds for every agent. The settings fragments add the same cut BEFORE the mod loads and in a folder session
+  opened from the app.
+- Engine switches in settings `env` (found in the engine binary, unverified live): `ENABLE_CLAUDEAI_MCP_SERVERS=false`,
+  `CLAUDE_CODE_DISABLE_CRON`, `..._EXPLORE_PLAN_AGENTS`, `..._BUNDLED_SKILLS`, `..._CLAUDE_API_SKILL`, `..._CLAUDE_CODE_SKILL`,
+  `..._GIT_INSTRUCTIONS`, `..._AUTO_MEMORY`, `..._ADVISOR_TOOL`.
+- Cannot be removed: the engine's system prompt, the schemas of the tools a role really uses (Bash and Edit are the big ones), the
+  plugin skills listing (it is trimmed to the role's skills, not to nothing) and lean-agent's own tool schemas (each is used).
+  `--tools`, `--strict-mcp-config` and `--bare` exist for a session you start yourself; a background thread is started by `claude --bg`
+  and its settings file is the only lever.
+
+**MCP is opt-in per job.** No worker or reader has an MCP tool by default. A thread grants a server for ONE job with a brief line
+`allow-mcp: <server>[, <server>]` (a connector's display name works: `Datadog` matches `mcp__claude_ai_Datadog__*`) and starts
+`lean-agent:reader-mcp` (haiku; the one definition without a `tools:` list, because an allow-list cannot name servers that vary: it
+removes the edit, agent, web and skill tools with `disallowedTools`). The guard records the line like `allow-cmd` and lets exactly that
+server's tools through for that worker, read-only ones only: a tool whose name starts with create, update, delete, upsert, edit, run, trigger,
+execute, send and similar verbs (or has a write word in it) is refused with "needs `allow-mcp-write: <server>` plus the user's approval through
+the desk". `allow-mcp-write` is recorded but a worker alone is never let through; the thread reports it with `lean_report`. Another server, no
+grant, an unresolved agent type: refused. The grant belongs to the job and ends with it. The MCP result is cut by the same output cap
+(`toolResultChars`, saved in full) and the worker's answer by the `lookup` schema below. A project's `profile.mcp` (the `learn` skill's
+profile) is respected: a listed server is never in a deny rule, and `threadSettings` never disables a connector at all (it is only removed from the desk).
+
+**Return schemas and fail fast.** The first line of a worker brief names the job: `job: lookup|edit|run|check`. The Agent result is cut
+to the job's schema and marked `[lean-agent: result outside the <job> schema, trimmed to ...]`; a conforming result is untouched:
+
+| job | result | tool calls |
+|---|---|---:|
+| lookup | `answer:` (<= 20 lines), `refs: path:line, ...` | 5 |
+| edit | `files:`, `diffstat:`, `result: pass\|fail`, `note:` (one line) | 8 |
+| run | `result: pass\|fail`, <= 20 lines | 3 |
+| check | `result: pass\|fail`, <= 20 lines | 5 |
+
+`config.json` `workers.stepsByJob: { "lookup": 5, ... }` sets the budgets; `workers.steps` stays the ceiling. At the budget the guard refuses
+further calls ("return what you have in the <job> schema") and the worker's `maxTurns` is the hard stop. `workers.requireJob: true` refuses a
+brief without the job line (default off: such a brief keeps `workers.steps` and no schema). Retries are counted per thread and brief
+(`why-sonnet:` lines and spacing ignored): the first run is allowed, the second identical brief only with a `why-sonnet:` line, the third is
+refused ("split the job differently or report blocked"), never a loop; a changed brief starts again.
 
 ## Learned rules
 

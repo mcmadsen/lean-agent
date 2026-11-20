@@ -27,7 +27,9 @@ import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
-import { parseGrants, recordGrant, releaseGrant } from './guard'
+import { hasGrants, parseGrants, recordGrant, releaseGrant } from './guard'
+import { jobOf, jobResult } from './jobs'
+import { overheadReport } from './overhead'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
@@ -140,7 +142,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'context'] }, session: { type: 'string', description: 'context: a session id (default: the newest session transcript)' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'context', 'overhead'] }, session: { type: 'string', description: 'context: a session id (default: the newest session transcript)' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' } }, required: ['command'] } }
@@ -281,10 +283,13 @@ async function soft($: any, label: string, fn: () => Promise<unknown>): Promise<
 }
 
 // the engine replaces a tool registered again under the same name, so a repeat is harmless; `registered` only saves the call
+// the specs this session registered (lean_doctor overhead measures them: what a request carries for lean-agent's own tools)
+const seenSpecs = new Map<string, any>()
 async function registerOnce($: any, spec: any): Promise<void> {
   if (registered.has(spec.name)) return
   await $.tool.register(spec as any)
   registered.add(spec.name)
+  seenSpecs.set(spec.name, spec)
 }
 
 // thread side of the usage-limit resume: the exhausted rate-limit windows give the reset (limitFromUsage); the record is kept as it is
@@ -818,6 +823,7 @@ export const register: Register = on => {
         if (o.ok) dropSetupCheck()
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
       }
+      if (e.action === 'overhead') return { result: await overheadReport(host, String($.plugin.root), { session: typeof e.session === 'string' && e.session ? e.session : undefined, home: await homeDir(host), tools: { desk: [...seenSpecs.values()], thread: [...THREAD_TOOLS, SCRIPT_SPEC, RUN_SPEC] } }) } as any
       if (e.action === 'context') return { result: await contextReport(host, await homeDir(host), typeof e.session === 'string' && e.session ? e.session : undefined) } as any
       if (e.action === 'dismiss-old-desk') {
         const o = await dismissOldDesk(host)
@@ -876,7 +882,7 @@ export const register: Register = on => {
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
     // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
-    const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
+    const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
     if (gcall) await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
     // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
@@ -893,10 +899,14 @@ export const register: Register = on => {
     if (octx && r?.deny === undefined && !e.agentId) {
       const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))
       if (oc.on && role.kind === 'desk') r = await capTo(host, 'desk', r, oc.deskChars).catch(() => r)
-      else if (oc.on && role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) r = await capTo(host, role.id, r, oc.agentChars).catch(() => r)
+      else if (oc.on && role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {
+        r = jobResult(r, jobOf(e.prompt)) // the result is cut to its job's schema (jobs.ts), then to agentChars
+        r = await capTo(host, role.id, r, oc.agentChars).catch(() => r)
+      }
     }
     // an oversized Bash or MCP result of a thread's main loop is cut before it enters the conversation (cap.ts); the full text is a file
-    if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
+    // (a worker's MCP result too: it is the worker's context that it would fill)
+    if (role.kind === 'thread' && (!e.agentId || String(e.tool ?? '').startsWith('mcp__')) && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
     if (audited && role.kind === 'thread' && r?.deny === undefined) {
       const reply = texts(r?.result).join('\n')

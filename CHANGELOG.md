@@ -13,6 +13,17 @@
 - `hooks/preflight.ts`: the preflight pack (`preflightText`) of a thread's fresh start, computed by script.
 - `lean_doctor context`: tokens by tool and size bucket, the top 10 results, delegated against direct, Haiku share, from the transcript.
 - Worker and reader agent definitions: one step, `split: <rest>`, ≤ 30 lines, no nested agents.
+- **Fixed overhead** (see [README](README.md#fixed-overhead)): `lean_doctor overhead` measures what each role's request carries before any
+  work (template, agent definition, skills listing, lean-agent tool schemas; with a transcript the first request and the MCP share).
+  `hooks/leantools.ts`: `deskSettings()` / `threadSettings()` / `mergeSettings()`, the settings that remove tools the desk and a thread
+  never use (deny rules, engine `env` switches); a connector or MCP server of the project is never disabled for a thread. Worker and reader
+  agents carry `maxTurns`.
+- **MCP opt-in per job**: a brief line `allow-mcp: <server>` grants one server's read-only tools to `lean-agent:reader-mcp` for that job;
+  other servers, write tools (`allow-mcp-write` needs the user's approval) and calls without a grant are refused; the result goes through the
+  output cap.
+- **Job types**: `job: lookup|edit|run|check` as the first brief line: return schemas enforced by script (result cut and marked), step
+  budgets 5 / 8 / 3 / 5 (`workers.stepsByJob`, `workers.steps` the ceiling, `workers.requireJob`), and a retry rule per (thread, brief):
+  the second identical brief needs `why-sonnet:`, the third is refused.
 
 ## 1.0.14
 
