@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **An auditor's verdict is recorded even when the thread asked for the background.** An `lean-agent:auditor` Agent call with
+  `run_in_background: true` returned "Async agent launched" at once and its `LEAN-AUDIT` line arrived later in a hand-back that no hook
+  records, so the script stayed unaudited. The thread's `tool.call` hook now hands such a call on with `run_in_background: false` (other
+  agent types keep their request) and tells the thread; if an engine ignores the switch and the reply is still "Async agent launched",
+  the thread is told no verdict was recorded and to run the audit again in the foreground.
 - **A thread's direct report finds the desk again after a desk restart.** A report refused with "no live session on this machine has
   id <uuid>" (the desk had restarted, the thread still held the old id in `desk.json`) fell back to the inbox and kept sending to the dead
   id. The send now looks up the desk's live session (`claude agents --json`, the session in the desk folder, the newest when several)

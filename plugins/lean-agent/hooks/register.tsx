@@ -33,7 +33,7 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
-import { SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
@@ -800,9 +800,12 @@ export const register: Register = on => {
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && (g.edit?.length || g.cmds?.length) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
     if (gcall) await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
+    // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
+    const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
+    const forced = audited && wantsBackground(e)
     let r: any
     try {
-      r = await next(e)
+      r = await next(audited ? foregroundCall(e) : e)
     } finally {
       if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
     }
@@ -810,9 +813,13 @@ export const register: Register = on => {
     // an oversized Bash or MCP result of a thread's main loop is cut before it enters the conversation (cap.ts); the full text is a file
     if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) r = await capResult(host, role.id, String(e.tool ?? ''), r).catch(() => r)
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
-    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && /^(lean-agent:)?auditor$/.test(String(e.subagent_type ?? ''))) {
-      const said = await auditFromReply(host, role.id, texts(r?.result).join('\n'), String(e.prompt ?? '')).catch(() => null)
-      if (said) r = { ...r, context: [...(r.context ?? []), said] }
+    if (audited && r?.deny === undefined) {
+      const reply = texts(r?.result).join('\n')
+      const said = await auditFromReply(host, role.id, reply, String(e.prompt ?? '')).catch(() => null)
+      // (the engine ignored the foreground switch and the call came back as "Async agent launched": say that no verdict was recorded)
+      const lost = !said && /async agent launched/i.test(reply) ? AUDIT_ASYNC_NOTE : ''
+      const notes = [...(forced && !lost ? [AUDIT_FOREGROUND_NOTE] : []), ...(said ? [said] : []), ...(lost ? [lost] : [])]
+      if (notes.length) r = { ...r, context: [...(r.context ?? []), ...notes] }
     }
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
     // call counts for the thread. This is what a project profile is learned from.
