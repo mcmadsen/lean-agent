@@ -499,3 +499,27 @@ test('stats: the cost by model with the opus share and the threads on opus; doct
   const none = fakeHost(null)
   expect((await check(none.host, ROOT)).some(l => l.includes('opus is'))).toBe(false)
 })
+
+test('doctor: a high opus share is a FIX only while a thread is ON opus now, and then names only those threads; otherwise it is a note', async () => {
+  const h = fakeHost(null)
+  h.clock.t = NOON
+  h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', state: 'closed', model: 'opus', effort: 'high' })) // spent on opus, closed since
+  h.files.set(`${L}/threads/t2/thread.json`, JSON.stringify({ id: 't2', state: 'open', model: 'sonnet', effort: 'high' }))
+  h.files.set(`${L}/ledger.jsonl`, row(NOON - 1000, { tN: 't1', model: 'claude-opus-5-5', usd: 7, tmodel: 'opus', effort: 'high' }) + row(NOON - 1000, { tN: 't2', usd: 3 }))
+  const s = await opusShare(h.host)
+  expect(s.threads).toEqual(['t1'])
+  expect(s.now).toEqual([])
+  const note = (await check(h.host, ROOT)).find(l => l.includes('opus was 70%'))!
+  expect(note).toBeTruthy()
+  expect(note.startsWith('note')).toBe(true)
+  expect(note).toContain('no thread runs on opus now')
+  expect((await check(h.host, ROOT)).some(l => l.startsWith('FIX') && l.includes('opus is'))).toBe(false)
+  expect(await statsText(h.host)).toContain('on opus now: none')
+  // a thread starts on opus again: the FIX is back and names only that one (t1 is closed and no longer named)
+  h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', state: 'open', model: 'opus', effort: 'high' }))
+  h.files.set(`${L}/threads/t2/thread.json`, JSON.stringify({ id: 't2', state: 'open', model: 'opus', effort: 'high' }))
+  const fix = (await check(h.host, ROOT)).find(l => l.includes('opus is 70% of spend'))!
+  expect(fix.startsWith('FIX')).toBe(true)
+  expect(fix).toContain('threads t2, t5 run on opus now')
+  expect(fix).not.toContain('t1')
+})

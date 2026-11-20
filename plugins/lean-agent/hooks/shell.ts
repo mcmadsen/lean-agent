@@ -330,12 +330,18 @@ export function analyze(c: string): Verdict {
 // empty segment, no word-initial ~, no `{a,b}` / `{1..3}` brace expansion; `HEAD~1` and `@{u}` are plain); inside single quotes everything is data; inside double quotes
 // `$` and backtick are refused. Globs, braces and tildes must be quoted (then they
 // are data for the program) or not used.
-export function plainPipeline(c: string): string[][] | null {
+// Opt-in (the readers' and the reviewer's command set, guard.ts): `glob` lets an unquoted * ? [ ] through, and the word that carries one
+// comes back with GLOB_MARK in front, so the caller expands it itself and checks every match; `devnull` lets the exact word `2>/dev/null`
+// (stderr thrown away, nothing else) through. Nothing else changes: any other redirect, `>`, `<`, `&`, `!` or `\` still returns null.
+export const GLOB_MARK = '\u0001'
+export const isGlobWord = (w: string) => w.startsWith(GLOB_MARK)
+export function plainPipeline(c: string, opts: { glob?: boolean; devnull?: boolean } = {}): string[][] | null {
   const segs: string[][] = []
   let words: string[] = []
   let cur = ''
   let has = false
-  const endWord = () => { if (has) words.push(cur); cur = ''; has = false }
+  let globbed = false
+  const endWord = () => { if (has) words.push(globbed ? GLOB_MARK + cur : cur); cur = ''; has = false; globbed = false }
   const endSeg = (): boolean => { endWord(); if (!words.length) return false; segs.push(words); words = []; return true }
   const n = c.length
   for (let i = 0; i < n; i++) {
@@ -365,6 +371,13 @@ export function plainPipeline(c: string): string[][] | null {
     }
     if (ch === '~' && !has) return null // tilde expansion only at the start of a word (`HEAD~1` is plain)
     if (ch === '~') { cur += ch; continue }
+    if (ch === '>' && opts.devnull && cur === '2' && has && !globbed && c.startsWith('>/dev/null', i) && /^(?:[\s|]|$)/.test(c.slice(i + 10, i + 11))) { // the whole word is `2>/dev/null`
+      cur = ''
+      has = false
+      i += 9
+      continue
+    }
+    if (opts.glob && /[*?[\]]/.test(ch)) { cur += ch; has = true; globbed = true; continue }
     if (/[;&<>()`$}*?[\]\\!\n\r#]/.test(ch)) return null
     cur += ch
     has = true

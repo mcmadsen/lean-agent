@@ -16,6 +16,13 @@ absolute path (a no-op refresh when it is, and it adopts one made with plain `gi
 answer says why when it refuses (a taken key is replaced when stale, else registered under a `~2` suffix). The desk asks the user, records the yes with `approve-push <tN> <sha>` (one sha, single
 use, 2 hours) and pushes with `push` (and opens the PR) from the desk. Or the user pushes by hand with the printed `git -C ... push` command.
 
+**Two levels, so the review does not eat the day.** A **light** review (the default of `prepare`) is ONE sonnet pass on correctness,
+behaviour and reuse: use it at an intermediate checkpoint ("is this on the right track?"); it never records green. The **full** strict
+review (`level: "full"`: every pass, two runs for a high-risk diff, the record that unlocks `git push`) runs only when the work is done,
+right before you `lean_report` "ready to push". `prepare` prints the expected cost (`expected review cost ~$1.20 (2 passes, sonnet)`,
+the median of this project's earlier reviewer passes in the ledger, else a stated default): say it to the user before you start the
+reviewer agents, and never run a full review at every checkpoint. The push gate still needs the full review's record for the pushed sha.
+
 The review is strict on purpose: the reviewer works in ordered passes (completeness, correctness traced end to end, behaviour
 before -> after, reuse and duplication, scope and platform, tests, defaults and state, style last), a script (not a model) computes
 what it must look at, and the `lean_review` tool refuses green when the reviewer's own result does not hold. Never argue with the
@@ -24,12 +31,17 @@ tool's refusal: do what it says.
 1. `git rev-parse HEAD` (full sha), the branch (`git branch --show-current`), `git diff <base>...HEAD --stat`; base defaults to
    the default branch. The goal is the thread's goal, the branch name, the commit messages and the PR or work-item text, in one line.
 2. **Prepare (a script, no model):** `lean_review` (`mcp__lean-agent__lean_review`) with `action: "prepare"`, `project` (the name in
-   `projects.json`), `base`, `branch`. It computes from the diff: new symbols and files, edited tests whose assertions change
+   `projects.json`), `base`, `branch`, and `level`: omit it (= `light`) at a checkpoint, pass `"full"` only for the review before "ready
+   to push". It reads your registered worktree (`worktree` names another registered one). It computes from the diff, leaving out
+   generated files (`.gitattributes` linguist-generated, `*.snap`, golden / fixtures / `__snapshots__` paths, lockfiles, minified
+   bundles and the globs of config `review.exclude`: the text says how many files and lines, and the `':(exclude,literal)path'` pathspecs that keep them
+   out of the reviewer's own `git diff`): new symbols and files, edited tests whose assertions change
    (renamed, flipped, deleted, skipped), new parameters with defaults, new module-level state, changed or removed exported symbols,
    the user's declines for this branch, and on a later pass the open findings and the delta since the last reviewed sha. The first
    line is `LEAN-REVIEW-PREP {...}` (the model, the number of runs and why, whether a second opinion comes first, whether this is a
-   re-review); everything after the first lines goes into the reviewer's prompt as it is. Print the reviewer line (`reviewer: sonnet x2
-   (risk: ...)`, or `reviewer: sonnet (...)`) so the user sees who reviews and why. The reviewer is **always sonnet**; never pass
+   re-review); everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
+   worktree path (git -C <worktree> ...). Print the reviewer line (`reviewer: sonnet x2
+   (risk: ...)`, or `reviewer: sonnet (...)`) and the expected cost line so the user sees who reviews, why and what it costs. The reviewer is **always sonnet**; never pass
    `model` to prepare yourself: it is only for a model the brief explicitly names.
 3. **Lessons:** call `lean_review` with `action: "lessons"` (`project`, `base`, `head` = the full HEAD sha, `goal` = the one-line goal from step 1: its words select lessons too) and add the text block it returns to the
    reviewer's prompt (the project's review checklist and shared helpers that match the changed paths). If the tool says it has no such
@@ -46,13 +58,13 @@ tool's refusal: do what it says.
    keep them as `second` (`[{symbol, candidate}]`) for the record.
 5. **Pass 1:** spawn the `lean-agent:reviewer` agent on the model prepare printed (the Agent call's `model`: `sonnet`, always). A
    high-risk diff (security, concurrency, migrations/schema/storage, UI strings/locales, public API, config formats, removed public
-   symbols, ~800+ changed lines) gets TWO independent sonnet passes: prepare prints `reviewer: sonnet x2 (risk: ...)`, you spawn two
-   separate reviewer Agent calls with the same prompt (neither sees the other's answer) and keep both JSON blocks. A re-review and a
-   docs/tests-only diff get one. Opus reviews only when `config.json` `review.model` is `opus` or the brief explicitly asks for it AND the
+   symbols, ~800+ changed lines) gets, on the FULL level, TWO independent sonnet passes: prepare prints `reviewer: sonnet x2 (risk: ...)`,
+   you spawn two separate reviewer Agent calls with the same prompt (neither sees the other's answer) and keep both JSON blocks. A light
+   review, a re-review and a docs/tests-only diff get one. Opus reviews only when `config.json` `review.model` is `opus` or the brief explicitly asks for it AND the
    user approved it in the pane for this thread: without that approval prepare says so, files a request in the pane and sonnet runs; never
    spawn a reviewer on opus (or `worker-opus`) on your own, the guard refuses it ("opus needs the user's approval: report it and stop"). Its prompt: the project path, base and full HEAD sha, the goal, the whole
    prepare text, the lessons, the second opinion, the project's test command, and these lines, with the real base and full HEAD sha
-   filled in (a grant matches the command or a prefix of it followed by more words; nothing else, no pipes or redirects). Your session's
+   filled in (the prepare text already carries this `allow-cmd:` line with your worktree path: keep it as printed; a grant matches the command or a prefix of it followed by more words; nothing else, no pipes or redirects). Your session's
    folder is the thread folder, which is NOT a repository, so every git command names the checkout: `<worktree>` is the absolute path of the
    worktree (or repo) you review, the same path `git -C` takes everywhere else here:
    `allow-cmd: git -C <worktree> diff <base>...<sha>, git -C <worktree> log <base>..<sha>, git -C <worktree> show <sha>, git -C <worktree> merge-base <base> <sha>`
@@ -75,7 +87,9 @@ tool's refusal: do what it says.
    converges: a new major about code that did not change since is minor. Stop after at most 3 passes; if blockers remain, record
    `green: false` and report with `lean_report`.
 8. **Record** with `lean_review` (`action: "record"`, the default): `project`, `sha` (full HEAD), `base`, `branch`, `green`,
-   `passes`, `model`, `second` (if any) and `review` (the reviewer's last JSON block, as it wrote it); for a high-risk diff pass
+   `level` (`"light"` after a light pass: the record keeps its open findings for the next light pass and is never green; the
+   tool also remembers which level the last `prepare` of this sha asked for, so a light pass cannot be recorded green by leaving this
+   out), `passes`, `model`, `second` (if any) and `review` (the reviewer's last JSON block, as it wrote it); for a high-risk diff pass
    `reviews: [<run 1 block>, <run 2 block>]` instead (the tool merges them like `review --runs 2`: findings both runs raised are marked
    `[2/2]`, the others `[1/2]`, the union counts, so a major only one run found still blocks; `action: "merge"` with the same `reviews`
    returns the merged block to read, and that block, unchanged, is accepted as `review`). A high-risk diff with one block is refused

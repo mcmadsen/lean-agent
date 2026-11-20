@@ -1,7 +1,7 @@
 // `lean_doctor stats`: spend, caps, rule loads and worker feedback as compact text, computed here (no model, no ledger read by
 // the caller). Spend comes from the rollup (ledger.ts), so it costs a stat and the tail of the ledger, not 27 MB.
-import { readConfig } from './budget'
-import { LEDGER, addTo, dayOf, firstRow, merge, syncRollup, zero } from './ledger'
+import { budgetLimits, readConfig } from './budget'
+import { LEDGER, addTo, dayOf, fileSize, firstRow, merge, normalizeRow, readFrom, syncRollup, zero } from './ledger'
 import type { Agg, Dim } from './ledger'
 import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
@@ -76,7 +76,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by model (${n}d)`, sum.model))
   // opus is the expensive model (the user approves it per thread in the pane): its share of the window, and the threads that run on it
   const os = await opusShare(h, n).catch(() => null)
-  if (os && os.total > 0) out.push(`opus share (${n}d): ${Math.round(os.pct)}% of spend (${usd(os.usd)} of ${usd(os.total)})${os.threads.length ? `; threads ${os.threads.join(', ')} run on opus` : '; no open thread is on opus'}`)
+  if (os && os.total > 0) out.push(`opus share (${n}d): ${Math.round(os.pct)}% of spend (${usd(os.usd)} of ${usd(os.total)})${os.threads.length ? `; threads ${os.threads.join(', ')} spent on opus or are on it (on opus now: ${os.now.join(', ') || 'none'})` : '; no open thread is on opus'}`)
   out.push(...table(`by role x model (${n}d; a model you did not configure shows here)`, Object.fromEntries(Object.entries(sum.rm).map(([k, a]) => [k.replace('|', ' / '), a]))))
   out.push(...table(`by role (${n}d)`, sum.role))
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
@@ -165,7 +165,8 @@ export async function threadChoices(h: Host, home: string, tme: Dim, threadUsd: 
 // spent on opus in the window (the ledger's thread x model rows) and the open ones started on it (thread.json). Doctor shows a FIX row over
 // OPUS_SHARE_FIX percent: opus needs the user's approval, so a high share means threads got it some other way (an older start, a config value).
 export const OPUS_SHARE_FIX = 40
-export type OpusShare = { usd: number; total: number; pct: number; threads: string[] }
+// threads: spent on opus in the window or open on it (history); now: only the open threads that are ON opus now (what doctor can act on)
+export type OpusShare = { usd: number; total: number; pct: number; threads: string[]; now: string[] }
 export async function opusShare(h: Host, days = STATS_DAYS): Promise<OpusShare> {
   const home = await homeDir(h)
   const now = await h.clock.now()
@@ -183,11 +184,13 @@ export async function opusShare(h: Host, days = STATS_DAYS): Promise<OpusShare> 
       if (family(model) === 'opus' && /^t\d+$/.test(tN) && a[0] > 0) ids.add(tN)
     }
   }
+  const live = new Set<string>()
   for (const e of (await h.fs.list(threadsDir(home)).catch(() => [])).filter(x => /^t\d+$/.test(x.name))) {
     const t = await readJson<{ model?: string; state?: string } | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
-    if (t?.model && family(t.model) === 'opus' && t.state !== 'closed') ids.add(e.name)
+    if (t?.model && family(t.model) === 'opus' && t.state !== 'closed') { ids.add(e.name); live.add(e.name) }
   }
-  return { usd: usdOpus, total, pct: total > 0 ? (usdOpus / total) * 100 : 0, threads: [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) }
+  const byId = (a: string, b: string) => Number(a.slice(1)) - Number(b.slice(1))
+  return { usd: usdOpus, total, pct: total > 0 ? (usdOpus / total) * 100 : 0, threads: [...ids].sort(byId), now: [...live].sort(byId) }
 }
 
 // "Today $x · 7d $y" for the pane footer and a thread's status line; null when there is no ledger at all
@@ -204,6 +207,26 @@ export async function spendNumbers(h: Host): Promise<Spend | null> {
   return { today: today?.t[0] ?? 0, week: w[0], byThread: Object.fromEntries(Object.entries(today?.tN ?? {}).map(([k, a]) => [k, a[0]])) }
 }
 
+// What each thread has spent TODAY, live: the numbers for a pane card (the view reads this; it is the one function to wire). `model` and
+// `effort` are the thread's own choice (thread.json); `over` is set when it passed the per-thread daily alert (config budget.threadDaily,
+// default 20 USD, "off" = never). Threads that spent nothing today are not listed; an empty object when there is no ledger.
+export type ThreadCost = { id: string; usd: number; model: string; effort: string; over: boolean }
+export async function threadCostsToday(h: Host, spend?: Spend | null): Promise<Record<string, ThreadCost>> {
+  const s = spend === undefined ? await spendNumbers(h) : spend
+  if (!s) return {}
+  const home = await homeDir(h)
+  const { thread } = await budgetLimits(h)
+  const out: Record<string, ThreadCost> = {}
+  for (const [id, usdToday] of Object.entries(s.byThread)) {
+    if (!/^t\d+$/.test(id) || !(usdToday > 0)) continue
+    const t = await readJson<{ model?: unknown; effort?: unknown } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
+    out[id] = { id, usd: usdToday, model: typeof t?.model === 'string' ? t.model : '', effort: typeof t?.effort === 'string' ? t.effort : '', over: thread !== null && usdToday >= thread }
+  }
+  return out
+}
+// "$6.20" for a card, "$21.30!" when it is over the alert
+export const costBadge = (c: Pick<ThreadCost, 'usd' | 'over'>): string => `$${c.usd.toFixed(2)}${c.over ? '!' : ''}`
+
 export const spendText = (s: Spend): string => `$${s.today.toFixed(2)} · 7d $${s.week.toFixed(2)}`
 export async function spendLine(h: Host): Promise<string | null> {
   const s = await spendNumbers(h)
@@ -216,6 +239,31 @@ export async function spendLine(h: Host): Promise<string | null> {
 const family = modelFamily
 // `info`: spend of today on the model the app started the desk on, when lean-agent switched that session to the pin (deskmodel.ts keeps
 // the record): nothing is wrong now, so doctor shows a note, never FIX
+// What the desk's own requests (not a worker's) cost on a model other than `desk`, from `since` on, per model: today's rows of the ledger tail
+// (the rollup has no clock inside a day). null when the ledger cannot be read, so the caller keeps the whole day's number.
+async function deskSpendSince(h: Host, home: string, since: number, desk: string, now: number): Promise<Record<string, number> | null> {
+  try {
+    const file = `${leanDir(home)}/${LEDGER}`
+    const size = await fileSize(h, file)
+    if (size === null) return null
+    const out: Record<string, number> = {}
+    for (const line of (await readFrom(h, file, Math.max(0, size - 4_000_000))).split('\n')) {
+      if (!line.includes('"desk"')) continue
+      let r: ReturnType<typeof normalizeRow> = null
+      try {
+        r = normalizeRow(JSON.parse(line))
+      } catch {
+        continue
+      }
+      if (r && r.role === 'desk' && r.agent === 'main' && r.ts >= since && dayOf(r.ts) === dayOf(now) && family(r.model) !== desk) out[r.model] = (out[r.model] ?? 0) + r.usd
+    }
+    return out
+  } catch {
+    return null
+  }
+}
+const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16)
+
 export async function modelMismatches(h: Host): Promise<string[]> {
   return (await modelRows(h)).fix
 }
@@ -252,11 +300,20 @@ export async function modelRows(h: Host): Promise<{ fix: string[]; info: string[
   const deskWhy = beforePin ? 'that session started before setup pinned the model; close it and open the desk again' : `the app chose another model for this session: pick ${desk.charAt(0).toUpperCase() + desk.slice(1)} in its model menu${deskLive?.model && family(deskLive.model) === desk ? ` (the live desk session runs ${desk} now)` : ''}`
   const ro = await syncRollup(h, now)
   const rm = ro.days[dayOf(now)]?.rmm ?? {} // the sessions' own requests: a worker's model is chosen per call and is no mismatch
+  // The desk row counts only what was spent AFTER lean-agent pinned the desk model (desk/pinned.json `at`): money spent on the app's model
+  // earlier today (before this version pinned one) is history, a note, never a problem that stays until midnight.
+  const pinAt = pinRec?.model === desk && typeof pinRec.at === 'number' && pinRec.at > 0 ? pinRec.at : 0
+  const afterPin = pinAt && dayOf(pinAt) === dayOf(now) ? await deskSpendSince(h, home, pinAt, desk, now) : null
   for (const [k, a] of Object.entries(rm)) {
     const [role, model = ''] = k.split('|')
     if (role === 'desk' && family(model) !== desk) {
       if (switched && family(switched.from) === family(model)) info.push(`the app started the desk on ${model}; lean-agent switched it to ${desk} (${usd(a[0])} spent on ${model} today)`)
-      else out.push(`the desk spent ${usd(a[0])} today on ${model}, lean-agent pins ${desk}: ${deskWhy}`)
+      else if (afterPin && !((afterPin[model] ?? 0) > 0.005)) info.push(`the desk spent ${usd(a[0])} today on ${model} before lean-agent pinned ${desk} at ${hhmm(pinAt)} UTC; nothing on it since`)
+      else {
+        const spent = afterPin ? afterPin[model]! : a[0]
+        const history = a[0] - spent // spent before the pin: not counted (said only when there is some)
+        out.push(`the desk spent ${usd(spent)} ${history > 0.005 ? `on ${model} since lean-agent pinned ${desk} at ${hhmm(pinAt)} UTC (${usd(history)} before that is history)` : `today on ${model}`}, lean-agent pins ${desk}: ${deskWhy}`)
+      }
     }
     if (role === 'thread' && allowed.size && !allowed.has(family(model))) out.push(`threads spent ${usd(a[0])} today on ${model}, but none was started on ${[...allowed].join('/')} only: a thread from before 1.0.2 or a model given by hand; close it and Start again`)
   }

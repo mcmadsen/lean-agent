@@ -555,7 +555,7 @@ test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside t
   const ok = ['rg foo src', "rg 'a|b' src", 'rg -n --glob "*.ts" foo /h/code/app/src', 'rg foo', 'grep -rn foo src', "grep -rn '/api/v1' src", 'grep -rn foo /h/code/app', 'find . -name "*.ts"', 'find /h/code/app -type f -name x',
     'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
   for (const t of ['lean-agent:explorer', 'lean-agent:reader-haiku', 'lean-agent:reviewer', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
-  const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat src/*', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
+  const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
     'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
   for (const c of bad) expect(await as('lean-agent:reader-sonnet')(c), c).toContain('granted')
   for (const c of ['rg foo > out', 'cat /etc/passwd', 'python3 x.py', 'git show HEAD:f']) expect(await as('lean-agent:auditor')(c), `auditor: ${c}`).toContain('granted') // read-only, never runs the script
@@ -607,8 +607,63 @@ test('a refusal names the refused program (first word only, no arguments), so th
   expect(await r('git push origin x')).toContain('refused: git (a flag that writes')
   expect(await as('other:reader-haiku')('ls')).toContain('refused: ls (not a built-in read-only command)') // a foreign type has nothing built in
   expect(await as('other:reader-haiku')('ls')).toContain('built-in read-only commands (none)')
-  expect(await r('npm test')).toContain('may run only its built-in read-only commands (git, rg, grep, find, ls, wc, head, tail, cat, sed -n, stat, file, diff, jq, tree)')
+  expect(await r('npm test')).toContain('may run only its built-in read-only commands (git, rg, grep, find, ls, wc, head, tail, cat, sed -n, stat, file, diff, jq, tree, sort, uniq, cut, tr, nl)')
   expect(await as('lean-agent:explorer')('npm test')).toContain('(git, rg, grep, find, ls, wc, head, tail, cat)')
+})
+
+test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg with no path, sort/uniq/cut/tr/nl; every other form stays refused', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
+  const wt = '/h/.lean-agent/worktrees/app/t1'
+  for (const f of ['src/a.ts', 'src/b.ts', 'src/-x.ts', 'src/sub/c.ts', 'a.md', 'b.md', 'z/q.md']) h.files.set(`${wt}/${f}`, 'x')
+  for (const f of ['one.ts', 'two.ts']) h.files.set(`/h/code/app/lib/${f}`, 'x')
+  h.files.set('/h/.ssh/id_rsa', 'secret')
+  h.files.set(`${wt}/dash/-x.md`, 'x') // a name that would read as a flag once a relative glob expands
+  h.files.set(`${wt}/dash/y.md`, 'x')
+  h.links.set(`${wt}/lnk/escape`, '/h/.ssh') // a link out of the roots, listed in its folder
+  h.files.set(`${wt}/lnk/escape/.keep`, 'x')
+  h.files.set('/h/.ssh/.keep', 'x') // what the link points at
+  const thread = { kind: 'thread', id: 't1' } as any
+  const as = (t: string, cwd = wt) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, t, 'x1')
+  const ok = ['cat *.md', 'ls src/*.ts', 'wc -l src/*.ts', 'head -3 *.md', 'cat /h/code/app/lib/*.ts', 'ls /h/code/app/lib/t*.ts', 'cat src/s?b/c.ts', 'cat src/*/c.ts', 'cat src/[ab].ts', 'wc -l z/*', 'ls -d */', 'rg foo src/*.ts', 'grep -n foo *.md',
+    'rg foo src 2>/dev/null', 'ls /h/code/app/nope 2>/dev/null', 'cat a.md 2>/dev/null | head -3', 'rg foo 2>/dev/null | sort | uniq -c | sort -rn', 'cat nothing/*.zzz', // a glob with no match stays a literal word
+    'cat a.md | wc -l *.md', 'ls .gitignore*', "cat a.md | tr -d '\\n' | sort *.md", "sort '*.md'", // (a quoted * is a plain name)
+    'rg foo', 'rg -n foo', 'rg foo | sort', 'grep foo', 'grep -rn foo', 'grep -c foo', 'rg -c foo 2>/dev/null',
+    'sort a.md', 'sort -u a.md b.md', 'sort -rn -k2,2 a.md', 'sort -t, -k1 a.md', 'cat a.md | sort | uniq', 'uniq a.md', 'uniq -c a.md', 'cat a.md | uniq -d', 'sort *.md', 'cut -d, -f1 a.md', "cut -d ' ' -f 2- a.md", 'cat a.md | cut -c1-10', "cat a.md | tr -d '\\n'", 'cat a.md | tr a-z A-Z', "cat a.md | tr -s ' '", 'nl a.md', 'nl -ba a.md', 'nl *.md', 'cat a.md | nl -ba', 'rg -l foo src | sort | head -5', 'ls src/*.ts | wc -l']
+  for (const t of ['lean-agent:reader-haiku', 'lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  const bad = ['cat *.md > out', 'cat *.md >> out', 'rg foo 2>out', 'rg foo 2>/dev/nullx', 'rg foo 2>>/dev/null', 'rg foo >/dev/null', 'rg foo 2>&1', 'rg foo &>/dev/null', 'rg foo 2> /dev/null', 'cat a.md 3>/dev/null',
+    'ls; ls', 'ls && ls', 'ls || ls', 'cat $(ls)', 'cat `ls`', 'cat "$(ls)"', 'cat ${HOME}/x', 'cat *.md; rm x', 'cat *.md && rm x', 'cat *.md &', 'cat < a.md',
+    'cat /etc/*', 'cat /*', 'ls /h/*', 'cat /h/.ssh/*', 'cat ../*', 'cat src/../*', 'cat ../../etc/*', 'ls /h/code/*', 'cat /h/code/app/../*', 'cat /h/.lean-agent/../.ssh/*', 'cat lnk/*', 'cat lnk/esc*', 'cat l*/*', 'cat lnk/e*/.keep', 'cat */*', 'ls -d /h/.*', 'cat -*',
+    'sort -o out a.md', 'sort -oout a.md', 'sort --output=out a.md', 'sort --output out a.md', 'sort -T /tmp a.md', 'sort --random-source=/etc/passwd -R a.md', 'sort --files0-from=x', 'sort --compress-program=sh a.md', 'sort /etc/passwd', 'sort ../x',
+    'uniq *.md', 'cat a.md | uniq *.md', 'uniq a.m*', // (a glob that expands to two names would make the second one uniq's OUTPUT file)
+    'cat .*', 'ls .*', 'ls .?', 'ls ..*', 'rg x .*/.*/.*/.*', 'ls src/.*', 'cat .*/x', // (older shells expand .* to . and .., which climbs out of the roots)
+    'sort [!]]o a.md', 'cat []a]', 'cat [!]]', 'cat [[:alpha:]]', 'cat src/[]]', 'cat [a-z[:digit:]]', // (a bracket set that is sized differently by the shell)
+    'rg foo | wc -l /etc/*', 'rg foo | sort *.md > out',
+    'uniq a.md b.md', 'uniq /etc/passwd', 'uniq -c a.md out', 'cut -f1 /etc/passwd', 'tr', 'tr a b c', 'tr -d', 'tr a b /etc/passwd', 'tr a-z *', 'nl /etc/passwd', 'nl -h x --output=y a.md',
+    'xargs ls', 'rg -l foo | xargs cat', 'cd src', 'cd /h && ls', 'awk 1 a.md', 'find . -name *.ts', 'sed -n 1p *.md', 'jq . *.json', 'stat *.md', 'diff *.md', 'git log *.ts', 'git -C /h/code/app diff -- *.ts', 'rg *.ts', 'rg foo -g *.ts src', 'grep -e *x src', 'rg -t * x']
+  for (const t of ['lean-agent:reader-sonnet', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')
+  // a relative glob whose match would read as a flag (-x.md) is refused; the same glob next to a plain name is fine, and so is a pattern that starts with a folder
+  expect(await as('lean-agent:reader-sonnet', `${wt}/dash`)('cat *.md')).toContain('granted')
+  expect(await as('lean-agent:reader-sonnet', `${wt}/dash`)('cat y*.md')).toBeNull()
+  expect(await as('lean-agent:reader-sonnet')('cat dash/*.md')).toBeNull()
+  // no path operand needs a cwd inside the roots; a cwd outside them refuses it, and so does a glob there
+  for (const cwd of ['/h', '/tmp', '/']) for (const c of ['rg foo', 'grep -rn foo', 'cat *.md', 'ls *', 'rg foo 2>/dev/null']) expect(await as('lean-agent:reader-haiku', cwd)(c), `${cwd}: ${c}`).toContain('granted')
+  expect(await as('lean-agent:reader-haiku', '/h/code/app/src')('rg foo 2>/dev/null')).toBeNull()
+  expect(await as('lean-agent:reader-haiku', '/h/code/app/lib')('cat *.ts')).toBeNull()
+  // the explorer, the auditor, bare and foreign types get none of it, and a worker is not restricted by it
+  for (const t of ['lean-agent:explorer', 'lean-agent:auditor']) {
+    for (const c of ['cat *.md', 'rg foo src 2>/dev/null', 'sort a.md', 'uniq a.md', 'cut -f1 a.md', 'tr a b', 'nl a.md']) expect(await as(t)(c), `${t}: ${c}`).toContain('granted')
+    expect(await as(t)('rg foo src')).toBeNull()
+  }
+  for (const t of ['reader-haiku', 'other:reader-haiku']) expect(await as(t)('cat *.md')).toContain('granted')
+  // the refusal says what is allowed, and what a worker's out-of-grant edit must do
+  expect(await as('lean-agent:reviewer')('cat *.md > out')).toContain('2>/dev/null')
+  expect(await as('lean-agent:explorer')('cat *.md')).toContain('glob')
+  await recordGrant(h.host, thread, 'w1', 'lean-agent:worker-sonnet', { edit: ['/h/code/app/src'] })
+  const edit = await run(h, thread, { tool: 'Edit', file_path: '/h/code/app/other/x.ts' }, wt, 'lean-agent:worker-sonnet', 'w1')
+  expect(edit).toContain('stop and report this path')
+  expect(edit).toContain('/h/code/app/other/x.ts')
+  expect(await run(h, thread, { tool: 'Edit', file_path: '/h/code/app/src/x.ts' }, wt, 'lean-agent:worker-sonnet', 'w1')).toBeNull()
 })
 
 test('search commands refuse a relative path when the session cwd is unknown or root', async () => {

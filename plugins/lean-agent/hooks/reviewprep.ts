@@ -9,6 +9,8 @@
 import type { Host } from './state'
 import { homeDir, leanDir, readJson } from './state'
 import { slugOk } from './rules'
+import { dropSections, generatedFiles } from './reviewexclude'
+import type { Excluded } from './reviewexclude'
 
 export type Sym = { name: string; path: string; line: number }
 export type TestEdit = { path: string; test: string; why: string }
@@ -25,6 +27,7 @@ export type Prep = {
   lines: number // added + removed lines
   hunks: Record<string, [number, number][]> // new-side line ranges the diff adds or edits, per file
   truncated?: boolean
+  excluded?: Excluded // generated files left out of everything above (reviewexclude.ts)
 }
 
 export const TEST_PATH_RE = /(^|\/)(tests?|__tests__|specs?|e2e)(\/|$)|[._-](test|spec)s?\.\w+$|_test\.go$|(^|\/)test_[^/]*$|(^|\/)src\/(test|androidTest|integrationTest)\//i
@@ -310,8 +313,9 @@ export async function projectPath(h: Host, project: string): Promise<string | nu
 
 export type Range = { path: string; base: string; head: string; mb: string }
 // resolve the range with git: head defaults to HEAD, base to the project's default branch; the merge base is what the diff starts from
-export async function resolveRange(h: Host, project: string, baseIn: string | undefined, headIn: string | undefined): Promise<Range | string> {
-  const path = await projectPath(h, project)
+// `pathIn`: the checkout to read (the calling thread's own worktree); default the project's registered path
+export async function resolveRange(h: Host, project: string, baseIn: string | undefined, headIn: string | undefined, pathIn?: string): Promise<Range | string> {
+  const path = pathIn ?? (await projectPath(h, project))
   if (!path) return `unknown project ${JSON.stringify(project)}`
   const git = async (...a: string[]) => { const r = await h.process.run(['git', '-C', path, ...a], { timeoutMs: 30_000 }).catch(() => null); return r && r.exitCode === 0 ? r.stdout.trim() : null }
   const sha = (r: string) => git('rev-parse', '--verify', '--end-of-options', `${r}^{commit}`)
@@ -331,20 +335,24 @@ export async function resolveRange(h: Host, project: string, baseIn: string | un
 
 // the prep of `from`..`r.head` (default: the whole range from the merge base), with the diff text the risk classifier reads
 // `failed`: git did not answer (an error or a timeout): an empty prep from that is NOT "nothing to check", so a green must be refused
-export async function prepare(h: Host, r: Range, from: string = r.mb): Promise<{ prep: Prep; diff: string; failed: boolean }> {
+// `exclude`: config.json review.exclude globs; generated files (reviewexclude.ts) are cut from the diff, the file lists and the line count
+export async function prepare(h: Host, r: Range, from: string = r.mb, exclude: string[] = []): Promise<{ prep: Prep; diff: string; failed: boolean }> {
   // fixed options: the user's diff.noprefix / diff.external / core.quotePath settings must not change what the parser reads
   const GIT = ['-c', 'core.quotePath=false', '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false']
   const git = async (...a: string[]): Promise<string | null> => { const x = await h.process.run(['git', '-C', r.path, ...GIT, ...a], { timeoutMs: 60_000 }).catch(() => null); return x && x.exitCode === 0 ? x.stdout : null }
   const raw = await git('diff', '-U0', '--no-color', '--no-renames', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', '--end-of-options', from, r.head)
   const names = await git('diff', '--name-status', '--no-renames', '--end-of-options', from, r.head)
-  let diff = raw ?? ''
+  const all = (names ?? '').split('\n').map(l => l.split('\t')).filter(p => p[1])
+  const gen = await generatedFiles(h, r.path, all.map(p => p[1]!), exclude)
+  const cut = dropSections(raw ?? '', new Set(gen.files.keys()))
+  let diff = cut.diff
   const truncated = diff.length > MAX_DIFF_CHARS
   if (truncated) diff = diff.slice(0, MAX_DIFF_CHARS)
   const newFiles = new Set<string>()
-  for (const l of (names ?? '').split('\n')) {
-    const [st, f] = l.split('\t')
-    if (st?.startsWith('A') && f) newFiles.add(f)
-  }
+  for (const [st, f] of all) if (st?.startsWith('A') && f && !gen.files.has(f)) newFiles.add(f)
   const p = await analyzeDiff(diff, async f => (await git('show', `${from}:${f}`)) ?? '', newFiles)
+  // the biggest excluded files first: those are the ones worth keeping out of the reviewer's own `git diff`
+  const files = [...gen.files.keys()].sort((a, b) => (cut.per.get(b) ?? 0) - (cut.per.get(a) ?? 0) || a.localeCompare(b))
+  if (files.length) p.excluded = { files, lines: cut.lines, ...(gen.attrFailed ? { attrFailed: true } : {}), ...(gen.attrSkipped ? { attrSkipped: true } : {}) }
   return { prep: truncated ? { ...p, truncated } : p, diff, failed: raw === null || names === null }
 }

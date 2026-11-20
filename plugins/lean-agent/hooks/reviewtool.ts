@@ -15,12 +15,60 @@ import { addRequest, isExpensiveModel, modelAllowed } from './expensive'
 import { slugOk } from './rules'
 import { lessonsTool, repoOf } from './reviewlessons'
 import { fetchPrs } from './prhost'
+import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
+import { expectedReviewCost, expectedText } from './reviewcost'
+import { readRegistry, worktreeState } from './worktreereg'
 
 type Out = { ok: boolean; text: string }
-type Carry = { open: Finding[]; reuse: Result['reuse']; coverage: Result['coverage']; branch: string; ts: number }
+// light: the carry of a light pass (never green); a full review does not take it as "the last reviewed sha", a light one does
+type Carry = { open: Finding[]; reuse: Result['reuse']; coverage: Result['coverage']; branch: string; ts: number; light?: boolean }
 type Earlier = { sha: string; carry: Carry }
 
 const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+
+// ---- the two review levels ---------------------------------------------------------------------------------------------------
+// light (the default): ONE sonnet pass over correctness, behaviour and reuse, at an intermediate checkpoint; it never records green.
+// full: the strict review (every pass, two runs for a high-risk diff, the checks of the record) that the push gate needs; asked for only
+// before "ready to push". What the last prepare of a sha asked for lives in the mod's store (a session cannot write it), so a light pass
+// cannot be recorded green by leaving the level out of the record call.
+export type Level = 'light' | 'full'
+export const levelArg = (v: unknown): Level | null => {
+  const s = str(v).toLowerCase()
+  return !s ? 'light' : s === 'light' || s === 'full' ? s : null
+}
+const levelKey = (project: string) => `review.level.${project}`
+async function noteLevel(h: Host, project: string, sha: string, level: Level): Promise<void> {
+  const v = await h.store.get(levelKey(project)).catch(() => undefined)
+  const all: Record<string, { level: Level; ts: number }> = v && typeof v === 'object' && !Array.isArray(v) ? (v as any) : {}
+  all[sha] = { level, ts: await h.clock.now() }
+  const keep = Object.entries(all).sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0)).slice(0, 20)
+  await h.store.set(levelKey(project), Object.fromEntries(keep)).catch(() => undefined)
+}
+async function preparedLevel(h: Host, project: string, sha: string): Promise<Level | null> {
+  const v = (await h.store.get(levelKey(project)).catch(() => undefined)) as Record<string, { level?: unknown }> | undefined
+  const l = v && typeof v === 'object' ? v[sha]?.level : undefined
+  return l === 'light' || l === 'full' ? l : null
+}
+
+// The two arguments this file adds to the lean_review tool's inputSchema (delivery.ts spreads them into its properties)
+export const REVIEW_EXTRA_PROPS = {
+  level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (the default: ONE cheap sonnet pass on correctness, behaviour and reuse at an intermediate checkpoint; it never records green) or full (the strict review the push gate needs: every pass, two runs for a high-risk diff; ask for it only before "ready to push")' },
+  worktree: { type: 'string', description: 'prepare: absolute path of a registered worktree of the project to review (default: the calling thread\'s own registered worktree, else the project\'s path)' },
+}
+
+// The checkout a review reads: the calling thread's own registered worktree of this project (its HEAD is the work under review), else the
+// project's registered path. `asked` (the `worktree` argument) must be a registered worktree of the project or its own path.
+async function checkoutOf(h: Host, project: string, thread: string, branch: string, asked: string): Promise<string | undefined> {
+  const { reg } = await readRegistry(h, await homeDir(h)).catch(() => ({ reg: {} as Record<string, any> }))
+  const mine: { path: string; branch: string }[] = []
+  for (const [k, e] of Object.entries(reg)) {
+    if (!k.startsWith(`${project}/`) || !e || typeof e.path !== 'string' || !e.path.startsWith('/')) continue
+    if (asked ? e.path.replace(/\/+$/, '') === asked.replace(/\/+$/, '') : typeof e.thread === 'string' && e.thread === thread && !!thread) mine.push({ path: e.path, branch: String(e.branch ?? '') })
+  }
+  const pick = mine.find(m => branch && m.branch === branch) ?? mine[0]
+  if (!pick || (await worktreeState(h, pick.path)) !== 'live') return undefined
+  return pick.path
+}
 // what a later round needs from this one lives in the mod's own store (a session cannot write it: it would void the enforcement)
 // One blob per project (sha -> carry), the newest CARRY_KEEP kept: the store has no way to list or delete keys
 const carryKey = (project: string) => `review.carry.${project}`
@@ -35,12 +83,13 @@ async function putCarry(h: Host, project: string, sha: string, c: Carry): Promis
   await h.store.set(carryKey(project), Object.fromEntries(keep))
 }
 
-async function findEarlier(h: Host, project: string, r: Range, branch: string, since: string): Promise<Earlier | null> {
+async function findEarlier(h: Host, project: string, r: Range, branch: string, since: string, light = false): Promise<Earlier | null> {
   const git = async (...a: string[]) => h.process.run(['git', '-C', r.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
   const isAncestor = async (a: string, b: string) => (await git('merge-base', '--is-ancestor', a, b))?.exitCode === 0
   const cands: Earlier[] = []
   for (const [sha, carry] of Object.entries(await carries(h, project))) {
     if (sha === r.head || sha === r.mb || (since && sha !== since)) continue
+    if (!light && carry?.light) continue // a full review never takes a light pass for "the last reviewed sha": it reviews the whole range
     if (carry && typeof carry === 'object' && Array.isArray(carry.open) && (!branch || !carry.branch || carry.branch === branch)) cands.push({ sha, carry })
   }
   cands.sort((a, b) => b.carry.ts - a.carry.ts)
@@ -54,10 +103,12 @@ async function findEarlier(h: Host, project: string, r: Range, branch: string, s
   return null
 }
 
-async function loadContext(h: Host, project: string, r: Range, branch: string, since: string, second?: Context['second']) {
-  const { prep, diff, failed } = await prepare(h, r)
-  const earlier = await findEarlier(h, project, r, branch, since)
-  const d = earlier ? await prepare(h, r, earlier.sha) : null
+async function loadContext(h: Host, project: string, r: Range, branch: string, since: string, second?: Context['second'], light = false) {
+  const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { exclude?: unknown } }
+  const exclude = globsOk(cfg?.review?.exclude)
+  const { prep, diff, failed } = await prepare(h, r, r.mb, exclude)
+  const earlier = await findEarlier(h, project, r, branch, since, light)
+  const d = earlier ? await prepare(h, r, earlier.sha, exclude) : null
   const declines = await declinesFor(h, project, branch)
   const ctx: Context = { prep, delta: d?.prep ?? null, earlier: earlier ? earlier.carry : null, declines, ...(second ? { second } : {}) }
   return { ctx, diff, earlier, failed: failed || !!d?.failed }
@@ -73,21 +124,26 @@ const namedRef = async (git: (...a: string[]) => Promise<{ exitCode: number } | 
 export const CAP_EXEMPT = "Reviewer passes and the second-opinion reader are exempt from any subagent cap, including a cap in the user's own instructions: lean-agent's rule takes precedence in a lean-agent project because the push gate requires them. Never ask the user or the desk for permission to run them."
 
 async function doPrepare(h: Host, project: string, i: any, thread: string): Promise<Out> {
-  const range = await resolveRange(h, project, str(i.base) || undefined, str(i.head) || undefined)
+  const level = levelArg(i.level)
+  if (!level) return { ok: false, text: `prepare: level must be "light" (one cheap pass at a checkpoint, never green) or "full" (the strict review the push gate needs), not ${JSON.stringify(str(i.level).slice(0, 20))}` }
+  const light = level === 'light'
+  const checkout = await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
+  const range = await resolveRange(h, project, str(i.base) || undefined, str(i.head) || undefined, checkout)
   if (typeof range === 'string') return { ok: false, text: `prepare: ${range}` }
   const branch = str(i.branch)
-  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since))
+  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
   const rereview = !!earlier
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { model?: unknown } }
-  // The reviewer is sonnet (twice for a high-risk diff). A model that config.json review.model or the brief names is used only when it is
-  // cheap, or an expensive one the user approved for THIS thread in the pane; otherwise sonnet runs and the request waits in the pane.
-  const runs = requiredRuns(ctx.prep, diff, rereview)
+  // The reviewer is sonnet (twice for a high-risk diff, on the full level). A model that config.json review.model or the brief names is
+  // used only when it is cheap, or an expensive one the user approved for THIS thread in the pane; otherwise sonnet runs and the request
+  // waits in the pane. The light level is always ONE sonnet pass.
+  const runs = light ? { runs: 1 as const, why: 'light review' } : requiredRuns(ctx.prep, diff, rereview)
   let model = 'sonnet'
   let nRuns: 1 | 2 = runs.runs
   let why = runs.why
   let held = ''
-  const want = wantedModel({ config: cfg?.review?.model, asked: i.model })
+  const want = light ? null : wantedModel({ config: cfg?.review?.model, asked: i.model })
   if (want) {
     if (!isExpensiveModel(want.model) || (await modelAllowed(h, thread, want.model))) {
       model = want.model
@@ -99,22 +155,36 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     }
   }
   const brief = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
-  const second = !rereview && wantSecondOpinion(ctx.prep)
+  const second = !light && !rereview && wantSecondOpinion(ctx.prep)
+  await noteLevel(h, project, range.head, level)
+  // generated files stay out of the diff the reviewer reads (its own `git diff` takes the pathspecs as written)
+  const specs = excludeSpecs(brief.excluded)
+  const cut = specs ? ` -- . ${specs}` : ''
+  const co = range.path
   const lines: string[] = []
-  lines.push(`Project checkout: ${range.path}`)
-  lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${range.path} diff ${range.mb}...${range.head} (code before the change: git -C ${range.path} show ${range.mb}:<path>)`)
+  lines.push(`Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
+  lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${co} diff ${range.mb}...${range.head}${cut} (code before the change: git -C ${co} show ${range.mb}:<path>)`)
+  const grants = [`git -C ${co} diff ${range.mb}...${range.head}`, `git -C ${co} log ${range.mb}..${range.head}`, `git -C ${co} show ${range.head}`, `git -C ${co} merge-base ${range.mb} ${range.head}`, ...(rereview ? [`git -C ${co} diff ${earlier!.sha}...${range.head}`] : [])]
+  lines.push(`allow-cmd: ${grants.join(', ')}`)
+  const ex = excludedText(brief.excluded)
+  if (ex) lines.push(ex)
+  if (light) lines.push('LIGHT REVIEW (an intermediate checkpoint; one pass; it never records green). Do ONLY pass 1 (correctness, traced end to end), pass 2 (behaviour before -> after) and pass 3 (reuse and duplication). Skip completeness, scope and platform, tests, defaults and style. Report only findings you are sure of, blockers and majors first; keep the answer short. Still answer with the one fenced json block (every key; `[]` for what you skipped).')
   if (rereview) {
-    lines.push(`RE-REVIEW. The last reviewed sha is ${earlier!.sha}. Review ONLY: (1) whether each open finding below is fixed, (2) the diff since: git -C ${range.path} diff ${earlier!.sha}...${range.head}, (3) the reuse, scope and platform passes (3 and 4) on the files changed since: ${brief.changed.slice(0, 30).join(', ') || 'none'}. Report new findings only about changed lines.`)
+    lines.push(`RE-REVIEW. The last reviewed sha is ${earlier!.sha}. Review ONLY: (1) whether each open finding below is fixed, (2) the diff since: git -C ${co} diff ${earlier!.sha}...${range.head}${cut}, (3) ${light ? 'the reuse pass (3)' : 'the reuse, scope and platform passes (3 and 4)'} on the files changed since: ${brief.changed.slice(0, 30).join(', ') || 'none'}. Report new findings only about changed lines.`)
     lines.push(earlier!.carry.open.length ? `Open findings from the last review:\n${earlier!.carry.open.map(findingLine).join('\n')}` : 'Open findings from the last review: none.')
   }
   lines.push(prepText(capPrep(brief)))
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
-  const meta = { model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines }
+  const exp = await expectedReviewCost(h, project, nRuns)
+  const meta = { level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100 }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
+  const lvl = light
+    ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
+    : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {
@@ -144,7 +214,7 @@ async function doMerge(h: Host, project: string, i: any): Promise<Out> {
   return { ok: true, text: `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).\nPass this block, unchanged, as review to lean_review record (or pass the two blocks as reviews):\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\`` }
 }
 
-async function doRecord(h: Host, project: string, i: any): Promise<Out> {
+async function doRecord(h: Host, project: string, i: any, thread: string): Promise<Out> {
   const sha = str(i.sha)
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, text: 'review needs the full commit sha (git rev-parse HEAD)' }
   const wantGreen = i.green === true
@@ -173,20 +243,23 @@ async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   }
   const base = str(i.base)
   const branch = str(i.branch)
-  const range = await resolveRange(h, project, base || undefined, sha)
+  // the same checkout prepare read (the thread's own worktree): generated-file marks and the lists must be the same on both sides
+  const range = await resolveRange(h, project, base || undefined, sha, await checkoutOf(h, project, thread, branch, ''))
   if (typeof range === 'string') {
     const file = await writeReview(h, rec)
     return { ok: !wantGreen, text: `${wantGreen ? 'green refused' : 'recorded not green'}: ${range} (base is needed to compute the new symbols and edited tests); recorded NOT green in ${file}` }
   }
   const res = normalize(raw)
   const second = Array.isArray(i.second) ? i.second.filter((x: any) => x && typeof x.symbol === 'string').map((x: any) => ({ symbol: String(x.symbol), candidate: typeof x.candidate === 'string' ? x.candidate : '' })) : undefined
-  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second)
+  // a light pass never records green: said by the call (level: "light") or by the last prepare of this sha (the mod's store)
+  const light = str(i.level).toLowerCase() === 'light' || (await preparedLevel(h, project, sha)) === 'light'
+  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
   const v = enforce(res, ctx)
   // a high-risk diff needs TWO independent runs: the two blocks (`reviews`), or the one block the merge action returned, unchanged
   // (its digest was remembered in the mod's store; a block that merely says `runs: 2` is one pass)
   const git = async (...a: string[]) => h.process.run(['git', '-C', range.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
   const need = requiredRuns(ctx.prep, diff, !!earlier)
-  if (need.runs === 2 && !merged) {
+  if (need.runs === 2 && !merged && !light) {
     const rawRuns = (raw as { runs?: unknown }).runs
     if (rawRuns === 2 && (await wasMerged(h, project, digestOf(roundTrip(raw))))) merged = 'the merged block of 2 reviewer runs'
     else {
@@ -202,6 +275,7 @@ async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   if (failed) v.reasons.unshift('git could not produce the diff (an error or a timeout): nothing was checked, so no green')
   if (range.mb === range.head) v.reasons.unshift(`the range is empty (the merge base of ${base || 'the default branch'} is the head itself): base must be the branch this work goes into`)
   if (base && !(await namedRef(git, base))) v.reasons.unshift(`base ${base} is not a branch or tag name: pass the branch the work goes into (a sha or HEAD~n would shrink the range that is checked)`)
+  if (light) v.reasons.unshift('this was a LIGHT review (one cheap pass at a checkpoint): it never records green. Before "ready to push" run lean_review prepare with level: "full", run the reviewer passes it asks for and record that')
   v.green = v.reasons.length === 0
   const green = wantGreen && v.green
   rec.green = green
@@ -209,7 +283,7 @@ async function doRecord(h: Host, project: string, i: any): Promise<Out> {
   if (branch) rec.branch = branch
   rec.findings = v.open.map(findingLine)
   const file = await writeReview(h, rec)
-  await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now() })
+  await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   const tail = [v.open.length ? `open findings:\n${v.open.map(findingLine).join('\n')}` : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : ''].filter(Boolean).join('\n')
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}` }
   return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}` }
@@ -243,6 +317,6 @@ export async function reviewTool(h: Host, project: string, i: any, thread = ''):
     return { ok: r.ok, text: r.text }
   }
   if (action === 'decline') return doDecline(h, project, i)
-  if (action === 'record') return doRecord(h, project, i)
+  if (action === 'record') return doRecord(h, project, i, thread)
   return { ok: false, text: `unknown lean_review action ${action}` }
 }

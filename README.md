@@ -245,6 +245,14 @@ Agent definitions in `plugins/lean-agent/agents/`:
 | `lean-agent:explorer` | explores one area for the `learn` skill |
 | `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
 
+**Readers and the reviewer** (and only our own agent types) run these read-only shell commands without a grant: `git -C <checkout>
+log|show|diff|status|rev-parse|merge-base|ls-files` and `rg`, `grep`, `find`, `ls`, `wc`, `head`, `tail`, `cat`, `sed -n`, `stat`,
+`file`, `diff`, `jq`, `tree`, `sort` (no `-o`), `uniq` (one operand), `cut`, `tr`, `nl`, joined by `|`, on paths inside `~/.lean-agent` and
+the registered projects. A glob (`src/*.ts`) is allowed when every file it can match is inside those folders (no `..`, no link out, no
+name that could read as a flag), `2>/dev/null` is allowed, and `rg`/`grep` with no path search the current folder when it is inside
+them. Still refused: any other redirect, `;`, `&&`, `||`, `$(...)`, backticks, `xargs`, `cd` (use absolute paths), `sort -o`, `uniq in out`,
+a path outside the roots. A worker whose edit is refused for a path outside its `allow-edit` grant stops and reports that path.
+
 Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
 `threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high again (the opus pin of 1.0.10 and 1.0.11 is reverted; `lean_doctor fix` replaces it; a `config.json` `desk.model` / `desk.effort` you set wins);
 `worker-sonnet`, `worker-opus` and `reader-sonnet` run at effort medium (a worker does one briefed task; the thread that briefs it
@@ -353,6 +361,19 @@ The reviewer reads the project's path rules through git too: `git -C <repo> show
 `git log -p -- <path>` and a plain `git show <rev>:<path>` in the project's worktree load the rules of the files they name, and for the
 reviewer a path-less `git diff` loads `_project.md` and the rules written for the whole repo.
 
+**Two levels, so a review does not eat the day.** `lean_review` `prepare` takes `level`: **light** (the default) is ONE sonnet pass on
+correctness, behaviour and reuse, for an intermediate checkpoint, and **never records green**; **full** is the strict review below
+(every pass, two runs for a high-risk diff, the record the push gate needs) and is asked for only right before the thread says "ready
+to push". The level a sha was prepared at is kept in the mod's own store, so a light pass cannot be recorded green by leaving the level
+out of the record call; a full review never takes a light pass for "the last reviewed sha". `prepare` also prints
+`expected review cost ~$1.20 (2 passes, sonnet; median of 5 earlier reviewer passes on this project)`: the median cost of this
+project's earlier reviewer passes in the usage ledger, else a stated default of $1.50 a pass. It carries the thread's own registered
+worktree (every reviewer command is `git -C <worktree> ...`) and the `allow-cmd:` line for it. **Generated files are left out** of the
+file lists, the risk, the line count and the diff the reviewer reads (it gets `':(exclude,literal)path'` pathspecs for them; a change that edits `.gitattributes` cannot mark its own files, and `record` reads the same worktree `prepare` did): files marked
+`linguist-generated` in `.gitattributes`, `*.snap`, paths under `golden` / `fixtures` / `__snapshots__`, lockfiles (`package-lock.json`,
+`pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`, `poetry.lock`), minified bundles and the globs of `config.json`
+`review.exclude` (`{"review": {"exclude": ["docs/api/**", "*.gen.ts"]}}`); the text says how many files and lines were left out.
+
 **The review is strict** (the 0.45 review, restored): ordered passes, inputs computed by a script and enforcement by a script.
 
 - **Passes**, in order: 0 completeness (what the change promises against what it delivers, self-declared gaps); 1 correctness, each
@@ -425,6 +446,14 @@ Desk reports: while the desk is idle, a thread's question or `done` / `blocked` 
 
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
 step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
+
+**Alerts by default** (they warn, they never refuse a request): `{ "budget": { "daily": 25, "threadDaily": 20 } }` (USD; both are
+the defaults, `"off"` turns one off). The desk gets a notice (the pane lists it) and a toast when the day's spend reaches 50% and 80% of
+`budget.daily`, once per day per level, with today's spend, the top 3 threads by cost and their models; and when one thread passes
+`budget.threadDaily` (once a day per thread). The goals chaser also asks a stale thread that is over `threadDaily` what the spend bought.
+A thread's cost today is on its pane card (`ThreadRow.cost`); `threadCostsToday` in `stats.ts` adds its model and whether it is over the alert.
+Doctor counts "the desk spent $X on opus today" only from the moment lean-agent pinned the model (earlier spend is a note), and shows
+"opus is N% of spend" as a FIX only while a thread is on opus now (then naming only those threads), otherwise as a note.
 
 ## Context size
 

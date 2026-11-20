@@ -3,7 +3,7 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
-import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
+import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import type { Host } from './state'
@@ -424,7 +424,11 @@ async function cRoots($: Host, ctx: Ctx): Promise<string[]> {
 const SEARCH_CMDS = new Set(['rg', 'grep', 'find', 'ls', 'wc', 'head', 'tail', 'cat'])
 // more plain read-only file commands, only for the readers and the reviewer (not the explorer, the auditor or the desk):
 // sed -n, stat, file, diff, jq, tree. Same rules: listed flags only, paths inside the roots, no redirect.
-const MORE_CMDS = new Set(['sed', 'stat', 'file', 'diff', 'jq', 'tree'])
+// and the text filters of a pipeline (sort without -o, uniq with at most one operand, cut, tr, nl; xargs, awk and the rest stay refused)
+const MORE_CMDS = new Set(['sed', 'stat', 'file', 'diff', 'jq', 'tree', 'sort', 'uniq', 'cut', 'tr', 'nl'])
+// the commands whose plain file operands may be an unquoted glob (readers and the reviewer; the words are expanded and checked by globOk)
+// (never uniq: its second operand is the OUTPUT file, and a glob can expand to two names)
+const GLOB_CMDS = new Set(['rg', 'grep', 'ls', 'wc', 'head', 'tail', 'cat', 'sort', 'cut', 'nl'])
 export const builtinMore = (t?: string): boolean => {
   const n = ownName(t) ?? ''
   return /^reader-/.test(n) || n === 'reviewer'
@@ -451,6 +455,12 @@ const SPECS: Record<string, Spec> = {
   file: { no: 'bIi', val: '', lnone: ['brief', 'mime', 'mime-type', 'mime-encoding'], lval: [] },
   diff: { no: 'uqsbBwiyEZaNpTtc', val: 'UC', digits: true, lnone: ['unified', 'context', 'brief', 'report-identical-files', 'ignore-all-space', 'ignore-space-change', 'ignore-blank-lines', 'ignore-case', 'ignore-trailing-space', 'new-file', 'text', 'side-by-side', 'expand-tabs', 'initial-tab', 'minimal', 'show-c-function'], lval: ['unified', 'context'] },
   tree: { no: 'adfiFqhpusgDtrCNJx', val: 'LIP', lnone: ['noreport', 'dirsfirst', 'prune', 'du', 'si', 'inodes', 'device'], lval: ['filelimit'] },
+  // sort: no -o / --output (writes a file), -T / --compress-program / --random-source / --files0-from (name a file or run a program)
+  sort: { no: 'bdfghiMnruVcCmsz', val: 'kt', lnone: ['reverse', 'numeric-sort', 'unique', 'ignore-case', 'ignore-leading-blanks', 'dictionary-order', 'ignore-nonprinting', 'general-numeric-sort', 'human-numeric-sort', 'month-sort', 'version-sort', 'stable', 'check', 'merge', 'zero-terminated'], lval: ['key', 'field-separator'] },
+  uniq: { no: 'cdDiuz', val: 'fsw', digits: true, lnone: ['count', 'repeated', 'ignore-case', 'unique', 'zero-terminated'], lval: ['skip-fields', 'skip-chars', 'check-chars'] }, // (a second operand of uniq is the OUTPUT file: at most one is allowed, below)
+  cut: { no: 'snz', val: 'bcfd', lnone: ['only-delimited', 'complement', 'zero-terminated'], lval: ['bytes', 'characters', 'fields', 'delimiter', 'output-delimiter'] },
+  tr: { no: 'cCdst', val: '', lnone: ['complement', 'delete', 'squeeze-repeats', 'truncate-set1'], lval: [] }, // its operands are character sets, not files
+  nl: { no: 'p', val: 'bhfdilnsvw', lnone: ['no-renumber'], lval: ['body-numbering', 'header-numbering', 'footer-numbering', 'number-format', 'number-width', 'number-separator', 'starting-line-number', 'line-increment', 'join-blank-lines', 'section-delimiter'] },
 }
 // ---- sed -n: a script of print / delete / quit / hold-space commands and s / y, nothing that writes, reads or runs ----------------
 // Refused: w W e r R a i c b t T : v F z, the s flags w and e, a custom regex delimiter (\cREc), a raw newline inside a part. A
@@ -583,6 +593,52 @@ async function pathOk($: Host, ctx: Ctx, roots: string[], word: string): Promise
   const d = await resolve($, word, ctx.cwd)
   return roots.some(r => within(d, r))
 }
+// An unquoted glob operand (shell.ts GLOB_MARK + the pattern): expanded here, level by level, the way the shell would (a superset: dotfiles
+// match, a [...] set matches any one character), and the command is allowed only when the folder it starts in and EVERY possible match
+// resolve inside the roots (a symlink out of them refuses) and no match could be read as a flag (a name starting with `-`). More than
+// GLOB_MAX entries looked at: refused (quote the pattern, or name a narrower folder).
+const GLOB_MAX = 1000
+const hasGlob = (s: string) => /[*?[\]]/.test(s)
+const segRe = (s: string) => new RegExp('^' + s.replace(/\[[^\]]*\]|[*?[\]]|[.+^${}()|\\]/g, m => (m === '*' ? '[^/]*' : m === '?' || m[0] === '[' || m === ']' ? '[^/]' : '\\' + m)) + '$')
+async function globOk($: Host, ctx: Ctx, roots: string[], marked: string): Promise<boolean> {
+  const pat = marked.slice(1)
+  if (!pat || pat.startsWith('-') || pat.split('/').includes('..')) return false
+  const parts = pat.split('/')
+  // a bracket set the scan above cannot size exactly (`[]a]`, `[!]]`, `[[:alpha:]]`: a `]` or `[` inside the set) matches one character in the
+  // shell but more in segRe: refused, not guessed
+  if (/\[[!^]?\]|\[[^\]]*\[/.test(pat)) return false
+  const first = parts.findIndex(hasGlob)
+  if (first < 0) return pathOk($, ctx, roots, pat)
+  const lead = parts.slice(0, first).join('/') // '' = the cwd, or the root for an absolute pattern
+  if (!(await pathOk($, ctx, roots, pat.startsWith('/') ? lead || '/' : lead || '.'))) return false
+  const join = (dir: string, name: string) => (dir === '' ? name : dir === '/' ? `/${name}` : `${dir}/${name}`)
+  let level: string[] = [pat.startsWith('/') && !lead ? '/' : lead] // '' = the cwd (a relative pattern), '/' = the file system root
+  let seen = 0
+  for (let k = first; k < parts.length; k++) {
+    const next: string[] = []
+    for (const dir of level) {
+      if (!hasGlob(parts[k]!)) { next.push(join(dir, parts[k]!)); continue }
+      const real = await resolve($, dir || '.', ctx.cwd)
+      if (!roots.some(r => within(real, r))) return false
+      const names = await $.fs.list(real).catch(() => [] as { name: string; kind: string }[])
+      const re = segRe(parts[k]!)
+      // a segment led by a literal dot (`.*`, `.?`, `..*`) matches `.` and `..` in older shells (bash before 5.2, macOS bash 3.2), which a
+      // directory listing never shows: `.*/.*/.*` would climb out of the roots
+      if (parts[k]!.startsWith('.') && (re.test('.') || re.test('..'))) return false
+      for (const n of names) {
+        if (!re.test(n.name)) continue
+        if (++seen > GLOB_MAX) return false
+        next.push(join(dir, n.name))
+      }
+    }
+    level = next
+  }
+  for (const m of level) {
+    if (m.startsWith('-')) return false
+    if (!(await pathOk($, ctx, roots, m))) return false
+  }
+  return true
+}
 // flags parsed against the spec; the positional words come back (null = a flag that is not allowed)
 function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolean; recursive: boolean; noPattern: boolean } | null {
   const sp = SPECS[cmd]!
@@ -620,6 +676,8 @@ function parseFlags(cmd: string, rest: string[]): { pos: string[]; given: boolea
 async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first = true, more = false): Promise<boolean> {
   const cmd = w[0]!
   if (!SEARCH_CMDS.has(cmd) && !(more && MORE_CMDS.has(cmd))) return false
+  const nGlob = w.filter(isGlobWord).length // words with an unquoted glob (shell.ts marks them): only the plain file operands of GLOB_CMDS may be one
+  if (nGlob && !(more && GLOB_CMDS.has(cmd))) return false
   const rest = w.slice(1)
   if (cmd === 'sed' || cmd === 'jq') { // the script / filter is data (checked above), the other words are files; none = stdin
     const files = cmd === 'sed' ? sedWordsOk(rest)?.pos : jqWordsOk(rest)
@@ -642,10 +700,13 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
   }
   const f = parseFlags(cmd, rest)
   if (!f) return false
+  if (cmd === 'tr') return f.pos.length >= 1 && f.pos.length <= 2 // character sets from stdin, no file operand
   const grepLike = cmd === 'grep' || cmd === 'rg'
   const paths = grepLike && !f.given && !f.noPattern ? f.pos.slice(1) : f.pos // the first positional of grep / rg is the pattern: data
   if (grepLike && !f.given && !f.noPattern && !f.pos.length) return false // no pattern
-  for (const p of paths) if (!(await pathOk($, ctx, roots, p))) return false
+  if (cmd === 'uniq' && paths.length > 1) return false // `uniq in out` writes `out`
+  if (paths.filter(isGlobWord).length !== nGlob) return false // a glob that is the pattern or a flag's value is expanded by the shell, never checked: refused
+  for (const p of paths) if (!(isGlobWord(p) ? await globOk($, ctx, roots, p) : await pathOk($, ctx, roots, p))) return false
   if ((cmd === 'stat' || cmd === 'file') && !paths.length) return false
   if (cmd === 'diff') { // two plain files: on directories diff stat()s same-named entries, following a symlink out of the roots
     if (paths.length !== 2) return false
@@ -664,25 +725,25 @@ async function searchOk($: Host, ctx: Ctx, w: string[], roots: string[], first =
 type Refusal = { prog: string; why: string }
 const WHY_CMD = 'not a built-in read-only command'
 const WHY_ARGS = 'a flag that writes or runs a program, a path outside the allowed folders, or a missing operand / -n'
-const WHY_SHELL = 'redirect, ;, &&, ||, substitution, glob, & or another shell form is not allowed'
+const WHY_SHELL = (more: boolean) => `redirect, ;, &&, ||, substitution, ${more ? '' : 'glob, '}& or another shell form is not allowed${more ? ' (allowed: 2>/dev/null, and a glob that stays inside the allowed folders)' : ''}`
 // the first word as a name (`npm`, `/usr/bin/ls`): leading name characters only, so no argument, variable or substitution is echoed
 const progName = (word: string | undefined): string => (/^[A-Za-z0-9_.+/-]{1,40}/.exec(word ?? '')?.[0] ?? '?')
 async function builtinReadOnly($: Host, ctx: Ctx, c: string): Promise<Refusal | null> {
   const git = builtinGit(ctx.agentType)
   const more = builtinMore(ctx.agentType)
-  const segs = plainPipeline(c)
+  const segs = plainPipeline(c, more ? { glob: true, devnull: true } : {}) // readers and the reviewer: unquoted globs (checked in globOk) and 2>/dev/null
   if (!git.length) return { prog: progName(segs?.[0]?.[0] ?? c.trim().split(/\s+/)[0]), why: WHY_CMD }
-  if (!segs) return { prog: progName(c.trim().split(/[\s|;&<>]/)[0]), why: WHY_SHELL }
+  if (!segs) return { prog: progName(c.trim().split(/[\s|;&<>]/)[0]), why: WHY_SHELL(more) }
   const roots = await cRoots($, ctx)
   for (let i = 0; i < segs.length; i++) {
     const w = segs[i]!
-    if (w[0] === 'git' ? await gitOk($, ctx, w, git, roots) : await searchOk($, ctx, w, roots, i === 0, more)) continue
+    if (w[0] === 'git' ? !w.some(isGlobWord) && (await gitOk($, ctx, w, git, roots)) : await searchOk($, ctx, w, roots, i === 0, more)) continue
     const known = w[0] === 'git' || SEARCH_CMDS.has(w[0]!) || (more && MORE_CMDS.has(w[0]!))
     return { prog: progName(w[0]), why: known ? WHY_ARGS : WHY_CMD }
   }
   return null
 }
-const builtinList = (t?: string) => (builtinGit(t).length ? [...['git'], ...SEARCH_CMDS, ...(builtinMore(t) ? ['sed -n', 'stat', 'file', 'diff', 'jq', 'tree'] : [])].join(', ') : 'none')
+const builtinList = (t?: string) => (builtinGit(t).length ? [...['git'], ...SEARCH_CMDS, ...(builtinMore(t) ? ['sed -n', 'stat', 'file', 'diff', 'jq', 'tree', 'sort', 'uniq', 'cut', 'tr', 'nl'] : [])].join(', ') : 'none')
 async function gitOk($: Host, ctx: Ctx, w: string[], allowed: string[], roots: string[]): Promise<boolean> {
   let i = 1
   let seenC = false // one -C only (git chains them)
@@ -729,7 +790,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     if (!raw) return 'lean-agent: edit without a path'
     const p = await resolve($, raw, ctx.cwd)
     for (const root of g.edit ?? []) if (within(p, norm(root))) return null
-    return `lean-agent: ${p} is outside the paths the thread granted this worker (allow-edit)`
+    return `lean-agent: ${p} is outside the paths the thread granted this worker (allow-edit): stop and report this path to the thread (do not edit it another way); the thread adds it to allow-edit and briefs you again`
   }
   return null
 }

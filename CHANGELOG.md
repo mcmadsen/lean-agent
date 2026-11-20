@@ -3,19 +3,13 @@
 ## Unreleased
 
 ### Added
-- **Restart desk remembers the desk it replaced and keeps asking you to archive it.** No engine call closes a session, and the desk is a
-  Desktop session that `claude rm` / `claude stop` (background sessions) are not assumed to reach. The restart records the old desk's id
-  and title (`~/.lean-agent/desk/old-desk.json`) before the new desk opens; the new desk's first notice, then once per desk turn, and the
-  doctor (`note old desk session ...`) name it and say "archive it in the Claude app (right-click, Archive)" until
-  `claude agents --json --all` no longer lists it as an active row (also ends 7 days after the restart). A desk session never listed
-  there cannot be checked: the reminder ends 24 h after the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact
-  id is listed as a background-kind session that is not working and runs in the desk folder; the result is logged in the record. Never
-  the new desk, never `--discard-unpushed` / `--force-remove-worktree`, never a stop of the app or a service.
-
 ### Changed
 - The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with
   AskUserQuestion and never relayed with `send` (a relayed yes does not satisfy the permission check). A thread no longer reports
   `blocked` with an `approval` for something it decides itself (a subagent cap, a model choice).
+- A worker whose edit is refused for a path outside its `allow-edit` grant is told to stop and report that path.
+- Doctor: "the desk spent $X on opus today" counts only spend after lean-agent pinned the model (earlier spend today is a note), and
+  "opus is N% of spend" is a FIX only while a thread is on opus now, naming only those threads; otherwise a note.
 
 ### Fixed
 - **A stale "needs your yes" card no longer stays after the thread carried on.** The card existed for as long as the blocked report was

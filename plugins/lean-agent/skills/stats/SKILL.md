@@ -6,7 +6,7 @@ roles: desk, thread
 
 Desk: call `lean_doctor` with `action: stats` (optional `days`, default 7, max 90; `project` for one project's rules). The mod
 computes everything, so one call answers: spend today and for the window with request counts, today against the daily
-caps, tables by model with a line "opus share: x% of the window's spend (threads tN run on opus)" (an expensive model needs the user's approval in the pane, so a high share is worth a sentence), by role x model (a model lean-agent did not configure shows up there), by role, by agent and by
+caps, tables by model with a line "opus share: x% of the window's spend (threads tN spent on opus or are on it; on opus now: ...)" (an expensive model needs the user's approval in the pane, so a high share is worth a sentence), by role x model (a model lean-agent did not configure shows up there), by role, by agent and by
 thread (top 10 and the rest), by thread model/effort (the choice each thread was started with, from the ledger rows, with
 the share of thread spend from before that was recorded) and one line "threads at the default (sonnet/high): N, $X, median $Y" to judge the
 default, a line `output cap (7d): saved 140.0k chars in 12 results` when oversized Bash/MCP results were cut before a thread saw them, rule loads per project (including `_project.md` and the rules that never loaded), worker
