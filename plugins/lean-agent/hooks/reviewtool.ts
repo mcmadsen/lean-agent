@@ -11,7 +11,8 @@ import { chooseModel, wantSecondOpinion } from './reviewrisk'
 import { addDecline, declinesFor, declinesText, enforce, findingLine, normalize } from './reviewgate'
 import type { Context, Finding, Result } from './reviewgate'
 import { slugOk } from './rules'
-import { lessonsTool } from './reviewlessons'
+import { lessonsTool, repoOf } from './reviewlessons'
+import { fetchPrs } from './prhost'
 
 type Out = { ok: boolean; text: string }
 type Carry = { open: Finding[]; reuse: Result['reuse']; coverage: Result['coverage']; branch: string; ts: number }
@@ -163,6 +164,12 @@ export async function reviewTool(h: Host, project: string, i: any): Promise<Out>
   const les = await lessonsTool(h, project, i) // the learned lessons (reviewlessons.ts): lessons, learn, lessons-list/-rm/-undo/-verify
   if (les) return les
   if (action === 'prepare') return doPrepare(h, project, i)
+  if (action === 'prs') {
+    // the PR comments of a project's recent PRs (or one), from the host in its origin URL: prhost.ts, the one fetch the pr and review-learn skills share
+    const num = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) ? v : undefined)
+    const r = await fetchPrs(h, project, { repo: await repoOf(h, project, str(i.repo) || undefined), pr: num(i.pr), last: num(i.last), base: str(i.base) })
+    return { ok: r.ok, text: r.text }
+  }
   if (action === 'decline') return doDecline(h, project, i)
   if (action === 'record') return doRecord(h, project, i)
   return { ok: false, text: `unknown lean_review action ${action}` }

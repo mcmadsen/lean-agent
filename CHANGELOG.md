@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Added
+- **One PR-comment fetch for GitHub and Azure DevOps, shared by the `pr` and `review-learn` skills** (`hooks/prhost.ts`, `lean_review`
+  action `prs`: `project`, `pr` or `last` (default 10, at most 30), `base`, `repo`). `review-learn` was GitHub-only (`gh api user`); an
+  Azure DevOps project (origin on `dev.azure.com`, `*.visualstudio.com`, or the ssh forms) got nothing. The host now comes from the origin
+  URL, like the `pr` skill: github.com uses `gh` (owner = `gh api user --jq .login`, the last merged PRs, `gh pr view --json
+  reviews,comments` and the inline comments); Azure DevOps uses `az` (owner = `az account show --query user.name`; `az repos pr list
+  --status completed --top N --target-branch <base>`, then other targets when fewer than N; the threads from the REST endpoint
+  `.../pullRequests/<n>/threads` with a bearer token from `az account get-access-token --resource
+  499b84ac-1321-427f-aa17-267ca6975798`, handed to curl on stdin, kept out of every argument list, scrubbed from every error and never
+  printed; never a PAT). A script drops what is never a lesson and counts each kind: the owner's own comments, system threads (the
+  `CodeReviewThreadType` property: votes, policy results, ref updates, reviewer changes, and comments with `commentType: system`), deleted
+  threads and comments, bare approvals and typo fixes; an Azure thread's status (active, fixed, wontFix, closed, byDesign) stays with its
+  comments, replies are marked. The `comments` step of the `pr` skill uses the same call, so the two cannot drift.
 - **A thread says which lean-agent code it runs, and the desk shows it when that is not the installed one.** A thread restarted from the
   pane while 1.0.11 was installed loaded the review skill from the cached 1.0.9 folder, its `lean_review` only took 1.0.9's fields, its
   refusals said "(lean-agent 1.0.9)", and nothing told the desk: `thread.json` `version` is the version the DESK saw installed when it
