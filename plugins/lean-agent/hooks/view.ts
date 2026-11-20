@@ -7,8 +7,8 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNotices } from './notices'
 import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
-import { spendNumbers, spendText } from './stats'
-import type { Spend } from './stats'
+import { costBadge, spendNumbers, spendText, threadCostsToday } from './stats'
+import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
@@ -37,7 +37,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; ready: boolean; recTs: number; agents?: string }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -234,9 +234,11 @@ export async function loadView(h: Host): Promise<View> {
     else recsOf.set(r.from, [r])
   }
   // spend first: a thread card shows what the thread cost today
+  let costs: Record<string, ThreadCost> = {}
   await guard('budget', async () => {
     v.spend = await loadBudget(h, home)
     v.budget = v.spend ? spendText(v.spend) : 'n/a'
+    costs = await threadCostsToday(h, v.spend).catch(() => ({}) as Record<string, ThreadCost>) // the card's badge: today's usd, "!" over the alert
   })
   const reviews: Reviews = new Map()
   await guard('threads', async () => {
@@ -304,6 +306,7 @@ export async function loadView(h: Host): Promise<View> {
         ...(sha ? { sha } : {}),
         review,
         cost: v.spend?.byThread[t.id] ?? 0,
+        ...(costs[t.id] ? { costBadge: costBadge(costs[t.id]!), costOver: costs[t.id]!.over } : {}),
         ready: t.state === 'open' && isDone && review === 'green' && !pushed && !claimsPushed(lr?.text ?? ''),
         recTs: lr?.ts ?? 0,
         id: t.id,

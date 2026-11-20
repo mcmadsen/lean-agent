@@ -554,10 +554,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Text wrap="wrap">
             {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''} · `}</Text> : null}
             <Text bold color={sc.color}>{sc.word}</Text>
+            {t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{` · ${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
             {t.agents ? <Text dimColor>{` · ${t.agents}`}</Text> : null}
             {t.branch ? <Text dimColor>{` · ${t.branch}`}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>
-            {t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
           </Text>
           {t.finished ? <Text dimColor>finished: next message starts a new session</Text> : null}
           {t.liveNote ? <Text color={sc.word === 'stuck' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}

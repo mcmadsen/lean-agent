@@ -196,7 +196,8 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
       </Text>
       <Text>
         {d.state} · {runLabel}
-        {d.finished ? ' · finished (the next message starts a new session)' : ''} · {d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'} · project: {d.project || 'none'}
+        {d.finished ? ' · finished (the next message starts a new session)' : ''}
+        {d.costBadge ? ` · ${d.costBadge} today` : ''} · {d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'} · project: {d.project || 'none'}
       </Text>
       {!!d.liveNote && <Text color={d.live === 'stuck' ? 'red' : 'yellow'}>{d.liveNote}</Text>}
       {d.needsYou && <Text color="yellow">It waits for you in its own session: press Open session.</Text>}

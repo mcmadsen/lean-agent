@@ -10,6 +10,7 @@ import type { Rollup } from './ledger'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
 import { resolveRange } from './reviewprep'
+import { costBadge, threadCostsToday } from './stats'
 import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { isRunning, isWorking, listAgents, needsYou } from './threads'
@@ -51,6 +52,7 @@ export type ThreadDetail = {
   diffNote?: string // why there is no diff stat (no worktree, no base, git did not answer)
   review?: ReviewInfo
   cost: { today: number; total: number } | null
+  costBadge?: string // "$6.20", "$21.30!" over the alert; absent when the thread spent nothing today
   reports: Report[] // newest first, at most REPORTS_MAX
   reportsTotal: number
   queued: { ts: number; from?: string; text: string }[]
@@ -217,6 +219,8 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   })
   await guard('cost', async () => {
     d.cost = await costOf(h, id, now)
+    const c = (await threadCostsToday(h))[id]
+    if (c) d.costBadge = costBadge(c) // the header's badge, "!" over the alert
   })
   await guard('reports', async () => {
     const all = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask') && typeof r.text === 'string')
