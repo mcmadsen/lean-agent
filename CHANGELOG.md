@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Measured first: why a thread gets blocked
+Read-only measurement before any code, from the feedback exports on hand (7 distinct files, 2026-11-18 to 2026-11-20, lean-agent 1.0.5
+to 1.0.12; one of them was exported twice, byte for byte, and is counted once) and from the guard, the specs and the skills. A refusal
+row in an export keeps the agent type, the refused program (first word) and the reason, not the whole command. The exports are the
+user's and private: no text of them is copied here, the examples below are synthetic.
+
+| Kind of block | Source | How often in the data | Avoidable? | Fix |
+|---|---|---|---|---|
+| A reader / reviewer / explorer subagent refused a shell command (`reader-sonnet` 26, `reviewer` 42 of 68) | lean-agent guard, `tool.call` refusal | 68 of 78 guard refusals. 63 carry the 1.0.5 to 1.0.9 wording ("only its built-in read-only git commands"): readers could not read enough, fixed since 1.0.9 and widened in 1.0.14 (globs, `2>/dev/null`, `rg` with no path, `sort`, `uniq`, `cut`, `tr`, `nl`). The 5 on 1.0.12: `cd` x3, `rg` x2 (one "shell form", one "flag / path / operand") | Mostly fixed. What is left refuses on purpose: `cd`, any other redirect, `;`, `&&`, `$(...)`, `xargs`, a path outside the roots. The two `rg` rows may be commands 1.0.14 allows now (the export does not keep the command) | None new: the refusal text names the program and the reason; `lean_doctor refusals` (this release) groups them with a one-line fix and the doctor says when one repeats |
+| The desk was refused a command in strict mode ("route this to a thread") | lean-agent guard, the desk | 10 of 78 (4 + 4 + 2 over three exports; 2 of them a Read outside `~/.lean-agent`) | Yes, by routing: the desk does not run things | The desk guide already says route; `lean_doctor refusals` shows it. The `pr` skill's desk steps were fixed earlier (every step names its role) |
+| A worker's edit refused as outside `allow-edit` | lean-agent guard | 0 in these exports (the code path exists; 1.0.14 added the "stop and report that exact path" text) | Yes: a thread that names too few paths | Grants up front: `lean_thread new` takes `allowEdit` / `allowCmd`, the brief carries them, and the thread guide tells the desk to name a path outside the worktree (a repo's `.claude/skills/...` file is the usual one) |
+| A subagent cap asked the user ("may I run the review passes?") | A cap in the user's own CLAUDE.md read by the thread (policy rule), plus lean-agent's `agents.cap` | 1 report (a thread counted the push gate's reviewer passes against a cap of 4) | Fixed in 1.0.13 / 1.0.14: reviewer passes and the second-opinion reader are exempt and the guide says so | None new |
+| A remote write by a thread: an Azure DevOps work-item update, a PR thread reply (a script POSTing the comment) | Claude Code permission check / auto-mode classifier, not lean-agent | 2 blocked reports from one thread in one day | Yes, and only here: the thread cannot get past the classifier and a hook cannot carry the desk's yes (1.0.14) | Typed desk-executed actions (this release): the thread asks with `lean_report` `action`, the user decides through the desk, the mod performs exactly the approved write. NOT covered: the same script also PATCHed the PR thread's status (fixed / closed) after replying; that is outside the five kinds and stays a manual step (reported, not built) |
+| `git push` / `gh pr create` by a thread | Claude Code auto-mode classifier (the guard also refuses it with the push-gate text) | 1 denied push, 1 push refused because the worktree was not registered | By design: the push gate is the desk's, after a green review and the user's yes | None new. The thread guide already says "report ready to push"; the denied push was a thread trying it anyway |
+| Not a permission block at all (reported as `blocked`): an MCP server not signed in (2), a worktree registry slot taken (1), a thread that did not post a reply because the user's own rule says "only after a first-attempt green" (1) | The environment, the registry, a policy rule in the user's project CLAUDE.md | 4 | The policy rule is right and stays; the other two are setup | None: the doctor row and the worktree skill cover them |
+
+Read from this: the avoidable blocks are the classifier's denials of remote writes (the only kind a user had to answer in the thread's
+own session), and the grants a thread forgot. Nothing in settings.json was widened and the guard was not widened for anything that
+writes or runs a program. A harmless class the classifier keeps denying, other than the five write kinds below: none showed up in
+the data (the PATCH of a PR thread's status above is a write, not a harmless read).
+
 ## 1.0.14
 
 ### Added

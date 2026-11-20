@@ -208,6 +208,17 @@ while the thread is really blocked: not working, and no tool call since its repo
 only for what the permission check denied, never for something it decides itself (a subagent cap, a model choice). An expensive model
 is the pane's Approve, a push the desk's `approve-push`.
 
+### Why a thread gets blocked (measured)
+
+Measured on the feedback exports of three days (7 distinct files, lean-agent 1.0.5 to 1.0.12; the full table is in the changelog under
+"Unreleased"): of 78 guard refusals, 68 were a reader, reviewer or explorer refused a shell command (63 of them under the git-only
+wording that 1.0.9 and 1.0.14 widened; what is left, `cd`, redirects, `;`, `&&`, `$(...)`, `xargs`, paths outside the roots, refuses on
+purpose) and 10 were the desk refused in strict mode (it routes instead). No worker `allow-edit` refusal was recorded. The blocks a
+user had to answer in a thread's own session were 2 remote writes (an Azure DevOps work-item update, a PR thread reply) denied by Claude
+Code's own permission check or classifier, plus 1 push the thread tried itself (the push gate is the desk's). The other `blocked`
+reports were no permission block (an MCP server not signed in, a registry slot, a policy rule of the user's own project). So the
+avoidable ones are the remote writes and the grants a brief forgot.
+
 ## Skills
 
 | Skill | Use |
