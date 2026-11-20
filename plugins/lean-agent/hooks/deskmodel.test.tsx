@@ -284,7 +284,7 @@ test('doctor: spend on the model the app started the desk on is an info note, no
   expect(await deskLine(h)).toContain('the app chose another model') // no record yet: still FIX
   const e = engine([modelRow(), effortRow()], { models: ['claude-sonnet-5-5'] })
   expect((await checkDeskModel(h.host, e.engine, OPUS, true)).kind).toBe('set')
-  expect(JSON.parse(h.files.get(`${L}/desk/model-set.json`)!)).toEqual({ from: OPUS, to: 'sonnet', at: NOON })
+  expect(JSON.parse(h.files.get(`${L}/desk/model-set.json`)!)).toEqual({ from: OPUS, to: 'sonnet', at: NOON, count: 1 })
   expect(await deskLine(h)).toBeUndefined() // not a FIX row any more
   expect((await modelRows(h.host)).info).toEqual([note])
   expect((await modelRows(h.host)).fix).toEqual([])
@@ -334,4 +334,94 @@ test('doctor fix: the pin time is recorded only when setup changes the pin', asy
   h.files.set('/h/lean-agent-desk/.claude/settings.json', JSON.stringify({ model: 'opus', effortLevel: 'high' }))
   await fix(h.host, '/p').catch(() => undefined)
   expect(JSON.parse(h.files.get(`${L}/desk/pinned.json`)!).at).toBe(NOON + 5_000) // changed back: written again
+})
+
+// ---- the pin holds against the app choosing again (1.0.20) ------------------------------------------------------------------------
+import { appChoseText, decideSwitch, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice, readDeskSwitch, selfSwitching } from './deskmodel'
+
+const isExp = (m: string) => /opus|fable/.test(m)
+const sonnetPin = { model: 'sonnet', effort: 'high' } as any
+
+test('the app choosing opus again and again in one session: the pin goes back each time, ONE line says so the first time, the count follows', async () => {
+  const h = world()
+  const rows = [modelRow(), effortRow({ value: 'high' })]
+  const e = engine(rows, { models: ['claude-sonnet-5-5'] })
+  const first = await checkDeskModel(h.host, e.engine, OPUS, true, 's1')
+  expect(first.kind).toBe('set')
+  expect(first.repeat).toBeUndefined()
+  expect(first.text).toContain('the app chose it')
+  const second = await checkDeskModel(h.host, e.engine, OPUS, true, 's1')
+  expect(second.repeat).toBe(true)
+  expect(second.text).toBe('the app chose opus twice this session; lean-agent set sonnet each time')
+  const third = await checkDeskModel(h.host, e.engine, OPUS, true, 's1')
+  expect(third.text).toBe(appChoseText(OPUS, 3, 'sonnet'))
+  expect(third.text).toContain('3 times')
+  expect(notice(h, 'desk-model-set')).toContain('3 times') // the notice carries the count, the prompt line was said once
+  expect((await readDeskSwitch(h.host))?.count).toBe(3)
+  // another session starts over
+  const other = await checkDeskModel(h.host, e.engine, OPUS, true, 's2')
+  expect(other.repeat).toBeUndefined()
+  expect((await readDeskSwitch(h.host))?.count).toBe(1)
+})
+
+test('a model the person chose by hand is not put back in that session', async () => {
+  const h = world()
+  const e = engine([modelRow(), effortRow({ value: 'high' })], { models: ['claude-sonnet-5-5'] })
+  await noteUserChoice(h.host, OPUS, 's1')
+  const r = await checkDeskModel(h.host, e.engine, OPUS, true, 's1')
+  expect(r.kind).toBe('match')
+  expect(e.sets).toEqual([])
+  const next = await checkDeskModel(h.host, e.engine, OPUS, true, 's2') // a new session: the pin applies again
+  expect(next.kind).toBe('set')
+})
+
+test('PreModelSwitch: the app\'s expensive model is asked once, then refused; /model and the picker are never touched; our own switch is ignored', () => {
+  const st = newSwitchState()
+  const ev = (source: string, to = OPUS) => ({ from_model: 'claude-sonnet-5-5', to_model: to, source })
+  expect(decideSwitch(ev('command'), sonnetPin, st, isExp)).toEqual({ user: OPUS }) // /model opus: the person's, stands
+  expect(decideSwitch(ev('picker'), sonnetPin, st, isExp)).toEqual({ user: OPUS })
+  expect(decideSwitch(ev('sdk', 'claude-sonnet-5-5'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // the pin itself
+  expect(decideSwitch(ev('sdk', 'claude-haiku-5-5'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // not expensive
+  expect(decideSwitch(ev('auto'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // a fallback is not ours to block
+  expect(decideSwitch(ev('resume'), sonnetPin, newSwitchState(), isExp)).toEqual({})
+  const app = newSwitchState()
+  const a = decideSwitch(ev('sdk'), sonnetPin, app, isExp)
+  expect(a.decision).toBe('ask')
+  expect(a.reason).toContain('/model opus')
+  const b = decideSwitch(ev('sdk'), sonnetPin, app, isExp)
+  expect(b.decision).toBe('deny')
+  expect(b.reason).toContain('/model opus')
+  expect(app.denied).toBe(1)
+  // the person said yes to the question (the switch ran): it stands for the session
+  noteSwitched(ev('sdk'), app)
+  expect(decideSwitch(ev('sdk'), sonnetPin, app, isExp)).toEqual({})
+  // a model the person chose by hand earlier in the session stands too
+  const hand = newSwitchState()
+  hand.user = OPUS
+  expect(decideSwitch(ev('sdk'), sonnetPin, hand, isExp)).toEqual({})
+  expect(selfSwitching()).toBe(false)
+})
+
+test('our own config.set is not taken for the person: selfSwitching is on while the pin is written', async () => {
+  const h = world()
+  let during = false
+  const eng = { configList: async () => [modelRow(), effortRow({ value: 'high' })], configSet: async () => { during = during || selfSwitching(); return {} }, model: async () => 'claude-sonnet-5-5' }
+  await checkDeskModel(h.host, eng as any, OPUS, true, 's1')
+  expect(during).toBe(true)
+  expect(selfSwitching()).toBe(false)
+})
+
+test('a refused app choice counts into the same one-line tally and the record says the engine cannot tell the app from its menu; the doctor row says so', async () => {
+  const h = world()
+  await noteSdkSwitch(h.host, OPUS, 's1', false) // asked
+  expect((await readDeskSwitch(h.host))?.blind).toBe(true)
+  await noteSdkSwitch(h.host, OPUS, 's1', true) // refused
+  await noteSdkSwitch(h.host, OPUS, 's1', true)
+  const sw = await readDeskSwitch(h.host)
+  expect(sw?.count).toBe(2)
+  expect(sw?.blind).toBe(true)
+  expect(notice(h, 'desk-model-set')).toContain('the app chose opus twice this session; lean-agent set sonnet each time')
+  const rows = await modelRows(h.host)
+  expect(rows.info.join('\n')).toContain('the app chose opus twice this session; lean-agent set sonnet each time')
+  expect(rows.info.join('\n')).toContain('cannot tell the app\'s choice from its model menu')
 })

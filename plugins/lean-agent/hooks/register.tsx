@@ -22,8 +22,9 @@ import { chase } from './chaser'
 import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
-import { checkDeskModel } from './deskmodel'
-import { DESK_FAMILIES, modelFamily } from './models'
+import { checkDeskModel, decideSwitch, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
+import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
+import { isExpensiveModel } from './expensive'
 import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -80,9 +81,14 @@ let busySince = 0 // ms the desk's main turn started (0 = idle): the report rela
 let lastRelay = 0
 let deskModelTried = false // the desk's model / effort pin is applied at most once per session (deskmodel.ts)
 let deskModelSeen = '' // the model last judged: a check runs again only when it changes
+let switchState = newSwitchState() // this session's PreModelSwitch decisions (deskmodel.ts decideSwitch)
+let modSession = String(Date.now()) // a session key when the engine gave no session id
+const deskSession = () => lastSid || modSession
 export const resetModState = () => {
   deskModelTried = false
   deskModelSeen = ''
+  switchState = newSwitchState()
+  modSession = String(Date.now())
   notified = 0
   busySince = 0
   lastRelay = 0
@@ -648,17 +654,19 @@ const engineOf = ($: any): Engine => ({
 })
 // The session's own model is what is judged (a request may be a side request on a small model, a title or a summary); the request's
 // model only stands in when the session cannot say.
-async function deskModelCheck($: any, fromRequest = ''): Promise<void> {
+async function deskModelCheck($: any, fromRequest = '', again = false): Promise<void> {
   try {
     const sm = String((await engineOf($).model().catch(() => '')) ?? '')
     const running = DESK_FAMILIES.includes(modelFamily(sm)) ? sm : fromRequest
     if (!running) return
-    const apply = !deskModelTried
+    // a later prompt whose session model is not the pin again (the app chose it once more) puts the pin back BEFORE the turn runs
+    const host = hostOf($)
+    const apply = !deskModelTried || (again && modelFamily(running) !== (await deskChoice(host, await homeDir(host))).model)
     if (!apply && running === deskModelSeen) return
     deskModelTried = true
     deskModelSeen = running
-    const r = await checkDeskModel(hostOf($), engineOf($), running, apply)
-    if (r.text) pending.push(`[lean-agent] ${r.text}`)
+    const r = await checkDeskModel(host, engineOf($), running, apply, deskSession())
+    if (r.text && !r.repeat) pending.push(`[lean-agent] ${r.text}`) // said once per session; the pane notice carries the count
   } catch {
     /* a model check that fails changes nothing */
   }
@@ -763,6 +771,24 @@ export const register: Register = on => {
   // result whose text says the permission check / auto mode classifier denied it. From then on the thread's own edit of the paths that call
   // named in its brief is allowed (orchestrate.ts; the engine's permission check still judges each edit). Never `retry`, no permission changed.
   const deniedSeen = new Set<string>()
+  // The desk's model pin against the app choosing again (deskmodel.ts decideSwitch): the app's choice of an expensive model is asked about once per
+  // session and then refused, a switch the person made by hand (/model, the picker) is never touched. The decision is the engine's documented
+  // PreModelSwitch answer; the engine's `source` cannot tell the app's default from its model menu (both "sdk"), hence the one question.
+  on('classic.PreModelSwitch', async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'desk') return r
+    const host = hostOf($)
+    const d = decideSwitch(e, await deskChoice(host, await homeDir(host)), switchState, isExpensiveModel)
+    if (d.user) await noteUserChoice(host, d.user, deskSession())
+    if (d.user) switchState.user = d.user
+    if (!d.decision) return r
+    await noteSdkSwitch(host, String(e?.to_model ?? ''), deskSession(), d.decision === 'deny')
+    return { ...r, permissionDecision: d.decision, permissionDecisionReason: d.reason }
+  }).catch(($, e: any, next) => next(e))
+  on('classic.PostModelSwitch', async ($, e: any, next) => {
+    if (role.kind === 'desk') noteSwitched(e, switchState)
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
   on('classic.PermissionDenied', async ($, e: any, next) => {
     await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied').catch(() => undefined)
     return next(e) // never `retry`
@@ -1264,6 +1290,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
     await redetect($)
+    if (role.kind === 'desk') await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
       let more: string | null = null

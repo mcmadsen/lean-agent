@@ -7,7 +7,7 @@ import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskChoice, modelFamily, threadChoice } from './models'
-import { readDeskModel, readDeskSwitch } from './deskmodel'
+import { appChoseText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
 import { windowLine } from './windows'
@@ -279,6 +279,9 @@ export async function modelRows(h: Host): Promise<{ fix: string[]; info: string[
   // switched today, and the switch is not undone by a later session that could not be set (deskmodel.ts keeps model.json for that)
   const sw = await readDeskSwitch(h)
   const switched = sw && family(sw.to) === desk && dayOf(sw.at) === dayOf(now) && !(await readDeskModel(h)) ? sw : null
+  // the app choosing again: ONE line with the count; the engine's switch event (source "sdk") does not tell the app's default from its model menu
+  if (sw && sw.count && sw.count > 1 && dayOf(sw.at) === dayOf(now)) info.push(`${appChoseText(sw.from, sw.count, desk)} (today, last session)${sw.blind ? "; the engine cannot tell the app's choice from its model menu, so lean-agent asks once per session and reapplies the pin: pick " + desk.charAt(0).toUpperCase() + desk.slice(1) + " in the app's model menu to stop it" : ''}`)
+  else if (sw?.blind && dayOf(sw.at) === dayOf(now)) info.push(`the desk's model switch is asked once per session: the engine cannot tell the app's choice from its model menu (source "sdk" for both)`)
   const allowed = new Set<string>()
   const def = await threadChoice(h, home, {})
   if (typeof def !== 'string') allowed.add(family(def.model))

@@ -18,6 +18,16 @@
     folder is trimmed from the listing, not hidden from the engine). `threads.mcp`: `"all"` (default, unchanged: connectors available so `allow-mcp:`
     jobs work), `"project"` (only servers `projects.json` `<name>.mcp` or the profile lists, plus the thread's needs), `"none"`; a server outside the list is
     deferred (findable through ToolSearch), never removed.
+- **The desk's model pin did not stick** (field: at several prompts of one desk session "the desk was on claude-opus-5-5 (the app chose it); lean-agent set
+  sonnet"). The app picks opus again and again; the pin was put back each time, with one prompt line each time, and opus could run in between.
+  The engine's `PreModelSwitch` says who asked: `command` (`/model`, the `/config` Model row, also lean-agent's own write), `picker`, `sdk` (a headless
+  set_model: the Claude app's default AND its model menu alike), `auto`, `resume`. Now: the pin is put back at `prompt.submit` BEFORE the turn runs
+  whenever the session model is not the pin; the app's choice (`sdk`) of an expensive model is answered with the documented `permissionDecision`: `ask`
+  once per session and model, then `deny` with "type /model opus to switch by hand"; what the person did by hand (`command`, `picker`) is never blocked
+  and is not put back in that session; a fallback (`auto`) and a resume pass. ONE line per session reaches the model; the pane notice carries the count
+  ("the app chose opus 4 times this session; lean-agent set sonnet each time"). The engine cannot tell the app's default from the app's model menu
+  (both `sdk`), so the doctor's desk row says that, and that the question is asked once per session.
+
 
 ## 1.0.19
 
