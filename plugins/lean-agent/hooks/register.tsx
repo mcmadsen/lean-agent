@@ -57,8 +57,9 @@ import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
 import { resetRequestCache } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
-import { recordContext } from './threadcontext'
-import { autoRestartTick, threadTurnEnd } from './autorestart'
+import { recordContext, threadLimits } from './threadcontext'
+import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
+import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
@@ -229,6 +230,47 @@ let turnStartedAt = 0
 let lastEnd = '' // the turn end last handled (tokens@time): session.measure and turn.complete both reach it, once is enough
 let lastTokens: number | null = null // the context size of the last session.measure of this thread
 
+// The hard stop at the context limit (contextstop.ts): set at a turn end over the limit or by the tool.call check; cleared when the size is
+// under the limit again (compaction) or the limit was raised. `stopCheck` answers every tool call of the thread's own main loop.
+let stopped: { sid: string; tokens: number; limit: number } | null = null
+let mainCalls = 0
+const STOP_EVERY = 10 // tool calls between two size checks of a running turn
+const stopChecked = new WeakMap<object, { deny: string } | null>() // one call can pass two of the tool.call handlers: it is judged (and counted, logged) once
+async function stopCheck($: any, e: any): Promise<{ deny: string } | null> {
+  if (role.kind !== 'thread' || e?.agentId) return null
+  if (e && typeof e === 'object' && stopChecked.has(e)) return stopChecked.get(e)!
+  const r = await stopCheckOnce($, e)
+  if (e && typeof e === 'object') stopChecked.set(e, r)
+  return r
+}
+async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
+  try {
+    const host = hostOf($)
+    if (!stopped && ++mainCalls % STOP_EVERY === 0) {
+      const tokens = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
+      const limit = (await threadLimits(host)).limit
+      if (Number.isFinite(tokens) && tokens >= limit) {
+        const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+        lastTokens = tokens
+        stopped = { sid, tokens, limit }
+        await hardStop(host, role.id, { sid, tokens, limit, since: turnStartedAt, tasks: currentTasks() })
+      }
+    }
+    if (!stopped) return null
+    const limit = (await threadLimits(host)).limit
+    if (stopped.tokens < limit) {
+      stopped = null // the limit was raised above the size
+      return null
+    }
+    const st = { ...stopped, tokens: lastTokens ?? stopped.tokens, limit }
+    const r = await stopGate(host, role.id, st, e)
+    if (r) await logRefusal(host, { role: 'thread', rule: STOP_RULE, text: r.deny, tool: String(e.tool ?? ''), thread: role.id, version: VERSION })
+    return r
+  } catch {
+    return null // a failing check never blocks a tool
+  }
+}
+
 // A thread's turn end, by script (no model turn): the context size record, the plan-window snapshot, the state snapshot and, over the
 // context limit with work left, the checkpoint the desk's timer restarts from (autorestart.ts). Observes only; every failure is silent.
 // No engine call of its own (session.measure hands it the figures it already read): turn.complete uses the last measured size.
@@ -238,7 +280,8 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string)
     const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
     if (lastEnd === key) return
     lastEnd = key
-    await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
+    const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
+    if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
   } catch {
     /* the next turn end tries again */
   }
@@ -703,6 +746,8 @@ export const register: Register = on => {
     if (id && role.kind === 'thread') {
       const host = hostOf($)
       orchAgentEnd(id)
+      // a worker that ended after the context limit stopped the thread: its result goes into the snapshot's pending list (by script, never acted on)
+      if (stopped && typeof (e?.last_assistant_message ?? e?.result) === 'string') await notePending(host, role.id, stopped.sid, { agent: String(e?.agent_type ?? id), text: String(e.last_assistant_message ?? e.result) }).catch(() => false)
       await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
     }
     return next(e)
@@ -922,6 +967,8 @@ export const register: Register = on => {
 
   // scripts over models: thread and desk (propose is a thread's, decide the desk's; scripts.ts checks per action)
   on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` as const }, async ($, e: any) => {
+    const halted = await stopCheck($, e)
+    if (halted) return { result: halted.deny, isError: true } as any
     if (role.kind !== 'thread' && role.kind !== 'desk') await redetect($, undefined, true)
     const r = role
     if (r.kind !== 'thread' && r.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: SCRIPT_TOOL, need: 'thread', role: r, startDir, sid: lastSid }), isError: true } as any
@@ -978,6 +1025,8 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` as const }, async ($, e: any) => {
+    const halted = await stopCheck($, e)
+    if (halted) return { result: halted.deny, isError: true } as any
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: 'lean_doctor', need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
@@ -1028,6 +1077,8 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: `mcp__lean-agent__${RUN}` as const }, async ($, e: any) => {
+    const halted = await stopCheck($, e)
+    if (halted) return { result: halted.deny, isError: true } as any
     if (role.kind !== 'thread') await redetect($, undefined, true)
     if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: RUN, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
     if (e.agentId) return { result: "lean_run is the thread's own tool: a worker runs its one step with its own tools", isError: true } as any
@@ -1044,6 +1095,8 @@ export const register: Register = on => {
 
   for (const t of THREAD_TOOLS) {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` as const }, async ($, e: any) => {
+      const halted = await stopCheck($, e)
+      if (halted) return { result: halted.deny, isError: true } as any
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       // a review thread's done report needs a lean_review record of the sha it reviewed; the evidence is appended from the store (reviewevidence.ts)
@@ -1075,6 +1128,8 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
+    const halted = await stopCheck($, e)
+    if (halted) return { deny: halted.deny } as any
     const atype = await agentType($, e.agentId, e)
     const gctx = { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION, root: String($.plugin.root ?? '') }
     const rname = atype || e.agentId ? 'worker' : role.kind // the role field of every refusal / missing-tool record

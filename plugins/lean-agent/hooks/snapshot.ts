@@ -8,6 +8,7 @@ import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
 
 export type SnapTask = { text: string; status: string }
+export type SnapPending = { agent: string; text: string }
 export type Snapshot = {
   v: 1
   id: string
@@ -23,6 +24,7 @@ export type Snapshot = {
   lastReport: { ts: number; state: string; text: string } | null
   questions: string[] // asks of this thread newer than its last report
   tokens: number | null // the session's context size
+  pending?: SnapPending[] // results of workers that finished after the context limit stopped the thread (recorded by script, not acted on)
 }
 
 const STATUS_MAX = 40
@@ -30,6 +32,8 @@ const EDITED_MAX = 40
 const TASKS_MAX = 30
 const REPORT_MAX = 1_500
 const QUESTION_MAX = 400
+const PENDING_MAX = 10
+const PENDING_TEXT = 600
 const cut = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n) + '…')
 
 export const snapshotFile = (home: string, id: string) => `${threadsDir(home)}/${id}/state.json`
@@ -98,7 +102,7 @@ export function tasksOf(raw: unknown): SnapTask[] {
   return out
 }
 
-export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?: string; tokens?: number | null; edited?: string[]; tasks?: unknown } = {}): Promise<Snapshot> {
+export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?: string; tokens?: number | null; edited?: string[]; tasks?: unknown; pending?: SnapPending[] } = {}): Promise<Snapshot> {
   const dir = await workDir(h, home, id)
   const [branch, head, status, stat] = await Promise.all([git(h, dir, ['rev-parse', '--abbrev-ref', 'HEAD']), git(h, dir, ['rev-parse', 'HEAD']), git(h, dir, ['status', '--short']), git(h, dir, ['diff', '--stat', 'HEAD'])])
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask'))
@@ -122,6 +126,7 @@ export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?
     lastReport: last ? { ts: last.ts, state: last.state || 'working', text: cut(String(last.text ?? '').trim(), REPORT_MAX) } : null,
     questions: asks.slice(-5).map(a => cut(String(a.text ?? '').trim(), QUESTION_MAX)),
     tokens: typeof o.tokens === 'number' && Number.isFinite(o.tokens) ? Math.round(o.tokens) : null,
+    ...(o.pending?.length ? { pending: o.pending.slice(-PENDING_MAX).map(p => ({ agent: cut(String(p.agent), 60), text: cut(String(p.text), PENDING_TEXT) })) } : {}),
   }
 }
 
@@ -156,6 +161,7 @@ export function snapshotText(s: Snapshot, now: number): string {
   if (s.tasks.length) l.push(`task list:\n${s.tasks.map(t => `  [${t.status}] ${t.text}`).join('\n')}`)
   if (s.lastReport) l.push(`last report (${s.lastReport.state}): ${s.lastReport.text.replace(/\s+/g, ' ')}`)
   if (s.questions.length) l.push(`open questions:\n${s.questions.map(q => `  - ${q.replace(/\s+/g, ' ')}`).join('\n')}`)
+  if (s.pending?.length) l.push(`pending results (workers that finished after the context limit stopped the thread; read them, they were not acted on):\n${s.pending.map(p => `  - ${p.agent}: ${p.text.replace(/\s+/g, ' ')}`).join('\n')}`)
   if (s.tokens !== null) l.push(`context at that time: ${s.tokens} tokens`)
   return l.join('\n')
 }
