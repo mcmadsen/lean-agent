@@ -27,17 +27,24 @@ roles: thread
    capped at 25 lines; the store has its own, much larger cap). First `lean_review` `lessons-list` (`project`) to see what
    is there. Then one `lean_review` `learn` call (`project`, `source` e.g. "review-learn <date>"):
    - `checklist`: general lines, each "Before adding X, check Y in Z" or "When changing X, also Y". No PR numbers, names or dates.
+     **One test for where a line goes:** would a reviewer check it in ANY change (a string, stored here), or does it only describe one
+     area's commands or layout (how that folder builds, tests or is laid out)? Give the second kind as `{text, area}` (`area` = the
+     folder or rule name): the tool does not store it, it hands it back under "NOT stored" and you put it into that area's rule with the
+     `learn` skill (`--area <area>`, which keeps the rule's 25-line cap).
    - `helpers`: for every existing helper or mechanism a human pointed to, open the code first and give
-     `{name, where, what}` with `where` = the file path relative to the repo root (as `git ls-files` shows it). A helper you
-     cannot find in the code is left out. Reviewers asking for reuse ("we already have X for this") are the most valuable
+     `{name, where, what}` with `where` = the file path relative to the repo root (as `git ls-files` shows it). The tool runs the same
+     existence check as `lessons-verify` before it adds a helper and refuses one whose path and symbol it cannot find, naming it
+     ("refused helper X"): fix its path or leave it out. Reviewers asking for reuse ("we already have X for this") are the most valuable
      lessons: a helper whose name is already in the store updates its line.
    - `replace`: `[{old, new}]` to correct a line that is wrong or out of date.
    Near-duplicates of existing lines are skipped by the tool (it says so); lines the store cannot take (cap) are named.
-   A rule about one area's commands or layout still goes to a `paths:` rule via the `learn` skill (`--area <dir>`), keeping
-   its size cap. One-off remarks go to `lean_remember` instead.
+   A rule about one area's commands or layout goes to a `paths:` rule via the `learn` skill (`--area <dir>`), keeping its size
+   cap: give it as `{text, area}` in `checklist` and the tool returns it for that. One-off remarks go to `lean_remember` instead.
 5. Manage the store with `lean_review`: `lessons-list`, `lessons-rm` (`which` = the number or a unique piece of text),
    `lessons-undo` (the last batch), `lessons-verify` (`repo` = absolute path; flags helper lines whose code path or symbol
    cannot be found; `apply: true` removes them; run it after a refactor). Nothing is deleted for good: a removed line is
    marked dropped and `lessons-undo` brings it back.
-6. Report which themes were added, which skipped, how many lines went into the store (and how many were duplicates), and
-   how many comments were excluded as the owner's.
+6. Report which themes were added, which skipped, how many lines went into the store (and how many were duplicates), which helpers were
+   refused, which lines went to an area rule, and the comment counts: the last line of the `learn` answer gives them from the `prs`
+   fetch ("comments seen N, kept K; excluded: the owner's own A, system threads B, deleted C; dropped as approval D, as typo fix E");
+   quote it, so the owner's comments and the dropped approvals and typos are never mixed up.

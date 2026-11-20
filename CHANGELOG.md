@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Added
+- **`lean_review` `learn` follow-ups.** (1) A checklist line may be `{text, area}`: a line about ONE area's commands or layout is not stored,
+  the answer returns it under "NOT stored ... run the learn skill with --area <area>" (the tool never writes a rule file: the rule caps
+  and the scripts block stay the learn skill's), a line a reviewer would check in any change stays a plain string and goes to the store;
+  the review-learn skill has the one-line test. An area that is not a folder or rule name is refused. (2) `learn` runs the helper
+  existence check of `lessons-verify` (one shared function) before it adds a helper and refuses one whose path and symbol it cannot find,
+  naming it ("refused helper X (path): path ... and symbol ... not found on HEAD"); the other helpers are added; with no repo or no commit
+  the helpers are added and the answer says they were not checked. (3) The answer ends with what the last `prs` fetch dropped (the owner's
+  own comments, system threads, deleted comments, approvals, typo fixes) next to its own result, for twelve hours after the fetch.
 - **One PR-comment fetch for GitHub and Azure DevOps, shared by the `pr` and `review-learn` skills** (`hooks/prhost.ts`, `lean_review`
   action `prs`: `project`, `pr` or `last` (default 10, at most 30), `base`, `repo`). `review-learn` was GitHub-only (`gh api user`); an
   Azure DevOps project (origin on `dev.azure.com`, `*.visualstudio.com`, or the ssh forms) got nothing. The host now comes from the origin

@@ -309,3 +309,63 @@ test('lean_review actions: lessons selects by base/head or paths through git, le
   // the record action still needs a sha
   expect((await threadTool(h.host, 't1', 'lean_review', { project: 'proj', green: true })).ok).toBe(false)
 })
+
+// ---- learn: area lines go to the rules, helpers must exist, the PR fetch's drops are reported -------------------------------------
+function learnRig() {
+  const h = fakeHost(null)
+  h.files.set(`${L}/projects.json`, JSON.stringify({ proj: { path: '/repo' } }))
+  h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ project: 'proj' }))
+  h.git.handler = a => {
+    const s = a.join(' ')
+    if (s.includes('rev-parse')) return { exitCode: a.includes('HEAD^{commit}') ? 0 : 1, stdout: 'x\n' }
+    if (s.includes('ls-tree')) return { exitCode: 0, stdout: 'src/lib/dates.ts\nsrc/api/http.ts\nREADME.md\n' }
+    return { exitCode: 1, stdout: '' } // git grep: no symbol anywhere
+  }
+  return { h, learn: (i: any) => threadTool(h.host, 't1', 'lean_review', { action: 'learn', project: 'proj', ...i }) }
+}
+
+test('learn: a line with an area is routed to that area\'s rule (not stored), a line without one goes to the store; a bad area is refused', async () => {
+  const { h, learn } = learnRig()
+  const r = await learn({ checklist: ['Before adding a date parser, search src/lib for an existing one', { text: 'Run pnpm test:api before touching handlers', area: 'services/api' }, { text: 'Generated clients live under apps/web/src/api/gen: never edit them', area: 'apps/web/' }, { text: 'Another API command line', area: 'services/api' }, { text: 'bad area line', area: '../etc' }, { text: 'plain object, no area' }] })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('added #1 review-checklist: Before adding a date parser')
+  expect(r.text).toContain('added #2 review-checklist: plain object, no area')
+  expect(r.text).toContain('3 line(s) name an area: NOT stored')
+  expect(r.text).toContain('run the learn skill with --area <area>')
+  expect(r.text).toContain('  area services/api:\n    - Run pnpm test:api before touching handlers\n    - Another API command line')
+  expect(r.text).toContain('  area apps/web:\n    - Generated clients live under apps/web/src/api/gen')
+  expect(r.text).toContain('NOT added: area "../etc" is not a folder or rule name')
+  const stored = (await readLessons(h.host, 'proj')).map(l => l.text)
+  expect(stored).toHaveLength(2)
+  expect(stored.join('\n')).not.toContain('pnpm test:api')
+})
+
+test('learn: a helper whose path and symbol are not in the code is refused by name, the others are added; no repo = added and said unchecked', async () => {
+  const { h, learn } = learnRig()
+  const r = await learn({ helpers: [{ name: 'parseDate', where: 'src/lib/dates.ts', what: 'parses dates' }, { name: 'ghostHelper', where: 'src/gone/ghost.ts', what: 'was removed long ago' }, { name: 'fetchJson', where: 'src/api/http.ts', what: 'GET with retries' }] })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('added #1 shared-helpers: parseDate (src/lib/dates.ts)')
+  expect(r.text).toContain('added #2 shared-helpers: fetchJson (src/api/http.ts)')
+  expect(r.text).toContain('refused helper ghostHelper (src/gone/ghost.ts): path src/gone/ghost.ts and symbol ghostHelper not found on HEAD')
+  expect((await readLessons(h.host, 'proj')).map(l => l.text).join('\n')).not.toContain('ghostHelper')
+  // a symbol that exists elsewhere in the code is enough (git grep finds it): the helper moved, the path is wrong
+  h.git.handler = a => (a.includes('grep') ? { exitCode: 0, stdout: '' } : a.join(' ').includes('rev-parse') ? { exitCode: a.includes('HEAD^{commit}') ? 0 : 1, stdout: 'x\n' } : { exitCode: 0, stdout: 'README.md\n' })
+  expect((await learn({ helpers: [{ name: 'movedHelper', where: 'src/old/place.ts', what: 'now elsewhere' }] })).text).toContain('added #3 shared-helpers: movedHelper')
+  // not a registered project and no repo: nothing to check against
+  const lone = await threadTool(h.host, 't1', 'lean_review', { action: 'learn', project: 'other', helpers: [{ name: 'someHelper', where: 'src/x.ts', what: 'does x' }] })
+  expect(lone.text).toContain('added #1 shared-helpers: someHelper')
+  expect(lone.text).toContain('helpers were NOT checked against the code (no repo')
+  // a repo without a commit is no check either
+  h.git.handler = () => ({ exitCode: 1, stdout: '' })
+  expect((await learn({ helpers: [{ name: 'otherHelper', where: 'src/y.ts', what: 'does y' }] })).text).toContain('the repo has no commit')
+})
+
+test('learn reports what the last PR fetch dropped (owner, system, deleted, approvals, typos) next to its own result, only while fresh', async () => {
+  const { h, learn } = learnRig()
+  expect((await learn({ checklist: ['Check the retry limit of every new client call'] })).text).not.toContain('comments seen')
+  h.files.set(`${L}/proj/pr-fetch.json`, JSON.stringify({ at: h.clock.t - 60_000, host: 'azure', prs: [11, 12], counts: { seen: 40, owner: 6, system: 20, deleted: 2, approvals: 5, typos: 3, kept: 4 } }))
+  const r = await learn({ checklist: ['Never log whole request objects in handlers'] })
+  expect(r.text).toContain("from 2 PR(s): comments seen 40, kept 4; excluded: the owner's own 6, system threads 20, deleted 2; dropped as approval 5, as typo fix 3")
+  h.files.set(`${L}/proj/pr-fetch.json`, JSON.stringify({ at: h.clock.t - 13 * 3_600_000, host: 'azure', prs: [11], counts: { seen: 1 } }))
+  expect((await learn({ checklist: ['Prefer the shared logger over console calls'] })).text).not.toContain('comments seen') // too old: another round's numbers
+})
