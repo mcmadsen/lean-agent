@@ -3,23 +3,6 @@
 ## Unreleased
 
 ### Added
-- **A detail pane per thread** (`lean-agent-thread-<tN>`, `hooks/threadpane.tsx` + `hooks/threaddetail.ts`): brief, goal, project,
-  model/effort, state, branch and worktree, the diff stat against the base, the review record for HEAD (green only when its HMAC
-  verifies, passes, open findings), cost today and total, the last 10 reports (expandable), queued messages, and Open session / Restart /
-  Close (two presses) / Refresh. Several panes may be open at once; a closed or missing thread shows one line. Exported for the desk pane's
-  buttons: `openThreadPane($ | hostOf($), surface, tN)`.
-- **A new-thread form** (`lean-agent-new-thread`, `hooks/newthread.tsx`): title, project (registered or none), model and effort (each
-  "default" = left out, so `config.json` `threads.*` apply as for the tool), a multi-line brief and Start, which runs the `lean_thread new` code (no model turn) and opens the new thread's pane. Empty or too long title and brief
-  and an unregistered project are said inline before anything is created. Exported: `openNewThread($ | hostOf($), surface)`.
-- `hostOf($)` now carries `ui.open` (the two functions above open their panes through it).
-- **Desk toasts, no model** (`hooks/notify.ts`): a toast when a thread enters Needs you (approval, question, ready to push, blocked) or
-  reports done, once per event (the keys are kept in `~/.lean-agent/desk/notify-seen.json`; the first pass after an install, and the
-  time toasts are off, only record). `config.json` `notify: { toast: true, sound: false }`. `sound` is accepted and does nothing: the
-  engine plays only an audio clip the plugin bundles, and none is shipped.
-- `hooks/panelinks.ts`: the two buttons that open another pane (a thread's detail pane, the new-thread form) call
-  `openThreadPane(host, surface, id)` and `openNewThread(host, surface)` from here. Until those panes are merged the two functions are
-  stubs that say "comes in this release"; wiring them is two re-exports.
-
 ### Changed
 - **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
   budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the

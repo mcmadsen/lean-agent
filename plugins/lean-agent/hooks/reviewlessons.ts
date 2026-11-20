@@ -85,7 +85,7 @@ export const stem = (w: string): string => {
   return s
 }
 const split = (t: string) => t.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_.$-]+/g, ' ')
-const wordsOf = (t: string): string[] => (split(t).match(/[A-Za-z][A-Za-z0-9]{2,}/g) ?? []).map(stem).filter(w => w.length >= 3 && !STOP.has(w))
+export const wordsOf = (t: string): string[] => (split(t).match(/[A-Za-z][A-Za-z0-9]{2,}/g) ?? []).map(stem).filter(w => w.length >= 3 && !STOP.has(w))
 const isStrong = (k: string) => /[A-Z_.\/]/.test(k)
 const SYMBOL = /\b[a-z]+[A-Z][A-Za-z0-9]*\b|\b[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*\b|\b[a-z][a-z0-9]*_[a-z0-9_]+\b/g
 // keywords of a lesson: symbols and file names as they are written (strong), plus up to 10 plain word stems (weak, lowercase)
@@ -106,10 +106,10 @@ export function helperParts(text: string): { name: string; where: string; what: 
   const m = /^(.+?) \((.+)\)(?::\s*(.*))?$/.exec(text)
   return m ? { name: m[1]!.trim(), where: m[2]!.trim(), what: (m[3] ?? '').trim() } : { name: text.split(/[\s(:]/)[0] ?? '', where: '', what: '' }
 }
-const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-const jaccard = (a: Set<string>, b: Set<string>) => { let n = 0; for (const x of a) if (b.has(x)) n++; const u = a.size + b.size - n; return u ? n / u : 0 }
-const wset = (t: string) => new Set(t.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])
-const similar = (a: string, b: string, cut = 0.6) => jaccard(wset(a), wset(b)) >= cut
+export const norm = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+export const jaccard = (a: Set<string>, b: Set<string>) => { let n = 0; for (const x of a) if (b.has(x)) n++; const u = a.size + b.size - n; return u ? n / u : 0 }
+export const wset = (t: string) => new Set(t.toLowerCase().match(/[a-z0-9]{3,}/g) ?? [])
+export const similar = (a: string, b: string, cut = 0.6) => jaccard(wset(a), wset(b)) >= cut
 
 // a lesson from a line; paths and keywords are derived (a helper's own `where` is its path)
 export function makeLesson(id: number, family: Family, text: string, o: { source: string; added: string; topic?: string; batch?: string }): Lesson {
@@ -127,7 +127,7 @@ export async function readLessons(h: Host, project: string): Promise<Lesson[]> {
 }
 const writeLessons = async (h: Host, home: string, project: string, all: Lesson[]) => atomicWrite(h, lessonFile(home, project), all.map(l => JSON.stringify(l)).join('\n') + (all.length ? '\n' : ''))
 const live = (all: Lesson[]) => all.filter(l => !l.dropped)
-const removedByUser = (all: Lesson[]) => all.filter(l => l.dropped && l.droppedWhy === 'removed') // (a line the user removed is not learned again)
+const removedByUser = (all: Lesson[]) => all.filter(l => l.dropped && (l.droppedWhy === 'removed' || l.droppedWhy === 'upstreamed')) // (a line the user removed, or that now lives in the repo's own files, is not learned again)
 const nextId = (all: Lesson[]) => all.reduce((m, l) => Math.max(m, l.id), 0) + 1
 
 type Meta = { lastImport?: number; imported?: number; from?: string[] }

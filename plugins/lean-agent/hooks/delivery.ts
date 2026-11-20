@@ -10,6 +10,7 @@ import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
+import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
@@ -133,11 +134,11 @@ export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_compare', description: 'Compare a project clean vs as a lean-agent thread: mode task runs one read-only task both ways and a haiku judge compares them (costs money: only when the brief says so); overhead and history as lean_doctor compare.', inputSchema: obj({ project: { type: 'string' }, mode: { type: 'string', enum: ['task', 'overhead', 'history'] }, task: { type: 'string', description: 'task mode: the read-only task' }, model: { type: 'string' }, maxUsd: { type: 'number', description: 'task mode: cap per run (default 1)' } }, ['mode']) },
   {
     name: 'lean_rules',
-    description: 'Learned project rules: check (dry run: lines and chars per rule against the caps, before any sync), sync (copy rules and recipe skills into a checkout, or with all: true into every worktree of the project; one summary line per checkout), stale (areas to re-learn), record (area, globs, sha, relies, covered_by after learning; lines are counted from the file), verify (do the names a rule mentions still exist in the repo), stats (which rules load).',
+    description: 'Learned project rules: check (dry run: lines and chars per rule against the caps, before any sync), sync (copy rules and recipe skills into a checkout, or with all: true into every worktree of the project; one summary line per checkout), stale (areas to re-learn), record (area, globs, sha, relies, covered_by after learning; lines are counted from the file), verify (do the names a rule mentions still exist in the repo), stats (which rules load), pr-plan (no model: the plan for a PR that improves the project\'s own CLAUDE.md files and .claude/rules from what lean-agent learned: files and tokens per session, sections to move to path rules, rules to add with their load evidence, stale and duplicate lines, recurring missing context; written to ~/.lean-agent/<project>/rules-pr/plan-<date>.json and .md), retire-upstreamed (lean rules and review lessons whose text now lives in the repo files stop loading from ~/.lean-agent, kept in a backup; a dry run unless apply: true; ref e.g. origin/main checks the merged state).',
     inputSchema: obj({
-      action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats', 'check', 'verify'] },
+      action: { type: 'string', enum: ['sync', 'stale', 'record', 'stats', 'check', 'verify', 'pr-plan', 'retire-upstreamed'] },
       project: { type: 'string' },
-      repo: { type: 'string', description: 'absolute path of the checkout or worktree (sync, stale, verify)' },
+      repo: { type: 'string', description: 'absolute path of the checkout or worktree (sync, stale, verify; pr-plan and retire-upstreamed default to the registered project path)' },
       area: { type: 'string', description: 'record: the area (its rule file is rules/<area>.md); verify: only this rule' },
       globs: { type: 'array', items: { type: 'string' }, description: 'record: the paths the area covers (several globs wire an area to the ones it depends on)' },
       sha: { type: 'string' },
@@ -146,6 +147,12 @@ export const THREAD_TOOLS: Tool[] = [
       covered_by: { type: 'string', description: 'record: the repo doc that already covers this area: no rule file, never stale' },
       all: { type: 'boolean', description: 'sync: every worktree of the project, not just repo' },
       verbose: { type: 'boolean', description: 'sync: every path copied/removed/skipped, as JSON' },
+      ref: { type: 'string', description: 'pr-plan, retire-upstreamed: read the repo files from this git ref (e.g. origin/main) instead of the working tree' },
+      apply: { type: 'boolean', description: 'retire-upstreamed: really retire (default: a dry run that lists what would be)' },
+      min_sessions: { type: 'number', description: 'pr-plan: sessions a lean rule must have loaded in to be proposed (default 3, config.json rulesPr.minSessions)' },
+      min_days: { type: 'number', description: 'pr-plan: days between its first and last load (default 7)' },
+      min_gaps: { type: 'number', description: 'pr-plan: reports that make a missing-context cluster recurring (default 2)' },
+      window_days: { type: 'number', description: 'pr-plan: how far back loads and reports count (default 90)' },
     }, ['action']),
   },
   {
@@ -399,7 +406,14 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (i.action === 'stats') return { ok: true, text: JSON.stringify(await rulesStats(h, project)) }
       if (i.action === 'check') {
         const lim = Number(((await readConfig(h, home)) as any)?.learn?.maxExplorers)
-        return { ok: true, text: [...(await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines, ...(await lessonLines(h, project).catch(() => [] as string[]))].join('\n') }
+        return { ok: true, text: [...(await checkRules(h, project, Number.isInteger(lim) && lim > 0 ? lim : MAX_EXPLORERS)).lines, ...(await lessonLines(h, project).catch(() => [] as string[])), ...(await dupSummary(h, project).catch(() => [] as string[]))].join('\n') }
+      }
+      if (i.action === 'pr-plan' || i.action === 'retire-upstreamed') {
+        if (repo && !repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo as an absolute path (or none: the registered project path is used)` }
+        const given = { repo: repo || undefined, ref: str(i.ref) || undefined }
+        if (i.action === 'retire-upstreamed') return retireUpstreamed(h, project, { ...given, apply: i.apply === true })
+        const n = (v: unknown) => (typeof v === 'number' ? v : undefined)
+        return prPlanTool(h, project, { ...given, minSessions: n(i.min_sessions), minDays: n(i.min_days), minGaps: n(i.min_gaps), windowDays: n(i.window_days) })
       }
       if (i.action === 'record') {
         if (!str(i.area) || !Array.isArray(i.globs) || !str(i.sha)) return { ok: false, text: 'record needs area, globs and sha' }
