@@ -26,7 +26,7 @@ Python.
 |---|---|
 | **Desk** | A local Claude desktop session in `~/lean-agent-desk`. Its generated `CLAUDE.md` makes it a router: it never reads code or edits files, it starts and talks to threads |
 | **Threads** | Background sessions (`claude --bg`), one folder each under `~/.lean-agent/threads/tN`, visible in the Claude app. A thread works in its own git worktree and reports back with `lean_report` / `lean_ask` / `lean_goal` |
-| **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when a cheaper one failed; read-only readers and a reviewer |
+| **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when the user asks for it and approves it in the pane; read-only readers and a reviewer (always sonnet) |
 | **Pane** | The desk's side pane: what needs you, one card per thread, the inbox by thread, spend and the desk's context at a glance ([The pane](#the-pane)) |
 | **Opener** | A login item that waits for the Claude app (never launches it) and opens a new session in the desk folder through the app's `claude://code/new?folder=…` link (`open`; `claude --desktop` only as the last fallback) |
 | **Rules** | What the `learn` skill writes per project: short `paths:`-scoped rules that load only when a matching file is read |
@@ -106,10 +106,12 @@ Two more panes open beside the desk pane (the desk pane's buttons call them; `op
   and the buttons **Open session** (stops an idle process, then the `claude://resume` link, the same path as "Open tN"), **Restart** and
   **Close** (press twice; Close never touches a working thread) and **Refresh**. A closed or missing thread shows one short line. Data is
   read through short caches (session listing 8 s, git 15 s, cost 30 s), so many open panes do not multiply the work.
-- **New thread** (`lean-agent-new-thread`): a title field, a project (the registered ones or none), model (default, haiku, sonnet, opus),
+- **New thread** (`lean-agent-new-thread`): a title field, a project (the registered ones or none), model (default, haiku, sonnet, opus;
+  opus is labelled "needs your Approve press"),
   effort (default, high, medium, low; "default" leaves the field out, so sonnet / high or `config.json` `threads.model` /
   `threads.effort` apply exactly as for the tool), a multi-line brief (the engine's `Input` takes `rows`) and **Start**. Start runs the tool's own `new`
-  code, no model turn, then opens the new thread's pane. An empty title or brief, a title or brief that is too long and a project that
+  code, no model turn, then opens the new thread's pane. Picking opus shows a note and a Reason field (why sonnet is not enough);
+  Start then creates the thread but starts no session: the request waits in "Needs you" (see "Expensive models"). An empty title or brief, a title or brief that is too long and a project that
   is no longer registered are said inline, before any folder exists; a failed start keeps what you typed.
 - Both are desk-only (elsewhere they say so). The pane's open/fold state is kept in the mod, not in `$.state`, so a mod reload folds it again.
 
@@ -182,16 +184,30 @@ Agent definitions in `plugins/lean-agent/agents/`:
 |---|---|
 | `lean-agent:worker-haiku` | small mechanical edits, renames, formatting, simple lookups. Use first for anything routine |
 | `lean-agent:worker-sonnet` | ordinary implementation, tests, bug fixes (default) |
-| `lean-agent:worker-opus` | hard design or debugging, only after a cheaper worker failed |
+| `lean-agent:worker-opus` | hard design or debugging, only when the user asks for it; never a default, and refused unless the user approved opus for that thread in the pane |
 | `lean-agent:reader-haiku`, `lean-agent:reader-sonnet` | read-only lookup and analysis |
 | `lean-agent:reviewer` | read-only review of a diff |
 | `lean-agent:explorer` | explores one area for the `learn` skill |
 | `lean-agent:auditor` | read-only audit of one candidate script (`scripts` skill) |
 
 Defaults (mistakes are expensive where the work happens): threads run on sonnet / effort high (`config.json` `threads.model` /
-`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is opus / high (`config.json` `desk.model` / `desk.effort` override);
+`threads.effort` override; `lean_thread new|start` `model` / `effort` override per thread); the desk is sonnet / high again (the opus pin of 1.0.10 and 1.0.11 is reverted; `lean_doctor fix` replaces it; a `config.json` `desk.model` / `desk.effort` you set wins);
 `worker-sonnet`, `worker-opus` and `reader-sonnet` run at effort medium (a worker does one briefed task; the thread that briefs it
 carries the reasoning), `reviewer` and `auditor` at high (a missed finding costs more than the tokens), the haiku agents and the explorer at low.
+
+**Expensive models.** Opus (or anything that is not haiku or sonnet: a deny-by-default test, so fable and unknown names count) needs
+your approval, and only your press in the desk pane gives it; no `lean_thread`, `lean_doctor` or `lean_script` action, no `config.json`
+value (a session can write the lean-agent folder) and no message can. `lean_thread new|start|reopen|restart|resume` that asks for one,
+with a reason, does NOT start the thread: the request (thread, model, effort, reason) is a card in "Needs you" with **Approve** and
+**Deny** (two presses each) and **Start on sonnet instead**, and the reply tells the desk to ask you to press Approve. Approve starts it
+on that model; Deny, or no answer, leaves it unstarted. Inside sessions the guard refuses an Agent call to `worker-opus` or to any agent
+whose model resolves to an expensive one, an Agent `model` override to one, a Bash `claude ... --model <x>` (or `-m`), a `lean_compare`
+on one and a review on opus without your approval ("opus needs the user's approval: report it and stop"; the thread reports blocked, and the
+refusal is a card to approve or deny). An approval is signed (HMAC, the review key in the mod's own store), for ONE thread (or the desk)
+and ONE model family, ends when the thread closes and after 24 h at most, and is logged in the thread's `history.jsonl` with the time and
+what was approved. A desk the app started on an expensive model is switched to sonnet / high at start; when that cannot be done a red
+"Needs you" row says so. Your own `/model` or the app's menu is your choice and is never blocked. `lean_doctor stats` shows the opus
+share of the window's spend with the threads on it, and `check` has a FIX row when opus is over 40 % of the last 7 days' spend.
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
@@ -309,9 +325,14 @@ reviewer a path-less `git diff` loads `_project.md` and the rules written for th
   Later reviews of that branch are told and a matching finding is left out, on later commits too; a decline never turns a verdict
   green by itself (the open findings are what the gate counts).
 - **Second opinion and model**: for a new abstraction or a big diff (3+ new symbols, 2+ new files) a cheap `reader-haiku` search-only
-  pass (or 12+ changed files with something new in them) looks for existing code first, and the main reviewer must confirm or reject each candidate. The reviewer model is chosen by
-  risk and printed with the reason: `opus` for security, concurrency, migrations/schema/storage, UI strings/locales, public API, config
-  formats, removed public symbols or ~800+ changed lines; `sonnet` otherwise and on every re-review (`config.json` `review.model` wins).
+  pass (or 12+ changed files with something new in them) looks for existing code first, and the main reviewer must confirm or reject each candidate. The reviewer is **always sonnet**
+  and `prepare` prints who reviews and why: for a high-risk diff (security, concurrency, migrations/schema/storage, UI strings/locales,
+  public API, config formats, removed public symbols or ~800+ changed lines) `reviewer: sonnet x2 (risk: ...)`, TWO independent sonnet
+  passes whose JSON blocks are merged like 0.45's `review --runs 2` (`lean_review` `record` with `reviews: [a, b]`, or `merge` first:
+  findings matched by category, file and wording, `[2/2]` when both found them, `[1/2]` otherwise, the union counts, so a major only one
+  run found still blocks; a high-risk diff with one block, two identical blocks or a hand-written `runs: 2` is never green);
+  `reviewer: sonnet (...)` otherwise and on every re-review. Opus reviews only when `config.json` `review.model` is `opus` or the brief
+  explicitly asks AND you approved it for that thread in the pane; without that approval sonnet runs and a request waits in "Needs you".
 - **Re-review**: pass 2+ gives the reviewer only the open findings, the declines and the diff since the last reviewed sha (plus the
   reuse, scope and platform passes on the files changed since). An earlier round's `reuse` and `coverage` entries still count (kept in
   the mod's own store, which a session cannot write), an earlier blocker or major must be listed again or named in `fixed`, and a new

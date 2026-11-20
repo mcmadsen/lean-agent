@@ -23,7 +23,7 @@ function setup(o: { thread?: Record<string, unknown>; inbox?: string | null; row
   h.clock.t = 10_000_000
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
-  h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'medium', ...o.thread }))
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'haiku', effort: 'medium', ...o.thread }))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
   if (o.inbox !== null) h.files.set(INBOX, o.inbox ?? DONE)
   const st = { rows: [{ sessionId: SID, name: 't1 · fix login', cwd: T1, status: 'idle', startedAt: 1, pid: 42, id: 'abcd1234', ...o.row }] as any[] }
@@ -164,7 +164,7 @@ test('after finish a send starts a NEW session with the handover, never a resume
   expect(starts().length).toBe(1)
   expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
   const argv = starts()[0]!
-  expect(argv).toContain('opus') // the thread's recorded model and effort
+  expect(argv).toContain('haiku') // the thread's recorded model and effort
   const prompt = argv[argv.length - 1]!
   expect(prompt).toContain('fix the login bug') // the brief
   expect(prompt).toContain('branch fix-x, worktree /w, last commit abc1234') // the done report
@@ -248,7 +248,7 @@ test('restart: the session is stopped and a NEW one starts with the handover, sa
   expect(starts().length).toBe(1)
   expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
   const argv = starts()[0]!
-  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'opus', '--effort', 'medium'])
+  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'haiku', '--effort', 'medium'])
   const prompt = argv[argv.length - 1]!
   for (const w of ['Restarted from the pane.', 'fix the login bug', 'ship the login fix', 'last commit abc1234', 'remember the staging url']) expect(prompt).toContain(w)
   expect(thread().sid).toBe(NEW)

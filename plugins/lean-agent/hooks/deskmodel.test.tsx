@@ -28,7 +28,7 @@ function engine(rows: unknown, o: { deny?: string; throws?: boolean; models?: st
     },
   }
 }
-// most specs here run a SONNET desk pin (config.json `desk`, which wins over the default); the default opus pin has its own specs below
+// most specs here run a SONNET desk pin through config.json `desk` (which wins over the default); the default pin has its own specs below
 const SONNET_DESK = JSON.stringify({ desk: { model: 'sonnet', effort: 'high' } })
 const world = (conf: string | null = SONNET_DESK) => { const h = fakeHost(null); h.clock.t = NOON; if (conf) h.files.set(`${L}/config.json`, conf); return h }
 const notice = (h: any, k: string) => h.files.get(`${L}/notices/${k}.txt`)
@@ -62,28 +62,33 @@ test('a model the app chose is set through the Model and Effort rows once; the n
   expect(e4.sets[0]).toEqual({ key: 'model', value: 'sonnet[1m]' }) // no exact option: the family
 })
 
-test('the DEFAULT desk pin is opus / high: a sonnet session is set to Opus, or the row says to pick Opus; a desk already on Opus is left alone', async () => {
+test('the DEFAULT desk pin is sonnet / high (the 1.0.10 opus pin is reverted): an opus or fable session is set to Sonnet, or the row says to pick Sonnet; a desk already on Sonnet is left alone; config.json desk.model wins', async () => {
   const SONNET = 'claude-sonnet-5-5'
   const h = world(null) // no config.json: the default
-  const e = engine([modelRow({ value: 'sonnet' }), effortRow()], { models: [OPUS] })
-  const r = await checkDeskModel(h.host, e.engine, SONNET, true)
+  const e = engine([modelRow(), effortRow()], { models: [SONNET] })
+  const r = await checkDeskModel(h.host, e.engine, OPUS, true)
   expect(r.kind).toBe('set')
-  expect(e.sets).toEqual([{ key: 'model', value: 'opus' }, { key: 'effort', value: 'high' }])
-  expect(r.text).toBe(`the desk was on ${SONNET} (the app chose it); lean-agent set opus / high through /config (the app may keep that as your default for new sessions)`)
+  expect(e.sets).toEqual([{ key: 'model', value: 'sonnet' }, { key: 'effort', value: 'high' }])
+  expect(r.text).toBe(`the desk was on ${OPUS} (the app chose it); lean-agent set sonnet / high through /config (the app may keep that as your default for new sessions)`)
+  // another expensive family is switched too (a deny-by-default rule, not a name list)
+  const f = world(null)
+  const fe = engine([modelRow(), effortRow()], { models: [SONNET] })
+  expect((await checkDeskModel(f.host, fe.engine, 'claude-fable-5-2', true)).kind).toBe('set')
+  expect(fe.sets[0]).toEqual({ key: 'model', value: 'sonnet' })
   const u = world(null)
   const none = engine([effortRow()])
-  const r2 = await checkDeskModel(u.host, none.engine, SONNET, true)
+  const r2 = await checkDeskModel(u.host, none.engine, OPUS, true)
   expect(r2.kind).toBe('unsettable')
-  expect(r2.text).toBe("the desk runs claude-sonnet-5-5; pick Opus in the app's model menu (lean-agent pins opus / high)")
-  expect(notice(u, 'desk-model')).toContain('pick Opus in the app')
+  expect(r2.text).toBe("the desk runs claude-opus-5-5; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)")
+  expect(notice(u, 'desk-model')).toContain('pick Sonnet in the app')
   const ok = world(null)
-  const same = engine([modelRow(), effortRow({ value: 'high' })])
-  expect((await checkDeskModel(ok.host, same.engine, OPUS, true)).kind).toBe('match')
+  const same = engine([modelRow({ value: 'sonnet' }), effortRow({ value: 'high' })])
+  expect((await checkDeskModel(ok.host, same.engine, SONNET, true)).kind).toBe('match')
   expect(same.sets).toEqual([])
-  // a config.json desk.model wins over the default: sonnet configured, a sonnet session is on the pin
-  const c = world(JSON.stringify({ desk: { model: 'sonnet' } }))
-  const cs = engine([modelRow({ value: 'sonnet' }), effortRow({ value: 'high' })])
-  expect((await checkDeskModel(c.host, cs.engine, SONNET, true)).kind).toBe('match')
+  // a config.json desk.model the user set wins over the default: opus configured, an opus session is on the pin
+  const c = world(JSON.stringify({ desk: { model: 'opus' } }))
+  const cs = engine([modelRow({ value: 'opus' }), effortRow({ value: 'high' })])
+  expect((await checkDeskModel(c.host, cs.engine, OPUS, true)).kind).toBe('match')
   expect(cs.sets).toEqual([])
 })
 

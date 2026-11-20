@@ -20,7 +20,7 @@ import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
 import { checkDeskModel } from './deskmodel'
-import { MODELS, modelFamily } from './models'
+import { DESK_FAMILIES, modelFamily } from './models'
 import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
@@ -140,9 +140,9 @@ const SCHEMA = {
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
-    reason: { type: 'string', description: 'approve-push: why, in a few words' },
+    reason: { type: 'string', description: 'approve-push: why, in a few words. new/start/reopen/restart/resume with an expensive model (opus): why sonnet is not enough (required; the thread does NOT start, the request waits in the pane for the user\'s Approve)' },
     pr: { type: 'object', description: 'push: open a pull request after the push succeeded (gh pr create, or az repos pr create for an Azure DevOps remote, from the thread\'s worktree)', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string', description: 'default: the repo\'s default branch' }, draft: { type: 'boolean' } }, required: ['title'] },
-    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start: default sonnet' },
+    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start/reopen/restart: default sonnet. Never choose opus yourself: only when the user asked for it, with a reason; it still needs the user\'s Approve press in the pane' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
     on: { type: 'boolean', description: 'project-private: true or false; profile: false removes the project profile' },
@@ -500,7 +500,7 @@ const engineOf = ($: any): Engine => ({
 async function deskModelCheck($: any, fromRequest = ''): Promise<void> {
   try {
     const sm = String((await engineOf($).model().catch(() => '')) ?? '')
-    const running = (MODELS as readonly string[]).includes(modelFamily(sm)) ? sm : fromRequest
+    const running = DESK_FAMILIES.includes(modelFamily(sm)) ? sm : fromRequest
     if (!running) return
     const apply = !deskModelTried
     if (!apply && running === deskModelSeen) return
@@ -783,7 +783,7 @@ export const register: Register = on => {
       if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: t.name, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
       // lean_compare needs the plugin root (the thread-shaped folder's CLAUDE.md, --plugin-dir for a dev copy): answered here
       const out = t.name === 'lean_compare'
-        ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread')
+        ? await compare(hostOf($), $.plugin.root, { project: str(e.project) || str((await readJson<{ project?: string }>(hostOf($), `${threadsDir(await homeDir(hostOf($)))}/${role.id}/thread.json`, {})).project), mode: str(e.mode) || 'task', task: typeof e.task === 'string' ? e.task : '', model: str(e.model) || undefined, maxUsd: typeof e.maxUsd === 'number' ? e.maxUsd : undefined }, 'thread', role.id)
         // every other tool: a done / blocked report and every question also goes straight to the desk's session (the inbox keeps it either way)
         : await threadTool(hostOf($), role.id, t.name, e, (sid, text) => $.session.send({ to: { sessionId: sid }, text }))
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
@@ -804,7 +804,7 @@ export const register: Register = on => {
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
     const atype = await agentType($, e.agentId, e)
-    const why = await decide(host, { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION }, e)
+    const why = await decide(host, { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION, root: String($.plugin.root ?? '') }, e)
     if (why) {
       await logRefusal(host, { text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }).catch(() => undefined) // for the feedback export
       return { deny: why } as any

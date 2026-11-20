@@ -6,7 +6,8 @@ import { resetLocks } from './threads'
 import { resetViewCache } from './view'
 import { resetThreadCache } from './threaddetail'
 import { resetThreadPanes } from './threadpane'
-import { BRIEF_ROWS, DEFAULT, EFFORT_CHOICES, MODEL_CHOICES, NEW_THREAD_PANE, NO_PROJECT, openNewThread, resetNewThread, validate } from './newthread'
+import { APPROVAL_NOTE, BRIEF_ROWS, DEFAULT, EFFORT_CHOICES, MODEL_CHOICES, NEW_THREAD_PANE, NO_PROJECT, openNewThread, resetNewThread, validate } from './newthread'
+import { listRequests } from './expensive'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = decodeURIComponent(new URL('..', (import.meta as any).url).pathname).replace(/\/$/, '')
@@ -30,8 +31,13 @@ function world(on: any, projects: Record<string, unknown> = { app: { path: '/r/a
   // the engine's answer to $.ui.open: placed; what was opened is kept for the specs
   const opened: { id: string; title?: string }[] = []
   on('ui.open', (_: any, e: any) => { opened.push({ id: e.id, title: e.title }); return { value: { isPlaced: true } } })
-  return Object.assign(h, { opened })
+  // the mod's own store beneath the pane (the model requests live in it): a map the specs can read
+  const kv = new Map<string, unknown>()
+  on('store.get', (_: any, e: any) => ({ value: kv.get(e.key) }))
+  on('store.set', (_: any, e: any) => { kv.set(e.key, e.value); return { value: undefined } })
+  return Object.assign(h, { opened, kv })
 }
+const requestsIn = (kv: Map<string, unknown>) => listRequests({ store: { get: async (k: string) => kv.get(k), set: async () => undefined } } as any)
 const threadsMade = (h: any) => [...h.files.keys()].filter((k: string) => /\/threads\/t\d+\/thread\.json$/.test(k))
 const fill = async (ui: any, title: string, brief: string) => {
   await ui.input({ key: 'title', text: title, kind: 'change' })
@@ -44,7 +50,9 @@ test('validate: empty or blank title and brief, a title or brief too long, an un
   expect(validate({ title: 'x'.repeat(81), brief: 'y', model: 'sonnet', effort: 'high' })[0]).toContain('too long')
   expect(validate({ title: 'x', brief: 'y'.repeat(20_001), model: 'sonnet', effort: 'high' })[0]).toContain('too long')
   expect(validate({ title: 'x', brief: 'y', model: 'gpt', effort: 'max' })).toEqual(['Unknown model gpt.', 'Unknown effort max.'])
-  expect(validate({ title: 'x', brief: 'y', model: 'opus', effort: 'low' })).toEqual([])
+  expect(validate({ title: 'x', brief: 'y', model: 'opus', effort: 'low' })).toEqual(['Reason is empty: opus needs your approval, say why sonnet is not enough.']) // opus needs a reason (the Approve press follows in the pane)
+  expect(validate({ title: 'x', brief: 'y', model: 'opus', effort: 'low', reason: 'a hard migration' })).toEqual([])
+  expect(validate({ title: 'x', brief: 'y', model: 'haiku', effort: 'low' })).toEqual([])
 })
 
 test('the form draws: title, project (none + registered), model (sonnet default), effort (high default), a multi-line brief, Start', async ($, on) => {
@@ -115,15 +123,15 @@ test('Start: the lean_thread `new` path with the chosen project, model, effort a
   const ui = await $.ui.mount(PANE as any)
   await fill(ui, '  add a widget  ', 'Add the widget.\nKeep it small.')
   await ui.select({ key: 'project', value: 'app' })
-  await ui.select({ key: 'model', value: 'opus' })
+  await ui.select({ key: 'model', value: 'haiku' })
   await ui.select({ key: 'effort', value: 'medium' })
   await ui.press({ key: 'start' })
   expect(threadsMade(h)).toEqual([`${THREADS}/t1/thread.json`])
   const t = JSON.parse(h.files.get(`${THREADS}/t1/thread.json`)!)
-  expect([t.title, t.project, t.model, t.effort, t.sid]).toEqual(['add a widget', 'app', 'opus', 'medium', SID])
+  expect([t.title, t.project, t.model, t.effort, t.sid]).toEqual(['add a widget', 'app', 'haiku', 'medium', SID])
   expect(h.files.get(`${THREADS}/t1/brief.md`)).toBe('Add the widget.\nKeep it small.\n')
   const bg = h.claudeCalls().find(a => a[0] === '--bg')!
-  expect(bg).toEqual(['--bg', '-n', 't1 · add a widget', '--model', 'opus', '--effort', 'medium', '--', 'Add the widget.\nKeep it small.'])
+  expect(bg).toEqual(['--bg', '-n', 't1 · add a widget', '--model', 'haiku', '--effort', 'medium', '--', 'Add the widget.\nKeep it small.'])
   expect(h.opened.filter(p => p.id !== 'lean-agent')).toEqual([{ id: 'lean-agent-thread-t1', title: 't1 · add a widget' }]) // the new thread's own pane (the desk opened its own at the start)
   expect(await text(ui, /t1 started/)).toBe(true)
   expect((await ui.find({ key: 'title' }))?.props.value).toBe('')
@@ -142,10 +150,10 @@ test('Start on "default" leaves model and effort out: config.json threads.model 
   expect([t.model, t.effort]).toEqual(['haiku', 'medium'])
   expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'medium'])
   await fill(ui, 'pinned one', 'do it')
-  await ui.select({ key: 'model', value: 'opus' }) // a choice made in the form beats the config
+  await ui.select({ key: 'model', value: 'sonnet' }) // a choice made in the form beats the config
   await ui.press({ key: 'start' })
   const u = JSON.parse(h.files.get(`${THREADS}/t2/thread.json`)!)
-  expect([u.model, u.effort]).toEqual(['opus', 'medium'])
+  expect([u.model, u.effort]).toEqual(['sonnet', 'medium'])
   await ui.unmount()
 })
 
@@ -177,6 +185,34 @@ test('Start with the defaults and no project: sonnet / high, no project; a faili
   expect(await text(ui, /claude --bg failed: no capacity/)).toBe(true)
   expect(h.opened.some(p => p.id === 'lean-agent-thread-t2')).toBe(false)
   expect((await ui.find({ key: 'title' }))?.props.value).toBe('second') // what was typed stays for another try
+  await ui.unmount()
+})
+
+test('picking opus shows that it needs the Approve press and asks for a reason; Start files a request, creates the thread and starts NO session', async ($, on) => {
+  const h = world(on)
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ key: 'reason' })).toBeFalsy() // sonnet (the default): nothing about approval
+  expect(await text(ui, /needs your approval/)).toBe(false)
+  const model = (await ui.find({ key: 'model' }))?.props as any
+  expect(model.options.find((o: any) => o.value === 'opus').label).toContain('needs your Approve press')
+  expect(model.options.find((o: any) => o.value === 'sonnet').label).toBe('sonnet')
+  await fill(ui, 'migrate the store', 'Move the store to the new layout.')
+  await ui.select({ key: 'model', value: 'opus' })
+  expect(await text(ui, new RegExp(APPROVAL_NOTE.slice(0, 40)))).toBe(true) // the note says nothing runs on opus before the press
+  expect(await ui.find({ key: 'reason' })).toBeTruthy()
+  await ui.press({ key: 'start' })
+  expect(await text(ui, /Reason is empty/)).toBe(true) // said inline, before anything is created
+  expect(threadsMade(h)).toEqual([])
+  await ui.input({ key: 'reason', text: 'a cross-module change that sonnet got wrong twice', kind: 'change' })
+  await ui.press({ key: 'start' })
+  expect(threadsMade(h)).toEqual([`${THREADS}/t1/thread.json`]) // the folder exists ...
+  expect(h.claudeCalls().some(a => a[0] === '--bg')).toBe(false) // ... but no session was started
+  expect(JSON.parse(h.files.get(`${THREADS}/t1/thread.json`)!).sid).toBe('')
+  const reqs = await requestsIn(h.kv)
+  expect(reqs).toHaveLength(1)
+  expect(reqs[0]).toMatchObject({ thread: 't1', model: 'opus', family: 'opus', action: 'new', origin: 'tool', state: 'pending', asked: true, reason: 'a cross-module change that sonnet got wrong twice' })
+  expect(await text(ui, /t1 NOT started on opus/)).toBe(true)
   await ui.unmount()
 })
 

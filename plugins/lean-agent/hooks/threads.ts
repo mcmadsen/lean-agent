@@ -7,6 +7,7 @@ import { goalsLocked, unconsumed, wakeMark } from './delivery'
 import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
+import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
@@ -251,10 +252,38 @@ function batchPrompt(msgs: Inbox[]): string {
   return msgs.map(m => (m.from ? `[${m.from}] ` : '') + m.text).join('\n\n')
 }
 
-async function startSession(h: Host, home: string, t: Thread, prompt: string, given: { model?: string; effort?: string } = {}, installed = ''): Promise<Out> {
+// What a call may name for a session: the model and effort, and for an expensive model the reason and the action (expensive.ts)
+type Given = { model?: string; effort?: string; reason?: string; action?: string }
+
+// An expensive model (anything but haiku or sonnet) is never started on a call's say-so: the request waits in the pane's "Needs you" for
+// the user's Approve (expensive.ts; only a press there approves). null = go on: a cheap model, or an approval for this thread is there.
+// The reason is required when the call NAMED the model (the desk chose it); one that is only the thread's recorded or configured model
+// gets a stock reason.
+const reasonProblem = (model: string, given: Given): string | null =>
+  given.model !== undefined && isExpensiveModel(model) && !(given.reason ?? '').trim()
+    ? `${familyOf(model)} needs the user's approval and a reason: call again with reason (one line: why sonnet is not enough for this work). Nothing was started.`
+    : null
+async function holdExpensive(h: Host, t: Thread, model: string, effort: string | undefined, given: Given, action: string): Promise<Out | null> {
+  if (!isExpensiveModel(model) || (await modelAllowed(h, t.id, model))) return null
+  const family = familyOf(model)
+  const bad = reasonProblem(model, given)
+  if (bad) return err(bad)
+  const asked = given.model !== undefined
+  const reason = (given.reason ?? '').trim() || `${t.id} already runs on ${model} (recorded or configured, not chosen by this call)`
+  const req = await addRequest(h, { thread: t.id, model, ...(effort ? { effort } : {}), reason, action, origin: 'tool', asked })
+  return {
+    ok: true,
+    text: `${t.id} NOT ${action === 'resume' ? 'resumed' : 'started'} on ${model}: ${family} needs the user's approval and no session may choose it. ${req.state === 'denied' ? 'The user DENIED it in the pane.' : 'Ask the user to press Approve (or Deny) on its row in the pane\'s "Needs you".'} Reason shown there: ${req.reason}. Until then nothing runs on ${family}. If the user declines, start it on sonnet instead: lean_thread start ${t.id} model sonnet (the pane has the same button). Do not start it on another model yourself.`,
+    data: { pending: true },
+  }
+}
+
+async function startSession(h: Host, home: string, t: Thread, prompt: string, given: Given = {}, installed = ''): Promise<Out> {
   const folder = tpath(home, t.id)
   const choice = await threadChoice(h, home, given, t)
   if (typeof choice === 'string') return err(choice)
+  const held = await holdExpensive(h, t, choice.model, choice.effort, given, given.action === 'new' ? 'new' : given.action === 'reopen' || given.action === 'restart' ? given.action : 'start')
+  if (held) return held
   t.model = choice.model
   t.effort = choice.effort
   // before the session exists its mod reads model, effort and needs from thread.json (at its first request): only these three are saved now,
@@ -291,6 +320,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   delete t.finished // a new session is a new piece of work
   if (installed) t.version = installed
   await save(h, home, t)
+  await dropRequests(h, t.id, 'tool').catch(() => undefined) // a session started: what a call asked for earlier (an expensive model) is moot
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
   const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + menv.lines.map(l => ` · ${l}`).join('')
@@ -320,6 +350,8 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   if (!title) return err('new needs a title')
   const pre = await threadChoice(h, home, i)
   if (typeof pre === 'string') return err(pre) // a bad model/effort stops here, before any folder exists
+  const noReason = reasonProblem(pre.model, i) // an expensive model named without a reason: nothing is created
+  if (noReason) return err(noReason)
   const project = (i.project ?? '').trim()
   if (project) {
     const bad = await unknownProject(h, project) // before any folder exists
@@ -382,7 +414,13 @@ async function inFolder(h: Host, cwd: string, own: string): Promise<boolean> {
 // from the current template when lean-agent wrote it, so the fresh session also gets today's rules.
 // `restart`: the user asked for it in the pane (or the desk on request), so a working session is stopped too (its current step is lost);
 // otherwise a working session is never touched.
-async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: { model?: string; effort?: string }, restart = false): Promise<Out> {
+async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: Given, restart = false): Promise<Out> {
+  // an expensive model without the user's approval is held BEFORE anything is stopped: a restart never loses work for a session that cannot start
+  const want = await threadChoice(h, home, given, t)
+  if (typeof want !== 'string') {
+    const held = await holdExpensive(h, t, want.model, want.effort, given, given.action ?? 'resume')
+    if (held) return held
+  }
   const listed = t.sid ? await agents(h) : []
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so no new session is started`)
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
@@ -402,7 +440,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   return r
 }
 
-async function refreshGuide(h: Host, root: string, home: string, t: Thread, given: { model?: string; effort?: string } = {}): Promise<void> {
+async function refreshGuide(h: Host, root: string, home: string, t: Thread, given: Given = {}): Promise<void> {
   const file = `${tpath(home, t.id)}/CLAUDE.md`
   try {
     const have = await h.fs.read(file)
@@ -441,6 +479,12 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (t.finished || (!opts.limit && (await doneSession(h, home, t)))) {
     const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', 'Its previous session reported done and was finished; this message starts a new session.', {})
     return fresh(r) ? { ...r, text: `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
+  }
+  // a resume continues the model the session was started on: one that is expensive and not approved (an older thread, or a model that
+  // was asked for before this rule) waits for the user, the messages stay queued
+  if (t.model) {
+    const held = await holdExpensive(h, t, t.model, t.effort, { action: 'resume' }, 'resume')
+    if (held) return held
   }
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
@@ -532,6 +576,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
         case 'wake':
           return await wake(h, home, t, { root, current: installed })
         case 'resume': {
+          // a resume that names an expensive model is held like a start on it (the model itself is the session's saved one)
+          if (i.model !== undefined && isExpensiveModel(i.model)) {
+            const held = await holdExpensive(h, t, i.model, i.effort ?? t.effort, i, 'resume')
+            if (held) return held
+          }
           // A session keeps the lean-agent code it started with. When this one ran an older version than the installed one, a resume
           // would continue old behaviour: start a fresh session with a handover instead and say why (an unrecorded version is unknown: resume).
           if (t.state === 'open' && t.sid && olderVersion(t.version, installed)) {
@@ -580,7 +629,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           // a session in the thread's own folder) and a NEW session starts with the handover (brief, goal, notes, reports, queued
           // messages, branch and worktree from the reports; the thread's recorded model and effort)
           if (t.state !== 'open') return err(`${id} is ${t.state}: reopen it first`)
-          const r = await freshSession(h, root, home, t, installed, 'Restarted from the pane.', {}, true)
+          const r = await freshSession(h, root, home, t, installed, 'Restarted from the pane.', i, true) // (a model named here is asked for like a start's)
           return fresh(r) ? { ...r, text: `${id} restarted as a new session (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {
@@ -632,6 +681,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             return { ok: false, text: `${id} is closing, not closed: claude agents failed twice, so it may still run. Stop it from the Claude app, then close ${id} again.` }
           }
           t.state = 'closed'
+          await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null

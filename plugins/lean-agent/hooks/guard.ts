@@ -5,10 +5,11 @@ import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './s
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
+import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import type { Host } from './state'
 import type { Role } from './role'
 
-export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string } // agentType/agentId: set inside a subagent loop
+export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
 export type Grants = { edit?: string[]; cmds?: string[] }
 type GrantRec = Grants & { call: string; type?: string }
@@ -711,6 +712,50 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   return null
 }
 
+// ---- expensive models ----------------------------------------------------------------------------------------------------------
+// "opus or higher needs the user's approval" (expensive.ts): a thread's or the desk's own Agent call that would run an expensive model
+// (the worker-opus type, any agent whose frontmatter model is one, a `model` override to one) and a `claude ... --model <x>` / `-m <x>`
+// in a shell command are refused unless the user approved that family for this thread in the pane. The refusal is also a request in the
+// pane's "Needs you" (the thread reports blocked). The user's own plain session is never touched: its model is the user's choice.
+async function expensiveDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  if (ctx.role.kind !== 'thread' && ctx.role.kind !== 'desk') return null
+  const scope = ctx.role.kind === 'thread' ? ctx.role.id : 'desk'
+  let model = ''
+  let what = ''
+  let action = 'agent'
+  if (e.tool === 'Agent' || e.tool === 'Task') {
+    const sub = typeof e.subagent_type === 'string' ? e.subagent_type.trim() : ''
+    const over = typeof e.model === 'string' ? e.model.trim() : ''
+    const note = typeof e.description === 'string' && e.description.trim() ? ` (${e.description.trim().replace(/\s+/g, ' ').slice(0, 100)})` : ''
+    if (/^(lean-agent:)?worker-opus$/.test(sub)) {
+      model = 'opus'
+      what = `the worker-opus agent${note}`
+    } else if (over && over.toLowerCase() !== 'inherit') {
+      if (isExpensiveModel(over)) {
+        model = over
+        what = `an Agent call with model ${over.slice(0, 40)}${note}`
+      }
+    } else if (sub) {
+      const m = await agentModel($, ctx.root ?? '', ctx.cwd, sub).catch(() => null)
+      if (m && isExpensiveModel(m)) {
+        model = m
+        what = `the ${sub.slice(0, 60)} agent runs on ${m}${note}`
+      }
+    }
+  } else if (e.tool === 'Bash') {
+    const m = claudeModelIn(String(e.command ?? ''))
+    if (m && isExpensiveModel(m)) {
+      model = m
+      what = `a shell command that starts claude on ${m.slice(0, 40)}`
+      action = 'bash'
+    }
+  }
+  if (!model || (await modelAllowed($, scope, model))) return null
+  const family = familyOf(model)
+  await addRequest($, { thread: scope, model, reason: what, action, origin: 'guard', asked: true }).catch(() => undefined)
+  return `lean-agent: ${needsApprovalText(family, what)}`
+}
+
 // ---- entry ---------------------------------------------------------------------------------------------------
 // every refusal names the code that refused: a session may run an older guard than the skills it reads say (version skew)
 export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null> {
@@ -718,6 +763,8 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
   return why && ctx.version ? `${why} (lean-agent ${ctx.version})` : why
 }
 async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  const dear = await expensiveDenial($, ctx, e)
+  if (dear) return dear
   // grants are owned by a thread's own loop: an Agent call with allow-cmd / allow-edit lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''

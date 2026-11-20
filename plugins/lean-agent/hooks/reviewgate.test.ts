@@ -5,7 +5,9 @@ import { greenReview } from './reviews'
 import { enforce, isDeclined, normalize } from './reviewgate'
 import type { Context } from './reviewgate'
 import type { Prep } from './reviewprep'
-import { chooseModel, classifyRisk, wantSecondOpinion } from './reviewrisk'
+import { chooseModel, classifyRisk, requiredRuns, wantSecondOpinion } from './reviewrisk'
+import { digestOf, mergeRuns, sameBlocks } from './reviewmerge'
+import { grantModelApproval, listRequests } from './expensive'
 
 const prep = (p: Partial<Prep> = {}): Prep => ({ files: [], symbols: [], tests: [], renamed: [], params: [], state: [], exports: [], changed: ['src/a.ts'], lines: 20, hunks: {}, ...p })
 const ctx = (p: Partial<Prep> = {}, extra: Partial<Context> = {}): Context => ({ prep: prep(p), declines: [], ...extra })
@@ -130,16 +132,23 @@ test('an earlier round\'s reuse and coverage entries still count', () => {
   expect(run({}, c).green).toBe(true)
 })
 
-test('risk: security words, schema paths and removed exports choose opus; docs-only and re-review sonnet; second opinion for new abstractions', () => {
+test('risk: security words, schema paths and removed exports earn TWO sonnet runs (never opus by risk); docs-only and re-review one; a model config or the brief wants is returned as wanted; second opinion for new abstractions', () => {
   const diff = '+++ b/src/session.ts\n+  const token = signature(secret)\n'
-  expect(chooseModel(prep({ changed: ['src/session.ts'] }), diff).model).toBe('opus')
+  expect(chooseModel(prep({ changed: ['src/session.ts'] }), diff)).toMatchObject({ model: 'sonnet', runs: 2 })
+  expect(chooseModel(prep({ changed: ['src/session.ts'] }), diff).why).toContain('risk: security-sensitive')
   expect(classifyRisk(prep({ changed: ['db/migrations/001.sql'] }), '')).toContain('migration/schema/storage')
   expect(classifyRisk(prep({ exports: [{ name: 'publicFn', path: 'a.ts', line: 1, kind: 'removed' }] }), '')[0]).toContain('removes public symbols: publicFn')
+  expect(chooseModel(prep({ lines: 900 }), '')).toMatchObject({ model: 'sonnet', runs: 2 })
   expect(chooseModel(prep({ lines: 900 }), '').why).toContain('large diff')
-  expect(chooseModel(prep({ changed: ['README.md', 'docs/a.md'] }), '+secret\n').model).toBe('sonnet')
-  expect(chooseModel(prep({ changed: ['src/a.ts'] }), diff, { rereview: true })).toEqual({ model: 'sonnet', why: 're-review' })
-  expect(chooseModel(prep(), '', { config: 'fable' }).model).toBe('fable')
-  expect(chooseModel(prep(), '').model).toBe('sonnet')
+  expect(chooseModel(prep({ changed: ['README.md', 'docs/a.md'] }), '+secret\n')).toEqual({ model: 'sonnet', runs: 1, why: 'docs/tests only' })
+  expect(chooseModel(prep({ changed: ['src/a.ts'] }), diff, { rereview: true })).toEqual({ model: 'sonnet', runs: 1, why: 're-review' })
+  expect(chooseModel(prep(), '', { config: 'fable' })).toEqual({ model: 'fable', runs: 1, why: 'config.json review.model' }) // wanted, not yet approved: reviewtool.ts decides
+  expect(chooseModel(prep(), '', { asked: 'opus' })).toEqual({ model: 'opus', runs: 1, why: 'the brief asks for it' })
+  expect(chooseModel(prep(), '', { config: 'haiku', asked: 'opus' }).model).toBe('opus') // the brief beats the config
+  expect(chooseModel(prep(), '', { config: 'auto' })).toMatchObject({ model: 'sonnet', runs: 1 })
+  expect(chooseModel(prep(), '')).toEqual({ model: 'sonnet', runs: 1, why: '20 lines, no sensitive paths' })
+  expect(requiredRuns(prep({ changed: ['src/session.ts'] }), diff)).toMatchObject({ runs: 2 })
+  expect(requiredRuns(prep({ changed: ['src/session.ts'] }), diff, true)).toEqual({ runs: 1, why: 're-review' })
   expect(wantSecondOpinion(prep({ symbols: [sym('abc'), sym('def'), sym('ghi')] }))).toBe(true)
   expect(wantSecondOpinion(prep({ symbols: [sym('abc')] }))).toBe(false)
   expect(wantSecondOpinion(prep({ changed: Array.from({ length: 12 }, (_, i) => `f${i}.ts`) }))).toBe(false) // nothing new to look for
@@ -215,8 +224,10 @@ test('lean_review prepare: lists from the diff, the model with its reason, the s
   const r = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
   expect(r.ok).toBe(true)
   const meta = JSON.parse(r.text.split('\n')[0]!.replace('LEAN-REVIEW-PREP ', ''))
-  expect(meta).toMatchObject({ model: 'opus', secondOpinion: true, rereview: false, newSymbols: 3, mb: MB })
-  expect(r.text).toContain('reviewer model: opus (risk: security-sensitive')
+  expect(meta).toMatchObject({ model: 'sonnet', runs: 2, secondOpinion: true, rereview: false, newSymbols: 3, mb: MB })
+  expect(r.text).toContain('reviewer: sonnet x2 (risk: security-sensitive')
+  expect(r.text).toContain('run TWO independent reviewer passes on sonnet')
+  expect(r.text).not.toContain('opus')
   expect(r.text).toContain('alpha1 (src/auth.ts:1)')
   expect(r.text).toContain('Declined by the user')
   expect(r.text).toContain('duplication alpha1')
@@ -313,4 +324,107 @@ test('a deletion-only hunk in the delta keeps a new major about removed code; li
   const delta = prep({ hunks: { 'src/a.ts': [[30, 31]] } })
   const c = ctx({}, { delta, earlier: { open: [], reuse: [], coverage: [] } })
   expect(run({ findings: [finding({ line: 31, text: 'the removed guard was needed' }), finding({ n: 2, line: 0, text: 'no line known for this one' })] }, c).open.map(f => f.severity)).toEqual(['major', 'major'])
+})
+
+// ---- the reviewer is sonnet; a high-risk diff gets two merged runs; opus only with the user's approval -----------------------------
+const plainDiff = newFileDiff('src/plain.ts', 'export function plain1() {}')
+const reuseOf = (...names: string[]) => names.map(symbol => ({ symbol, candidate: '', verdict: 'justified-new', why: 'there is no other helper in this module that does this job' }))
+const riskSetup = () => setup({ '*': newFileDiff('src/auth.ts', 'export function alpha1() {}', 'export function beta2() {}', 'export function gamma3() {}', 'const token = secret') }, { '*': 'A\tsrc/auth.ts\n' })
+const runA = { ...base, reuse: reuseOf('alpha1', 'beta2', 'gamma3'), searches: [{ for: 'helpers', found: 'none' }], findings: [finding({ severity: 'minor', category: 'security', path: 'src/auth.ts', line: 4, text: 'the token is compared with a plain equality check' })] }
+const runB = { ...base, reuse: reuseOf('alpha1', 'beta2', 'gamma3'), searches: [{ for: 'compare', found: 'none' }], findings: [finding({ severity: 'minor', category: 'security', path: './src/auth.ts', line: 4, text: 'token compared with plain equality, not constant time' })] }
+const prepMeta = (r: { text: string }) => JSON.parse(r.text.split('\n')[0]!.replace('LEAN-REVIEW-PREP ', ''))
+
+test('mergeRuns: a finding both runs raised is [2/2], the others [1/2]; the union counts; the stricter entry wins; fixed is what both say', () => {
+  const a = normalize({ ...base, verdict: 'approve', findings: [finding({ text: 'empty input crashes the parser', severity: 'minor', line: 9 }), finding({ n: 2, path: 'src/b.ts', category: 'tests', severity: 'major', text: 'no test for the retry path' })], fixed: [1, 2], reuse: [{ symbol: 'X', candidate: 'src/x.ts:1 X', verdict: 'justified-new', why: 'short' }], coverage: [{ test: 'adds', protected: 'sum', status: 'still-covered' }] })
+  const b = normalize({ ...base, verdict: 'changes-requested', findings: [finding({ text: 'the parser crashes on empty input', severity: 'major', line: 7 }), finding({ n: 2, path: 'src/c.ts', category: 'scope', severity: 'minor', text: 'a sibling file needs the same fix' })], fixed: [2, 3], reuse: [{ symbol: 'x', candidate: '', verdict: 'duplicate', why: 'copies X in src/x.ts, 12 lines the same' }], coverage: [{ test: 'adds', protected: 'sum of two', status: 'lost' }] })
+  const { result, info } = mergeRuns(a, b)
+  expect(info).toEqual({ both: 1, only: 2 })
+  expect(result.runs).toBe(2)
+  expect(result.findings.map(f => [f.n, f.severity, f.line, f.text.endsWith('[2/2]'), f.text.endsWith('[1/2]')])).toEqual([[1, 'major', 7, true, false], [2, 'major', 3, false, true], [3, 'minor', 3, false, true]]) // the higher severity, the smaller line, the union
+  expect(result.verdict).toBe('changes-requested')
+  expect(result.fixed).toEqual([2])
+  expect(result.reuse).toHaveLength(1)
+  expect(result.reuse[0]).toMatchObject({ verdict: 'duplicate', candidate: 'src/x.ts:1 X' })
+  expect(result.coverage[0]).toMatchObject({ status: 'lost', protected: 'sum of two' })
+  // the digest does not depend on key order; two identical blocks are one pass
+  expect(digestOf({ a: 1, b: [{ c: 2, d: 3 }] })).toBe(digestOf({ b: [{ d: 3, c: 2 }], a: 1 }))
+  expect(sameBlocks({ x: 1, y: 2 }, { y: 2, x: 1 })).toBe(true)
+  expect(sameBlocks({ x: 1 }, { x: 2 })).toBe(false)
+})
+
+test('lean_review prepare: an expensive reviewer model that config or the brief wants needs the pane approval for THIS thread, else sonnet runs and one request waits', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { model: 'opus' } }))
+  const r = await tool(h, { action: 'prepare', base: 'main' })
+  expect(prepMeta(r)).toMatchObject({ model: 'sonnet', runs: 1 })
+  expect(r.text).toContain('reviewer: sonnet (')
+  expect(r.text).toContain("a review on opus (config.json review.model) needs the user's approval for this thread")
+  let reqs = await listRequests(h.host)
+  expect(reqs).toHaveLength(1)
+  expect(reqs[0]).toMatchObject({ thread: 't1', model: 'opus', action: 'review', origin: 'review', state: 'pending' })
+  await tool(h, { action: 'prepare', base: 'main' })
+  expect(await listRequests(h.host)).toHaveLength(1) // asking again is the same request
+  // another thread's approval does not count
+  await grantModelApproval(h.host, { scope: 't2', model: 'opus', reason: 'not this thread' })
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).model).toBe('sonnet')
+  // this thread's does (one run: a wanted model is used as it is)
+  await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'a security review' })
+  const ok = await tool(h, { action: 'prepare', base: 'main' })
+  expect(prepMeta(ok)).toMatchObject({ model: 'opus', runs: 1 })
+  expect(ok.text).toContain('reviewer: opus (config.json review.model)')
+  // after 24 h it is gone again
+  h.clock.t += 25 * 3_600_000
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).model).toBe('sonnet')
+  // the brief asks for it (no config): the same rule
+  h.files.set(`${L}/config.json`, '{}')
+  const asked = await tool(h, { action: 'prepare', base: 'main', model: 'opus' })
+  expect(prepMeta(asked).model).toBe('sonnet')
+  expect(asked.text).toContain('the brief asks for it')
+  await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'the brief says so' })
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'opus' })).model).toBe('opus')
+  // a cheap model needs nothing
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'haiku' })).model).toBe('haiku')
+  reqs = await listRequests(h.host)
+  expect(reqs.every(q => q.thread === 't1' && q.origin === 'review')).toBe(true)
+})
+
+test('lean_review record: a high-risk diff needs TWO reviewer runs: one block is never green; reviews [a, b] or the merge action\'s block is', async () => {
+  const h = riskSetup()
+  const one = await tool(h, { sha: H2, base: 'main', green: true, review: runA })
+  expect(one.ok).toBe(false)
+  expect(one.text).toContain('two independent reviewer passes are required')
+  expect(await greenReview(h.host, 'app', H2)).toBe(false)
+  // a block that merely says runs: 2 is one pass; the same block twice is no second pass; one block in reviews is not two
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: { ...runA, runs: 2 } })).ok).toBe(false)
+  const same = await tool(h, { sha: H2, base: 'main', green: true, reviews: [runA, runA] })
+  expect(same.ok).toBe(false)
+  expect(same.text).toContain('identical')
+  expect((await tool(h, { sha: H2, base: 'main', green: true, reviews: [runA] })).ok).toBe(false)
+  expect(await greenReview(h.host, 'app', H2)).toBe(false)
+  // both blocks: merged, the shared finding marked, green
+  const two = await tool(h, { sha: H2, base: 'main', green: true, reviews: [runA, runB] })
+  expect(two.ok).toBe(true)
+  expect(two.text).toContain('merged from 2 reviewer runs')
+  expect(await greenReview(h.host, 'app', H2)).toBe(true)
+  expect(rec(h, H2).findings.join('\n')).toContain('[2/2]')
+  // the merge action returns one block that record accepts unchanged; edited, it is no longer the merged one
+  const m = await tool(h, { action: 'merge', reviews: [runA, runB] })
+  expect(m.ok).toBe(true)
+  expect(m.text).toContain('1 found by both [2/2]')
+  const block = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(m.text)![1]!)
+  expect(block.runs).toBe(2)
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: block })).ok).toBe(true)
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: { ...block, goal: 'edited after the merge' } })).ok).toBe(false)
+  expect((await tool(h, { action: 'merge', reviews: [runA, runA] })).ok).toBe(false)
+  // the union counts: a major only one run found still blocks, and says it was found by one run
+  const majorB = { ...runB, findings: [...runB.findings, finding({ n: 2, severity: 'major', category: 'security', path: 'src/auth.ts', line: 4, text: 'the secret is written to the log in plain text' })] }
+  const blocked = await tool(h, { sha: H2, base: 'main', green: true, reviews: [runA, majorB] })
+  expect(blocked.ok).toBe(false)
+  expect(blocked.text).toContain('open major')
+  expect(blocked.text).toContain('[1/2]')
+  // an ordinary diff still takes one block
+  const p = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const solo = await tool(p, { sha: H2, base: 'main', green: true, review: { ...base, reuse: reuseOf('plain1'), searches: [{ for: 'plain', found: 'none' }] } })
+  expect(solo.ok).toBe(true)
+  expect(await greenReview(p.host, 'app', H2)).toBe(true)
 })

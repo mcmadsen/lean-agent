@@ -1,6 +1,6 @@
 ---
 name: worker-opus
-description: Expensive worker for hard design, tricky debugging or cross-cutting changes. Use only when a cheaper worker failed or the task is clearly hard.
+description: Expensive worker for hard design, tricky debugging or cross-cutting changes. Use only when the user asks for it (and approved opus for the thread in the pane); never the default. Without that approval the Agent call is refused.
 model: opus
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash

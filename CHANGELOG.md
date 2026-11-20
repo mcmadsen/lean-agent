@@ -3,12 +3,44 @@
 ## Unreleased
 
 ### Added
-
+- **Expensive models need your approval, and only your press in the pane gives it** ([README: Expensive models](README.md#agents)). Opus
+  or anything that is not haiku or sonnet (a deny-by-default test: fable and unknown names count) is never chosen by a session. A
+  `lean_thread new|start|reopen|restart|resume` that asks for one, with a `reason` (required), does not start the thread: the request
+  (thread, model, effort, reason) is a card in "Needs you" with **Approve** and **Deny** (two presses each) and **Start on sonnet
+  instead**; the reply tells the desk to ask you to press Approve. Inside sessions the guard (`tool.call`) refuses an Agent call to
+  `lean-agent:worker-opus` or to an agent whose model resolves to an expensive one (plugin, project and user agent files), an Agent
+  `model` override to one, a Bash `claude ... --model <x>` / `-m <x>` / `ANTHROPIC_MODEL=<x> claude` started by a thread, a worker or the
+  desk, and a `lean_compare` on one ("opus needs the user's approval: report it and stop"; the refusal is also a card to approve or deny).
+  An approval is signed (HMAC with the review key in the mod's own store), for one thread (or the desk) and one model family, ends when
+  the thread closes and after 24 h at most, and is logged in the thread's `history.jsonl` with the time and what was approved; no
+  `lean_thread` / `lean_doctor` / `lean_script` action, no `config.json` value and no message can create one (a source check in
+  `skills-contract.test.sh` keeps `grantModelApproval` to the pane's one Approve press). A resume, wake or send of an older thread whose
+  recorded model is expensive waits for the same press (its messages stay queued, nothing is stopped). New module `hooks/expensive.ts`.
+- **Two independent sonnet reviewer passes for a high-risk diff, merged like 0.45's `review --runs 2`.** `lean_review prepare` prints
+  `reviewer: sonnet x2 (risk: ...)`; the thread runs two separate reviewer Agent calls and passes both JSON blocks to `record` as
+  `reviews: [a, b]` (or to the new `merge` action, whose block is accepted unchanged as `review`; its digest is kept in the mod's store,
+  so a hand-written `runs: 2` is one pass). Findings are matched by category, file and wording, marked `[2/2]` when both runs found them
+  and `[1/2]` otherwise, and the union counts. A high-risk diff with one block, or two identical blocks, is never green. New module
+  `hooks/reviewmerge.ts`.
+- **`lean_doctor stats` shows the opus share** of the window's spend with the threads that run on opus, and `lean_doctor check` has a FIX
+  row when opus is over 40 % of the last 7 days' spend ("opus is 64% of spend: threads t1, t3 run on opus").
+- **A red "Needs you" row** when the app started the desk on an expensive model and the mod could not switch it to sonnet / high.
 
 ### Changed
+- **MODEL POLICY (cost data: by model opus $93.78, sonnet $26.79, haiku $0.75; reviewer agents in threads $13.89 of that).**
+  - **The desk is pinned to sonnet / high again; the 1.0.10 opus pin is reverted.** `lean_doctor fix` replaces the opus pin that 1.0.10 and
+    1.0.11 wrote (the row says "1.0.10 and 1.0.11 pinned opus; the desk is on sonnet again"); a `desk.model` / `desk.effort` the user set in
+    `config.json` still wins. At a desk session start the model-set path switches an opus (or fable) desk to sonnet / high; the doctor rows,
+    the desk template, the thread skill and the README say the same.
+  - **The reviewer is always sonnet** (`hooks/reviewtool.ts` prepare no longer picks opus by risk; the same risk classifier now decides
+    one or two runs). Opus reviews only when `config.json` `review.model` is `opus` or the brief explicitly asks AND the user approved it for
+    that thread in the pane; otherwise sonnet runs and a request waits in "Needs you".
+  - **`worker-opus` stays available but is never the default**: its description and the worker selection text say "only when the user
+    asks", and the guard refuses it without the user's approval for the thread.
+  - The new-thread form keeps sonnet as the default; picking opus shows a note and a Reason field, and Start files the request.
 - **Subagent effort: `worker-sonnet` and `worker-opus` run at effort medium (was high).** A worker does one briefed task, so the reasoning
   budget is spent where the task is chosen and checked, in the thread. Unchanged: `reviewer` and `auditor` high, `reader-sonnet` medium, the
-  haiku agents, `reader-haiku` and the explorer low, threads sonnet / high, the desk opus / high. Nothing in the doctor, `stats` or the
+  haiku agents, `reader-haiku` and the explorer low, threads and the desk sonnet / high. Nothing in the doctor, `stats` or the
   specs read an agent's effort, so only the two agent files and the README line changed.
 - **The desk pane is a dashboard, not a list** ([README: The pane](README.md#the-pane)). A header with the model/effort chip, the desk's
   context as a bar against `deskTokens` (yellow from 80 %, red from 100 %, **Restart desk** beside it from 80 %), today's and the 7-day
@@ -23,7 +55,8 @@
   for more), read rows older than 7 days archived (hidden in the pane, kept in `inbox.jsonl`), **ack all** stays. Closed threads stay
   folded with their count; Projects and Scripts are one folded **More** section; Goals shows only when there are some.
 - **Footer actions**: **New thread**, **Feedback export** (the `/lean-agent-feedback` export, from the pane) and **Setup / repair**.
-  **Restart desk** moved to the header (from 80 % of the limit) and to the "desk over its limit" card.
+  **Restart desk** is in the header (from 80 % of the limit), on the "desk over its limit" card and, always, in the footer (the same two-press
+  confirm; the pane's **Open** and **New thread** buttons open the real thread pane and new-thread form).
 - **A minimized widget** (`placement: "widget"`, Claude desktop) draws a glance only, with no button: running and blocked threads,
   how many need you, desk context in percent, today's spend. A narrow body (under 50 columns) gets shorter rows and wrapping buttons.
 

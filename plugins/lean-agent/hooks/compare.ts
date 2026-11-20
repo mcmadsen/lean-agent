@@ -18,6 +18,7 @@ import type { Host } from './state'
 import { rulesStats, slugOk, unverifiedLine } from './rules'
 import { threadClaudeMd, threadSettings } from './threads'
 import { installedKeys } from './skew'
+import { addRequest, familyOf, isExpensiveModel, modelAllowed, needsApprovalText, scopeOk } from './expensive'
 import { disabledPlugins, isOwn, loadedText, nameMatches, norm, projectUsage, resolveLoaded, usedText, writeLoaded } from './profile'
 import type { Loaded } from './profile'
 
@@ -466,9 +467,16 @@ export async function taskMode(h: Host, root: string, name: string, task: string
 }
 
 // ---- the entry the desk (lean_doctor) and a thread (lean_compare) call ----------------------------------------------
-export async function compare(h: Host, root: string, i: { project?: string; mode?: string; task?: string; model?: string; maxUsd?: number }, who: 'desk' | 'thread'): Promise<{ ok: boolean; text: string }> {
+// `scope`: the thread id the call comes from (an approval of an expensive model is for that thread only; a call from the desk has none)
+export async function compare(h: Host, root: string, i: { project?: string; mode?: string; task?: string; model?: string; maxUsd?: number }, who: 'desk' | 'thread', scope = who === 'desk' ? 'desk' : ''): Promise<{ ok: boolean; text: string }> {
   const mode = i.mode || 'overhead'
   if (mode === 'history') return { ok: true, text: await historyText(h, i.project || undefined) }
+  // a comparison on opus (or any model that is not haiku or sonnet) costs the user's money: never without their approval in the pane
+  if (i.model && isExpensiveModel(i.model) && !(await modelAllowed(h, scope, i.model))) {
+    const what = `compare asked for model ${i.model.slice(0, 40)}`
+    if (scopeOk(scope)) await addRequest(h, { thread: scope, model: i.model, reason: what, action: 'compare', origin: 'guard', asked: true }).catch(() => undefined)
+    return { ok: false, text: needsApprovalText(familyOf(i.model), what) }
+  }
   if (!i.project) return { ok: false, text: 'compare needs project (a registered name)' }
   if (mode === 'overhead') return overhead(h, root, i.project, { model: i.model, maxUsd: i.maxUsd, who })
   if (mode === 'task') {

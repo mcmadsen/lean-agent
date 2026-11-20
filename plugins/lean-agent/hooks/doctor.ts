@@ -9,7 +9,7 @@ import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, skewText } from './skew'
-import { modelRows } from './stats'
+import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
 import { pruneStale, staleEntries } from './worktreereg'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction, manualNote } from './deskcompact'
@@ -58,7 +58,7 @@ export type FixOut = { lines: string[] }
 // what an older setup wrote), or neither (a hand-edited file: no cause is named)
 async function pinCause(h: Host, home: string, before: { model?: string; effort?: string }): Promise<string> {
   if (await deskModelConfigured(h, home)) return ', config.json desk.model'
-  if (before.model === 'sonnet' && before.effort === 'high') return `, an older setup pinned sonnet; the desk default is now ${DESK_DEFAULT.model}`
+  if (before.model === 'opus' && before.effort === 'high') return `, 1.0.10 and 1.0.11 pinned opus; the desk is on ${DESK_DEFAULT.model} again (opus needs your approval in the pane)`
   return `, the desk default is ${DESK_DEFAULT.model}`
 }
 export async function fix(h: Host, root: string): Promise<FixOut> {
@@ -96,7 +96,7 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
     await mkdirp(h, `${leanDir(home)}/desk`)
     await writeJson(h, `${leanDir(home)}/desk/pinned.json`, { at: await h.clock.now(), model: want.model, effort: want.effort })
   }
-  // an older setup's pin (sonnet) is replaced by today's (opus / high, or the user's config.json `desk`): the row says so
+  // an older setup's pin (the opus pin 1.0.10 and 1.0.11 wrote) is replaced by today's (sonnet / high, or the user's config.json `desk`): the row says so
   const was = pinned && typeof before?.model === 'string' && before.model && before.model !== want.model ? ` (was ${before.model} / ${typeof before.effort === 'string' ? before.effort : 'no effort'}: updated${await pinCause(h, home, before)})` : ''
   lines.push(pinned ? `desk pinned to ${want.model} / effort ${want.effort}${was}` : 'desk .claude/settings.json does not parse: model not pinned, fix the file by hand')
   const opened = await mergeAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
@@ -144,7 +144,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const have = await readModelSettings(h, `${deskDir(home)}/.claude/settings.json`)
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
-  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${typeof have?.model === 'string' && have.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : have.model === 'sonnet' && have.effort === 'high' ? ' (an older setup pinned sonnet: doctor fix updates it)' : ' (doctor fix updates it)') : ''}`)
+  row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${typeof have?.model === 'string' && have.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : have.model === 'opus' && have.effort === 'high' ? ' (1.0.10 and 1.0.11 pinned opus: doctor fix replaces it with sonnet)' : ' (doctor fix updates it)') : ''}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason
@@ -161,6 +161,10 @@ export async function check(h: Host, root: string): Promise<string[]> {
   for (const m of rows.fix) row(false, m)
   for (const m of rows.info) out.push(`note ${m}`) // the desk was switched to the pin: spend on the app's model is history, not a fault
   if (!rows.fix.length) out.push('ok   no session on an unexpected model today')
+  // opus is the expensive model: a share over OPUS_SHARE_FIX percent of the last 7 days' spend is a FIX row naming the threads on it
+  const os = await opusShare(h).catch(() => null)
+  if (os && os.total > 0 && os.pct > OPUS_SHARE_FIX) row(false, `opus is ${Math.round(os.pct)}% of spend: ${os.threads.length ? `threads ${os.threads.join(', ')} run on opus` : 'no open thread is on opus (the desk or a worker used it)'} (last 7 days, $${os.usd.toFixed(2)} of $${os.total.toFixed(2)}; opus needs your approval in the pane, so start new work on sonnet)`)
+  else if (os && os.total > 0) out.push(`ok   opus is ${Math.round(os.pct)}% of the last 7 days' spend`)
   // stale worktree registry entries (the key blocks a new worktree of that branch); `fix` drops them
   const stale = await staleEntries(h).catch(() => [])
   if (stale.length) row(false, `worktrees.json has ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}: ${stale.slice(0, 5).map(s => `${s.key} (${s.why}${s.path ? `: ${s.path}` : ''})`).join('; ')}${stale.length > 5 ? `; ${stale.length - 5} more` : ''}. Run fix to drop them`)

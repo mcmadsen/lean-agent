@@ -189,8 +189,8 @@ test('the thread folder is saved with model, effort and needs BEFORE the session
     }
     return { exitCode: 0, stdout: '[]' }
   }
-  await call({ action: 'new', title: 'a', project: 'app', needs: ['x'], model: 'opus', effort: 'low' })
-  expect(JSON.parse(atStart)).toMatchObject({ model: 'opus', effort: 'low', needs: ['x'] })
+  await call({ action: 'new', title: 'a', project: 'app', needs: ['x'], model: 'haiku', effort: 'low' })
+  expect(JSON.parse(atStart)).toMatchObject({ model: 'haiku', effort: 'low', needs: ['x'] })
 })
 
 test('a thread of a project without a profile gets no profile text in its CLAUDE.md; lean_profile fill is limited to its own project', async () => {

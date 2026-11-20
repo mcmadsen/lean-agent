@@ -45,6 +45,15 @@ async function sign(key: string, project: string, sha: string, green: boolean): 
   return hex(hmac(enc.encode(key), enc.encode(`${project}\n${sha}\n${green}`)))
 }
 
+// A MAC over a caller's own message with the same store key (the first line of the message names what it is for, so a signature of one
+// kind is never valid for another): the model approvals (expensive.ts) are signed with it. '' = no key yet and none to be created.
+export async function macOf(h: Host, message: string, create: boolean): Promise<string> {
+  const key = await secret(h, create)
+  if (!key) return ''
+  const enc = new TextEncoder()
+  return hex(hmac(enc.encode(key), enc.encode(message)))
+}
+
 export async function writeReview(h: Host, r: Review): Promise<string> {
   if (!/^[0-9a-f]{7,64}$/.test(r.sha)) throw new Error('review needs a full commit sha')
   if (!slugOk(r.project)) throw new Error('review needs a project name')

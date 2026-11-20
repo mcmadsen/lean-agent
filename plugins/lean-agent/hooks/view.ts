@@ -12,6 +12,8 @@ import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { Thread } from './threads'
 import { deskChoice } from './models'
+import { isExpensiveModel, listRequests } from './expensive'
+import type { ModelRequest } from './expensive'
 import { contextSize, deskNote, deskTokens } from './deskcompact'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
@@ -36,12 +38,14 @@ import { scriptCounts, waitingScripts } from './scripts'
 import type { Waiting } from './scripts'
 // one thing that waits for the user (the pane's first section, and what a toast is made of). key: the event's identity (a toast is shown
 // once per key); notify: false = shown in the pane, never a toast
-export type NeedKind = 'approval' | 'question' | 'push' | 'blocked' | 'script' | 'context'
-export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting }
+// model: a request for an expensive model (Approve / Deny, expensive.ts); deskmodel: the desk runs an expensive model and the mod could not
+// switch it (red)
+export type NeedKind = 'approval' | 'question' | 'push' | 'blocked' | 'script' | 'context' | 'model' | 'deskmodel'
+export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting; request?: ModelRequest }
 // one thread's inbox: unread rows first, then at most READ_SHOWN read ones (`read` holds every read row that is not archived)
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; desk: DeskInfo; errors: string[]; deskModel?: string; deskModelSet?: string }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; desk: DeskInfo; errors: string[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[] }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -156,7 +160,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [] }
+  const v: View = { scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [], modelRequests: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -318,7 +322,13 @@ export async function loadView(h: Host): Promise<View> {
       v.deskModel = deskModelText(m)
       deskModelNote = v.deskModel
       deskRuns = m.running
+      if (isExpensiveModel(m.running)) v.deskModelRed = v.deskModel // an expensive desk the mod could not switch: a red row in "Needs you", not a header line
     }
+  })
+  // requests for an expensive model (a thread's own `lean_thread` call, the guard's refusal, a review): Approve / Deny in "Needs you"
+  await guard('model requests', async () => {
+    const open = new Set(v.threads.map(t => t.id))
+    v.modelRequests = (await listRequests(h)).filter(r => r.thread === 'desk' || open.has(r.thread))
   })
   // the header chip (the pinned model and effort, or what it really runs when that is another) and the context bar
   // (the model lookup is guarded on its own: the size, the limit and the "cannot compact" note, with its Restart desk button, never depend on it)
@@ -340,9 +350,23 @@ export async function loadView(h: Host): Promise<View> {
 }
 
 // what waits for the user, in the order the pane draws it: approvals, questions, ready reports, blocked threads, scripts, the desk's size
-export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 'desk'>): NeedRow[] {
+export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 'desk'> & Partial<Pick<View, 'modelRequests' | 'deskModelRed'>>): NeedRow[] {
   const out: NeedRow[] = []
   const title = (id: string) => v.threads.find(t => t.id === id)?.title ?? ''
+  // the desk itself runs an expensive model that the mod could not switch away from: first, red
+  if (v.deskModelRed) out.push({ key: `deskmodel:${v.deskModelRed.slice(0, 80)}`, kind: 'deskmodel', text: v.deskModelRed, notify: true })
+  // a request for an expensive model: the user's Approve is the only way it runs (expensive.ts); a denied one stays until dismissed
+  for (const r of v.modelRequests ?? []) {
+    const what = `${r.model}${r.effort ? `/${r.effort}` : ''}`
+    const who = r.thread === 'desk' ? 'the desk' : r.thread
+    const text =
+      r.state === 'denied'
+        ? `${who}: ${what} was denied (${flat(r.reason).slice(0, 120)}); nothing runs on ${r.family}. Start it on sonnet instead?`
+        : r.origin === 'tool'
+          ? `${who} asks to run on ${what} (${r.family} is not sonnet or haiku, so it needs your approval): ${flat(r.reason).slice(0, 200)}`
+          : `${who} was refused ${r.family} and reported blocked: ${flat(r.reason).slice(0, 200)}. Approve it to let ${who} go on, or deny it.`
+    out.push({ key: `model:${r.id}:${r.state}`, kind: 'model', ...(r.thread !== 'desk' ? { thread: r.thread } : {}), text, notify: r.state === 'pending', request: r })
+  }
   for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true })
   for (const q of v.openQuestions) out.push({ key: `ask:${q.q}`, kind: 'question', thread: q.from, text: `${q.from ?? 'desk'} asks: ${flat(q.question ?? '')}`, notify: true })
   for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true })

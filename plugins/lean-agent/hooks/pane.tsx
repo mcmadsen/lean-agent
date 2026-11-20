@@ -18,6 +18,9 @@ import type { Role } from './role'
 import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 import { openNewThread, openThreadPane } from './panelinks'
 import { notifyTick } from './notify'
+// grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
+import { denyRequest, grantModelApproval, removeRequest } from './expensive'
+import type { ModelRequest } from './expensive'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.11'
@@ -380,6 +383,55 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       tell()
     })
     const closeDone = twoStep('close:done', () => closeIds('done'))
+    // ---- a request for an expensive model (expensive.ts): Approve / Deny press twice; Start on sonnet instead starts it on the default ----
+    const sayModel = (text: string, bad: boolean) => {
+      notice = short(text, 300)
+      if (bad) lastError = notice
+    }
+    const tellThread = (r: ModelRequest, text: string) => (r.thread === 'desk' ? Promise.resolve() : leanThread(host, $.plugin.root, { action: 'send', tN: r.thread, text }).then(() => undefined, () => undefined))
+    // the action that goes on after an approval or on sonnet: what a tool call asked for (a new thread is started now), nothing for a guard refusal
+    const retryOf = (r: ModelRequest, model?: string) => ({ action: r.action === 'new' ? 'start' : r.action, tN: r.thread, ...(model ? { model } : r.asked ? { model: r.model, ...(r.effort ? { effort: r.effort } : {}) } : {}) })
+    const approveModel = (r: ModelRequest) =>
+      twoStep(`model:approve:${r.id}`, async () => {
+        resetViewCache()
+        try {
+          await grantModelApproval(host, { scope: r.thread, model: r.model, reason: r.reason })
+        } catch (err) {
+          sayModel(`approve failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`, true)
+          return tell()
+        }
+        await removeRequest(host, r.id)
+        let said = `${r.thread === 'desk' ? 'the desk' : r.thread} may use ${r.family} (until it closes, at most 24 h)`
+        if (r.origin === 'tool') {
+          const out = await leanThread(host, $.plugin.root, retryOf(r) as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
+          said += `; ${out.text}`
+          resetViewCache()
+          sayModel(said, !out.ok)
+        } else {
+          await tellThread(r, `The user approved ${r.family} for this thread in the pane (until it closes, at most 24 h): you may retry what was refused.`)
+          sayModel(`${said}; ${r.thread === 'desk' ? 'retry it' : `${r.thread} was told it may retry`}`, false)
+        }
+        tell()
+      })
+    const denyModel = (r: ModelRequest) =>
+      twoStep(`model:deny:${r.id}`, async () => {
+        await denyRequest(host, r.id)
+        if (r.origin !== 'tool') await tellThread(r, `The user denied ${r.family} for this thread: do not retry it; go on without it or report.`)
+        sayModel(`denied ${r.family} for ${r.thread === 'desk' ? 'the desk' : r.thread}`, false)
+        tell()
+      })
+    const onSonnet = (r: ModelRequest) => async () => {
+      resetViewCache()
+      await removeRequest(host, r.id)
+      const out = await leanThread(host, $.plugin.root, retryOf({ ...r, action: r.action === 'resume' ? 'restart' : r.action }, 'sonnet') as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} on sonnet failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    }
+    const dismissModel = (r: ModelRequest) => async () => {
+      await removeRequest(host, r.id)
+      tell()
+    }
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
     // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
     // user's decision; a secret or privacy finding is never adopted, whatever is pressed)
@@ -457,9 +509,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const needs = v?.needs ?? []
     const restartLabel = confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'
     const needCard = (n: NeedRow) => {
-      const tone = n.kind === 'blocked' ? 'error' : 'warning'
+      const tone = n.kind === 'blocked' || n.kind === 'deskmodel' ? 'error' : 'warning'
       const t = n.thread ? v?.threads.find(x => x.id === n.thread) : undefined
       const w = n.script
+      const mr = n.request
       return (
         <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
           <Text color={tone} wrap="wrap">
@@ -471,6 +524,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!w && <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />}
             {!!w && <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />}
             {n.kind === 'context' && <Button key="restart-desk-top" label={restartLabel} onPress={restartDeskPress} />}
+            {!!mr && mr.state === 'pending' && <Button key={`model-approve-${mr.id}`} label={confirming(ui, `model:approve:${mr.id}`, now2) ? `Confirm approve ${mr.family} for ${mr.thread}` : 'Approve'} onPress={approveModel(mr)} />}
+            {!!mr && mr.state === 'pending' && <Button key={`model-deny-${mr.id}`} label={confirming(ui, `model:deny:${mr.id}`, now2) ? `Confirm deny ${mr.family}` : 'Deny'} onPress={denyModel(mr)} />}
+            {!!mr && mr.origin === 'tool' && <Button key={`model-sonnet-${mr.id}`} label="Start on sonnet instead" onPress={onSonnet(mr)} />}
+            {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
+            {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
           </Box>
         </Box>
       )
@@ -549,7 +607,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>
         </Box>
         {/* the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick, at the top */}
-        {!!v?.deskModel && <Text color="yellow">{v.deskModel}</Text>}
+        {!!v?.deskModel && !v.deskModelRed && <Text color="yellow">{v.deskModel}</Text>}
         {showSetNote && <Text dimColor>{setNote}</Text>}
         {ctx > 0 && limit > 0 ? (
           <Box flexWrap="wrap" columnGap={1}>

@@ -1,4 +1,6 @@
-// The desk's model and effort pin (opus / high, the user's decision; config.json `desk` overrides) against what the session really runs on.
+// The desk's model and effort pin (sonnet / high, the user's decision; config.json `desk` overrides) against what the session really runs on.
+// A desk the app started on an expensive model (opus, fable) is switched to the pin here; when that is not possible the pane says so in a
+// red "Needs you" row (view.ts), never silently.
 //
 // The pin is written to the desk folder's settings.json, but a session the Claude app starts (by hand, or through the
 // claude://code/new deep link) may take the app's own model menu instead. What the engine gives a plugin (types: EventCalls):
@@ -10,11 +12,11 @@
 // So, once per desk session (at session.start when the model is known then, else at the first request): when the model (or the effort
 // row) differs from the pin, the Model / Effort rows are set through `$.config.set`. When that is not possible (no such row, no option
 // of that family, locked, denied, throws) nothing is forced: the state is written to ~/.lean-agent/desk/model.json for the pane's top row
-// ("the desk runs <model>; pick Opus in the app's model menu ...") and a notice. The file is removed when a later request runs on the pin.
+// ("the desk runs <model>; pick Sonnet in the app's model menu ...") and a notice. The file is removed when a later request runs on the pin.
 // Never in a thread: a thread is started with `--model` / `--effort` on the command line.
 import { atomicWrite, homeDir, leanDir, mkdirp, readJson } from './state'
 import type { Host } from './state'
-import { MODELS, deskChoice, modelFamily } from './models'
+import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
 import type { Choice } from './models'
 import { setNotice } from './notices'
 
@@ -98,7 +100,7 @@ export type CheckResult = { kind: 'match' | 'unknown' | 'set' | 'unsettable'; te
 export async function checkDeskModel(h: Host, eng: Engine | null, running: string, apply: boolean): Promise<CheckResult> {
   const pin = await deskChoice(h, await homeDir(h))
   const fam = modelFamily(running)
-  if (!(MODELS as readonly string[]).includes(fam)) return { kind: 'unknown' } // a gateway's own name, or nothing yet: no claim
+  if (!DESK_FAMILIES.includes(fam)) return { kind: 'unknown' } // a gateway's own name, or nothing yet: no claim
   const need = fam !== pin.model
   let done: Applied | null = null
   if (apply) await setNotice(h, NOTICE_SET, null) // a new session's attempt: the last one's note is old

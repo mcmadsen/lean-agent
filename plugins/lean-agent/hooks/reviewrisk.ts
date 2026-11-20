@@ -1,4 +1,4 @@
-// Which reviewer model a change deserves, and whether it needs a cheap search-only second opinion first (0.45's classify_risk,
+// How a change is reviewed (sonnet, once or twice) and whether it needs a cheap search-only second opinion first (0.45's classify_risk,
 // choose_review_model and second_opinion, ported). Pure functions over the diff text and the prep: no model decides this.
 import type { Prep } from './reviewprep'
 import { isTestPath } from './reviewprep'
@@ -39,14 +39,29 @@ export function classifyRisk(prep: Prep, diff: string): string[] {
   return why
 }
 
-// { model, why }: a re-review and a docs/tests-only diff run on sonnet; any risk reason on opus; `config` (review.model) wins unless 'auto'
-export function chooseModel(prep: Prep, diff: string, opts: { rereview?: boolean; config?: unknown } = {}): { model: string; why: string } {
-  if (typeof opts.config === 'string' && opts.config && opts.config !== 'auto') return { model: opts.config, why: 'config.json review.model' }
-  if (opts.rereview) return { model: 'sonnet', why: 're-review' }
-  if (prep.changed.length && prep.changed.every(n => isDocs(n) || isTestPath(n))) return { model: 'sonnet', why: 'docs/tests only' }
+// The reviewer is ALWAYS sonnet (the user's decision: opus is the expensive model and needs their approval, expensive.ts). A high-risk diff
+// (classifyRisk: security, concurrency, migrations/schema/storage, UI strings/locales, public API, config formats, removed public symbols,
+// ~800+ lines) gets TWO independent sonnet passes whose results are merged (reviewmerge.ts); a re-review and a docs/tests-only diff one.
+// { model, runs, why }. `config` (config.json review.model, unless 'auto') and `asked` (a model the brief names) are what is WANTED: an
+// expensive one is used only when the caller finds it approved (reviewtool.ts asks the store), else the sonnet rules below apply.
+export type ReviewChoice = { model: string; runs: 1 | 2; why: string }
+export function requiredRuns(prep: Prep, diff: string, rereview = false): { runs: 1 | 2; why: string } {
+  if (rereview) return { runs: 1, why: 're-review' }
+  if (prep.changed.length && prep.changed.every(n => isDocs(n) || isTestPath(n))) return { runs: 1, why: 'docs/tests only' }
   const why = classifyRisk(prep, diff)
-  if (why.length) return { model: 'opus', why: `risk: ${why.slice(0, 4).join(', ')}` }
-  return { model: 'sonnet', why: `${prep.lines} lines, no sensitive paths` }
+  if (why.length) return { runs: 2, why: `risk: ${why.slice(0, 4).join(', ')}` }
+  return { runs: 1, why: `${prep.lines} lines, no sensitive paths` }
+}
+export function wantedModel(opts: { config?: unknown; asked?: unknown } = {}): { model: string; why: string } | null {
+  if (typeof opts.asked === 'string' && opts.asked.trim() && opts.asked.trim() !== 'auto') return { model: opts.asked.trim(), why: 'the brief asks for it' }
+  if (typeof opts.config === 'string' && opts.config.trim() && opts.config.trim() !== 'auto') return { model: opts.config.trim(), why: 'config.json review.model' }
+  return null
+}
+export function chooseModel(prep: Prep, diff: string, opts: { rereview?: boolean; config?: unknown; asked?: unknown } = {}): ReviewChoice {
+  const want = wantedModel(opts)
+  if (want) return { model: want.model, runs: 1, why: want.why }
+  const r = requiredRuns(prep, diff, opts.rereview)
+  return { model: 'sonnet', runs: r.runs, why: r.why }
 }
 
 // a new abstraction or a big diff: a cheap search-only reuse pass first (needs something new to look for)

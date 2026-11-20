@@ -3,6 +3,7 @@
 // then opens the new thread's detail pane. Mistakes are said inline, next to the button, before anything is created.
 import { ensureGitHooks } from './githooks'
 import { guardParents } from './doctor'
+import { isExpensiveModel } from './expensive'
 import { hostOf } from './host'
 import { listProjects, unknownProject } from './projects'
 import type { Role } from './role'
@@ -22,8 +23,11 @@ export const BRIEF_ROWS = 8
 const TITLE_MAX = 80
 const BRIEF_MAX = 20_000
 
-type Form = { title: string; project: string; model: string; effort: string; brief: string; errors: string[]; notice: string; busy: boolean; surface?: string }
-const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: DEFAULT, effort: DEFAULT, brief: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+type Form = { title: string; project: string; model: string; effort: string; brief: string; reason: string; errors: string[]; notice: string; busy: boolean; surface?: string }
+const fresh = (surface?: string): Form => ({ title: '', project: NO_PROJECT, model: DEFAULT, effort: DEFAULT, brief: '', reason: '', errors: [], notice: '', busy: false, ...(surface ? { surface } : {}) })
+// opus (any model that is not haiku or sonnet) needs the user's Approve press in the pane: Start only files the request (expensive.ts)
+export const needsApproval = (model: string) => model !== DEFAULT && isExpensiveModel(model)
+export const APPROVAL_NOTE = 'opus needs your approval: Start creates the thread and a request in "Needs you" on the desk pane; nothing runs on opus until you press Approve there (twice). Say why sonnet is not enough:'
 let form: Form = fresh()
 export const resetNewThread = () => {
   form = fresh()
@@ -42,7 +46,7 @@ export async function openNewThread($: any, surface: string | undefined): Promis
 }
 
 // What is wrong with the form, in the order the fields are drawn (an unknown project is looked up by the caller)
-export function validate(f: Pick<Form, 'title' | 'brief' | 'model' | 'effort'>): string[] {
+export function validate(f: Pick<Form, 'title' | 'brief' | 'model' | 'effort'> & { reason?: string }): string[] {
   const out: string[] = []
   if (!f.title.trim()) out.push('Title is empty: give the thread a short title.')
   else if (f.title.trim().length > TITLE_MAX) out.push(`Title is too long (${f.title.trim().length} characters, at most ${TITLE_MAX}).`)
@@ -50,6 +54,7 @@ export function validate(f: Pick<Form, 'title' | 'brief' | 'model' | 'effort'>):
   else if (f.brief.length > BRIEF_MAX) out.push(`Brief is too long (${f.brief.length} characters, at most ${BRIEF_MAX}).`)
   if (f.model !== DEFAULT && !(MODEL_CHOICES as readonly string[]).includes(f.model)) out.push(`Unknown model ${f.model}.`)
   if (f.effort !== DEFAULT && !(EFFORT_CHOICES as readonly string[]).includes(f.effort)) out.push(`Unknown effort ${f.effort}.`)
+  if (needsApproval(f.model) && (MODEL_CHOICES as readonly string[]).includes(f.model) && !(f.reason ?? '').trim()) out.push(`Reason is empty: ${f.model} needs your approval, say why sonnet is not enough.`)
   return out
 }
 
@@ -92,7 +97,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
     try {
       // the same steps as the tool's handler for `new` (register.tsx): a stale parent guide is cleared first, the git hooks refreshed after
       await guardParents(host).catch(() => [])
-      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), ...(f.model !== DEFAULT ? { model: f.model } : {}), ...(f.effort !== DEFAULT ? { effort: f.effort } : {}) }), 'start thread', 130_000)
+      const out = await bounded($, leanThread(host, $.plugin.root, { action: 'new', title: f.title.trim(), text: f.brief.trim(), ...(project ? { project } : {}), ...(f.model !== DEFAULT ? { model: f.model } : {}), ...(f.effort !== DEFAULT ? { effort: f.effort } : {}), ...(needsApproval(f.model) ? { reason: f.reason.trim() } : {}) }), 'start thread', 130_000)
       await ensureGitHooks(host).catch(() => undefined)
       const id = out.ok ? (out.data as Thread | undefined)?.id : undefined
       if (!out.ok || !id) {
@@ -112,7 +117,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
   }
   const projectOptions = [{ value: NO_PROJECT, label: 'none' }, ...names.map(n => ({ value: n, label: n }))]
   const known = projectOptions.some(o => o.value === form.project)
-  const modelOptions = [{ value: DEFAULT, label: 'default (sonnet, or threads.model in config.json)' }, ...MODEL_CHOICES.map(m => ({ value: m, label: m }))]
+  const modelOptions = [{ value: DEFAULT, label: 'default (sonnet, or threads.model in config.json)' }, ...MODEL_CHOICES.map(m => ({ value: m, label: needsApproval(m) ? `${m} (needs your Approve press)` : m }))]
   const effortOptions = [{ value: DEFAULT, label: 'default (high, or threads.effort in config.json)' }, ...EFFORT_CHOICES.map(x => ({ value: x, label: x }))]
   return (
     <Box flexDirection="column">
@@ -120,7 +125,9 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
       <Input key="title" label="Title" placeholder="short title" value={form.title} onInput={(v: string) => void (form.title = v)} onSubmit={(v: string) => void (form.title = v)} />
       {!!listError && <Text color="red">{listError}</Text>}
       <Select key="project" label={names.length ? 'Project' : 'Project (none registered: ask the desk to add one)'} options={projectOptions} value={known ? form.project : NO_PROJECT} onSelect={(v: string) => void (form.project = v)} />
-      <Select key="model" label="Model" options={modelOptions} value={form.model} onSelect={(v: string) => void (form.model = v)} />
+      <Select key="model" label="Model" options={modelOptions} value={form.model} onSelect={(v: string) => { form.model = v; tell() }} />
+      {needsApproval(form.model) && <Text color="yellow">{APPROVAL_NOTE}</Text>}
+      {needsApproval(form.model) && <Input key="reason" label="Reason" placeholder="why sonnet is not enough" value={form.reason} onInput={(v: string) => void (form.reason = v)} onSubmit={(v: string) => void (form.reason = v)} />}
       <Select key="effort" label="Effort" options={effortOptions} value={form.effort} onSelect={(v: string) => void (form.effort = v)} />
       <Input key="brief" label="Brief" placeholder="what the thread should do" rows={BRIEF_ROWS} value={form.brief} onInput={(v: string) => void (form.brief = v)} onSubmit={(v: string) => void (form.brief = v)} />
       {form.errors.map((m, i) => (

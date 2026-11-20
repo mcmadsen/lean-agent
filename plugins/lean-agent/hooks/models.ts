@@ -1,16 +1,19 @@
-// Which model and effort a session runs on. The desk is pinned (opus, high: the user's decision; config.json `desk` wins); a thread gets sonnet/high unless the
-// brief asks for more or less. config.json: `desk: { model, effort }`, `threads: { model, effort }` override the defaults.
+// Which model and effort a session runs on. The desk is pinned (sonnet, high; config.json `desk` wins); a thread gets sonnet/high unless the
+// brief asks for more or less. config.json: `desk: { model, effort }`, `threads: { model, effort }` override the defaults. Opus or any
+// other model that is not haiku or sonnet needs the user's approval in the pane for a thread (expensive.ts).
 import { atomicWrite, dirOf, leanDir, mkdirp, readJson } from './state'
 import type { Host } from './state'
 
 export const MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const EFFORTS = ['low', 'medium', 'high'] as const
 export type Choice = { model: string; effort: string }
-export const DESK_DEFAULT: Choice = { model: 'opus', effort: 'high' } // the alias `opus` is the latest Opus; config.json `desk` overrides
+export const DESK_DEFAULT: Choice = { model: 'sonnet', effort: 'high' } // the alias `sonnet` is the latest Sonnet; config.json `desk` overrides
 export const THREAD_DEFAULT: Choice = { model: 'sonnet', effort: 'high' }
 
 // `claude-sonnet-5-5` and `sonnet` are the same family; a name of no known family is returned as it is
-export const modelFamily = (m: string): string => (/haiku/i.test(m) ? 'haiku' : /sonnet/i.test(m) ? 'sonnet' : /opus/i.test(m) ? 'opus' : m)
+export const modelFamily = (m: string): string => (/haiku/i.test(m) ? 'haiku' : /sonnet/i.test(m) ? 'sonnet' : /opus/i.test(m) ? 'opus' : /fable/i.test(m) ? 'fable' : m)
+// the families the desk's model check knows (the cheap ones, and the expensive ones it switches away from)
+export const DESK_FAMILIES: readonly string[] = [...MODELS, 'fable']
 
 const okModel = (m: unknown): m is string => typeof m === 'string' && (MODELS as readonly string[]).includes(m)
 const okEffort = (e: unknown): e is string => typeof e === 'string' && (EFFORTS as readonly string[]).includes(e)

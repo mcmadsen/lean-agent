@@ -95,9 +95,9 @@ const obj = (properties: Record<string, unknown>, required: string[]) => ({ type
 export const THREAD_TOOLS: Tool[] = [
   {
     name: 'lean_review',
-    description: 'The strict review\'s script side. action prepare (project, base, head, branch): the brief computed from the diff without a model (new symbols and files, edited tests, defaulted parameters, module state, changed exports, declines, a re-review\'s open findings), the reviewer model by risk and whether a second opinion comes first. action record (default; project, sha, base, green, review = the reviewer\'s JSON block, second, passes, branch): records the verdict for a commit (the push gate reads it; only this tool can write it); green is REFUSED, with the reason, when a new symbol has no reuse entry, an edited test no coverage entry, a second-opinion candidate no answer, or a blocker/major finding is open. action decline (project, branch or all, kind, symbol, why): a finding the user decided not to fix; later reviews do not raise it again. The project\'s learned review lessons (the checklist and the shared helpers earlier human reviews found), no model involved: action lessons (project, base, head or paths, goal, repo, budget): the text block for the reviewer\'s prompt, chosen from the changed files and the diff; learn (checklist, helpers {name, where, what}, replace [{old, new}], source): add lines, near-duplicates skipped; lessons-list; lessons-rm (which); lessons-undo (the last batch); lessons-verify (repo, apply): helper lines whose code cannot be found.',
+    description: 'The strict review\'s script side. action prepare (project, base, head, branch, model): the brief computed from the diff without a model (new symbols and files, edited tests, defaulted parameters, module state, changed exports, declines, a re-review\'s open findings), the reviewer (always sonnet; two independent runs for a high-risk diff; opus only when config review.model or the brief asks AND the user approved it in the pane for this thread) and whether a second opinion comes first. action merge (project, reviews = the two runs\' JSON blocks): merges them (findings both found are marked [2/2], the union counts) and returns the merged block. action record (default; project, sha, base, green, review = the reviewer\'s JSON block, or reviews = the two runs\' blocks of a high-risk diff, second, passes, branch): records the verdict for a commit (the push gate reads it; only this tool can write it); green is REFUSED, with the reason, when a new symbol has no reuse entry, an edited test no coverage entry, a second-opinion candidate no answer, or a blocker/major finding is open. action decline (project, branch or all, kind, symbol, why): a finding the user decided not to fix; later reviews do not raise it again. The project\'s learned review lessons (the checklist and the shared helpers earlier human reviews found), no model involved: action lessons (project, base, head or paths, goal, repo, budget): the text block for the reviewer\'s prompt, chosen from the changed files and the diff; learn (checklist, helpers {name, where, what}, replace [{old, new}], source): add lines, near-duplicates skipped; lessons-list; lessons-rm (which); lessons-undo (the last batch); lessons-verify (repo, apply): helper lines whose code cannot be found.',
     inputSchema: obj({
-      action: { type: 'string', enum: ['prepare', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify'] },
+      action: { type: 'string', enum: ['prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify'] },
       project: { type: 'string' },
       sha: { type: 'string', description: 'record: full HEAD sha that was reviewed' },
       base: { type: 'string', description: 'prepare, record, lessons: the base branch or sha (default for prepare and lessons: the default branch)' },
@@ -107,7 +107,8 @@ export const THREAD_TOOLS: Tool[] = [
       green: { type: 'boolean', description: 'record: true asks for a green record; the tool checks it' },
       review: { type: 'object', description: 'record: the reviewer\'s JSON block, as it wrote it' },
       second: { type: 'array', items: { type: 'object', properties: { symbol: { type: 'string' }, candidate: { type: 'string' } } }, description: 'record: the second opinion\'s candidates (each must be answered in review.reuse)' },
-      model: { type: 'string', description: 'record: the reviewer model used' },
+      reviews: { type: 'array', items: { type: 'object' }, description: 'record, merge: the two independent reviewer runs\' JSON blocks of a high-risk diff' },
+      model: { type: 'string', description: 'prepare: a reviewer model the brief explicitly asks for (an expensive one needs the user\'s approval in the pane); record: the reviewer model used' },
       passes: { type: 'number' },
       findings: { type: 'array', items: { type: 'string' }, description: 'record without review: open findings as text (never green)' },
       all: { type: 'boolean', description: 'decline: every branch of the project' },
@@ -388,7 +389,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     }
     if (name === 'lean_review') {
       const project = str(i.project) || (await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})).project || ''
-      return reviewTool(h, project, i)
+      return reviewTool(h, project, i, id)
     }
     if (name === 'lean_goal') {
       if (!str(i.update)) return { ok: false, text: 'lean_goal needs update' }

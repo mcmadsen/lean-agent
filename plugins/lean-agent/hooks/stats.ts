@@ -74,6 +74,9 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(`caps today: ${capLines.join(' · ')}${typeof cfg?.workerCapUsd === 'number' ? ` · per worker ${usd(cfg.workerCapUsd)}` : ''}`)
   out.push(`daily: ${span.map(d => `${d.slice(5)} ${usd(ro.days[d]?.t[0] ?? 0)}`).join(' · ')}`)
   out.push(...table(`by model (${n}d)`, sum.model))
+  // opus is the expensive model (the user approves it per thread in the pane): its share of the window, and the threads that run on it
+  const os = await opusShare(h, n).catch(() => null)
+  if (os && os.total > 0) out.push(`opus share (${n}d): ${Math.round(os.pct)}% of spend (${usd(os.usd)} of ${usd(os.total)})${os.threads.length ? `; threads ${os.threads.join(', ')} run on opus` : '; no open thread is on opus'}`)
   out.push(...table(`by role x model (${n}d; a model you did not configure shows here)`, Object.fromEntries(Object.entries(sum.rm).map(([k, a]) => [k.replace('|', ' / '), a]))))
   out.push(...table(`by role (${n}d)`, sum.role))
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
@@ -156,6 +159,35 @@ export async function threadChoices(h: Host, home: string, tme: Dim, threadUsd: 
     out.push(`threads at the default (${key}): ${threads.get(key)?.size ?? 0}, ${usd(mine.reduce((s, x) => s + x, 0))}, median ${usd(median)}`)
   }
   return out
+}
+
+// The share of the last `days` days' spend that went to opus (any model whose family is opus), and the threads that run on it: the ones that
+// spent on opus in the window (the ledger's thread x model rows) and the open ones started on it (thread.json). Doctor shows a FIX row over
+// OPUS_SHARE_FIX percent: opus needs the user's approval, so a high share means threads got it some other way (an older start, a config value).
+export const OPUS_SHARE_FIX = 40
+export type OpusShare = { usd: number; total: number; pct: number; threads: string[] }
+export async function opusShare(h: Host, days = STATS_DAYS): Promise<OpusShare> {
+  const home = await homeDir(h)
+  const now = await h.clock.now()
+  const ro = await syncRollup(h, now)
+  let usdOpus = 0
+  let total = 0
+  const ids = new Set<string>()
+  for (const d of lastDays(now, days)) {
+    const day = ro.days[d]
+    if (!day) continue
+    total += day.t[0]
+    for (const [k, a] of Object.entries(day.model)) if (family(k) === 'opus') usdOpus += a[0]
+    for (const [k, a] of Object.entries(day.tme ?? {})) {
+      const [tN = '', model = ''] = k.split('|')
+      if (family(model) === 'opus' && /^t\d+$/.test(tN) && a[0] > 0) ids.add(tN)
+    }
+  }
+  for (const e of (await h.fs.list(threadsDir(home)).catch(() => [])).filter(x => /^t\d+$/.test(x.name))) {
+    const t = await readJson<{ model?: string; state?: string } | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
+    if (t?.model && family(t.model) === 'opus' && t.state !== 'closed') ids.add(e.name)
+  }
+  return { usd: usdOpus, total, pct: total > 0 ? (usdOpus / total) * 100 : 0, threads: [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))) }
 }
 
 // "Today $x · 7d $y" for the pane footer and a thread's status line; null when there is no ledger at all
