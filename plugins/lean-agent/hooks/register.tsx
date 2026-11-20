@@ -38,7 +38,7 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
-import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, isLeanCall, markAuditStarted, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, isAuditorCall, isLeanCall, markAuditStarted, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
@@ -48,7 +48,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, lostEdit, loadOrch, noteGrantRoots, orchAgentEnd, orchEnd, orchTurnStart } from './orchestrate'
+import { isSmall, launchOf, lostEdit, loadOrch, noteGrantRoots, orchAgentEnd, orchEnd, orchRan, orchTurnStart } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -1068,16 +1068,14 @@ export const register: Register = on => {
     }
     // the thread's own edit the guard let through because the grants did not reach its workers: a refusal-record row (the feedback export counts them)
     if (octx && role.kind === 'thread' && lostEdit(octx, e)) await logRefusal(host, { role: 'thread', rule: 'grant-lost', text: `grant-lost: thread edit of ${String(e.file_path ?? e.notebook_path ?? '').slice(0, 200)} allowed (fallback, grants are not reaching workers)`, tool: e.tool, thread: role.id, version: VERSION })
-    // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one);
-    // so does every other lean-agent type a thread calls (the result schema and cap apply to the call's result, the grant lives as long as the call)
+    // a call's input is NEVER changed here (auto mode rejects a call whose input a hook changed after it reviewed it): the foreground is
+    // asked for in the agent descriptions and the briefs (run_in_background: false); a background worker's result is cut when it arrives
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
-    const fg = audited || (role.kind === 'thread' && !e.agentId && isLeanCall(e))
-    const forced = audited && wantsBackground(e)
     let r: any
     let launch: { async: boolean; agentId?: string } | undefined
     try {
-      r = await next(fg ? foregroundCall(e) : e)
-      launch = fg || e.tool === 'Agent' || e.tool === 'Task' ? launchOf(r, texts(r?.result).join('\n')) : undefined // the engine may ignore the foreground switch
+      r = await next(e)
+      launch = e.tool === 'Agent' || e.tool === 'Task' ? launchOf(r, texts(r?.result).join('\n')) : undefined
     } catch (err) {
       await noteMissingTool(host, gctx, rname, e, String((err as Error)?.message ?? err)) // a tool the session or worker does not have
       throw err
@@ -1085,6 +1083,8 @@ export const register: Register = on => {
       if (gcall) await releaseGrant(host, role, gcall, { ...gopts, async: launch?.async, agentId: launch?.agentId }).catch(() => undefined)
       if (octx) orchEnd(octx, e, launch) // a worker's slot (threads.workers) is free again, a background worker's when it ends
     }
+    // the worker RAN (a real result, or a background launch accepted): one try of this brief is used; a denied, rejected or errored call uses none
+    if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) orchRan(octx, e)
     if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
@@ -1107,9 +1107,9 @@ export const register: Register = on => {
       const reply = texts(r?.result).join('\n')
       await markAuditStarted(host, role.id, String(e.prompt ?? '')).catch(() => false) // the call went through (not denied): an audit of this text is under way (record-audit needs it)
       const said = await auditFromReply(host, role.id, reply, String(e.prompt ?? '')).catch(() => null)
-      // (the engine ignored the foreground switch and the call came back as "Async agent launched": say that no verdict was recorded)
+      // (a call that came back as "Async agent launched": say that no verdict was recorded yet)
       const lost = !said && /async agent launched/i.test(reply) ? AUDIT_ASYNC_NOTE : ''
-      const notes = [...(forced && !lost ? [AUDIT_FOREGROUND_NOTE] : []), ...(said ? [said] : []), ...(lost ? [lost] : [])]
+      const notes = [...(said ? [said] : []), ...(lost ? [lost] : [])]
       if (notes.length) r = { ...r, context: [...(r.context ?? []), ...notes] }
     }
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's

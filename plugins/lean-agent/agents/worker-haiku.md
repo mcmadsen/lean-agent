@@ -1,6 +1,6 @@
 ---
 name: worker-haiku
-description: Cheap worker for small mechanical edits, renames, formatting and simple lookups. Use first for anything routine.
+description: Cheap worker for small mechanical edits, renames, formatting and simple lookups. Use first for anything routine. Call it with run_in_background: false.
 model: haiku
 effort: low
 maxTurns: 12

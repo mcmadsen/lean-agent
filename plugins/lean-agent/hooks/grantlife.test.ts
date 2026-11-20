@@ -250,16 +250,44 @@ test('through the engine: "Async agent launched", then the worker\'s Edit inside
   expect(((await $.tool.call(workerEdit('w1'))) as any).deny).toBeUndefined() // a resumed w1 keeps its grant
 })
 
-test('through the engine: a thread\'s lean-agent Agent call is handed on in the foreground (undefined or true), a foreground call releases at return', async ($, on) => {
+test('through the engine: no tool.call hook changes a call\'s input (auto mode rejects that); a foreground call releases at return', async ($, on) => {
   const seen: any[] = []
   const h = await session($, on, () => 'done', seen)
-  await $.tool.call(agentCall('1'))
-  await $.tool.call(agentCall('2', { run_in_background: true }))
-  await $.tool.call(agentCall('3', { run_in_background: false }))
-  await $.tool.call({ tool: 'Agent', subagent_type: 'other:thing', prompt: 'x' } as any)
-  expect(seen.map(e => e.run_in_background)).toEqual([false, false, false, undefined])
+  const calls = [
+    agentCall('1'),
+    agentCall('2', { run_in_background: true }),
+    agentCall('3', { run_in_background: false }),
+    { tool: 'Agent', subagent_type: 'lean-agent:auditor', prompt: 'x' },
+    { tool: 'Agent', subagent_type: 'other:thing', prompt: 'x' },
+    { tool: 'Read', file_path: '/real/w/a.ts', limit: 10 },
+    { tool: 'Edit', file_path: '/real/w/c.ts', old_string: 'a', new_string: 'b' },
+    { tool: 'Bash', command: 'ls /real/w' },
+    { tool: 'mcp__lean-agent__lean_run', command: 'echo hi' },
+    workerEdit('w1'),
+  ]
+  for (const c of calls) {
+    const before = JSON.stringify(c)
+    seen.length = 0
+    await $.tool.call(c as any)
+    for (const s of seen) expect(JSON.stringify({ ...s, tool_use_id: undefined })).toBe(before) // the event handed on is the one received (the engine adds only tool_use_id)
+  }
   expect(grants(h).pending).toEqual([])
   expect(grants(h).agents).toEqual({})
+})
+
+test('through the engine: a rejected call (error result) consumes no try, no slot and no grant; the identical reissue runs; two real runs refuse the third', async ($, on) => {
+  let fail = true
+  const h = await session($, on, () => (fail ? { isError: true, content: [{ type: 'text', text: 'rejected before it ran' }] } : 'done'))
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { workers: 1 } }))
+  const same = () => agentCall('1', { toolUseId: undefined })
+  await $.tool.call(same()) // issued, then rejected
+  expect(grants(h).pending).toEqual([])
+  fail = false
+  expect(((await $.tool.call(same())) as any).deny).toBeUndefined() // identical reissue: allowed (and runs; the one slot was freed)
+  const second: any = await $.tool.call({ ...same(), prompt: `${same().prompt}\nwhy-sonnet: x` })
+  expect(second.deny).toBeUndefined() // second real run, escalated with the line
+  expect(((await $.tool.call({ ...same(), prompt: `${same().prompt}\nwhy-sonnet: y` })) as any).deny).toContain('never a third identical try') // two real runs: the third is refused
+  expect(grants(h).pending).toEqual([])
 })
 
 test('through the engine: the fail-fast fallback is logged as a grant-lost refusal row and the thread edits under its roots', async ($, on) => {

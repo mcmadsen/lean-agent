@@ -1,6 +1,6 @@
 ---
 name: explorer
-description: Explores one area (or a group of areas) of a repository for the learn skill and returns only what the repo's own docs do not say, at most 25 lines per area: build/test commands, non-obvious conventions, gotchas. Read-only.
+description: Explores one area (or a group of areas) of a repository for the learn skill and returns only what the repo's own docs do not say, at most 25 lines per area: build/test commands, non-obvious conventions, gotchas. Read-only. Call it with run_in_background: false.
 model: haiku
 effort: low
 tools: Read, Grep, Glob, Bash

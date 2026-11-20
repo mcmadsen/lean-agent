@@ -866,6 +866,9 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
      copy: lean-agent now treats that copy as the thread, but its history is the copy's), or a new session in another folder (the link did
      not resolve the id).
   Whatever the link does, `claude attach <id>` in a terminal reaches the thread's own session, and the app's session list shows it by name.
+- **Auto mode: "a hook changed this call's input" / "auto mode classifier gave no verdict"** on an Agent call (1.0.16 only). 1.0.16 rewrote the call
+  to `run_in_background: false`, which auto mode rejects, and the reissue then hit the duplicate guard. Update: lean-agent never changes a tool call's
+  input now, a rejected call consumes no retry, and the threads pass `run_in_background: false` themselves.
 - **A script audit never got a verdict** (`lean_script show` says "unaudited" after the auditor finished, or `decide` says "was never audited").
   The mod records the verdict from the auditor's `LEAN-AUDIT` line when the auditor's Agent call returns; with a background auditor that
   return carries no verdict (1.0.12 forces auditor calls to the foreground; whether the engine honours that is *unverified*). Now:

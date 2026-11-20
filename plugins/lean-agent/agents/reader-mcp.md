@@ -1,6 +1,6 @@
 ---
 name: reader-mcp
-description: Read-only lookup through ONE MCP server or connector the thread granted for this job (a brief line `allow-mcp: <server>`), e.g. a monitoring or logs check. Haiku. Only for a job that needs an MCP tool; everything else uses reader-haiku.
+description: Read-only lookup through ONE MCP server or connector the thread granted for this job (a brief line `allow-mcp: <server>`), e.g. a monitoring or logs check. Haiku. Only for a job that needs an MCP tool; everything else uses reader-haiku. Call it with run_in_background: false.
 model: haiku
 effort: low
 maxTurns: 12

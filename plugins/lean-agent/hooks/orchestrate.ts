@@ -2,7 +2,7 @@
 // small step for a haiku worker. Enforced here by the guard (guard.ts calls orchDecide), not by text a model has to remember.
 // Pure rules over a call plus a little in-memory state (per-turn direct reads, workers in flight, per-worker step counts).
 import { plainPipeline } from './shell'
-import { jobOf, retryDenial, retryReset, stepBudget } from './jobs'
+import { jobOf, retryDenial, retryRan, retryReset, stepBudget } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 
@@ -11,7 +11,7 @@ export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agen
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
-export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku'
+export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku (pass run_in_background: false)'
 export const SPLIT = 'return what you have; the thread splits the rest'
 export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
 export const DIRECT_READ_LINES = 200
@@ -164,7 +164,7 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   for (const [id, sl] of slots) if (now - sl.at > c.grantTtlMin * 60_000) freeSlot(id) // a worker that never ended: its slot is not held forever
   const n = inflight.get(k) ?? 0
   if (n >= c.workers) return `at most ${c.workers} workers at once (threads.workers); wait for one to finish`
-  const again = retryDenial(k, p) // (counted only when nothing else refused it)
+  const again = retryDenial(k, p) // (only a check: orchRan counts the try when the worker really ran)
   if (again) return again
   inflight.set(k, n + 1)
   return null
@@ -214,6 +214,13 @@ export function orchDecide(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (ctx.kind === 'desk') return isAgentTool(e) ? DESK_ROUTE : null
   if (ctx.kind === 'thread') return threadDenial(c, ctx, e)
   return null
+}
+
+// the Agent call RAN a worker (a real result came back, or a background launch was accepted): one try of this brief is used.
+// A call our guard denied, the permission check or the classifier rejected, or that errored before a worker started never gets here.
+export function orchRan(ctx: OCtx, e: Call): void {
+  if (!isAgentTool(e) || ctx.agentType || ctx.agentId || ctx.kind !== 'thread' || !isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) return
+  retryRan(key(ctx), String(e.prompt ?? e.description ?? ''))
 }
 
 // after a worker Agent call returned (allowed earlier by orchDecide): its slot is free again. A background launch ("Async agent launched",

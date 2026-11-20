@@ -2,8 +2,8 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide, parseGrants, recordGrant } from './guard'
-import { PARTS, STEPS_BY_JOB, jobHash, jobOf, jobResult, retryDenial, retryReset, stepBudget, trimJobResult } from './jobs'
-import { orchConfig, orchDecide, orchEnd, orchReset } from './orchestrate'
+import { PARTS, STEPS_BY_JOB, jobHash, jobOf, jobResult, retryDenial, retryRan, retryReset, stepBudget, trimJobResult } from './jobs'
+import { orchConfig, orchDecide, orchEnd, orchRan, orchReset } from './orchestrate'
 
 const TDIR = '/h/.lean-agent/threads/t1'
 const th = { kind: 'thread', home: '/h', threadDir: TDIR, cwd: '/r/app' } as const
@@ -68,12 +68,15 @@ test('the job type of the brief reaches the worker through its grant record (par
   expect(await decide(h.host, ctx, { tool: 'Bash', command: 'ls /r/app' })).toContain('run job')
 })
 
-test('retries: the second identical brief needs why-sonnet, the third is refused; a changed brief starts again; threads are separate', () => {
+test('retries: counted only when a worker ran (retryRan): the second identical brief needs why-sonnet, the third is refused; a changed brief starts again; threads are separate', () => {
   retryReset()
   const brief = 'job: lookup\nwhere is X defined'
   expect(retryDenial('t1', brief)).toBeNull()
+  expect(retryDenial('t1', brief)).toBeNull() // checking again counts nothing (an issued call that never ran uses no try)
+  retryRan('t1', brief)
   expect(retryDenial('t1', brief)).toContain('change the brief')
   expect(retryDenial('t1', `${brief}\nwhy-sonnet: haiku found nothing`)).toBeNull() // the second, escalated
+  retryRan('t1', `${brief}\nwhy-sonnet: haiku found nothing`)
   const third = retryDenial('t1', `${brief}\nwhy-sonnet: again`)
   expect(third).toContain('split the job differently or report blocked')
   expect(retryDenial('t1', brief)).toContain('split the job differently')
@@ -83,18 +86,22 @@ test('retries: the second identical brief needs why-sonnet, the third is refused
   expect(jobHash('a b')).not.toBe(jobHash('a c'))
 })
 
-test('Agent calls through the guard: a refused retry takes no worker slot; requireJob refuses a brief without a job line', () => {
+test('Agent calls through the guard: a call that never ran takes no try and (once ended) no slot; requireJob refuses a brief without a job line', () => {
   orchReset()
   const c = orchConfig({ threads: { workers: 1 } })
-  const ag = (prompt: string, sub = 'lean-agent:worker-haiku', cfg = c) => orchDecide(cfg, th, { tool: 'Agent', subagent_type: sub, prompt })
+  const sub = (s: string) => ({ tool: 'Agent', subagent_type: s })
+  const ag = (prompt: string, s = 'lean-agent:worker-haiku', cfg = c) => orchDecide(cfg, th, { ...sub(s), prompt })
+  const ran = (prompt: string, s = 'lean-agent:worker-haiku') => { orchRan(th, { ...sub(s), prompt }); orchEnd(th, sub(s)) }
   expect(ag('job: lookup\nq')).toBeNull()
-  orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' })
+  orchEnd(th, sub('lean-agent:worker-haiku')) // rejected before it ran: ended, not counted
+  expect(ag('job: lookup\nq')).toBeNull() // the identical reissue is allowed
+  ran('job: lookup\nq') // it ran
   expect(ag('job: lookup\nq')).toContain('already ran once')
   expect(ag('job: lookup\nq\nwhy-sonnet: haiku missed it', 'lean-agent:worker-sonnet')).toBeNull() // the escalation: sonnet, same brief
-  orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet' })
+  ran('job: lookup\nq\nwhy-sonnet: haiku missed it', 'lean-agent:worker-sonnet')
   expect(ag('job: lookup\nq\nwhy-sonnet: x', 'lean-agent:worker-sonnet')).toContain('report blocked')
   expect(ag('job: lookup\nq2')).toBeNull() // the refusals above did not hold the one slot
-  orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' })
+  orchEnd(th, sub('lean-agent:worker-haiku'))
   const strict = orchConfig({ workers: { requireJob: true } })
   expect(ag('find x', 'lean-agent:reader-haiku', strict)).toContain('job: lookup|edit|run|check')
   expect(ag('job: check\nrun x', 'lean-agent:reader-haiku', strict)).toBeNull()

@@ -1,6 +1,6 @@
 ---
 name: worker-sonnet
-description: Default worker for ordinary implementation, tests and bug fixes that need some reasoning.
+description: Default worker for ordinary implementation, tests and bug fixes that need some reasoning. Call it with run_in_background: false.
 model: sonnet
 effort: medium
 maxTurns: 15

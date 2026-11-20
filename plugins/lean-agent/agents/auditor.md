@@ -1,6 +1,6 @@
 ---
 name: auditor
-description: Read-only auditor of one candidate script: what it reads, writes, deletes, reaches over the network, hardcodes, and whether it is right on other data. Never edits, never runs it.
+description: Read-only auditor of one candidate script: what it reads, writes, deletes, reaches over the network, hardcodes, and whether it is right on other data. Never edits, never runs it. Call it with run_in_background: false.
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Bash

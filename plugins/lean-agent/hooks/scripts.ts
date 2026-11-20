@@ -264,7 +264,7 @@ export const RECORD_AUDIT_TEXT =
   'If no "audited:" line came back for the auditor (it ran in the background, or the engine returned "Async agent launched"), take the fields of its LEAN-AUDIT line from its hand-back and call lean_script record-audit with name, sha, verdict, network, deletes, secrets, generalises (true or false), reads, writes, hardcoded, changes and a one-line reason. The mod applies the same rules to it; do not invent or soften a verdict.'
 export function auditBrief(meta: Meta, dir: string): string {
   return [
-    `Audit the candidate script "${meta.name}" for lean-agent. Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
+    `Audit the candidate script "${meta.name}" for lean-agent. Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt and run_in_background: false. Never run the script yourself.`,
     '--- auditor brief ---',
     `Audit the candidate script ${meta.name}. Folder: ${dir} (the script is ${dir}/${meta.file}; meta.json beside it).`,
     `Script sha256: ${meta.sha256} (put it in the LEAN-AUDIT line as "sha")`,
@@ -275,7 +275,7 @@ export function auditBrief(meta: Meta, dir: string): string {
     `Project: ${meta.project}`,
     'Judge by reading; end your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns in the foreground (the auditor runs in the foreground; a background call returns before there is a verdict).',
+    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns in the foreground (pass run_in_background: false; a background call returns before there is a verdict, then use record-audit).',
     RECORD_AUDIT_TEXT,
     'A script is audited once per content: after an adapt, fix it and propose it again.',
   ].join('\n')
@@ -538,17 +538,13 @@ async function adoptVersion(h: Host, f: Found, via: 'audit' | 'user'): Promise<O
 }
 
 // An auditor's Agent reply: when it ends with a LEAN-AUDIT line the mod records the verdict. null = no such line.
-// An auditor's verdict is recorded from the reply of its own Agent call (auditFromReply). A call that asks for the background returns
-// "Async agent launched" at once and the LEAN-AUDIT line comes later, in a hand-back no hook records: the verdict would be lost. So an
-// auditor call always runs in the foreground: the event handed on has run_in_background false.
+// An auditor's verdict is recorded from the reply of its own Agent call (auditFromReply). A call that runs in the background returns
+// "Async agent launched" at once and the LEAN-AUDIT line comes later: the thread then records it with record-audit. The call's input is
+// never rewritten by a hook (auto mode rejects that), so the foreground is asked for: the brief says "pass run_in_background: false".
 export const isAuditorCall = (e: any): boolean => (e?.tool === 'Agent' || e?.tool === 'Task') && /^(lean-agent:)?auditor$/.test(String(e?.subagent_type ?? ''))
-// Current Claude Code runs a subagent in the background unless the call says run_in_background false: "not false" is a background call
-export const wantsBackground = (e: any): boolean => e?.run_in_background !== false && e?.run_in_background !== 'false'
-// a thread's own Agent call for one of this plugin's types (workers, readers, reviewer, explorer, auditor): handed on in the foreground
+// a thread's own Agent call for one of this plugin's types (workers, readers, reviewer, explorer, auditor)
 export const isLeanCall = (e: any): boolean => (e?.tool === 'Agent' || e?.tool === 'Task') && /^lean-agent:/.test(String(e?.subagent_type ?? ''))
-export const foregroundCall = (e: any): any => (wantsBackground(e) ? { ...e, run_in_background: false } : e)
-export const AUDIT_FOREGROUND_NOTE = '[lean-agent] the auditor ran in the foreground (run_in_background was switched off): its verdict is recorded when it returns, which a background auditor never gets'
-export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded yet: when its LEAN-AUDIT line comes back, call lean_script record-audit with its fields (name, sha, verdict, network, deletes, secrets, generalises, reads, writes, hardcoded, changes, reason); the mod checks it like a reply. Next time start the auditor in the foreground (no run_in_background)'
+export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded yet: when its LEAN-AUDIT line comes back, call lean_script record-audit with its fields (name, sha, verdict, network, deletes, secrets, generalises, reads, writes, hardcoded, changes, reason); the mod checks it like a reply. Next time pass run_in_background: false on the auditor call'
 
 export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
   const r = parseAudit(text)

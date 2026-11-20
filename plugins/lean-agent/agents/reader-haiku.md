@@ -1,6 +1,6 @@
 ---
 name: reader-haiku
-description: Read-only lookup: find where something is defined or used and summarise it. Cheapest reader.
+description: Read-only lookup: find where something is defined or used and summarise it. Cheapest reader. Call it with run_in_background: false.
 model: haiku
 effort: low
 maxTurns: 12

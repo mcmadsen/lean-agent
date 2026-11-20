@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Auto mode (Claude Code) refused every worker call: "auto mode classifier gave no verdict ... a hook changed this call's input after auto mode
+  reviewed it", and the identical reissue was then refused by the duplicate guard. 1.0.16 handed the Agent call on with `run_in_background: false`
+  (the foreground rewrite for lean-agent types and the auditor). **No tool.call hook changes a call's input any more** (a spec fails if one does);
+  the foreground is asked for instead: the agent descriptions, the step hint, the audit brief and the thread template say "pass
+  `run_in_background: false`". A background worker still works (its result is cut to the job schema when it arrives, grants survive the launch);
+  a background auditor's verdict goes through `record-audit`.
+- The retry guard ("this exact job already ran once / a third identical try is refused") counted a call when it was issued. It now counts only a
+  worker that RAN (a real result, or a background launch accepted): a call our guard denied, the permission check or the classifier rejected, or
+  that errored before a worker started uses no try, no slot and leaves no grant entry. Two real runs still refuse the third identical one.
+
 ## 1.0.16
 
 ### Fixed

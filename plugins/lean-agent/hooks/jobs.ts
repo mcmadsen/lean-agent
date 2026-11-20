@@ -1,7 +1,7 @@
 // Job types (execution model, fail fast): the first line of a worker brief names the job, `job: lookup|edit|run|check`. By job:
 //  - a step budget (tool calls): lookup 5, edit 8, run 3, check 5; config.json `workers.stepsByJob`; `workers.steps` stays the ceiling
 //  - a return schema, enforced by script: the Agent result is cut to it and marked (trimJobResult / jobResult)
-//  - a retry count per (thread, job hash): the second identical brief needs a `why-sonnet:` line, the third is refused (retryDenial)
+//  - a retry count per (thread, job hash): the second identical brief needs a `why-sonnet:` line, the third is refused (retryDenial checks, retryRan counts)
 // Pure: no host, no model. A brief without a `job:` line keeps today's rules (workers.steps, no schema).
 import { mapTexts } from './cap'
 
@@ -48,15 +48,19 @@ const tries = new Map<string, number>() // `${thread}|${hash}` -> times started
 const MAX_TRIES = 500
 export const retryReset = (): void => tries.clear()
 
-// null = allow (and count it). 1st: allowed. 2nd identical: only with a `why-sonnet:` line. 3rd: refused, never a loop.
+// null = allow. 1st: allowed. 2nd identical: only with a `why-sonnet:` line. 3rd: refused, never a loop.
+// Only a check: a try is counted by retryRan, when a worker really ran (a denied, rejected or failed call consumes none).
 export function retryDenial(thread: string, prompt: unknown): string | null {
-  const k = `${thread}|${jobHash(prompt)}`
-  const n = tries.get(k) ?? 0
+  const n = tries.get(`${thread}|${jobHash(prompt)}`) ?? 0
   if (n >= 2) return 'this exact job already ran twice: split the job differently or report blocked (never a third identical try)'
   if (n === 1 && !WHY_SONNET.test(String(typeof prompt === 'string' ? prompt : ''))) return 'this exact job already ran once and did not settle it: change the brief (one line saying what the first answer lacked), or escalate once with a `why-sonnet: <reason>` line; a third identical try is refused'
-  if (!tries.has(k) && tries.size >= MAX_TRIES) tries.delete(tries.keys().next().value as string)
-  tries.set(k, n + 1)
   return null
+}
+// a worker ran for this brief (the Agent call returned a real result, or a background launch was accepted): one try used
+export function retryRan(thread: string, prompt: unknown): void {
+  const k = `${thread}|${jobHash(prompt)}`
+  if (!tries.has(k) && tries.size >= MAX_TRIES) tries.delete(tries.keys().next().value as string)
+  tries.set(k, (tries.get(k) ?? 0) + 1)
 }
 
 // ---- return schemas ------------------------------------------------------------------------------------------------

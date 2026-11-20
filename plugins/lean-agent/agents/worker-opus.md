@@ -1,6 +1,6 @@
 ---
 name: worker-opus
-description: Expensive worker for hard design, tricky debugging or cross-cutting changes. Use only when the user asks for it (and approved opus for the thread in the pane); never the default. Without that approval the Agent call is refused.
+description: Expensive worker for hard design, tricky debugging or cross-cutting changes. Use only when the user asks for it (and approved opus for the thread in the pane); never the default. Without that approval the Agent call is refused. Call it with run_in_background: false.
 model: opus
 effort: medium
 maxTurns: 15

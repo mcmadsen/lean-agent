@@ -1,6 +1,6 @@
 ---
 name: reader-sonnet
-description: Read-only analysis that needs reasoning: explain a flow, compare two code paths, trace a bug without changing anything.
+description: Read-only analysis that needs reasoning: explain a flow, compare two code paths, trace a bug without changing anything. Call it with run_in_background: false.
 model: sonnet
 effort: medium
 maxTurns: 12
