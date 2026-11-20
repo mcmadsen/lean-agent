@@ -7,6 +7,7 @@ import type { Context } from './reviewgate'
 import type { Prep } from './reviewprep'
 import { chooseModel, classifyRisk, requiredRuns, wantSecondOpinion } from './reviewrisk'
 import { digestOf, mergeRuns, sameBlocks } from './reviewmerge'
+import { builtinGenerated, globRe } from './reviewexclude'
 import { grantModelApproval, listRequests } from './expensive'
 
 const prep = (p: Partial<Prep> = {}): Prep => ({ files: [], symbols: [], tests: [], renamed: [], params: [], state: [], exports: [], changed: ['src/a.ts'], lines: 20, hunks: {}, ...p })
@@ -221,7 +222,7 @@ test('lean_review prepare: lists from the diff, the model with its reason, the s
   const body = ['export function alpha1() {}', 'export function beta2() {}', 'export function gamma3() {}', 'const token = secret']
   const h = setup({ '*': newFileDiff('src/auth.ts', ...body) }, { '*': 'A\tsrc/auth.ts\n' })
   await tool(h, { action: 'decline', branch: 'feat', kind: 'duplication', symbol: 'alpha1', why: 'separate ticket' })
-  const r = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
+  const r = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', level: 'full' })
   expect(r.ok).toBe(true)
   const meta = JSON.parse(r.text.split('\n')[0]!.replace('LEAN-REVIEW-PREP ', ''))
   expect(meta).toMatchObject({ model: 'sonnet', runs: 2, secondOpinion: true, rereview: false, newSymbols: 3, mb: MB })
@@ -233,7 +234,7 @@ test('lean_review prepare: lists from the diff, the model with its reason, the s
   expect(r.text).toContain('Declined by the user')
   expect(r.text).toContain('duplication alpha1')
   // another branch does not see it
-  expect((await tool(h, { action: 'prepare', base: 'main', branch: 'other' })).text).not.toContain('Declined by the user')
+  expect((await tool(h, { action: 'prepare', base: 'main', branch: 'other', level: 'full' })).text).not.toContain('Declined by the user')
 })
 
 test('lean_review decline: needs why, a branch or all, and a symbol (a bare kind would silence a category)', async () => {
@@ -253,7 +254,7 @@ test('lean_review re-review: the second round gets the open findings and the del
   const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', green: true, review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries', category: 'correctness' })], verdict: 'changes-requested' } })
   expect(r1.ok).toBe(false)
   expect(r1.text).toContain('open major')
-  const p = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
+  const p = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', level: 'full' })
   expect(p.text).toContain('RE-REVIEW')
   expect(p.text).toContain(`diff ${H1}...${H2}`)
   expect(p.text).toContain('the cache never expires entries')
@@ -267,10 +268,10 @@ test('lean_review re-review: the second round gets the open findings and the del
   expect(r2.ok).toBe(true)
   expect(await greenReview(h.host, 'app', H2)).toBe(true)
   // a sha nobody recorded is a delta start with no earlier findings; the head itself is not a delta start
-  const odd = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', since: 'd'.repeat(40) })
+  const odd = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', since: 'd'.repeat(40), level: 'full' })
   expect(odd.text).toContain('RE-REVIEW')
   expect(odd.text).not.toContain('the cache never expires')
-  expect((await tool(h, { action: 'prepare', base: 'main', since: H2 })).text).not.toContain('RE-REVIEW')
+  expect((await tool(h, { action: 'prepare', base: 'main', since: H2, level: 'full' })).text).not.toContain('RE-REVIEW')
 })
 
 test('lean_review record: a failed or empty diff, a narrowed base and a silent re-review never give green', async () => {
@@ -282,7 +283,7 @@ test('lean_review record: a failed or empty diff, a narrowed base and a silent r
   const f = await tool(failing, { sha: H2, base: 'main', green: true, review: ok })
   expect(f.ok).toBe(false)
   expect(f.text).toContain('git could not produce the diff')
-  expect((await tool(failing, { action: 'prepare', base: 'main' })).ok).toBe(false)
+  expect((await tool(failing, { action: 'prepare', base: 'main', level: 'full' })).ok).toBe(false)
   // the merge base is the head: nothing would be checked
   const empty = setup({}, {}, { mb: H2 })
   expect((await tool(empty, { sha: H2, base: 'main', green: true, review: ok })).text).toContain('the range is empty')
@@ -356,35 +357,35 @@ test('mergeRuns: a finding both runs raised is [2/2], the others [1/2]; the unio
 test('lean_review prepare: an expensive reviewer model that config or the brief wants needs the pane approval for THIS thread, else sonnet runs and one request waits', async () => {
   const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
   h.files.set(`${L}/config.json`, JSON.stringify({ review: { model: 'opus' } }))
-  const r = await tool(h, { action: 'prepare', base: 'main' })
+  const r = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
   expect(prepMeta(r)).toMatchObject({ model: 'sonnet', runs: 1 })
   expect(r.text).toContain('reviewer: sonnet (')
   expect(r.text).toContain("a review on opus (config.json review.model) needs the user's approval for this thread")
   let reqs = await listRequests(h.host)
   expect(reqs).toHaveLength(1)
   expect(reqs[0]).toMatchObject({ thread: 't1', model: 'opus', action: 'review', origin: 'review', state: 'pending' })
-  await tool(h, { action: 'prepare', base: 'main' })
+  await tool(h, { action: 'prepare', base: 'main', level: 'full' })
   expect(await listRequests(h.host)).toHaveLength(1) // asking again is the same request
   // another thread's approval does not count
   await grantModelApproval(h.host, { scope: 't2', model: 'opus', reason: 'not this thread' })
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).model).toBe('sonnet')
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).model).toBe('sonnet')
   // this thread's does (one run: a wanted model is used as it is)
   await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'a security review' })
-  const ok = await tool(h, { action: 'prepare', base: 'main' })
+  const ok = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
   expect(prepMeta(ok)).toMatchObject({ model: 'opus', runs: 1 })
   expect(ok.text).toContain('reviewer: opus (config.json review.model)')
   // after 24 h it is gone again
   h.clock.t += 25 * 3_600_000
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).model).toBe('sonnet')
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).model).toBe('sonnet')
   // the brief asks for it (no config): the same rule
   h.files.set(`${L}/config.json`, '{}')
-  const asked = await tool(h, { action: 'prepare', base: 'main', model: 'opus' })
+  const asked = await tool(h, { action: 'prepare', base: 'main', model: 'opus', level: 'full' })
   expect(prepMeta(asked).model).toBe('sonnet')
   expect(asked.text).toContain('the brief asks for it')
   await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'the brief says so' })
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'opus' })).model).toBe('opus')
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'opus', level: 'full' })).model).toBe('opus')
   // a cheap model needs nothing
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'haiku' })).model).toBe('haiku')
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', model: 'haiku', level: 'full' })).model).toBe('haiku')
   reqs = await listRequests(h.host)
   expect(reqs.every(q => q.thread === 't1' && q.origin === 'review')).toBe(true)
 })
@@ -437,4 +438,166 @@ test('lean_review record: a high-risk diff needs TWO reviewer runs: one block is
   const solo = await tool(p, { sha: H2, base: 'main', green: true, review: { ...base, reuse: reuseOf('plain1'), searches: [{ for: 'plain', found: 'none' }] } })
   expect(solo.ok).toBe(true)
   expect(await greenReview(p.host, 'app', H2)).toBe(true)
+})
+
+// ---- light and full reviews, the expected cost, generated files, the thread's worktree ---------------------------------------------
+test('lean_review prepare: light is the default (one pass, no second opinion, never green); full is the strict review; a bad level is refused', async () => {
+  const h = riskSetup() // a high-risk diff: security words, three new symbols
+  const light = await tool(h, { action: 'prepare', base: 'main' })
+  expect(prepMeta(light)).toMatchObject({ level: 'light', model: 'sonnet', runs: 1, secondOpinion: false })
+  expect(light.text).toContain('level: LIGHT')
+  expect(light.text).toContain('LIGHT REVIEW')
+  expect(light.text).toContain('level: "full"')
+  expect(light.text).not.toContain('run TWO independent reviewer passes')
+  expect(light.text).toMatch(/expected review cost ~\$\d+\.\d\d \(1 pass, sonnet;/)
+  const full = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  expect(prepMeta(full)).toMatchObject({ level: 'full', runs: 2, secondOpinion: true })
+  expect(full.text).toContain('level: FULL')
+  expect(full.text).not.toContain('LIGHT REVIEW')
+  expect(full.text).toMatch(/expected review cost ~\$\d+\.\d\d \(2 passes, sonnet;/)
+  const bad = await tool(h, { action: 'prepare', base: 'main', level: 'strict' })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('level must be')
+  // a light pass ignores a wanted expensive model: it is one cheap sonnet pass
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { model: 'opus' } }))
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' }))).toMatchObject({ model: 'sonnet', runs: 1 })
+  expect(await listRequests(h.host)).toHaveLength(0)
+})
+
+test('lean_review record: a light pass never records green, however the call is made; the push gate needs the full review\'s record', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const ok = { ...base, reuse: reuseOf('plain1'), searches: [{ for: 'plain', found: 'none' }] }
+  // after a light prepare of this sha: green is refused (the level is the mod's memory of the prepare, not the call's word)
+  await tool(h, { action: 'prepare', base: 'main' })
+  const l = await tool(h, { sha: H2, base: 'main', green: true, review: ok })
+  expect(l.ok).toBe(false)
+  expect(l.text).toContain('LIGHT review')
+  expect(await greenReview(h.host, 'app', H2)).toBe(false)
+  expect(rec(h, H2).green).toBe(false)
+  const saidFull = await tool(h, { sha: H2, base: 'main', green: true, level: 'full', review: ok })
+  expect(saidFull.ok).toBe(false) // claiming "full" does not undo a light prepare
+  // not asking for green: a light result is recorded, with what is open
+  const quiet = await tool(h, { sha: H2, base: 'main', review: { ...ok, findings: [finding({ severity: 'minor' })] } })
+  expect(quiet.ok).toBe(true)
+  expect(quiet.text).toContain('not green')
+  // level: "light" on the record alone, with no prepare at all
+  const solo = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  expect((await tool(solo, { sha: H2, base: 'main', green: true, level: 'light', review: ok })).ok).toBe(false)
+  expect(await greenReview(solo.host, 'app', H2)).toBe(false)
+  // after the full prepare the same block is green
+  await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const f = await tool(h, { sha: H2, base: 'main', green: true, review: ok })
+  expect(f.ok).toBe(true)
+  expect(await greenReview(h.host, 'app', H2)).toBe(true)
+  // a full review without any prepare is as before (the enforcement reads the diff itself)
+  expect((await tool(solo, { sha: H2, base: 'main', green: true, review: ok })).ok).toBe(true)
+})
+
+test('lean_review: a light pass is the "last reviewed sha" of the next light pass only; a full review reviews the whole range again', async () => {
+  const first = newFileDiff('src/cache.ts', 'export class Cache {}')
+  const delta = ['diff --git a/src/cache.ts b/src/cache.ts', '--- a/src/cache.ts', '+++ b/src/cache.ts', '@@ -1 +1,2 @@', ' export class Cache {}', '+// fixed'].join('\n') + '\n'
+  const h = setup({ '*': first, [H1]: delta }, { '*': 'A\tsrc/cache.ts\n', [H1]: '' })
+  await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // (head H2 prepared light)
+  const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries' })], verdict: 'changes-requested' } })
+  expect(r1.ok).toBe(true)
+  const light = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })
+  expect(light.text).toContain('RE-REVIEW')
+  expect(light.text).toContain('the cache never expires entries')
+  expect(light.text).toContain('the reuse pass (3)')
+  const full = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', level: 'full' })
+  expect(full.text).not.toContain('RE-REVIEW')
+  expect(prepMeta(full)).toMatchObject({ rereview: false, since: '' })
+})
+
+test('lean_review prepare says the expected cost: the median of the earlier reviewer passes of this project in the ledger, else a stated default', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const none = await tool(h, { action: 'prepare', base: 'main' })
+  expect(none.text).toContain('expected review cost ~$1.50 (1 pass, sonnet; default $1.50 a pass, no earlier reviewer pass on this project in the ledger)')
+  expect(prepMeta(none).expectedUsd).toBe(1.5)
+  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: 1, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.5, ...o })
+  h.files.set(`${L}/threads/t2/thread.json`, JSON.stringify({ id: 't2', project: 'other' }))
+  h.files.set(`${L}/ledger.jsonl`, [
+    row({ agentId: 'a1', usd: 0.7 }), row({ agentId: 'a1', usd: 0.5, ts: 2 }), // one pass of $1.20
+    row({ agentId: 'a2', usd: 0.4 }), // $0.40
+    row({ agentId: 'a3', usd: 2.0 }), // $2.00
+    row({ agentId: 'x1', tN: 't2', usd: 50 }), // another project's pass
+    row({ agentId: 'w1', agent: 'lean-agent:worker-sonnet', usd: 9 }), // not a reviewer
+    row({ agentId: 'y1', tN: 't9', usd: 70 }), // a thread nobody knows
+    'not json reviewer',
+  ].join('\n') + '\n')
+  const some = await tool(h, { action: 'prepare', base: 'main' })
+  expect(some.text).toContain('expected review cost ~$1.20 (1 pass, sonnet; median of 3 earlier reviewer passes on this project)')
+  expect(prepMeta(some).expectedUsd).toBe(1.2)
+  const risky = riskSetup() // two passes on the full level: twice the median
+  for (const k of [`${L}/ledger.jsonl`, `${L}/threads/t2/thread.json`]) risky.files.set(k, h.files.get(k)!)
+  const two = await tool(risky, { action: 'prepare', base: 'main', level: 'full' })
+  expect(two.text).toContain('expected review cost ~$2.40 (2 passes, sonnet; median of 3 earlier reviewer passes on this project)')
+})
+
+test('lean_review prepare: generated files are left out of the lists, the line count, the risk and the diff the reviewer reads; the text says how many', async () => {
+  const golden = Array.from({ length: 900 }, (_, i) => `"token${i}": "secret${i}"`)
+  const diff = newFileDiff('src/a.ts', 'export function aa1() {}') + newFileDiff('test/golden/out.json', ...golden) + newFileDiff('web/app.min.js', 'var a=1') + newFileDiff('pnpm-lock.yaml', 'a: 1', 'b: 2') + newFileDiff('src/gen.ts', 'export function genned() {}') + newFileDiff('docs/x.txt', 'cfg')
+  const added = 'A\tsrc/a.ts\nA\ttest/golden/out.json\nA\tweb/app.min.js\nA\tpnpm-lock.yaml\nA\tsrc/gen.ts\nA\tdocs/x.txt\n'
+  const h = setup({ '*': diff }, { '*': added })
+  const git = h.git.handler
+  h.git.handler = (a: string[], c: Parameters<typeof git>[1]) => (a.includes('check-attr') ? { exitCode: 0, stdout: 'src/a.ts: linguist-generated: unspecified\nsrc/gen.ts: linguist-generated: set\ndocs/x.txt: linguist-generated: unspecified\n' } : git(a, c))
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { exclude: ['docs/*.txt'] } }))
+  const r = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const meta = prepMeta(r)
+  expect(meta.excluded).toEqual({ files: 5, lines: 900 + 1 + 2 + 1 + 1 })
+  expect(meta.lines).toBe(1) // only src/a.ts counts
+  expect(meta).toMatchObject({ runs: 1 }) // 900 golden lines with "token"/"secret" words are no risk
+  expect(r.text).toContain('Generated files left out of the lists, the risk and the line count: 5 files, 905 lines (test/golden/out.json,')
+  expect(r.text).toContain("git -C /r/app diff " + MB + '...' + H2 + " -- . ':!test/golden/out.json'")
+  expect(r.text).toContain("':!pnpm-lock.yaml'")
+  expect(r.text).toContain("':!src/gen.ts'")
+  expect(r.text).toContain("':!docs/x.txt'")
+  expect(r.text).not.toContain('genned')
+  expect(r.text).toContain('aa1 (src/a.ts:1)')
+  // nothing generated: no pathspec, no sentence
+  const plain = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const p = await tool(plain, { action: 'prepare', base: 'main', level: 'full' })
+  expect(p.text).not.toContain('Generated files')
+  expect(p.text).not.toContain("':!")
+  expect(prepMeta(p).excluded).toEqual({ files: 0, lines: 0 })
+  // git check-attr does not answer: the built-in and config rules still apply, and the text says the attributes were not read
+  const noAttr = setup({ '*': diff }, { '*': added })
+  noAttr.files.set(`${L}/config.json`, JSON.stringify({ review: { exclude: ['docs/*.txt'] } }))
+  const n = await tool(noAttr, { action: 'prepare', base: 'main', level: 'full' })
+  expect(prepMeta(n).excluded.files).toBe(4)
+  expect(n.text).toContain('git check-attr did not answer')
+})
+
+test('reviewexclude: the built-in rules and the config globs', () => {
+  for (const f of ['a/b.snap', 'x/__snapshots__/y.txt', 'test/golden/a.json', 'tests/fixtures/data.json', 'golden/a', 'package-lock.json', 'sub/pnpm-lock.yaml', 'yarn.lock', 'Cargo.lock', 'go.sum', 'poetry.lock', 'dist/app.min.js', 'a.min.css']) expect(builtinGenerated(f), f).toBe(true)
+  for (const f of ['src/golden.ts', 'src/fixtures.ts', 'src/a.ts', 'lock.ts', 'readme.md', 'a/snap.ts', 'src/admin.js']) expect(builtinGenerated(f), f).toBe(false)
+  expect(globRe('**/*.gen.ts').test('a/b/c.gen.ts')).toBe(true)
+  expect(globRe('**/*.gen.ts').test('c.gen.ts')).toBe(true)
+  expect(globRe('*.gen.ts').test('a/b/c.gen.ts')).toBe(true) // no slash: any depth
+  expect(globRe('gen/*.ts').test('gen/a.ts')).toBe(true)
+  expect(globRe('gen/*.ts').test('x/gen/a.ts')).toBe(false)
+  expect(globRe('gen/*.ts').test('gen/a/b.ts')).toBe(false)
+  expect(globRe('build/').test('x/build/o.js')).toBe(true)
+  expect(globRe('/dist/**').test('dist/a/b.js')).toBe(true)
+  expect(globRe('/dist/**').test('x/dist/a.js')).toBe(false)
+})
+
+test('lean_review prepare: the reviewer prompt carries the thread\'s own worktree and the allow-cmd line for it', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const git = h.git.handler
+  h.git.handler = (a: string[], c: Parameters<typeof git>[1]) => (a.includes('--show-toplevel') ? { exitCode: 0, stdout: `${a[1]}\n` } : git(a, c))
+  h.files.set('/w/app-t1/.keep', 'x')
+  h.files.set('/w/app-t2/.keep', 'x')
+  h.files.set(`${L}/worktrees.json`, JSON.stringify({ 'app/feat': { path: '/w/app-t1', repo: '/r/app', branch: 'feat', thread: 't1' }, 'app/other': { path: '/w/app-t2', repo: '/r/app', branch: 'other', thread: 't2' }, 'x/y': { path: '/w/x', repo: '/r/x', branch: 'y', thread: 't1' } }))
+  const r = await tool(h, { action: 'prepare', base: 'main' })
+  expect(r.text).toContain('git -C /w/app-t1 diff ' + MB + '...' + H2)
+  expect(r.text).toContain(`allow-cmd: git -C /w/app-t1 diff ${MB}...${H2}, git -C /w/app-t1 log ${MB}..${H2}, git -C /w/app-t1 show ${H2}, git -C /w/app-t1 merge-base ${MB} ${H2}`)
+  expect(r.text).not.toContain('/r/app')
+  expect(r.text).not.toContain('/w/app-t2')
+  // an explicit worktree must be a registered one of this project
+  expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/w/app-t2' })).text).toContain('git -C /w/app-t2 diff')
+  expect((await tool(h, { action: 'prepare', base: 'main', worktree: '/etc' })).text).toContain('git -C /r/app diff')
+  // a worktree that is gone, or a thread without one: the project's registered path
+  h.files.delete('/w/app-t1/.keep')
+  expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('git -C /r/app diff')
 })
