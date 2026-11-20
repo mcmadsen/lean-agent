@@ -25,6 +25,7 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { waitingScripts } from './scripts'
 import { setNotice } from './notices'
+import { dismissOldDesk, recordOldDesk, titleOf } from './olddesk'
 import type { Thread } from './threads'
 
 export const DEFAULT_TOKENS = 200_000
@@ -306,6 +307,13 @@ export async function restartDesk(h: Host, o: { recent: () => Promise<string[]>;
   } catch (e) {
     return { ok: false, text: `desk not restarted: the handover could not be written (${why(e)})` }
   }
+  // this (old) desk's id and title go into the store BEFORE the new desk opens: its session start finds them (olddesk.ts)
+  const oldSid = (await o.sid?.().catch(() => '')) || ''
+  const recorded = oldSid ? await recordOldDesk(h, oldSid, await titleOf(h, oldSid)) : false
   const r = await o.open()
-  return r.ok ? { ok: true, text: DESK_RESTARTED } : { ok: false, text: `Handover written to ${handoverFile(home)}, but no new desk was opened: ${r.text}` }
+  if (!r.ok) {
+    if (recorded) await dismissOldDesk(h, 'the new desk did not open: nothing took over').catch(() => undefined) // nothing took over: there is no old desk to archive
+    return { ok: false, text: `Handover written to ${handoverFile(home)}, but no new desk was opened: ${r.text}` }
+  }
+  return { ok: true, text: `${DESK_RESTARTED}. The mod cannot close a desktop session: ${recorded ? 'archive it in the Claude app (right-click, Archive); the new desk reminds you until it is gone' : 'archive it in the Claude app (right-click, Archive); its session id was not known, so no reminder follows'}` }
 }

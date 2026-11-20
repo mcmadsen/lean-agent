@@ -7,7 +7,7 @@ import { appendJsonl, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir,
 import type { Host } from './state'
 import { globRe, slugOk } from './rules'
 import { expandRun, hashText, recipeText } from './recipe'
-import type { Audit, Decision, Meta, Verdict, Version } from './recipe'
+import type { Audit, Auditing, Decision, Meta, Verdict, Version } from './recipe'
 import { refreshScriptRules } from './rulelines'
 import { withFolderLock } from './folderlock'
 import { unifiedDiff } from './textdiff'
@@ -258,6 +258,10 @@ async function propose(h: Host, who: Who, i: any): Promise<Out> {
 }
 
 // ---- audit ---------------------------------------------------------------------------------------------------------
+// What the thread that started the auditor does when no verdict was recorded for it (its call ran in the background, or the reply said
+// "Async agent launched"): the auditor has no lean_script tool, so the thread passes the answer on. The mod checks it like any other.
+export const RECORD_AUDIT_TEXT =
+  'If no "audited:" line came back for the auditor (it ran in the background, or the engine returned "Async agent launched"), take the fields of its LEAN-AUDIT line from its hand-back and call lean_script record-audit with name, sha, verdict, network, deletes, secrets, generalises (true or false), reads, writes, hardcoded, changes and a one-line reason. The mod applies the same rules to it; do not invent or soften a verdict.'
 export function auditBrief(meta: Meta, dir: string): string {
   return [
     `Audit the candidate script "${meta.name}" for lean-agent. Start ONE \`lean-agent:auditor\` subagent (Agent tool) with the block below as its prompt. Never run the script yourself.`,
@@ -271,7 +275,9 @@ export function auditBrief(meta: Meta, dir: string): string {
     `Project: ${meta.project}`,
     'Judge by reading; end your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns. A script is audited once per content: after an adapt, fix it and propose it again.',
+    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns in the foreground (the auditor runs in the foreground; a background call returns before there is a verdict).',
+    RECORD_AUDIT_TEXT,
+    'A script is audited once per content: after an adapt, fix it and propose it again.',
   ].join('\n')
 }
 
@@ -292,6 +298,47 @@ export async function auditorPromptProblem(h: Host, prompt: string): Promise<str
   const want = String(prompt ?? '').trim()
   if (want) for (const f of await allScripts(h)) if (briefOf(f) === want) return null
   return 'lean-agent: a lean-agent:auditor is started only with the brief lean_script audit generates, as its whole prompt and unchanged (a brief goes stale when the script is proposed or updated again: ask lean_script audit once more)'
+}
+
+// ---- an audit that is under way: started, no verdict yet ------------------------------------------------------------
+// The text an audit is about: the candidate, or the pending update of an adopted script.
+const subjectSha = (m: Meta): string => (m.status === 'adopted' && m.pending ? m.pending.sha256 : m.sha256)
+const verdictFor = (m: Meta): Audit | undefined => (m.status === 'adopted' && m.pending ? m.pending.audit : m.audit)
+// started (an auditor call or an audit thread was seen for THIS text) and no verdict stored for it
+export const waitingForVerdict = (m: Meta): boolean => !!m.auditing && m.auditing.sha === subjectSha(m) && verdictFor(m)?.sha !== subjectSha(m)
+
+// An auditor Agent call just started (the thread's own call, seen by the mod) with the exact brief of a script: the mod now knows that an
+// audit of this text is under way. record-audit needs this record, and `show` says "waiting for the verdict" until the verdict arrives.
+export async function markAuditStarted(h: Host, by: string, prompt: string): Promise<boolean> {
+  const want = String(prompt ?? '').trim()
+  if (!want) return false
+  try {
+    return await queued(h, async () => {
+      for (const x of await allScripts(h)) {
+        if (briefOf(x) !== want) continue
+        const sha = subjectSha(x.meta)
+        const keep = x.meta.auditing?.sha === sha ? x.meta.auditing : undefined
+        const ts = await h.clock.now()
+        const auditing: Auditing = { ...keep, sha, ts: keep?.ts ?? ts, by, agent: ts }
+        await writeJson(h, `${x.dir}/meta.json`, { ...x.meta, auditing })
+        return true
+      }
+      return false
+    })
+  } catch {
+    return false
+  }
+}
+
+// is the audit thread the desk started for this text still working on it? ('pending' = being started: for two minutes)
+const PENDING_MS = 120_000
+async function auditRunning(h: Host, a: Auditing): Promise<boolean> {
+  if (!a.thread) return false
+  const now = await h.clock.now()
+  if (a.thread === 'pending') return now - a.ts < PENDING_MS
+  if (!/^t\d+$/.test(a.thread)) return false
+  const t = await readJson<{ state?: string; finished?: number } | null>(h, `${threadsDir(await homeDir(h))}/${a.thread}/thread.json`, null)
+  return !!t && t.state === 'open' && !t.finished
 }
 
 export type Reply = { name: string; sha: string; verdict: Verdict | null; reads: string[]; writes: string[]; network: boolean | null; deletes: boolean | null; secrets: boolean | null; hardcoded: string[]; deterministic: boolean; errorsHandled: boolean; generalises: boolean | null; changes: string[]; reason: string }
@@ -343,31 +390,15 @@ export function judge(meta: Meta, r: Reply & { verdict: Verdict }, now: { privac
 // (a revised script has a new sha). The reply comes from a real auditor Agent call; there is no way to hand the mod a verdict.
 // The subject is a candidate (its script file) or, for an adopted script, its pending update (the new version file): the folder the
 // auditor must be pointed at, the sha it must still have, and what the update changes in purpose or run line (never auto-adopted).
-async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): Promise<Out> {
-  const f = await find(h, reply.name)
-  if (!f) return err(`no script ${reply.name || '(no name in the audit)'}`)
-  // a thread's auditor audits only its own project's scripts and global ones, as propose and update do (an audit may adopt)
-  const no = await mayTouch(h, { kind: 'thread', id: by }, f.meta)
-  if (no) return no
-  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
-  if (f.meta.status !== 'candidate' && !pend) return err(`${reply.name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting' : ''}: only a candidate or an update is audited`)
-  const folder = pend ? `${f.dir}/${pend.v}/` : `${f.dir}/`
+// The verdict the mod's rules make of an auditor's answer `r` for the stored text of `f` (its candidate file, or the pending update `pend`).
+// Nothing is written. `out` is a refusal: the text changed since the audit started, or the answer is unusable.
+type Answered = Reply & { verdict: Verdict; network: boolean; deletes: boolean; secrets: boolean; generalises: boolean } // every answer given
+type Evaluated = { out: Out } | { audit: Audit; j: { verdict: Verdict; blockers: string[] }; now: { privacy: string[]; secrets: string[] }; changes: string[]; waits: boolean; ts: number }
+async function evaluate(h: Host, f: Found, pend: Version | undefined, r: Answered, by: string, via?: Audit['via']): Promise<Evaluated> {
   const path = pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`
   const sha = pend ? pend.sha256 : f.meta.sha256
-  const prior = pend ? pend.audit : f.meta.audit
-  // the auditor was started with exactly the brief the mod generated for this script (and so names exactly this folder): any other
-  // prompt (extra instructions, another text) makes its verdict worthless
-  const expected = briefOf(f)
-  if (!expected || String(prompt ?? '').trim() !== expected || !expected.includes(folder)) return err(`${reply.name}: the auditor was not started with exactly the brief lean_script audit generates for this script (${folder}), so its verdict is ignored; ask lean_script audit again and pass that block unchanged`)
-  if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
-  // the auditor echoes the sha256 of the text it was given: a reply that read an older text (the script was proposed or updated again
-  // while the auditor ran) is never recorded against the newer one
-  if (reply.sha.length < 12 || !sha.startsWith(reply.sha)) return err(`${reply.name}: the audit does not carry the sha256 of the stored text (${sha.slice(0, 12)}...), so it may be about an older text; run the auditor again with the current brief`)
-  if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
-  const r = reply as Reply & { verdict: Verdict }
-  if (r.network === null || r.deletes === null || r.secrets === null || r.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
   const text = await readText(h, path)
-  if (text === null || hashText(text) !== sha) return err(`${r.name}: the stored script changed since it was ${pend ? 'sent as an update' : 'proposed'}, so this audit does not apply; ${pend ? 'send the update again' : 'propose it again'}`)
+  if (text === null || hashText(text) !== sha) return { out: err(`${r.name}: the stored script changed since it was ${pend ? 'sent as an update' : 'proposed'}, so this audit does not apply; ${pend ? 'send the update again' : 'propose it again'}`) }
   const now = scan(text, await homeDir(h))
   // what the update changes in purpose or run line, against what is current NOW (a rollback may have moved current since it was sent)
   const moved = pend ? [...(pend.purpose !== f.meta.purpose ? [`changes the purpose (was: ${f.meta.purpose})`] : []), ...(pend.run !== f.meta.run ? [`changes the run line (was: ${f.meta.run})`] : [])] : []
@@ -378,14 +409,59 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   const runBad = runProblem(pend ? pend.run : f.meta.run)
   const j = judge(f.meta, r, { ...now, risky: [...riskyText(text), ...strayWriteText(text, f.meta.outputs, pend ? pend.run : f.meta.run), ...riskyText([f.meta.purpose, pend?.purpose ?? '', ...f.meta.inputs, ...f.meta.outputs].join('\n')).filter(x => x.includes('addressed to the auditor')), ...(runBad ? [`its run line is not on the allowlist (${runBad})`] : []), ...moved] })
   const changes = [...r.changes, ...(j.verdict === 'adapt' && r.verdict === 'adopt' ? j.blockers.map(b => `mod: it ${b}`) : [])]
-  if (j.verdict === 'adapt' && !changes.length) return err('an adapt verdict needs the concrete changes (changes: [...])')
-  if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return err('a reject verdict needs a reason')
+  if (j.verdict === 'adapt' && !changes.length) return { out: err('an adapt verdict needs the concrete changes (changes: [...])') }
+  if (j.verdict === 'reject' && !r.reason && !j.blockers.length) return { out: err('a reject verdict needs a reason') }
   // the auditor said adopt but the proof fails: not adapted by the thread, decided by the desk (a privacy finding or a bad run line is
   // never adoptable, not even by the user: that one goes back to the thread as an adapt)
   const waits = r.verdict === 'adopt' && j.verdict === 'adapt' && !now.privacy.length && !runBad
   const ts = await h.clock.now()
-  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : ''), ...(waits ? { waits: true } : {}) }
-  const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
+  const audit: Audit = { ts, by, sha, claimed: r.verdict, verdict: j.verdict, reads: r.reads, writes: r.writes, network: r.network, deletes: r.deletes, secrets: r.secrets, hardcoded: r.hardcoded, deterministic: r.deterministic, errorsHandled: r.errorsHandled, generalises: r.generalises, changes, blockers: j.blockers, reason: r.reason || (j.verdict === 'reject' ? j.blockers.join('; ') : ''), ...(waits ? { waits: true } : {}), ...(via ? { via } : {}) }
+  return { audit, j, now, changes, waits, ts }
+}
+
+// `relay`: the verdict is not the engine's reply of the auditor's Agent call but the fields of its LEAN-AUDIT line passed on by a tool call
+// (record-audit: a background auditor's hand-back). It is checked like a reply, except that "the auditor got the exact brief" is proven by
+// the mod's own record that such a call STARTED for this text (`auditing.agent`), and only the thread that started it, the audit thread
+// the desk started for it, or the desk may record it. `by` is a thread id or 'desk'.
+async function recordAudit(h: Host, by: string, reply: Reply, prompt: string, relay = false): Promise<Out> {
+  const f = await find(h, reply.name)
+  if (!f) return err(`no script ${reply.name || '(no name in the audit)'}`)
+  // a thread's auditor audits only its own project's scripts and global ones, as propose and update do (an audit may adopt)
+  const no = by === 'desk' ? null : await mayTouch(h, { kind: 'thread', id: by }, f.meta)
+  if (no) return no
+  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
+  if (f.meta.status !== 'candidate' && !pend) return err(`${reply.name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting' : ''}: only a candidate or an update is audited`)
+  const folder = pend ? `${f.dir}/${pend.v}/` : `${f.dir}/`
+  const path = pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`
+  const sha = pend ? pend.sha256 : f.meta.sha256
+  const prior = pend ? pend.audit : f.meta.audit
+  // the auditor was started with exactly the brief the mod generated for this script (and so names exactly this folder): any other
+  // prompt (extra instructions, another text) makes its verdict worthless
+  if (relay) {
+    const a = f.meta.auditing
+    if (!a || a.sha !== sha || !a.agent) return err(`${reply.name}: the mod saw no auditor start with the brief lean_script audit generates for this text (${sha.slice(0, 12)}...), so there is no audit to record a verdict for; ask lean_script audit and start the auditor with that block unchanged first`)
+    if (by !== 'desk' && by !== a.by && by !== a.thread) return err(`${reply.name}: only the thread that started the auditor${a.by ? ` (${a.by})` : ''}, its audit thread or the desk records its verdict`)
+  } else {
+    const expected = briefOf(f)
+    if (!expected || String(prompt ?? '').trim() !== expected || !expected.includes(folder)) return err(`${reply.name}: the auditor was not started with exactly the brief lean_script audit generates for this script (${folder}), so its verdict is ignored; ask lean_script audit again and pass that block unchanged`)
+  }
+  if (prior && prior.sha === sha) return err(`${reply.name} was already audited at this content (${prior.verdict}); ${pend ? 'send a revised update' : 'propose a revised script'} to audit again`)
+  // the auditor echoes the sha256 of the text it was given: a reply that read an older text (the script was proposed or updated again
+  // while the auditor ran) is never recorded against the newer one
+  if (reply.sha.length < 12 || !sha.startsWith(reply.sha)) return err(`${reply.name}: the audit does not carry the sha256 of the stored text (${sha.slice(0, 12)}...), so it may be about an older text; run the auditor again with the current brief`)
+  if (reply.verdict === null) return err('audit verdict must be adopt, adapt or reject')
+  if (reply.network === null || reply.deletes === null || reply.secrets === null || reply.generalises === null) return err('audit incomplete: network, deletes, secrets and generalises must each be answered true or false')
+  const r = reply as Answered
+  const ev = await evaluate(h, f, pend, r, by, relay ? 'record-audit' : undefined)
+  if ('out' in ev) return ev.out
+  const { audit, j, now, changes, ts } = ev
+  // A verdict passed on by a tool call is the relaying model's word, not the engine's reply of a real auditor call: it is recorded, and even
+  // a clean `adopt` never adopts by itself. It waits for the desk like any adopt the mod's proof did not clear (the user's decide, or the
+  // pane's Adopt / Reject).
+  const held = relay && j.verdict === 'adopt'
+  const waits = ev.waits || held
+  if (waits) audit.waits = true
+  const why = (j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : '') + (held ? ' A verdict passed on with record-audit never adopts by itself.' : '')
   const said = `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`
   const waitText = `waits for the desk's decision (lean_script decide adopt|reject with the user's yes, or the pane's Adopt / Reject)`
   if (pend) {
@@ -396,7 +472,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
     }
     const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}${waits ? ' (waits for the desk)' : ''}`)
     await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
-    if (j.verdict === 'adopt') return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
+    if (j.verdict === 'adopt' && !held) return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
     if (waits) return { ok: true, text: `${r.name}: the update ${pend.v} ${waitText}.${why}` }
     return { ok: true, text: `${r.name}: the update ${pend.v} is adapt. Change: ${changes.join('; ')}. Then send the revised update again (lean_script update ${r.name}).${why}` }
   }
@@ -404,7 +480,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string): P
   if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
   if (waits) meta = { ...meta, status: 'audited' }
   await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
-  if (j.verdict === 'adopt') return await adopt(h, { meta, dir: f.dir }, 'audit')
+  if (j.verdict === 'adopt' && !held) return await adopt(h, { meta, dir: f.dir }, 'audit')
   if (j.verdict === 'reject') return { ok: true, text: `${r.name}: reject${r.reason ? ` (${r.reason})` : ''}.${why}` }
   if (waits) return { ok: true, text: `${r.name}: audited, the auditor said adopt, but it ${waitText}.${why}` }
   return { ok: true, text: `${r.name}: adapt. Change: ${changes.join('; ')}. Then propose the revised script again under the same name.${why}` }
@@ -469,7 +545,7 @@ export const isAuditorCall = (e: any): boolean => (e?.tool === 'Agent' || e?.too
 export const wantsBackground = (e: any): boolean => e?.run_in_background === true || e?.run_in_background === 'true'
 export const foregroundCall = (e: any): any => (wantsBackground(e) ? { ...e, run_in_background: false } : e)
 export const AUDIT_FOREGROUND_NOTE = '[lean-agent] the auditor ran in the foreground (run_in_background was switched off): its verdict is recorded when it returns, which a background auditor never gets'
-export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded: when its LEAN-AUDIT line comes back, run lean_script audit again and start the auditor in the foreground (no run_in_background)'
+export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded yet: when its LEAN-AUDIT line comes back, call lean_script record-audit with its fields (name, sha, verdict, network, deletes, secrets, generalises, reads, writes, hardcoded, changes, reason); the mod checks it like a reply. Next time start the auditor in the foreground (no run_in_background)'
 
 export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
   const r = parseAudit(text)
@@ -484,6 +560,22 @@ export async function auditFromReply(h: Host, by: string, text: string, prompt: 
   }
 }
 
+// record-audit (a tool call by the audit thread, the thread that started the auditor, or the desk): the fields of a LEAN-AUDIT line from an
+// auditor hand-back that no hook saw (the call ran in the background). Same checks as a reply (stored sha, every flag answered, the mod's
+// rules on top), plus: the mod saw an auditor start with the exact brief for this text, and the caller is one of those allowed. A verdict
+// that arrives this way is only as trustworthy as the model that passes it on, so it is RECORDED but never adopts by itself: an `adopt` waits
+// for the desk's decision (the user's yes in decide, or the pane's Adopt); adapt and reject take effect as for a reply.
+async function recordAuditTool(h: Host, who: Who, i: any): Promise<Out> {
+  const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null)
+  const verdict: Verdict | null = i?.verdict === 'adopt' || i?.verdict === 'adapt' || i?.verdict === 'reject' ? i.verdict : null
+  const name = str(i?.name)
+  if (!name) return err('record-audit needs name: the script the auditor judged')
+  if (!str(i?.sha)) return err('record-audit needs sha: the Script sha256 from the auditor\'s LEAN-AUDIT line (at least 12 characters)')
+  const reply: Reply = { name, sha: str(i.sha).toLowerCase(), verdict, reads: strs(i.reads), writes: strs(i.writes), network: bool(i.network), deletes: bool(i.deletes), secrets: bool(i.secrets), hardcoded: strs(i.hardcoded), deterministic: i.deterministic !== false, errorsHandled: i.errors_handled !== false, generalises: bool(i.generalises), changes: strs(i.changes), reason: txt(i.reason).slice(0, 400) }
+  const o = await recordAudit(h, who.kind === 'thread' ? who.id : 'desk', reply, '', true)
+  return o.ok ? { ...o, text: `${o.text} (recorded through record-audit)` } : o
+}
+
 // ---- decide, retire, list, show ------------------------------------------------------------------------------------
 async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (who.kind !== 'desk') return err('decide is for the desk, and only after the user said so in the chat')
@@ -491,9 +583,9 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (value !== 'adopt' && value !== 'reject') return err('decide needs verdict: adopt or reject')
   const reason = txt(i.reason).slice(0, 300)
   if (!reason) return err('decide needs reason (why the user decided so)')
-  const f = await find(h, str(i.name))
+  let f = await find(h, str(i.name))
   if (!f) return err(`no script ${str(i.name)}`)
-  const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined // for an adopted script the decision is about its waiting update
+  let pend = f.meta.status === 'adopted' ? f.meta.pending : undefined // for an adopted script the decision is about its waiting update
   if (f.meta.status === 'retired' || (f.meta.status === 'adopted' && !pend)) return err(`${f.meta.name} is ${f.meta.status}${pend === undefined && f.meta.status === 'adopted' ? ' with no update waiting' : ''}: use retire to take an adopted script out, rollback to go back a version`)
   // the decision is about the text the user saw: a caller that names its sha256 (the pane does) is refused when the script was
   // replaced meanwhile (proposed again under the same name, or a newer update)
@@ -501,7 +593,7 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   const seen = str(i.sha)
   if (seen && (seen.length < 12 || !cur.startsWith(seen))) return err(`${f.meta.name} changed since it was looked at (now ${cur.slice(0, 12)}): look at it again before deciding`)
   const ts = await h.clock.now()
-  const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f.meta.name, by: 'user', value, reason, prior: pend ? `update ${pend.v}: ${pend.audit?.verdict ?? 'unaudited'}` : verdictOf(f.meta), ...(pend ? { version: pend.v } : {}), ...extra })
+  const log = async (extra: object) => appendJsonl(h, `${scriptsDir(await homeDir(h))}/decisions.jsonl`, { ts, name: f!.meta.name, by: 'user', value, reason, prior: pend ? `update ${pend.v}: ${pend.audit?.verdict ?? 'unaudited'}` : verdictOf(f!.meta), ...(pend ? { version: pend.v } : {}), ...extra })
   if (value === 'reject') {
     if (pend) {
       await h.process.run(['rm', '-rf', `${f.dir}/${pend.v}`])
@@ -510,8 +602,23 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
     await log({})
     return { ok: true, text: `${f.meta.name}${pend ? ` update ${pend.v}` : ''} rejected (the user's decision, logged)` }
   }
-  const audit = pend ? pend.audit : f.meta.audit
-  if (!audit) return err(`${f.meta.name}${pend ? ` ${pend.v}` : ''} was never audited: audit it first (lean_script audit); a verdict can be overridden, a missing one cannot`)
+  let audit = pend ? pend.audit : f.meta.audit
+  let fallback = ''
+  if (!audit) {
+    // no verdict in the store (a background auditor's hand-back was never recorded): the audit thread's last report for this text may carry it
+    const fb = await auditFromThreadReport(h, f, pend)
+    if (fb) {
+      const ev = await evaluate(h, f, pend, fb.reply, fb.thread, 'thread-report')
+      if ('out' in ev) return err(`${f.meta.name}${pend ? ` ${pend.v}` : ''}: the audit thread's report could not be used (${ev.out.text})`)
+      audit = ev.audit
+      fallback = ` (verdict taken from the audit thread's report ${fb.thread})`
+      const kept: Meta = pend ? note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v}: verdict taken from the audit thread's report`) : note({ ...f.meta, audit, scan: ev.now.privacy }, ts, "verdict taken from the audit thread's report")
+      await writeJson(h, `${f.dir}/meta.json`, kept)
+      f = { ...f, meta: kept }
+      pend = kept.status === 'adopted' ? kept.pending : undefined
+    }
+  }
+  if (!audit) return err(`${f.meta.name}${pend ? ` ${pend.v}` : ''} was never audited${waitingForVerdict(f.meta) ? ' (an audit was started and its verdict has not been recorded: the audit thread records it with lean_script record-audit, or reports it)' : ''}: audit it first (lean_script audit); a verdict can be overridden, a missing one cannot`)
   const text = await readText(h, pend ? `${f.dir}/${pend.v}/${pend.file}` : `${f.dir}/${f.meta.file}`)
   if (text === null) return err(`${f.meta.name}: the stored script is unreadable`)
   const now = scan(text, await homeDir(h))
@@ -523,8 +630,25 @@ async function decide(h: Host, who: Who, i: any): Promise<Out> {
   if (over.length && i.confirm !== true) return err(`adopting ${f.meta.name}${pend ? ` ${pend.v}` : ''} overrides the audit (${over.join('; ')}). Tell the user that, and only if they still want it call decide again with confirm: true`)
   const decision: Decision = { value, by: 'user', reason, ts, ...(over.length ? { overrode: over } : {}) }
   const out = pend ? await adoptVersion(h, { meta: { ...f.meta, pending: { ...pend, decision } }, dir: f.dir }, 'user') : await adopt(h, { meta: { ...f.meta, decision }, dir: f.dir }, 'user')
-  if (out.ok) await log({ overrode: over })
-  return out
+  if (out.ok) await log({ overrode: over, ...(fallback ? { note: "verdict taken from the audit thread's report" } : {}) })
+  return out.ok && fallback ? { ...out, text: `${out.text}${fallback}` } : out
+}
+
+// The last report of the audit thread (the one the desk started for this text) that carries a LEAN-AUDIT line for this script and sha, as
+// a complete answer: what decide falls back to when no verdict was recorded. null = none.
+async function auditFromThreadReport(h: Host, f: Found, pend: Version | undefined): Promise<{ reply: Answered; thread: string } | null> {
+  const a = f.meta.auditing
+  const sha = pend ? pend.sha256 : f.meta.sha256
+  if (!a || a.sha !== sha || !/^t\d+$/.test(a.thread ?? '')) return null
+  const rows = await readJsonl<{ from?: string; kind?: string; text?: unknown }>(h, `${leanDir(await homeDir(h))}/desk/inbox.jsonl`)
+  for (const r of rows.reverse()) {
+    if (r?.from !== a.thread || r.kind !== 'report' || typeof r.text !== 'string') continue
+    const p = parseAudit(r.text)
+    if (!p || p.verdict === null || p.name !== f.meta.name || p.sha.length < 12 || !sha.startsWith(p.sha)) continue // an older or another report: look further back
+    if (p.network === null || p.deletes === null || p.secrets === null || p.generalises === null) continue
+    return { reply: p as Answered, thread: a.thread! }
+  }
+  return null
 }
 
 async function retire(h: Host, who: Who, i: any): Promise<Out> {
@@ -562,7 +686,9 @@ export function updateBrief(meta: Meta, dir: string, pend: Version): string {
     `Project: ${meta.project}`,
     'End your reply with the LEAN-AUDIT line your agent definition describes.',
     '--- end ---',
-    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns. A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
+    'The auditor must get that block as its WHOLE prompt, unchanged (the guard refuses any other prompt for it, and the mod ignores a verdict from one). The mod records the verdict from the auditor\'s LEAN-AUDIT line when its Agent call returns in the foreground (a background call returns before there is a verdict).',
+    RECORD_AUDIT_TEXT,
+    'A changed purpose or run line is shown in the verdict and is never adopted without the desk\'s decision.',
   ].join('\n')
 }
 
@@ -745,7 +871,9 @@ async function show(h: Host, who: Who, i: any): Promise<Out> {
   const ig = await integrity(h, f.dir, f.meta)
   const versions = (f.meta.versions ?? []).map(v => `${v.v}${v.v === f.meta.current ? ' (current)' : ''} · ${v.sha256.slice(0, 8)} · ${v.author} · ${new Date(v.ts).toISOString().slice(0, 10)} · ${v.decision ? `user: ${v.decision.value}` : (v.audit?.verdict ?? 'unaudited')}${v.changes?.length ? ` · ${v.changes.join('; ')}` : ''}`)
   const extra = f.meta.status === 'adopted' ? { command: expandRun(f.meta, f.dir), health: healthOf(f.meta, ig.ok), ...(ig.ok ? {} : { integrity: ig.why }), versionList: versions, failures: f.meta.failures ?? 0 } : {}
-  return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict: verdictOf(f.meta), uses, ...extra }, null, 2), data: f.meta }
+  // (an audit that was started and has no verdict yet is not "unaudited": the verdict is on its way)
+  const verdict = waitingForVerdict(f.meta) ? 'audited, waiting for the verdict' : verdictOf(f.meta)
+  return { ok: true, text: JSON.stringify({ ...f.meta, dir: f.dir, script: `${f.dir}/${f.meta.file}`, verdict, uses, ...extra }, null, 2), data: f.meta }
 }
 
 // scripts the auditor judged adopt that the mod's rules did not adopt on their own: they wait for the desk (candidates in status
@@ -773,7 +901,7 @@ export async function scriptCounts(h: Host): Promise<{ candidates: number; adopt
 export const SCRIPT_SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['propose', 'audit', 'list', 'show', 'retire', 'decide', 'update', 'rollback', 'report-bad', 'diff'] },
+    action: { type: 'string', enum: ['propose', 'audit', 'record-audit', 'list', 'show', 'retire', 'decide', 'update', 'rollback', 'report-bad', 'diff'] },
     name: { type: 'string', description: 'script name (letters, digits . _ -)' },
     path: { type: 'string', description: 'propose: absolute path of the script file (copied, never run)' },
     purpose: { type: 'string', description: 'propose: what it does, one sentence' },
@@ -781,21 +909,31 @@ export const SCRIPT_SCHEMA = {
     inputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it reads (arguments, files)' },
     outputs: { type: 'array', items: { type: 'string' }, description: 'propose: what it writes ("stdout" if it only prints; any file it writes must be listed)' },
     project: { type: 'string', description: 'propose: project name, or "global" (default: this thread\'s project)' },
-    verdict: { type: 'string', enum: ['adopt', 'reject'], description: 'decide (desk): the user\'s decision' },
-    reason: { type: 'string', description: 'decide / retire / rollback: why (a thread must give one to roll back)' },
+    verdict: { type: 'string', enum: ['adopt', 'adapt', 'reject'], description: 'decide (desk): the user\'s decision, adopt or reject; record-audit: the auditor\'s verdict from its LEAN-AUDIT line' },
+    reason: { type: 'string', description: 'decide / retire / rollback / record-audit: why (a thread must give one to roll back; record-audit: the auditor\'s one-line reason)' },
+    network: { type: 'boolean', description: 'record-audit: the auditor\'s answer, true or false (required)' },
+    deletes: { type: 'boolean', description: 'record-audit: the auditor\'s answer, true or false (required)' },
+    secrets: { type: 'boolean', description: 'record-audit: the auditor\'s answer, true or false (required)' },
+    generalises: { type: 'boolean', description: 'record-audit: the auditor\'s answer, true or false (required)' },
+    deterministic: { type: 'boolean', description: 'record-audit: default true' },
+    errors_handled: { type: 'boolean', description: 'record-audit: default true' },
+    reads: { type: 'array', items: { type: 'string' }, description: 'record-audit: what the auditor says it reads' },
+    writes: { type: 'array', items: { type: 'string' }, description: 'record-audit: what the auditor says it writes (checked against the declared outputs)' },
+    hardcoded: { type: 'array', items: { type: 'string' }, description: 'record-audit: hardcoded values the auditor found' },
+    changes: { type: 'array', items: { type: 'string' }, description: 'record-audit: the concrete changes an adapt verdict asks for' },
     edits: { type: 'array', items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } } }, description: 'update: exact replacements on the current version (each find occurs once), instead of a new file' },
     version: { type: 'string', description: 'rollback: the version to go back to, like v1 (default: the one before the current)' },
     a: { type: 'string', description: 'diff: first version (default: the one before current, or current when an update waits)' },
     b: { type: 'string', description: 'diff: second version (default: the update, or current)' },
     why: { type: 'string', description: 'report-bad: what was wrong with the script\'s result' },
-    sha: { type: 'string', description: 'decide: the sha256 (at least 12 characters) of the text the user looked at; refused when the script changed since' },
+    sha: { type: 'string', description: 'decide / record-audit: the sha256 (at least 12 characters) of the text the user looked at, or the auditor was given; refused when the script changed since' },
     confirm: { type: 'boolean', description: 'decide adopt over an audit that said otherwise: only after the user was told and agreed' },
   },
   required: ['action'],
 }
 export const SCRIPT_SPEC = {
   name: SCRIPT_TOOL,
-  description: 'Scripts over models: propose (copy a script you wrote into the candidate store, never run), audit (a read-only auditor judges it; the mod applies the rules), list, show, diff, retire; update (a new file or edits for an adopted script: audited as a diff, then current), rollback, report-bad (it was wrong); decide (desk, the user overrides a verdict). An adopted script becomes a rule line and a recipe skill (lean-agent-script-<name>) with its stable run command.',
+  description: 'Scripts over models: propose (copy a script you wrote into the candidate store, never run), audit (a read-only auditor judges it; the mod applies the rules; the desk starts one audit thread per text), record-audit (pass on the fields of the auditor\'s LEAN-AUDIT line when its call ran in the background and no verdict was recorded), list, show, diff, retire; update (a new file or edits for an adopted script: audited as a diff, then current), rollback, report-bad (it was wrong); decide (desk, the user overrides a verdict). An adopted script becomes a rule line and a recipe skill (lean-agent-script-<name>) with its stable run command.',
   inputSchema: SCRIPT_SCHEMA,
 }
 
@@ -831,11 +969,32 @@ export async function scriptTool(h: Host, who: Who, i: any, io: Io = {}): Promis
         const pend = f.meta.status === 'adopted' ? f.meta.pending : undefined
         if (f.meta.status !== 'candidate' && !pend) return err(`${name} is ${f.meta.status}${f.meta.status === 'adopted' ? ' with no update waiting (lean_script update sends one)' : ''}: only a candidate or an update is audited`)
         const brief = pend ? updateBrief(f.meta, f.dir, pend) : auditBrief(f.meta, f.dir)
-        if (who.kind === 'thread') return { ok: true, text: brief }
+        if (who.kind === 'thread') return { ok: true, text: `${brief}\nAudit started; verdict not recorded yet: it is recorded when the auditor returns in the foreground, or when you call lean_script record-audit.` }
         if (!io.startThread) return { ok: true, text: `Route this to a thread (lean_thread new) with this brief:\n${brief}` }
+        // one audit thread per text: claim it under the lock (a second audit while one runs starts nothing), then start it outside the lock
+        const sha = pend ? pend.sha256 : f.meta.sha256
+        const running = await queued(h, async () => {
+          const g = await find(h, name)
+          if (!g) return 'gone'
+          const a = g.meta.auditing
+          if (a && a.sha === sha && (await auditRunning(h, a))) return a.thread ?? ''
+          await writeJson(h, `${g.dir}/meta.json`, { ...g.meta, auditing: { sha, ts: await h.clock.now(), thread: 'pending' } satisfies Auditing })
+          return null
+        })
+        if (running === 'gone') return err(`no script ${name}`)
+        if (running !== null) return { ok: true, text: `audit of ${name} is already ${running === 'pending' ? 'being started' : `running in ${running}`}: no second audit thread was started. Audit started; verdict not recorded yet (lean_script show ${name} says when it arrives)` }
         const t = await io.startThread(`audit script ${name}`, brief, f.meta.project === 'global' ? '' : f.meta.project)
-        return t.ok ? { ok: true, text: `audit of ${name} started in a thread: ${t.text}` } : t
+        const id = String((t.data as { id?: unknown } | undefined)?.id ?? '')
+        await queued(h, async () => {
+          const g = await find(h, name)
+          if (!g || g.meta.auditing?.sha !== sha || g.meta.auditing.thread !== 'pending') return
+          const { auditing: _drop, ...rest } = g.meta
+          await writeJson(h, `${g.dir}/meta.json`, t.ok && /^t\d+$/.test(id) ? { ...g.meta, auditing: { ...g.meta.auditing, thread: id } } : rest) // a thread that did not start leaves nothing claimed
+        })
+        return t.ok ? { ok: true, text: `audit of ${name} started in a thread: ${t.text}. Audit started; verdict not recorded yet: the audit thread records it (lean_script record-audit, or the mod when its auditor returns in the foreground); lean_script show ${name} says "audited, waiting for the verdict" until then` } : t
       }
+      case 'record-audit':
+        return await queued(h, () => recordAuditTool(h, who, i))
       default:
         return err(`unknown lean_script action ${String(i?.action)}`)
     }

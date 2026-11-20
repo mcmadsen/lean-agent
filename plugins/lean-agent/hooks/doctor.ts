@@ -14,6 +14,7 @@ import { pruneStale, staleEntries } from './worktreereg'
 import { removeStaleSessions, threadSessionRows } from './threadsessions'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction, manualNote } from './deskcompact'
+import { oldDeskRows } from './olddesk'
 import { reportFailures } from './delivery'
 import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
@@ -162,6 +163,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   // (a headless session cannot compact: nothing is broken, so a `note` row with the advice, never FIX)
   if (cmp?.result === 'unavailable') out.push(`note last desk compaction at ${new Date(cmp.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: not possible in this session; ${manualNote(cmp.tokens)}`)
   else if (cmp) row(cmp.result === 'compacted',`last desk compaction at ${new Date(cmp.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${cmp.result} (desk context ${kTokens(cmp.tokens)})${cmp.reason ? `: ${cmp.reason}` : ''}${cmp.result === 'compacted' ? '' : '; it is tried again when the desk turn ends (or type /compact, or start a new desk session)'}`)
+  // the desk that Restart desk left behind: named until it is archived (olddesk.ts; a note, the user archives it in the app)
+  out.push(...(await oldDeskRows(h).catch(() => [] as string[])))
   // a lean_report that could not be written (the thread was given the text and the error): shown until that thread reports again (or 24 h)
   for (const rf of await reportFailures(h).catch(() => [])) row(false,`a lean_report from ${rf.thread} could not be written at ${new Date(rf.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC: ${rf.error} (the thread had to paste the text; cause: its session folder is usually gone, e.g. a removed worktree it had cd'ed into). Text: ${rf.text.replace(/\s+/g, ' ').slice(0, 120)}`)
   const bigGlobs = await overCapGlobs(h).catch(() => [] as string[])

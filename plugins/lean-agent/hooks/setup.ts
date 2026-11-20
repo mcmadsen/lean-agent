@@ -1,7 +1,7 @@
 // Setup without a model turn: the pane's button, the /lean-agent-setup command and lean_doctor `fix` all go through
 // setupFix, so there is one code path. doctor.fix is idempotent, so running it again is safe.
 import { check, fix } from './doctor'
-import { deskDir, homeDir, realPath } from './state'
+import { deskDir, homeDir, readJson, realPath, threadsDir } from './state'
 import type { Host } from './state'
 
 // `mcp`: what the doctor's `MCP ` rows say (an MCP server needs a variable the desk and threads do not have): not a repair a press
@@ -108,6 +108,15 @@ const NOT_STARTED = /ENOENT|not found|spawn|no such file/i
 // The app's deep link that resumes one session (the pane's "Open tN": the user answers the permission check in the thread's own session).
 export const resumeLink = (sid: string): string => `claude://resume?session=${encodeURIComponent(sid)}`
 
+// After the opener returned 0 the mod cannot know what the app showed: it may not resolve a `claude --bg` session id with the resume link
+// and start a new session in the thread folder instead. So the reply says what to look for and how to reach the session another way.
+async function verifyNote(h: Host, id: string, sid: string): Promise<string> {
+  const t = await readJson<{ title?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${id}/thread.json`, null).catch(() => null)
+  const title = typeof t?.title === 'string' ? t.title.replace(/\s+/g, ' ').trim().slice(0, 80) : ''
+  const name = title ? `${id} · ${title}` : id // the name the thread's session was started with (threads.ts label)
+  return `The opener cannot tell whether the app showed the right session: if a new desk opened instead, close it; the thread's session is in the app's session list as '${name}'. In a terminal: claude attach ${sid}`
+}
+
 // Open tN: `release` stops the thread's idle process and says its session id (threads.ts action release; a working thread, a session
 // outside the thread folder or a process that does not go away are refused there, and nothing is opened), then the resume link goes to
 // the system opener (same argv, no shell, as openDesk). A failing opener answers with the hand-made way.
@@ -123,7 +132,7 @@ export async function openThreadSession(h: Host, id: string, release: () => Prom
   const by = `open ${id} from the session list in the Claude app by hand`
   try {
     const x = await h.process.run(argv, { timeoutMs: 15_000 })
-    if (x.exitCode === 0) return { ok: true, text: `${id} opened in the Claude app: answer there.` }
+    if (x.exitCode === 0) return { ok: true, text: `${id} opened in the Claude app: answer there. ${await verifyNote(h, id, sid)}` }
     return { ok: false, text: `Could not open the Claude app: ${firstLine(x.stderr) || firstLine(x.stdout) || `${argv[0]} exited ${x.exitCode}`}; ${by}` }
   } catch (e) {
     return { ok: false, text: `Could not open the Claude app: ${firstLine(String((e as Error)?.message ?? e)) || `${argv[0]} failed`}; ${by}` }

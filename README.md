@@ -439,7 +439,14 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   press confirms; a working thread's label warns that the current step is lost). It stops the session (only one in the thread's own
   folder) and starts a new one with the handover, same model and effort ("Restarted from the pane."). The desk can do the same with
   `lean_thread restart tN` when you ask. `Restart desk` (or `/lean-agent-restart-desk`) writes `~/.lean-agent/desk/handover.md` and
-  opens a new desk session, which reads it; close the old one.
+  opens a new desk session, which reads it. The mod cannot close the old desk (no engine call closes a session; it is a Desktop session,
+  which `claude rm` and `claude stop` are not assumed to reach): it records the old session's id and title before the new desk opens, and
+  the new desk's first notice, then once per desk turn, and the doctor name it and say "archive it in the Claude app (right-click,
+  Archive)" until `claude agents --json --all` no longer lists it as an active row (a row is taken as archived only when the listing says
+  so: that field is an assumption, so the reminder also ends 7 days after the restart). A desk the listing never shows cannot be checked:
+  the reminder ends 24 h after the restart, or with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) runs only when that exact id
+  is listed as a background-kind session that is not working and lives in the desk folder; the result is logged in
+  `~/.lean-agent/desk/old-desk.json`. The mod never stops the Claude app or a service.
 - **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters keeps its head and tail;
   the full text is saved under `~/.lean-agent/output/` (the same folder as the Bash line squeeze; files older than 7 days, and all but
   the newest 2000, are pruned) and one line says where. Edit and Write results, errors, subagents and the desk are
@@ -576,6 +583,29 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   was not verified), then restart the thread from the pane; the start reply shows the version it now runs. The doctor shows a
   `FIX thread tN running X, installed Y` row with this advice. lean-agent never restarts a service itself and never tells the desk to.
   Until it is fixed, do not ask that thread for anything its version lacks.
+- **"Open tN" opened a new desk (or a new empty session) instead of the thread** (reported on a Mac with 1.0.12). *Not verified:* whether the
+  app resolves the id of a `claude --bg` session with `claude://resume?session=<id>`; the mod only hands the link to `open` and cannot see
+  what the app shows, so it never says the right session opened (the reply says "if a new desk opened instead, close it" and names the
+  session). What the mod does regardless: a session started in a thread's folder (`~/.lean-agent/threads/tN`) is that thread whatever
+  its session id (it never becomes a desk, and its id is recorded in `thread.json` `sids`); a session in `~/lean-agent-desk` is the desk.
+  *Checks to run on the Mac, and what each result means* (please report the three outputs):
+  1. `claude agents --json` — find the thread's row (its `name` is `tN · <title>`) and note its session id and `cwd`.
+  2. `open "claude://resume?session=<that id>"` by hand, with the thread idle (press "Open tN" does the same after stopping its process).
+     Does the app show that thread's conversation, or a new session?
+  3. `claude agents --json` again — compare: the same id (the app resumed it), a NEW row or id in the thread folder (the app resumed it as a
+     copy: lean-agent now treats that copy as the thread, but its history is the copy's), or a new session in another folder (the link did
+     not resolve the id).
+  Whatever the link does, `claude attach <id>` in a terminal reaches the thread's own session, and the app's session list shows it by name.
+- **A script audit never got a verdict** (`lean_script show` says "unaudited" after the auditor finished, or `decide` says "was never audited").
+  The mod records the verdict from the auditor's `LEAN-AUDIT` line when the auditor's Agent call returns; with a background auditor that
+  return carries no verdict (1.0.12 forces auditor calls to the foreground; whether the engine honours that is *unverified*). Now:
+  `lean_script audit` says "Audit started; verdict not recorded yet" and `show` says "audited, waiting for the verdict" until it arrives;
+  the audit thread passes a background hand-back on with `lean_script record-audit` (name, sha, verdict, flags, reason; the mod checks it
+  like a reply and needs its own record that an auditor started with the exact brief for that text), and `decide` falls back to the audit
+  thread's last report with a `LEAN-AUDIT` line for that script text ("verdict taken from the audit thread's report", logged). Only one
+  audit thread runs per script text. A network flag still needs your explicit adopt. A verdict passed on with `record-audit` is only as
+  reliable as the session that relays it, so it is recorded but never adopts by itself: an `adopt` waits in the pane for your Adopt /
+  Reject (`decide`); `adapt` and `reject` take effect as for a reply.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.

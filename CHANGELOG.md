@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+- **Restart desk remembers the desk it replaced and keeps asking you to archive it.** No engine call closes a session, and the desk is a
+  Desktop session that `claude rm` / `claude stop` (background sessions) are not assumed to reach. The restart records the old desk's id
+  and title (`~/.lean-agent/desk/old-desk.json`) before the new desk opens; the new desk's first notice, then once per desk turn, and the
+  doctor (`note old desk session ...`) name it and say "archive it in the Claude app (right-click, Archive)" until
+  `claude agents --json --all` no longer lists it as an active row (also ends 7 days after the restart). A desk session never listed
+  there cannot be checked: the reminder ends 24 h after the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact
+  id is listed as a background-kind session that is not working and runs in the desk folder; the result is logged in the record. Never
+  the new desk, never `--discard-unpushed` / `--force-remove-worktree`, never a stop of the app or a service.
+
 ### Changed
 - The desk is told that an approval of a thread's denied action is answered in the thread's own session, never asked with
   AskUserQuestion and never relayed with `send` (a relayed yes does not satisfy the permission check). A thread no longer reports
@@ -17,6 +27,23 @@
   left); the notes live in the mod store, which the expensive-model requests already share between a thread's session and the desk,
   but this was not run live. The thread detail does not know the usage-limit pause, so a paused thread keeps its card in the pane and
   loses it in the detail.
+- **A session started in a thread's folder is that thread, whatever its session id.** The role is decided by the folder first (the desk
+  folder is the desk, `~/.lean-agent/threads/tN` is thread tN) and by the session id second; an unknown id in a thread folder never
+  becomes a desk, and is recorded in the thread's `sids`. (A session id that another open thread holds still wins over a thread folder.)
+  This is the part of "Open tN opened a new desk" that could be fixed without running the app.
+- **"Open tN" no longer implies the right session opened.** After the link is handed to the system opener the reply says: if a new desk
+  opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it from a
+  terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
+- **A script audit's verdict is no longer lost when the auditor ran in the background.** The mod recorded the verdict only from the
+  auditor's own Agent reply, which a background call does not have (1.0.12 forces the foreground; unverified in the engine). New
+  `lean_script record-audit` (name, sha, verdict adopt|adapt|reject, network / deletes / secrets / generalises, reads, writes, hardcoded,
+  changes, reason) for the audit thread or the thread that started the auditor: checked like a reply (stored sha, every flag answered,
+  the mod's own rules on top) and only after the mod saw an auditor call with the exact brief for that text go through. A verdict passed
+  on this way never adopts by itself (an `adopt` waits for your Adopt / Reject; adapt and reject take effect). `audit` says "Audit started;
+  verdict not recorded yet", `show` says "audited, waiting for the verdict" (not "unaudited") until it arrives, and the desk starts only
+  one audit thread per script text. `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line
+  for that text instead of "was never audited" ("verdict taken from the audit thread's report", logged); a network flag still needs
+  your explicit adopt.
 
 ### Fixed (thread sessions, [README](README.md#thread-sessions-what-running-means-wake-names-leftovers))
 - **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and

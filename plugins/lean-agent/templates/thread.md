@@ -47,4 +47,4 @@ model: {{model}}, effort: {{effort}} (from thread.json)
   your or a worker's reading. Look for an adopted one first (`lean-agent-script-*` skills, `lean_script` list); one that worked
   and is reusable: `lean_script` propose it (path, name, purpose, run with `{script}`, inputs, outputs), then `audit` it: start ONE
   `lean-agent:auditor` with the block `audit` returns as its WHOLE prompt, unchanged and with no `allow-` lines (any other prompt is
-  refused), in the foreground (the mod switches `run_in_background` off: a background auditor's verdict would never be recorded). The mod then adopts it only if its own checks prove it clean; otherwise it is "audited" and waits for the user: say so with `lean_report`.
+  refused), in the foreground (the mod switches `run_in_background` off: a background auditor's verdict would never be recorded; if no "audited:" line comes back anyway, pass the LEAN-AUDIT fields on with `lean_script` `record-audit`). The mod then adopts it only if its own checks prove it clean; otherwise it is "audited" and waits for the user: say so with `lean_report`.
