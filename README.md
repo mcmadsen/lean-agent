@@ -125,6 +125,7 @@ anything is read. `lean_thread list`, the pane cards, the thread pane and the se
 | running | the process is alive and the turn is going |
 | idle, N unread queued | the process may be alive but the turn ended (a listed `status` that still says busy does not make it running) |
 | stuck | a queued message has been unread for `threads.stuckMinutes` (config.json, default 10): no tool call and no inbox read (a working session reads its queue at every tool call) |
+| stalled | alive and working, but no tool call and no report (the thread's or a worker's) for `threads.stallMinutes` (default 20), or a message unread that long; red, one notice per stall; `threads.stallRestart: true` restarts it by script |
 | done / parked | the session ended or finished, or you parked the thread |
 
 - **send** to an idle session wakes it (stops a lingering process, resumes with the batch); a send within 30 s of the last wake, or to a

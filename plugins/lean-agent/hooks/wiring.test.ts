@@ -112,3 +112,13 @@ test('the desk records its session id; a thread report goes out through $.sessio
   await $.session.receive({ origin: { kind: 'peer', plugin: 'other' }, text: '<!-- lean:r=78:t1:report -->' } as any)
   expect(h.files.get('/h/.lean-agent/desk/inbox-delivered.json')).not.toContain('78:t1')
 })
+
+test('a thread\'s tool call, a worker\'s tool call and a report write the stall watchdog\'s activity file', async ($, on) => {
+  const h = await threadSession($, on, () => on('tool.call', () => ({ result: 'ok' }) as any))
+  const at = () => JSON.parse(h.files.get('/h/.lean-agent/threads/t1/activity.json') ?? 'null')
+  await $.tool.call({ tool: 'Read', path: '/x' } as any)
+  expect(at()).toMatchObject({ at: h.clock.t, kind: 'tool' })
+  h.clock.t += 10_000
+  await $.tool.call({ tool: 'Read', path: '/y', agentId: 'w1' } as any)
+  expect(at()).toMatchObject({ at: h.clock.t, kind: 'worker' })
+})

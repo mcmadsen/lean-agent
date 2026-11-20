@@ -14,7 +14,7 @@ import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { buildHandover, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
-import { ENDED_AT_ONCE, endedAtOnce, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, stallConfig, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -550,7 +550,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   const u = await unconsumed(h, home, t.id)
   if (isWorking(row) && !restart && !(limit && isLimitRow(row))) {
     const tr = truthOf({ threadState: t.state, row, queued: u.msgs, now: await h.clock.now(), stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
-    return { ok: true, text: tr.word === 'stuck' ? `${t.id} is ${tr.text}: no new session started; restart ${t.id} replaces it` : `${t.id} is running: no new session started (stop it from the Claude app first)` }
+    return { ok: true, text: isStuck(tr.word) ? `${t.id} is ${tr.text}: no new session started; restart ${t.id} replaces it` : `${t.id} is running: no new session started (stop it from the Claude app first)` }
   }
   if (row && (row.pid > 0 || (restart && isWorking(row)))) {
     const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}), ...(limit ? { limit: true } : {}) })
@@ -614,15 +614,15 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
   const limited = !!opts.limit && isLimitRow(row)
   if (truth.word === 'running' && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
-  if (!msgs.length && !opts.force && truth.word !== 'idle' && truth.word !== 'stuck') return { ok: true, text: `${t.id}: nothing queued` }
+  if (!msgs.length && !opts.force && truth.word !== 'idle' && !isStuck(truth.word)) return { ok: true, text: `${t.id}: nothing queued` }
   // A stuck session that is still WORKING (one long tool call, a subagent wait: it reads nothing meanwhile) is replaced only by an
   // explicit restart (its current step is lost): wake never stops a working session. A stuck session whose turn ended (idle) is replaced by wake.
-  const stuckWorking = truth.word === 'stuck' && liveOf(row) === 'working'
-  if (truth.word === 'stuck' && (!(opts.explicit && !t.finished && !opts.limit) || stuckWorking)) return { ok: true, text: `${t.id} is ${truth.text}: ${msgs.length} message(s) queued, ${stuckWorking ? `it still works: restart ${t.id} replaces it (its current step is lost)` : 'wake or restart it'}`, data: { resumed: false } }
-  if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: ${msgs.length} message(s) queued, session ${truth.word === 'stuck' ? 'stuck' : 'idle'}: wake or restart it if it stays idle` }
+  const stuckWorking = isStuck(truth.word) && liveOf(row) === 'working'
+  if (isStuck(truth.word) && (!(opts.explicit && !t.finished && !opts.limit) || stuckWorking)) return { ok: true, text: `${t.id} is ${truth.text}: ${msgs.length} message(s) queued, ${stuckWorking ? `it still works: restart ${t.id} replaces it (its current step is lost)` : 'wake or restart it'}`, data: { resumed: false } }
+  if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: ${msgs.length} message(s) queued, session ${isStuck(truth.word) ? 'stuck' : 'idle'}: wake or restart it if it stays idle` }
   // a stuck session (nothing read for stuckMinutes) is replaced: stopped and a NEW session starts with the handover, queued messages
   // included (never a session that waits on a prompt for the user: truthOf calls that one running)
-  if (truth.word === 'stuck' && !t.finished) {
+  if (isStuck(truth.word) && !t.finished) {
     const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', `Its previous session was stuck: ${truth.unread} queued message(s) unread for ${Math.round(truth.oldestMs / 60_000)} min with no tool call.`, {}, true)
     return fresh(r) ? { ...r, text: `${t.id} was ${truth.text}: replaced by a new session with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
   }
@@ -688,6 +688,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
   const installed = await installedVersion(h, root)
   const now0 = await h.clock.now()
   const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes
+  const stall = await stallConfig(h, home)
   const ctxLimits = await threadLimits(h)
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) // the last report of each thread (a [working] one can be stale)
   const out: unknown[] = []
@@ -704,7 +705,7 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const q = queued.length
     const row = rows.find(a => a.sid === t.sid)
     // running | idle | stuck | done: from the session's own state and the queue, never from the thread's last report
-    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes }) : null
+    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stall.minutes, activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null }) : null
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
@@ -876,13 +877,14 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           }
           return { ...r, text: `${id} ${wasParked ? 'was parked: reopened and restarted' : 'restarted'} as a new session (old conversation kept read-only). ${r.text}` }
         }
+        case 'stall-restart': // (threads.stallRestart, stall.ts: the same stop and fresh session as the automatic restart at the context limit)
         case 'auto-restart': {
           // the desk's timer (autorestart.ts) at the context limit: the checkpoint was written, the session is idle. A NEW session with the
           // handover; never a parked or closed thread. A working session is left alone unless `force` (the desk's timer after the idle / grace rule:
           // the hard stop already refuses its tool calls, so it is stopped exactly as the pane's restart does and a fresh one takes over).
           if (t.state !== 'open') return err(`${id} is ${t.state}: no automatic restart`)
-          const r = await freshSession(h, root, home, t, installed, i.reason ?? 'Its context was over the limit: checkpointed and restarted by script.', i, i.force === true)
-          return fresh(r) ? { ...r, text: `${id} restarted at the context limit as a new session (old conversation kept read-only). ${r.text}` } : r
+          const r = await freshSession(h, root, home, t, installed, i.reason ?? (i.action === 'stall-restart' ? 'Its previous session stalled: no tool call or report for a long time; restarted by script.' : 'Its context was over the limit: checkpointed and restarted by script.'), i, i.force === true)
+          return fresh(r) ? { ...r, text: `${id} restarted ${i.action === 'stall-restart' ? 'after a stall' : 'at the context limit'} as a new session (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)
@@ -900,7 +902,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined
           if (t.sid && isRunning(srow)) {
             const tr = truthOf({ threadState: t.state, row: srow, queued: await pending(h, home, t), now: await h.clock.now(), stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
-            return { ok: true, text: tr.word === 'stuck' ? `${id} is ${tr.text}: nothing started; it still works: restart ${id} replaces it (its current step is lost)` : `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
+            return { ok: true, text: isStuck(tr.word) ? `${id} is ${tr.text}: nothing started; it still works: restart ${id} replaces it (its current step is lost)` : `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
           }
           // an idle session whose process is still alive is stopped before a new one takes its place (never a working one, never one outside the thread folder)
           if (srow && !t.finished && srow.pid > 0) {

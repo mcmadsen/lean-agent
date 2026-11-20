@@ -10,7 +10,7 @@ import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
 import { costBadge, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
@@ -65,7 +65,7 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'working' | 'done (finishing)' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
@@ -74,6 +74,7 @@ export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.blocked) return { word: 'blocked', color: 'error' }
   if (t.asking) return { word: 'asking', color: 'warning' }
   if (t.live === 'stuck') return { word: 'stuck', color: 'error' }
+  if (t.live === 'stalled') return { word: 'stalled', color: 'error' } // alive and working, no tool call or report for threads.stallMinutes (stall.ts)
   if (t.finishing) return { word: 'done (finishing)', color: 'inactive' } // reported done, the session only waits for a background worker's notification
   if (t.working) return { word: 'working', color: 'success' }
   if (t.done || t.finished) return { word: 'done', color: 'inactive' }
@@ -251,6 +252,7 @@ export async function loadView(h: Host): Promise<View> {
   const reviews: Reviews = new Map()
   await guard('threads', async () => {
     const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes // (once per refresh, not per thread)
+    const stallMinutes = (await stallConfig(h, home)).minutes
     const ctxLimits = await threadLimits(h)
     let ents: { name: string }[] = []
     try {
@@ -299,11 +301,11 @@ export async function loadView(h: Host): Promise<View> {
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
       const queued = (await unconsumed(h, home, t.id)).msgs
-      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes })
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
-      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
+      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', isStuck(truth.word) ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       const apv = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
       const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
       v.threads.push({

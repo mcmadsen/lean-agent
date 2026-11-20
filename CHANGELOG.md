@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Automatic context restart no longer fails while the thread is running** (1.0.19 field: three times "tN is running: no new session started" at 124k of 120k, a manual `restart` right after worked). The timer now stops a session that still shows as working exactly as the manual restart does (the hard stop already refuses its tool calls), under the same grace rule (idle 20 s, or `threads.stopGraceMinutes` after the record). A failed automatic restart is retried at every timer tick (at most 5 tries), then ONE desk notice names the reason and offers `restart`.
+- **Hard stop**: a spec pins that the 2nd, 3rd... turn end over the limit writes no further record and that every tool call but `lean_report` is refused; a turn end without an engine session id no longer writes a record every turn (it falls back to the thread's recorded session).
+
+### Added
+- **Stall watchdog.** A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued messages stayed unread that long, is `stalled`: red in the pane and in `lean_thread list` (which names the last activity time), ONE desk notice + toast per stall ("t7 has done nothing for 25 min, 3 messages unread: wake or restart it"), and a reminder line in the desk's context once per desk turn while it lasts. The thread's own hooks write `activity.json` in its folder (tool calls of the thread or of its workers, reports, prompts), so a thread waiting on a worker that still works is not stalled; a session waiting for your answer never is. `threads.stallRestart` (default false): when true the mod restarts a stalled thread itself (same path as the context restart) and says so.
+
 ## 1.0.19
 
 ### Fixed

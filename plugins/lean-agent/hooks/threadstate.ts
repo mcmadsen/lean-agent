@@ -1,7 +1,7 @@
 // What a thread's session REALLY is, from `claude agents --json --all` (state: working | idle | done ..., pid) and the thread's own queue,
 // and the two things that follow from it: the name check and the clean close of a superseded session (`claude rm`).
 // Pure helpers and one process call; it imports only types from threads.ts (threads.ts imports this file).
-import { readJson, realPath, leanDir, threadsDir, appendJsonl } from './state'
+import { readJson, realPath, leanDir, threadsDir, appendJsonl, writeJson } from './state'
 import type { Host } from './state'
 import { syncRollup } from './ledger'
 import type { AgentRow } from './threads'
@@ -32,37 +32,81 @@ export async function threadsConfig(h: Host, home: string): Promise<ThreadsConfi
   return { stuckMinutes: Number.isFinite(m) && m > 0 ? m : STUCK_MINUTES, removeOld: cfg?.threads?.removeOld !== false }
 }
 
-// ---- running | idle | stuck | done | parked -----------------------------------------------------------------------------
+// ---- stall watchdog (1.0.20): config threads.stallMinutes (default 20), threads.stallRestart (default false) -------------------------------
+// The thread's own hooks record its last activity (a tool call of the thread or of one of its workers, a report, a start or a message
+// handed over) in <thread folder>/activity.json; the desk reads it. A worker that still runs keeps the thread alive through its own tool calls.
+export const STALL_MINUTES = 20
+export async function stallConfig(h: Host, home: string): Promise<{ minutes: number; restart: boolean }> {
+  const cfg = await readJson<{ threads?: { stallMinutes?: unknown; stallRestart?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
+  const m = Number(cfg?.threads?.stallMinutes)
+  return { minutes: Number.isFinite(m) && m > 0 ? m : STALL_MINUTES, restart: cfg?.threads?.stallRestart === true }
+}
+export const activityFile = (home: string, id: string) => `${threadsDir(home)}/${id}/activity.json`
+export type Activity = { at: number; kind: string }
+export const readActivity = async (h: Host, home: string, id: string): Promise<Activity | null> => {
+  const a = await readJson<Partial<Activity> | null>(h, activityFile(home, id), null)
+  return a && typeof a === 'object' && Number.isFinite(Number(a.at)) && Number(a.at) > 0 ? { at: Number(a.at), kind: String(a.kind ?? '') } : null
+}
+// the last sign of life: the later of the recorded activity and the last start / wake (a fresh session is activity too); null = unknown
+export async function lastActivity(h: Host, home: string, id: string, lastWake?: number): Promise<number | null> {
+  const a = await readActivity(h, home, id)
+  const at = Math.max(a?.at ?? 0, Number(lastWake) || 0)
+  return at > 0 ? at : null
+}
+const touched = new Map<string, number>() // in-process throttle: a busy thread writes the file at most every 5 s (a report always)
+export const resetActivity = () => touched.clear()
+export async function touchActivity(h: Host, home: string, id: string, kind: string, always = false): Promise<void> {
+  try {
+    const now = await h.clock.now()
+    if (!always && now - (touched.get(id) ?? 0) < 5_000) return
+    touched.set(id, now)
+    await writeJson(h, activityFile(home, id), { at: now, kind } satisfies Activity)
+  } catch {
+    /* an observation: never blocks a tool */
+  }
+}
+
+// ---- running | idle | stuck | stalled | done | parked ------------------------------------------------------------------------
 // stuck: the oldest unread queued message is older than stuckMinutes. A working session reads its queue at every tool call (delivery.ts
 // takeBatch), so a message that stays unread that long means no tool call and no inbox read; an idle session never reads it.
-// A session that waits on a prompt for the user (waitingFor / blocked) is the user's to answer, never "stuck".
-export type Word = 'running' | 'idle' | 'stuck' | 'done' | 'parked'
-export type Truth = { word: Word; unread: number; oldestMs: number; text: string }
-export function truthOf(o: { threadState: string; finished?: boolean; row: AgentRow | undefined; queued: { ts: number }[]; now: number; stuckMinutes?: number }): Truth {
+// stalled: the session is alive and working, but no tool call and no report for stallMinutes (activityAt), or a message unread that long.
+// A session that waits on a prompt for the user (waitingFor / blocked) is the user's to answer, never "stuck" or "stalled".
+export type Word = 'running' | 'idle' | 'stuck' | 'stalled' | 'done' | 'parked'
+export const isStuck = (w: Word | string | undefined): boolean => w === 'stuck' || w === 'stalled'
+export type Truth = { word: Word; unread: number; oldestMs: number; text: string; stalledMs?: number; lastAt?: number }
+const hhmm = (ts: number) => new Date(ts).toTimeString().slice(0, 5)
+export function truthOf(o: { threadState: string; finished?: boolean; row: AgentRow | undefined; queued: { ts: number }[]; now: number; stuckMinutes?: number; stallMinutes?: number; activityAt?: number | null }): Truth {
   const unread = o.queued.length
   const oldestMs = unread ? Math.max(0, o.now - Math.min(...o.queued.map(m => Number(m.ts) || o.now))) : 0
   const limit = (o.stuckMinutes ?? STUCK_MINUTES) * 60_000
+  const stallLimit = (o.stallMinutes ?? STALL_MINUTES) * 60_000
   const live = liveOf(o.row)
   const waits = !!o.row && (!!o.row.waitingFor || o.row.state === 'blocked')
+  const idleMs = typeof o.activityAt === 'number' && o.activityAt > 0 ? Math.max(0, o.now - o.activityAt) : 0
+  const stalledMs = Math.max(idleMs, oldestMs)
   let word: Word
   if (o.threadState === 'parked') word = 'parked'
   else if (o.finished || o.threadState === 'closed' || live === 'gone') word = 'done'
   else if (waits) word = 'running'
+  else if (live === 'working' && stalledMs >= stallLimit) word = 'stalled'
   else if (unread && oldestMs >= limit) word = 'stuck'
   else word = live === 'working' ? 'running' : 'idle'
   const min = Math.max(1, Math.round(oldestMs / 60_000))
+  const smin = Math.max(1, Math.round(stalledMs / 60_000))
+  const lastAt = typeof o.activityAt === 'number' && o.activityAt > 0 ? o.activityAt : undefined
   const text =
     word === 'idle' ? `idle${unread ? `, ${unread} unread queued` : ''}`
     : word === 'stuck' ? `stuck: ${unread} unread queued for ${min} min, no tool call or inbox read`
+    : word === 'stalled' ? `stalled: no tool call or report for ${smin} min${lastAt ? ` (last activity ${hhmm(lastAt)})` : ''}${unread ? `, ${unread} unread queued` : ''}`
     : word
-  return { word, unread, oldestMs, text }
+  return { word, unread, oldestMs, text, ...(word === 'stalled' ? { stalledMs } : {}), ...(lastAt ? { lastAt } : {}) }
 }
 
 // what to do about a stuck session: wake replaces one whose turn ended; one that still works is replaced only by restart
 export const stuckAdvice = (r: AgentRow | undefined): string => (liveOf(r) === 'working' ? 'it still works: restart replaces it (its current step is lost)' : 'wake or restart it')
 
 // A [working] report is only true while the session works: a working report of a session that is not running is stale
-export const staleWorking = (lastState: string | undefined, word: Word): boolean => (lastState === undefined || lastState === '' || lastState === 'working') && (word === 'idle' || word === 'done' || word === 'stuck')
+export const staleWorking = (lastState: string | undefined, word: Word): boolean => (lastState === undefined || lastState === '' || lastState === 'working') && (word === 'idle' || word === 'done' || word === 'stuck' || word === 'stalled')
 
 // ---- a start or wake whose session ended its turn at once ------------------------------------------------------------------
 export const ENDED_AT_ONCE = 'started, but it ended its turn at once: wake it with the task'

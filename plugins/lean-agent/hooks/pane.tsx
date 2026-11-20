@@ -146,7 +146,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       }
       const th = v?.threads ?? []
       const working = th.filter(t => stateOf(t).word === 'working').length
-      const stuck = th.filter(t => ['blocked', 'waiting', 'approval', 'stuck'].includes(stateOf(t).word)).length
+      const stuck = th.filter(t => ['blocked', 'waiting', 'approval', 'stuck', 'stalled'].includes(stateOf(t).word)).length
       const needN = v?.needs.length ?? 0
       const dk = v?.desk
       const dpct = dk && dk.limit > 0 && dk.context > 0 ? `${Math.round((dk.context / dk.limit) * 100)}%` : 'n/a'
@@ -626,7 +626,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>
           </Text>
           {t.finished ? <Text dimColor>finished: next message starts a new session</Text> : null}
-          {t.liveNote ? <Text color={sc.word === 'stuck' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}
+          {t.liveNote ? <Text color={sc.word === 'stuck' || sc.word === 'stalled' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}
           {t.needsYou ? <Text color="warning">waiting for you: open it in the app</Text> : null}
           {t.pausedUntil ? <Text color="warning">{`paused until ${fmtUntil(t.pausedUntil, now2)}`}</Text> : null}
           <Text dimColor wrap="truncate-end">

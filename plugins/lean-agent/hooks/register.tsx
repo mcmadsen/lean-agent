@@ -55,9 +55,10 @@ import { contextReport } from './contextstat'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
-import { resetRequestCache } from './threadstate'
+import { resetRequestCache, touchActivity } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext, threadLimits } from './threadcontext'
+import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { noteBase } from './base'
@@ -509,6 +510,15 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await autoRestartTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, force) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force }) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-autorestart-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a thread whose session is alive and working but made no tool call and no report for threads.stallMinutes (stall.ts): ONE notice + toast per
+      // stall; threads.stallRestart restarts it by script
+      every($, 30_000, 'desk', async host2 => {
+        const notes = await stallTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'stall-restart', tN: id, reason: why, force: true }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-stall-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -1099,6 +1109,7 @@ export const register: Register = on => {
 
   for (const t of THREAD_TOOLS) {
     on('tool.call', { tool: `mcp__lean-agent__${t.name}` as const }, async ($, e: any) => {
+      if (role.kind === 'thread') await touchActivity(hostOf($), await homeDir(hostOf($)), role.id, t.name === 'lean_report' ? 'report' : 'tool', t.name === 'lean_report')
       const halted = await stopCheck($, e)
       if (halted) return { result: halted.deny, isError: true } as any
       if (role.kind !== 'thread') await redetect($, undefined, true) // a stale role never refuses: look once more (session id, folder)
@@ -1132,6 +1143,7 @@ export const register: Register = on => {
   // every tool: guards first (fail closed), then delivery of queued messages to a busy session
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
+    if (role.kind === 'thread') await touchActivity(host, await homeDir(host), role.id, e.agentId ? 'worker' : 'tool') // the stall watchdog's clock (stall.ts): the thread's or a worker's tool call
     const halted = await stopCheck($, e)
     if (halted) return { deny: halted.deny } as any
     const atype = await agentType($, e.agentId, e)
@@ -1264,9 +1276,12 @@ export const register: Register = on => {
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
       let more: string | null = null
+      if (role.kind === 'thread') await touchActivity(host, await homeDir(host), role.id, 'prompt', true)
       if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
       else if (role.kind === 'desk') {
         more = await takeReports(host)
+        const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts
+        if (stalled) more = more ? `${more}\n${stalled}` : stalled
         const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks
         if (tip) more = more ? `${more}\n${tip}` : tip
       }
