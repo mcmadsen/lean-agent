@@ -164,6 +164,117 @@ test('the OS user name becomes <user> (as a word); running the anonymiser twice 
   expect(p.anonymise(once2)).toBe(once2) // a project called "project" does not eat its own label
 })
 
+// ---- branch names, first names, the OS build ---------------------------------------------------------------------------------
+const withRegistry = (h: any) => h.files.set(lean(h, 'worktrees.json'), JSON.stringify({ 'alpha/feature/alpha-beta': { path: '/w/x', branch: 'feature/alpha-beta', thread: 't1' }, 'beta/infra/quebec-romeo~2': { path: '/w/y', branch: 'infra/quebec-romeo', thread: 't2' }, 'alpha/main': { path: '/w/z', branch: 'main' } }))
+
+test('branch names after the word branch keep a type prefix and mask the rest; plain words after it stay', async () => {
+  const a = await makeAnonymiser(setup().host)
+  expect(a.anonymise('Branch infra/zulu-yankee-xray is blocked')).toBe('Branch infra/<branch> is blocked')
+  expect(a.anonymise('on branch `bugfix/zulu-1` now')).toBe('on branch `bugfix/<branch>` now')
+  expect(a.anonymise('branch: zulu-yankee, and branch "feature/a.b/c"')).toBe('branch: <branch>, and branch "feature/<branch>"')
+  expect(a.anonymise('on branch alice/zulu-fix')).toBe('on branch <branch>') // a first segment that is no branch type may be a person
+  expect(a.anonymise('branches release/zulu9 and hotfix_q2')).toBe('branches release/<branch> and hotfix_q2') // only the name right after the word
+  expect(a.anonymise('branch hotfix_q2')).toBe('branch <branch>')
+  for (const same of ['the branch is ready', 'branch main', 'on branch master and branch develop', 'branch protection rules', 'branch names stay', 'a branch', 'branch-protection', 'branch Infra']) expect([same, a.anonymise(same)]).toEqual([same, same])
+  const once = a.anonymise('Branch infra/zulu-yankee-xray, branch bugfix/q-1')
+  expect(a.anonymise(once)).toBe(once)
+})
+
+test('worktree folders and registry keys: the branch is masked, the type prefix and the project label stay', async () => {
+  const h = setup()
+  const a = await makeAnonymiser(h.host)
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/feature-zulu-yankee is dirty')).toBe('~/.lean-agent/worktrees/zebra/feature-<branch> is dirty')
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/feature/zulu')).toBe('~/.lean-agent/worktrees/zebra/feature/<branch>')
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/zulu-yankee')).toBe('~/.lean-agent/worktrees/zebra/<branch>')
+  expect(a.anonymise('/h/.lean-agent/worktrees/alpha/infra-zulu')).toBe('~/.lean-agent/worktrees/project-A/infra-<branch>')
+  // a registry key of a project (its label stays) after the project rule ran
+  expect(a.anonymise('worktrees.json has alpha/feature/zulu-yankee for t1')).toBe('worktrees.json has project-A/feature/<branch> for t1')
+  expect(a.anonymise('the folder worktrees/ and src/main.ts')).toBe('the folder worktrees/ and src/main.ts')
+  const once = a.anonymise('/h/.lean-agent/worktrees/zebra/feature-zulu and alpha/bugfix/q-1')
+  expect(a.anonymise(once)).toBe(once)
+})
+
+test('the branches the worktree registry knows are masked everywhere, even inside a name that holds a project name', async () => {
+  const h = setup()
+  withRegistry(h)
+  const a = await makeAnonymiser(h.host)
+  // feature/alpha-beta holds the project name "alpha": the branch is masked first, so it is the branch rule that speaks
+  expect(a.anonymise('registry key alpha/feature/alpha-beta and beta/infra/quebec-romeo~2')).toBe('registry key project-A/feature/<branch> and project-B/infra/<branch>~2')
+  expect(a.anonymise('pushed feature/alpha-beta, then infra/quebec-romeo.')).toBe('pushed feature/<branch>, then infra/<branch>.')
+  expect(a.anonymise('/h/.lean-agent/worktrees/alpha/feature-alpha-beta')).toBe('~/.lean-agent/worktrees/project-A/feature-<branch>')
+  expect(a.anonymise('quebec-romeo2 is another name and xinfra/quebec-romeo too')).toContain('quebec-romeo2') // a longer name is not the branch
+  expect(a.anonymise('the main branch of alpha')).toBe('the main branch of project-A') // a default branch is no secret
+  const once = a.anonymise('alpha/feature/alpha-beta infra/quebec-romeo')
+  expect(a.anonymise(once)).toBe(once)
+  // the final check sees a surviving one, and a masked one passes
+  expect(a.missed('x feature/alpha-beta')).toContain('branch name')
+  expect(a.missed('Branch infra/zulu-yankee')).toContain('branch name')
+  expect(a.missed('/h/x/worktrees/zebra/zulu')).toContain('branch name')
+  expect(a.missed('Branch infra/<branch> in project-A/feature/<branch> at ~/worktrees/zebra/feature-<branch>')).toEqual([])
+  expect(a.missed('the branch is ready, branch main')).toEqual([])
+})
+
+test('the export refuses when a branch name survives; the blocked-thread lines keep the type prefix only', async () => {
+  const h = setup()
+  withRegistry(h)
+  h.files.set(lean(h, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'Branch infra/quebec-romeo: did not post the reply to Zed (asked by Zed)' }]))
+  const r = await run(h)
+  expect(r.ok).toBe(true)
+  const t = read(h, r) as string
+  expect(t).toContain('t1: Branch infra/<branch>: did not post the reply to <name> (asked by <name>)')
+  expect(t).not.toMatch(/quebec|Zed/)
+  // a rule that regressed (the branch is no longer masked): the final check refuses and names the kind, never the branch
+  const h2 = setup()
+  withRegistry(h2)
+  h2.files.set(lean(h2, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'Branch infra/quebec-romeo is blocked' }]))
+  const faulty = (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/infra\/<branch>/g, 'infra/quebec-romeo'), name: real.name, missed: real.missed })
+  const bad = await exportFeedback(h2.host, ROOT, { version: '1.0.4' }, { wrap: faulty })
+  expect(['registry branch', bad.ok, bad.text]).toEqual(['registry branch', false, expect.stringContaining('branch name')])
+  expect(bad.text).toContain('not written')
+  expect(bad.text).not.toContain('quebec')
+  expect(['files', [...h2.files.keys()].filter(k => k.includes('feedback-export/2'))]).toEqual(['files', []])
+  // a branch NOT in the registry, written after the word branch, is caught by the generic rule and by the check
+  const h3 = setup()
+  h3.files.set(lean(h3, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'Branch infra/xray-whiskey is blocked' }]))
+  const ok3 = await run(h3)
+  expect(read(h3, ok3)).toContain('t1: Branch infra/<branch> is blocked')
+  const h4 = setup() // (a fresh host: the first export above already took that report)
+  h4.files.set(lean(h4, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'Branch infra/xray-whiskey is blocked' }]))
+  const bad3 = await exportFeedback(h4.host, ROOT, { version: '1.0.4' }, { wrap: (real: any) => ({ anonymise: (t: string) => real.anonymise(t).replace(/infra\/<branch>/g, 'infra/xray-whiskey'), name: real.name, missed: real.missed }) })
+  expect(['generic branch', bad3.ok, bad3.text]).toEqual(['generic branch', false, expect.stringContaining('branch name')])
+})
+
+test('a first name after "reply to", "asked by", "from" or "to" is masked unless it is a product or common word', async () => {
+  const a = await makeAnonymiser(setup().host)
+  expect(a.anonymise('did not post the reply to Zed')).toBe('did not post the reply to <name>')
+  expect(a.anonymise('Reply to Zed and replied to Yara')).toBe('Reply to <name> and replied to <name>')
+  expect(a.anonymise('asked by Zed, a note from Yara, sent to Xena.')).toBe('asked by <name>, a note from <name>, sent to <name>.')
+  expect(a.anonymise("from Zed's side")).toBe("from <name>'s side")
+  for (const same of ['reply to Claude', 'switched from Sonnet to Opus', 'from GitHub to Azure DevOps', 'went from Monday to March', 'go to Settings', 'back to The start', 'asked by Anthropic', 'from the desk', 'to zed', 'from a colleague', 'REPLY TO ZED', 'reply to Ab', 'to Zed-Marie']) expect([same, a.anonymise(same)]).toEqual([same, same])
+  const once = a.anonymise('the reply to Zed, asked by Yara')
+  expect(a.anonymise(once)).toBe(once)
+  // the check flags the two person-specific phrases only (from / to are too common to judge)
+  expect(a.missed('did not post the reply to Zed')).toContain('person name')
+  expect(a.missed('asked by Zed')).toContain('person name')
+  expect(a.missed('reply to Claude, asked by Anthropic, reply to <name>')).toEqual([])
+  expect(a.missed('a note from Zed')).toEqual([])
+})
+
+test('the OS build goes, the OS family stays', async () => {
+  const a = await makeAnonymiser(setup().host)
+  expect(a.anonymise('Darwin 25.6.0 arm64')).toBe('Darwin arm64')
+  expect(a.anonymise('Linux 6.18.44-fc-v726 x86_64 and Windows_NT 10.0.19045 and macOS 15.1')).toBe('Linux x86_64 and Windows_NT and macOS')
+  expect(a.anonymise('Linux 6.1.2.3 beats it')).toBe('Linux beats it') // not read as an address
+  for (const same of ['Darwin', 'on Linux', 'Windows is slow', 'OS family: macOS (Darwin)']) expect([same, a.anonymise(same)]).toEqual([same, same])
+  expect(a.missed('Darwin 25.6.0')).toContain('OS build')
+  expect(a.missed('Darwin arm64')).toEqual([])
+  const h = setup()
+  h.files.set(lean(h, 'desk/inbox.jsonl'), jl([{ ts: T0 - 1000, from: 't1', kind: 'report', state: 'blocked', text: 'uname says Darwin 25.6.0 and the build fails' }]))
+  const r = await run(h)
+  expect(read(h, r)).toContain('t1: uname says Darwin and the build fails')
+  expect(read(h, r)).not.toContain('25.6.0')
+})
+
 // ---- the survival check -----------------------------------------------------------------------------------------------------
 test('a private string the rules cannot catch makes the export refuse: nothing is written, no state changes, the rule is named, the string is not echoed', async () => {
   const h = setup('/q/zeldaquux')

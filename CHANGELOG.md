@@ -23,6 +23,15 @@
   in the repo", no `learn --gaps` advice. `lean_rules` `record` now refuses a rule whose lines already appear in an always-loaded file
   (the repo's `CLAUDE.md`, tracked or not, `.claude/CLAUDE.md`, `CLAUDE.local.md`, the user's `~/.claude/CLAUDE.md`; it names the lines,
   and `covered_by` is the way out when nothing else is left), and `lean_rules` `check` reports such lines (the rule would load them twice).
+- **The feedback export leaked branch names, a colleague's first name and the OS build.** Blocked-thread lines kept "Branch
+  infra/<words>", a branch inside a registry key and a worktree path, and "did not post the reply to <Name>"; the environment text kept
+  "Darwin 25.6.0". Now a branch name is masked after the word branch/Branch, in worktree folders (`.../worktrees/<project>/<folder>`),
+  in registry keys, and wherever the worktree registry's own branches appear (checked first, so a branch that holds a project's name
+  is still masked as a branch); a first segment that is a branch type (`bugfix/`, `feature/`, `infra/`, `release/` ...) stays, the
+  rest becomes `<branch>`, any other first segment is masked too (it may be a person), and default branches are left. A capitalised
+  word after "reply to", "asked by", "from" or "to" becomes `<name>` unless it is a product or common word. "Darwin 25.6.0" becomes
+  "Darwin" (also Linux, Windows_NT, macOS). The final check refuses to write the file when a known branch, a branch after the word
+  "branch", an unmasked worktree folder, a name after "reply to" / "asked by" or an OS build survives.
 - **Doctor:** a stale registry entry (folder gone, or git says it is no worktree) is a FIX row and `fix` prunes it; a git that does not
   answer never makes an entry stale. The desk's spend on the model the app started it on is an info note ("the app started the desk on
   <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,
