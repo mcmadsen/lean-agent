@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **The read-only agents no longer open with a refused `cd <dir> && cat ...`.** `reader-sonnet`, `reader-haiku` and `explorer` now say up
+  front "absolute paths only, never `cd`" (use `/abs/path/file` or `git -C /abs/repo ...`); the skills contract check fails when one of
+  them loses the sentence.
+
 ## 1.0.11
 
 ### Fixed
