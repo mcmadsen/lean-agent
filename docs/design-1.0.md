@@ -52,7 +52,7 @@ Legend: **KEEP** (how in pure Claude Code), **CHANGE** (what changes), **DROP** 
 | 16 | Recipes / `do` | CHANGE | become project skills: `~/.lean-agent/<project>/skills/<name>/SKILL.md`, linked into checkouts like the rules (2.8) so Claude Code lists and runs them natively; `recipe` skill dropped |
 | 16a | `suggest` (pick model/cards for a task) | DROP | the thread picks the worker agent by the rule in its CLAUDE.md; context comes from path rules |
 | 17 | `runs` / `runs --wait/--lost/--resume` | DROP | the Agent tool is synchronous inside a thread; no detached worker processes to track |
-| 18 | `review` + reviewer quality gate | KEEP | skill `review` + `agents/reviewer.md` (opus, read-only); result `~/.lean-agent/<project>/reviews/<sha>.json` |
+| 18 | `review` + reviewer quality gate | KEEP | skill `review` + `agents/reviewer.md` (sonnet, read-only; two merged runs for a high-risk diff since 1.0.12, opus only with the user's pane approval); result `~/.lean-agent/<project>/reviews/<sha>.json` |
 | 19 | Review passes / fix loop (full, then deltas) | KEEP | skill `review` keeps `passes.json` per branch; delta mode passes the last reviewed sha |
 | 20 | Learn from reviews | KEEP | skill `review-learn` via `gh`: excludes only the owner's own comments (owner login from `gh api user`); marker match is the fallback |
 | 21 | Push gate (review before push) | KEEP | mod `tool.call` on Bash `git push`: deny unless `reviews/<HEAD sha>.json` is green |
