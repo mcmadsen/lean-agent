@@ -387,8 +387,9 @@ Every request pays for the whole context in cache reads, so lean-agent keeps con
   opens a new desk session, which reads it. The mod cannot close the old desk (no engine call closes a session; it is a Desktop session,
   which `claude rm` and `claude stop` are not assumed to reach): it records the old session's id and title before the new desk opens, and
   the new desk's first notice, then once per desk turn, and the doctor name it and say "archive it in the Claude app (right-click,
-  Archive)" until `claude agents --json --all` no longer lists it as an active row. A desk the listing never shows cannot be checked: the
-  reminder ends 24 h after the restart, or with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) runs only when that exact id
+  Archive)" until `claude agents --json --all` no longer lists it as an active row (a row is taken as archived only when the listing says
+  so: that field is an assumption, so the reminder also ends 7 days after the restart). A desk the listing never shows cannot be checked:
+  the reminder ends 24 h after the restart, or with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) runs only when that exact id
   is listed as a background-kind session that is not working and lives in the desk folder; the result is logged in
   `~/.lean-agent/desk/old-desk.json`. The mod never stops the Claude app or a service.
 - **Oversized tool results are cut before a thread sees them.** A Bash or MCP text over 20000 characters keeps its head and tail;
@@ -547,8 +548,9 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   the audit thread passes a background hand-back on with `lean_script record-audit` (name, sha, verdict, flags, reason; the mod checks it
   like a reply and needs its own record that an auditor started with the exact brief for that text), and `decide` falls back to the audit
   thread's last report with a `LEAN-AUDIT` line for that script text ("verdict taken from the audit thread's report", logged). Only one
-  audit thread runs per script text. A network flag still needs your explicit adopt. A verdict passed on this way is as reliable as the
-  session that relays it; the mod's rules and your decision are the limits.
+  audit thread runs per script text. A network flag still needs your explicit adopt. A verdict passed on with `record-audit` is only as
+  reliable as the session that relays it, so it is recorded but never adopts by itself: an `adopt` waits in the pane for your Adopt /
+  Reject (`decide`); `adapt` and `reject` take effect as for a reply.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.

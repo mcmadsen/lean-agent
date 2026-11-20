@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost, withSha } from './fake'
-import { auditFromReply, auditorPromptProblem, briefBlock, markAuditStarted, scriptTool, waitingForVerdict } from './scripts'
+import { auditFromReply, auditorPromptProblem, briefBlock, markAuditStarted, scriptTool, waitingForVerdict, waitingScripts } from './scripts'
 import type { Who } from './scripts'
 import { resetLocks } from './threads'
 
@@ -97,11 +97,25 @@ test('background hand-back: the audit thread passes the LEAN-AUDIT fields on wit
   expect(await markAuditStarted(h.host, 't9', b)).toBe(true) // t9's Agent call (it ran in the background: no reply with a verdict)
   const out = await record(h, T9)
   expect(out.ok).toBe(true)
-  expect(out.text).toContain('adopted')
+  expect(out.text).toContain("waits for the desk's decision") // a relayed adopt is recorded but never adopts by itself
+  expect(out.text).toContain('never adopts by itself')
   expect(out.text).toContain('recorded through record-audit')
-  const m = meta(h, DIR)
-  expect(m.status).toBe('adopted')
-  expect(m.audit).toMatchObject({ verdict: 'adopt', by: 't9', via: 'record-audit', sha: m.sha256 })
+  expect(h.files.has(`${DIR}/meta.json`)).toBe(false)
+  const m = meta(h)
+  expect(m.status).toBe('audited')
+  expect(m.audit).toMatchObject({ verdict: 'adopt', claimed: 'adopt', by: 't9', via: 'record-audit', waits: true, sha: m.sha256 })
+  expect((await waitingScripts(h.host)).map(w => w.name)).toEqual(['count-lines']) // the pane's Adopt / Reject
+  // only the user's decision adopts it (decide, which needs the desk)
+  expect((await scriptTool(h.host, T9, { action: 'decide', name: 'count-lines', verdict: 'adopt', reason: 'x' })).ok).toBe(false)
+  const done = await scriptTool(h.host, D, { action: 'decide', name: 'count-lines', verdict: 'adopt', reason: 'the user said so' })
+  expect(done.ok).toBe(true)
+  expect(meta(h, DIR).status).toBe('adopted')
+  // a relay by the thread that proposed the script (and started the auditor itself) does not adopt either
+  const self = setup()
+  await prop(self)
+  await markAuditStarted(self.host, 't1', await brief(self))
+  expect((await record(self, T)).text).toContain("waits for the desk's decision")
+  expect(self.files.has(`${DIR}/meta.json`)).toBe(false)
   // the mod's rules still apply: the network flag is never adopt
   const n = setup()
   await prop(n)
@@ -156,8 +170,14 @@ test('record-audit is refused: a wrong or missing sha, no auditor started, a cal
   const d = setup()
   await prop(d)
   await markAuditStarted(d.host, 't1', await brief(d))
-  expect((await record(d, D)).text).toContain('adopted')
-  expect(meta(d, DIR).audit.by).toBe('desk')
+  expect((await record(d, D)).text).toContain("waits for the desk's decision")
+  expect(meta(d).audit.by).toBe('desk')
+  // a relayed adapt or reject still takes effect
+  const e = setup()
+  await prop(e)
+  await markAuditStarted(e.host, 't1', await brief(e))
+  expect((await record(e, T, { verdict: 'reject', reason: 'reads secrets' })).text).toContain('reject')
+  expect(meta(e).status).toBe('rejected')
 })
 
 test('decide falls back to the audit thread\'s last report for that sha when the store has no verdict, and says so; the network flag still needs confirm', async () => {

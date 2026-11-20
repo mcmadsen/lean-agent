@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { check } from './doctor'
 import { restartDesk } from './deskcompact'
-import { UNLISTED_MS, dismissOldDesk, oldDeskRows, oldDeskStep, readOldDesk, resetOldDesk } from './olddesk'
+import { SEEN_MS, UNLISTED_MS, dismissOldDesk, oldDeskRows, oldDeskStep, readOldDesk, resetOldDesk } from './olddesk'
 
 const L = '/h/.lean-agent'
 const OLD = 'aaaa1111-2222-3333-4444-555555555555'
@@ -122,6 +122,28 @@ test('a desk session the listing never shows: said plainly, once per turn, and i
   expect(await oldDeskRows(d.h.host)).toEqual([])
   expect((await check(d.h.host, '/p')).join('\n')).not.toContain('old desk session')
   expect((await dismissOldDesk(world([]).h.host)).ok).toBe(false) // nothing recorded
+})
+
+test('a desk the listing keeps showing as active is reminded about for 7 days at most', async () => {
+  const w = world([row()])
+  await w.restart()
+  expect(await oldDeskStep(w.h.host, NEW, 'start')).toContain('still open in the Claude app')
+  await oldDeskStep(w.h.host, NEW, 'turn')
+  w.h.clock.t += UNLISTED_MS + 1 // past the 24 h of an unlisted desk: a listed one is still reminded
+  expect(await oldDeskStep(w.h.host, NEW, 'turn')).toContain('still open in the Claude app')
+  w.h.clock.t += SEEN_MS
+  expect(await oldDeskStep(w.h.host, NEW, 'turn')).toBeNull()
+  expect((await readOldDesk(w.h.host))?.done?.why).toContain('7 days')
+  expect(w.h.files.has(NOTICE)).toBe(false)
+})
+
+test('the listing and claude rm run with a timeout, so a hung service cannot hang a desk turn', async () => {
+  const w = world([row({ kind: 'background' })])
+  await w.restart()
+  await oldDeskStep(w.h.host, NEW, 'start')
+  const cc = w.h.calls.filter(c => c.argv[0] === 'claude')
+  expect(cc.length).toBeGreaterThan(1)
+  for (const c of cc) expect(c.timeoutMs, c.argv.join(' ')).toBeGreaterThan(0)
 })
 
 test('a failing listing concludes nothing, and a never-seen old desk still ends 24 h after the restart', async () => {

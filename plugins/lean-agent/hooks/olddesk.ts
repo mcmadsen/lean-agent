@@ -19,6 +19,7 @@ import type { AgentRow } from './threads'
 
 export const NOTICE_KEY = 'old-desk'
 export const UNLISTED_MS = 24 * 3_600_000 // an old desk the listing never shows: the reminder ends this long after the restart
+export const SEEN_MS = 7 * 24 * 3_600_000 // an old desk the listing keeps showing as active: the reminder ends this long after the restart
 const LOG_MAX = 10
 
 export type OldDesk = {
@@ -54,7 +55,7 @@ type Row = AgentRow & { ids: string[]; kind: string; archived: boolean }
 export async function listRows(h: Host): Promise<Row[] | null> {
   let r
   try {
-    r = await h.process.run(['claude', 'agents', '--json', '--all'])
+    r = await h.process.run(['claude', 'agents', '--json', '--all'], { timeoutMs: 15_000 }) // (a hung service must not hang a desk turn; a timeout is a failed listing)
   } catch {
     return null
   }
@@ -137,7 +138,7 @@ async function tryRm(h: Host, rec: OldDesk, row: Row, mySid: string): Promise<bo
   const home = await homeDir(h)
   const desk = await realPath(h, deskDir(home))
   if (!row.cwd || (await realPath(h, row.cwd)) !== desk) return false
-  const r = await h.process.run(['claude', 'rm', rec.sid]).catch(() => null) // (no flag at all: never --discard-unpushed, never --force-remove-worktree)
+  const r = await h.process.run(['claude', 'rm', rec.sid], { timeoutMs: 15_000 }).catch(() => null) // (no flag at all: never --discard-unpushed, never --force-remove-worktree)
   const ok = !!r && r.exitCode === 0
   rec.rm = { at: await h.clock.now(), ok, text: r ? flat(r.stderr || r.stdout, 120) || `exit ${r.exitCode}` : 'claude rm could not be started' }
   await logLine(h, rec, `claude rm ${shortId(rec.sid)}: ${ok ? 'removed from the list (the conversation is kept)' : `failed (${rec.rm.text})`}`)
@@ -163,6 +164,12 @@ export async function oldDeskStep(h: Host, sid: string, phase: 'start' | 'turn')
     const rec = await readOldDesk(h)
     if (!rec || rec.done || rec.dismissed || !sid || sid === rec.sid) return null
     const now = await h.clock.now()
+    // however it was seen, the reminder is not forever: 24 h for a desk the listing never showed, 7 days for one it showed as active
+    // (the `archived` marker of a row is an assumption about the listing: without it only this cap or a dismiss ends the reminder)
+    if (now - rec.restartedAt > (rec.seen ? SEEN_MS : UNLISTED_MS)) {
+      await settle(h, rec, rec.seen ? 'still listed as active after 7 days; the reminder window is over' : 'never listed in claude agents; the 24 h reminder window is over')
+      return null
+    }
     if (rec.newSid !== sid) {
       rec.newSid = sid
       await logLine(h, rec, `new desk session ${shortId(sid)} started`)

@@ -14,7 +14,8 @@
   auditor's own Agent reply, which a background call does not have (1.0.12 forces the foreground; unverified in the engine). New
   `lean_script record-audit` (name, sha, verdict adopt|adapt|reject, network / deletes / secrets / generalises, reads, writes, hardcoded,
   changes, reason) for the audit thread or the thread that started the auditor: checked like a reply (stored sha, every flag answered,
-  the mod's own rules on top) and only after the mod saw an auditor start with the exact brief for that text. `audit` says "Audit started;
+  the mod's own rules on top) and only after the mod saw an auditor call with the exact brief for that text go through. A verdict passed
+  on this way never adopts by itself (an `adopt` waits for your Adopt / Reject; adapt and reject take effect). `audit` says "Audit started;
   verdict not recorded yet", `show` says "audited, waiting for the verdict" (not "unaudited") until it arrives, and the desk starts only
   one audit thread per script text. `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line
   for that text instead of "was never audited" ("verdict taken from the audit thread's report", logged); a network flag still needs
@@ -25,8 +26,8 @@
   Desktop session that `claude rm` / `claude stop` (background sessions) are not assumed to reach. The restart records the old desk's id
   and title (`~/.lean-agent/desk/old-desk.json`) before the new desk opens; the new desk's first notice, then once per desk turn, and the
   doctor (`note old desk session ...`) name it and say "archive it in the Claude app (right-click, Archive)" until
-  `claude agents --json --all` no longer lists it as an active row. A desk session never listed there cannot be checked: the reminder
-  ends 24 h after the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact
+  `claude agents --json --all` no longer lists it as an active row (also ends 7 days after the restart). A desk session never listed
+  there cannot be checked: the reminder ends 24 h after the restart, or at once with `lean_doctor dismiss-old-desk`. `claude rm <id>` (no flags) is tried only when that exact
   id is listed as a background-kind session that is not working and runs in the desk folder; the result is logged in the record. Never
   the new desk, never `--discard-unpushed` / `--force-remove-worktree`, never a stop of the app or a service.
 

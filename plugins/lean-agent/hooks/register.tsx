@@ -834,7 +834,6 @@ export const register: Register = on => {
     // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
     const forced = audited && wantsBackground(e)
-    if (audited && role.kind === 'thread') await markAuditStarted(host, role.id, String(e.prompt ?? '')).catch(() => false) // an audit of this text is under way (record-audit needs it)
     let r: any
     try {
       r = await next(audited ? foregroundCall(e) : e)
@@ -847,6 +846,7 @@ export const register: Register = on => {
     // a script auditor's LEAN-AUDIT line: the mod records the verdict (and tells the thread what the rules made of it)
     if (audited && role.kind === 'thread' && r?.deny === undefined) {
       const reply = texts(r?.result).join('\n')
+      await markAuditStarted(host, role.id, String(e.prompt ?? '')).catch(() => false) // the call went through (not denied): an audit of this text is under way (record-audit needs it)
       const said = await auditFromReply(host, role.id, reply, String(e.prompt ?? '')).catch(() => null)
       // (the engine ignored the foreground switch and the call came back as "Async agent launched": say that no verdict was recorded)
       const lost = !said && /async agent launched/i.test(reply) ? AUDIT_ASYNC_NOTE : ''

@@ -454,8 +454,14 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string, re
   const r = reply as Answered
   const ev = await evaluate(h, f, pend, r, by, relay ? 'record-audit' : undefined)
   if ('out' in ev) return ev.out
-  const { audit, j, now, changes, waits, ts } = ev
-  const why = j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : ''
+  const { audit, j, now, changes, ts } = ev
+  // A verdict passed on by a tool call is the relaying model's word, not the engine's reply of a real auditor call: it is recorded, and even
+  // a clean `adopt` never adopts by itself. It waits for the desk like any adopt the mod's proof did not clear (the user's decide, or the
+  // pane's Adopt / Reject).
+  const held = relay && j.verdict === 'adopt'
+  const waits = ev.waits || held
+  if (waits) audit.waits = true
+  const why = (j.verdict !== r.verdict ? ` The auditor said ${r.verdict}; the mod's rules say ${j.verdict}: ${j.blockers.join('; ')}.` : '') + (held ? ' A verdict passed on with record-audit never adopts by itself.' : '')
   const said = `audited: ${j.verdict}${j.verdict !== r.verdict ? ` (auditor said ${r.verdict})` : ''}`
   const waitText = `waits for the desk's decision (lean_script decide adopt|reject with the user's yes, or the pane's Adopt / Reject)`
   if (pend) {
@@ -466,7 +472,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string, re
     }
     const meta: Meta = note({ ...f.meta, pending: { ...pend, audit } }, ts, `update ${pend.v} ${said}${waits ? ' (waits for the desk)' : ''}`)
     await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
-    if (j.verdict === 'adopt') return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
+    if (j.verdict === 'adopt' && !held) return await adoptVersion(h, { meta, dir: f.dir }, 'audit')
     if (waits) return { ok: true, text: `${r.name}: the update ${pend.v} ${waitText}.${why}` }
     return { ok: true, text: `${r.name}: the update ${pend.v} is adapt. Change: ${changes.join('; ')}. Then send the revised update again (lean_script update ${r.name}).${why}` }
   }
@@ -474,7 +480,7 @@ async function recordAudit(h: Host, by: string, reply: Reply, prompt: string, re
   if (j.verdict === 'reject') meta = { ...meta, status: 'rejected' }
   if (waits) meta = { ...meta, status: 'audited' }
   await writeJson(h, `${f.dir}/meta.json`, meta) // the audit is kept first, adopted or not
-  if (j.verdict === 'adopt') return await adopt(h, { meta, dir: f.dir }, 'audit')
+  if (j.verdict === 'adopt' && !held) return await adopt(h, { meta, dir: f.dir }, 'audit')
   if (j.verdict === 'reject') return { ok: true, text: `${r.name}: reject${r.reason ? ` (${r.reason})` : ''}.${why}` }
   if (waits) return { ok: true, text: `${r.name}: audited, the auditor said adopt, but it ${waitText}.${why}` }
   return { ok: true, text: `${r.name}: adapt. Change: ${changes.join('; ')}. Then propose the revised script again under the same name.${why}` }
@@ -557,7 +563,8 @@ export async function auditFromReply(h: Host, by: string, text: string, prompt: 
 // record-audit (a tool call by the audit thread, the thread that started the auditor, or the desk): the fields of a LEAN-AUDIT line from an
 // auditor hand-back that no hook saw (the call ran in the background). Same checks as a reply (stored sha, every flag answered, the mod's
 // rules on top), plus: the mod saw an auditor start with the exact brief for this text, and the caller is one of those allowed. A verdict
-// that arrives this way is as trustworthy as the model that passes it on, which is why the mod's rules and the user's decision still apply.
+// that arrives this way is only as trustworthy as the model that passes it on, so it is RECORDED but never adopts by itself: an `adopt` waits
+// for the desk's decision (the user's yes in decide, or the pane's Adopt); adapt and reject take effect as for a reply.
 async function recordAuditTool(h: Host, who: Who, i: any): Promise<Out> {
   const bool = (v: unknown): boolean | null => (typeof v === 'boolean' ? v : null)
   const verdict: Verdict | null = i?.verdict === 'adopt' || i?.verdict === 'adapt' || i?.verdict === 'reject' ? i.verdict : null
