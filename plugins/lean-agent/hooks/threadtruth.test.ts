@@ -349,18 +349,18 @@ test('every fresh start and restart passes -n with the generation: "tN · title"
 
 test('the name is read back from the agents listing; a mismatch is said and left, and no rename is ever attempted', async () => {
   const w = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })] })
-  w.st.newName = 'form finder revisit'
+  w.st.newName = 'demo app revisit'
   const r = await w.run({ action: 'restart', tN: 't1' })
-  expect(r.text).toContain('the app lists it as "form finder revisit", not "t1 · fix login (2)"')
+  expect(r.text).toContain('the app lists it as "demo app revisit", not "t1 · fix login (2)"')
   expect(r.text).toContain('Claude Code cannot rename a background session')
   expect(new Set(w.h.claudeCalls().map(a => a[0]))).toEqual(new Set(['agents', 'stop', '--bg', 'rm'])) // no rename command exists, none is tried
   // a matching name says nothing
   const ok = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })] })
   expect((await ok.run({ action: 'restart', tN: 't1' })).text).not.toContain('the app lists it as')
   // a resume cannot pass -n: the name the session keeps is read back too
-  const res = world({ rows: [row({ name: 'form-finder-revisit push log', state: 'idle', status: 'idle' })] })
+  const res = world({ rows: [row({ name: 'demo-app-revisit push log', state: 'idle', status: 'idle' })] })
   const rr = await res.run({ action: 'wake', tN: 't1' })
-  expect(rr.text).toContain('the app lists it as "form-finder-revisit push log"')
+  expect(rr.text).toContain('the app lists it as "demo-app-revisit push log"')
   expect(res.resumes()[0]).not.toContain('-n') // `claude --bg --resume <id> -- msg` takes no flags
   // a row without a name, or one that is not listed, says nothing
   expect(nameProblem(undefined, 'x')).toBeNull()

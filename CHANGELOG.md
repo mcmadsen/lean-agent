@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.14
 
 ### Added
 - **Thread status is the truth.** "Running" is what `claude agents --json --all` says, not a recorded flag. `lean_thread list`, the pane
