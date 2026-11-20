@@ -2,6 +2,7 @@
 import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { approvalOf, deskState, unconsumed } from './delivery'
+import { liveApproval } from './approvals'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNotices } from './notices'
@@ -278,6 +279,7 @@ export async function loadView(h: Host): Promise<View> {
       // the desk's push is recorded in the thread's history (push.ts), not in the desk inbox: a pushed commit is not "ready to push"
       const pushed = isDone && review === 'green' && !!full && (await readJsonl<{ kind?: string; ok?: boolean; sha?: string }>(h, `${threadsDir(home)}/${t.id}/history.jsonl`).catch(() => [])).some(x => x?.kind === 'push' && x.ok === true && typeof x.sha === 'string' && x.sha.length >= 7 && full!.startsWith(x.sha))
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
+      const apv = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
       v.threads.push({
         ...(used ? { agents: used } : {}),
         lastReport: flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
@@ -300,7 +302,7 @@ export async function loadView(h: Host): Promise<View> {
         asking: asking.has(t.id) || lr?.kind === 'ask',
         blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked',
         needsYou: !!ag?.needsYou && !paused,
-        ...(lr && t.state === 'open' && approvalOf(lr) ? { approval: approvalOf(lr) } : {}), // its last record is a blocked report that waits for the user's yes
+        ...(apv ? { approval: apv } : {}),
         ...(paused ? { pausedUntil: paused.resetAt } : {}),
         ...(typeof t.finished === 'number' && t.finished > 0 ? { finished: true } : {}), // reported done and was stopped: the next message starts a new session
       })

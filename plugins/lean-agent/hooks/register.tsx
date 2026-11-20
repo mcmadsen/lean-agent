@@ -9,6 +9,7 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide } from './guard'
+import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
@@ -91,6 +92,7 @@ export const resetModState = () => {
   resetDeskCompact()
   resetFinish()
   resetCap()
+  resetApprovals()
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
@@ -840,6 +842,8 @@ export const register: Register = on => {
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
     // call counts for the thread. This is what a project profile is learned from.
     if (role.kind === 'thread' && r?.deny === undefined) await noteToolUse(host, role.id, String(e.tool ?? ''), e).catch(() => false)
+    // a thread that reported blocked with an approval and now calls a tool has carried on: its "needs your yes" card ends (approvals.ts)
+    if (role.kind === 'thread' && !e.agentId) await noteCall(host, role.id, String(e.tool ?? '')).catch(() => false)
     // learned rules for a thread and its subagents: the engine loads them only beneath the session root, so the mod appends the rules
     // whose `paths:` match the files this call touches, once per context (ruleload.ts)
     if (role.kind === 'thread' && r?.deny === undefined) {

@@ -3,6 +3,7 @@
 // `errors` and the rest is still drawn. Several panes (one per thread) read through the same short caches, so five open panes do not
 // run five `claude agents` listings or five git diffs per refresh.
 import { approvalOf, deskState, unconsumed } from './delivery'
+import { liveApproval } from './approvals'
 import type { DeskRec } from './delivery'
 import { dayOf, syncRollup } from './ledger'
 import type { Rollup } from './ledger'
@@ -217,7 +218,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
       .slice(-REPORTS_MAX)
       .reverse()
     const last = all[all.length - 1]
-    if (last && t.state === 'open') d.approval = approvalOf(last)
+    if (last && t.state === 'open') d.approval = await liveApproval(h, id, approvalOf(last), last.ts, d.run !== 'unknown' && d.working).catch(() => approvalOf(last)) // only while it is really blocked (approvals.ts)
   })
   await guard('queued', async () => {
     const q: Inbox[] = (await unconsumed(h, home, id)).msgs

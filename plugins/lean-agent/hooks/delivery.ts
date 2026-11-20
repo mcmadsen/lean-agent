@@ -13,6 +13,7 @@ import { lessonLines } from './reviewlessons'
 import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
 import { readRegistry, registerOwn, staleEntries } from './worktreereg'
+import { notePending } from './approvals'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -77,7 +78,7 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string }
 export const APPROVAL_MAX = 300
 export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
-export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself]` : '')
+export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself, do not ask it with AskUserQuestion and do not send a yes (a relayed yes does not satisfy the permission check)]` : '')
 export type Tool = { name: string; description: string; inputSchema: unknown }
 
 // what a done report should carry so a fresh session can take over: the fields a text does not mention (a heuristic on words)
@@ -131,7 +132,7 @@ export const THREAD_TOOLS: Tool[] = [
       last: { type: 'number', description: 'prs: how many completed PRs (default 10, at most 30)' },
     }, ['project']),
   },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way)' } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way; never for something you decide yourself, such as a subagent cap or a model choice)' } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -433,6 +434,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
       }
       await clearReportFailure(h, home, id)
+      if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
       const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text), ...(approval ? { approval } : {}) }, i.important === true)
