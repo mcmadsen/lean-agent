@@ -6,14 +6,14 @@ import { jobOf, retryDenial, retryReset, stepBudget } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 
-export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean }
+export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
 export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string }
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
 export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku'
 export const SPLIT = 'return what you have; the thread splits the rest'
-export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false }
+export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
 export const DIRECT_READ_LINES = 200
 
 // a key of config.json: nested (`threads: { directReads }`) or flat (`"threads.directReads"`)
@@ -45,6 +45,7 @@ export function orchConfig(cfg: any): OrchConfig {
     steps: num(pick(cfg, 'workers.steps'), DEFAULTS.steps),
     stepsByJob: byJob(pick(cfg, 'workers.stepsByJob')),
     requireJob: pick(cfg, 'workers.requireJob') === true,
+    grantTtlMin: num(pick(cfg, 'grants.ttlMinutes'), DEFAULTS.grantTtlMin),
   }
 }
 
@@ -61,12 +62,19 @@ export async function loadOrch(h: Host): Promise<OrchConfig> {
 const reads = new Map<string, number>() // thread key -> direct reads this turn
 const inflight = new Map<string, number>() // thread key -> workers running
 const steps = new Map<string, number>() // worker id -> tool calls so far
+const slots = new Map<string, { key: string; at: number }>() // subagent id -> the thread whose worker slot it holds (a background worker outlives its Agent call)
+const stopped = new Set<string>() // subagents that ended before their launch result was seen
 const MAX_TRACKED = 500
 export const orchTurnStart = (key: string): void => void reads.delete(key)
 export function orchReset(): void {
   reads.clear()
   inflight.clear()
   steps.clear()
+  slots.clear()
+  stopped.clear()
+  grantRoots.clear()
+  grantMiss.clear()
+  lost.clear()
   retryReset()
 }
 
@@ -147,6 +155,13 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (p.length > c.briefChars) return `one step per job: the brief is ${p.length} chars, at most ${c.briefChars} (workers.briefChars); split it, one job per step`
   if (c.requireJob && !jobOf(p)) return 'the first line of the brief names the job: `job: lookup|edit|run|check` (workers.requireJob)'
   const k = key(ctx)
+  const lostNote = lost.get(k)
+  if (lostNote && !lostNote.told) {
+    lostNote.told = true // said once; the thread's own edits are allowed from now on
+    return GRANT_LOST
+  }
+  const now = Date.now()
+  for (const [id, sl] of slots) if (now - sl.at > c.grantTtlMin * 60_000) freeSlot(id) // a worker that never ended: its slot is not held forever
   const n = inflight.get(k) ?? 0
   if (n >= c.workers) return `at most ${c.workers} workers at once (threads.workers); wait for one to finish`
   const again = retryDenial(k, p) // (counted only when nothing else refused it)
@@ -161,7 +176,7 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (isAgentTool(e)) return agentCallDenial(c, ctx, e)
   if (t === 'Edit' || t === 'Write' || t === 'NotebookEdit') {
     const f = String(e.file_path ?? e.notebook_path ?? '')
-    return f && inLean(ctx, f) ? null : THREAD_STEP
+    return f && (inLean(ctx, f) || lostEdit(ctx, e)) ? null : THREAD_STEP
   }
   if (t === 'Read') {
     const f = String(e.file_path ?? '')
@@ -201,9 +216,70 @@ export function orchDecide(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   return null
 }
 
-// after a worker Agent call finished (allowed earlier by orchDecide): one slot is free again
-export function orchEnd(ctx: OCtx, e: Call): void {
+// after a worker Agent call returned (allowed earlier by orchDecide): its slot is free again. A background launch ("Async agent launched",
+// the subagent id in the result) has only started the worker: the slot is held until the subagent ends (orchAgentEnd).
+export function orchEnd(ctx: OCtx, e: Call, launch?: { async: boolean; agentId?: string }): void {
   if (!isAgentTool(e) || ctx.agentType || ctx.agentId || ctx.kind !== 'thread' || !isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) return
   const k = key(ctx)
+  if (launch?.async && launch.agentId && !stopped.delete(launch.agentId)) {
+    slots.set(launch.agentId, { key: k, at: Date.now() })
+    return
+  }
   inflight.set(k, Math.max(0, (inflight.get(k) ?? 0) - 1))
+}
+function freeSlot(id: string): void {
+  const sl = slots.get(id)
+  if (!sl) return
+  slots.delete(id)
+  inflight.set(sl.key, Math.max(0, (inflight.get(sl.key) ?? 0) - 1))
+}
+// an Agent call's result that only LAUNCHED a background subagent: `status: "async_launched"` with `agentId` (the engine's result record), or
+// the text "Async agent launched ... agentId: <id>". The subagent is still running; its life ends at classic.SubagentStop.
+export function launchOf(r: any, text: string): { async: boolean; agentId?: string } {
+  const o = [r?.result, r?.result?.data, r?.data, r].find(x => x && typeof x === 'object' && x.status === 'async_launched')
+  const async = !!o || /async agent launched/i.test(text)
+  const id = typeof o?.agentId === 'string' ? o.agentId : /agentId:?\s*["']?([A-Za-z0-9_-]+)/i.exec(text)?.[1]
+  return { async, ...(async && id ? { agentId: id } : {}) }
+}
+// the subagent ended (classic.SubagentStop): its slot and its step count are released
+export function orchAgentEnd(agentId: string): void {
+  steps.delete(agentId)
+  if (slots.has(agentId)) freeSlot(agentId)
+  else {
+    if (stopped.size >= MAX_TRACKED) stopped.delete(stopped.values().next().value as string)
+    stopped.add(agentId)
+  }
+}
+
+// ---- grants that did not arrive ----------------------------------------------------------------------------------------------
+// A worker edit refused as outside its grant although the path is inside an `allow-edit` root the thread passed on its last Agent calls:
+// after 2 such refusals the next one (and the thread's next worker Agent call) says to do the edit yourself, and the thread's OWN edit
+// of files under those roots is allowed for the rest of the session. Work never stops on a lost grant.
+export const GRANT_LOST = 'grants are not reaching workers (lean-agent bug or a version mix): do this edit yourself now'
+const grantRoots = new Map<string, string[]>() // thread key (its folder) -> allow-edit roots of its last worker Agent calls
+const grantMiss = new Map<string, number>() // thread key -> worker edits refused although inside those roots
+const lost = new Map<string, { told: boolean }>()
+export function noteGrantRoots(threadKey: string, edit: string[] | undefined): void {
+  if (!edit?.length) return
+  grantRoots.set(threadKey, [...new Set([...(grantRoots.get(threadKey) ?? []), ...edit.map(r => normPath(r))])].slice(-12))
+}
+const inRoots = (threadKey: string, abs: string): boolean => (grantRoots.get(threadKey) ?? []).some(r => under(abs, r))
+// a worker's edit was refused as outside its grant: null = count it as before, a string = the fail-fast text (the 3rd such refusal on)
+export function grantRefused(threadKey: string, absPath: string): string | null {
+  if (!inRoots(threadKey, normPath(absPath))) return null
+  const n = (grantMiss.get(threadKey) ?? 0) + 1
+  grantMiss.set(threadKey, n)
+  if (n <= 2) return null
+  if (!lost.has(threadKey)) lost.set(threadKey, { told: false })
+  return GRANT_LOST
+}
+export const grantArrived = (threadKey: string): void => void grantMiss.delete(threadKey) // a worker edit was allowed: the grants do arrive
+// the thread's own edit under a root it granted, after the grants were lost (the guard's fallback; register logs it as `grant-lost`)
+export function lostEdit(ctx: OCtx, e: Call): boolean {
+  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType || !lost.has(key(ctx))) return false
+  const f = String(e.file_path ?? e.notebook_path ?? '')
+  if (!f) return false
+  const abs = normPath(f, ctx.cwd)
+  const lean = `${ctx.home}/.lean-agent`
+  return inRoots(key(ctx), abs) && !(under(abs, lean) && LEAN_PROTECTED.test(abs.slice(lean.length))) // never its own settings, grants or review records
 }

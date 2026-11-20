@@ -18,9 +18,9 @@ const call = (ctx: any, e: any, c = C) => orchDecide(c, ctx, e)
 let seqN = 0 // a fresh brief each time: an identical brief is a retry (jobs.ts retryDenial)
 
 test('config: defaults, nested and flat keys, junk falls back, false switches the model off', () => {
-  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false })
+  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
   const c = orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
-  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false })
+  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
   expect(orchConfig({ 'lean.orchestrate': false }).on).toBe(false)
   expect(orchConfig({ workers: { steps: 'x' }, threads: { workers: -1 } })).toEqual(C)
   expect(orchConfig({ threads: { directReads: 0 } }).directReads).toBe(0)

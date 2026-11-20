@@ -831,6 +831,10 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
 - **An MCP server says `ENOTFOUND not-setup` (or another placeholder host)**: it needs a variable the desk does not have, see
   "MCP servers that need a variable". `lean_doctor check` names it; ask the desk to set it.
 
+- **Every worker edit is refused as outside `allow-edit`** (`no grant is recorded for this worker` = the grant did not reach it; `the path <p> is not within the
+  granted roots: <roots>` = it did, the path is elsewhere). Workers run in the background and keep their grant until they end; both sides of the check are
+  resolved by real path (symlinks, `/private`, `~`, case). After 2 such refusals inside a granted root lean-agent says `grants are not reaching workers ... do this
+  edit yourself now` and the thread may edit under its roots itself (refusal row `grant-lost`); stale grants expire after `grants.ttlMinutes` (default 120).
 - **The desk did not open at login**: `doctor check` shows the last opener line. The opener only acts while the Claude
   app is running (it waits ten minutes and never launches it). `/lean-agent-setup` (or `doctor fix`) reinstalls it.
 - **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `/lean-agent-setup`

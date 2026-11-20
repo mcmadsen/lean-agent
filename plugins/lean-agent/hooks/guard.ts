@@ -6,7 +6,7 @@ import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
-import { DESK_ROUTE, isSmall, loadOrch, orchDecide } from './orchestrate'
+import { DESK_ROUTE, grantArrived, grantRefused, isSmall, loadOrch, orchDecide } from './orchestrate'
 import { jobOf } from './jobs'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -16,8 +16,10 @@ import type { Role } from './role'
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
 export type Grants = { edit?: string[]; cmds?: string[]; mcp?: string[]; mcpWrite?: string[]; job?: string }
-type GrantRec = Grants & { call: string; type?: string }
-type GrantDoc = { pending: GrantRec[]; agents: Record<string, GrantRec> }
+type GrantRec = Grants & { call: string; type?: string; at?: number; sid?: string }
+type GrantDoc = { pending: GrantRec[]; agents: Record<string, GrantRec>; ended?: Record<string, GrantRec> } // ended: a subagent that stopped; a resumed one (same id) takes its grant back
+export const GRANT_TTL_MIN = 120
+export type GrantOpts = { sid?: string; ttlMin?: number }
 
 export const ROUTE = 'lean-agent strict mode: route this to a thread (thread skill)'
 
@@ -36,6 +38,46 @@ export const within = (p: string, root: string) => p === root || p.startsWith(ro
 async function resolve($: Host, p: string, cwd: string): Promise<string> {
   const abs = p.startsWith('/') ? norm(p) : norm(`${cwd}/${p}`)
   return norm(await realPath($, abs))
+}
+
+// Both sides of a grant check go through this: the real path of the deepest EXISTING parent (symlinks, /private/tmp on macOS, a file that
+// does not exist yet under a granted directory), `..` / `.` / doubled and trailing slashes removed, `~` expanded. Never the raw spelling.
+async function deepReal($: Host, raw: string, cwd: string): Promise<string> {
+  const home = await homeDir($)
+  const t = raw === '~' ? home : raw.startsWith('~/') ? `${home}/${raw.slice(2)}` : raw
+  const abs = t.startsWith('/') ? norm(t) : norm(`${cwd}/${t}`)
+  const rest: string[] = []
+  let cur = abs
+  for (let i = 0; i < 128; i++) {
+    try {
+      const s = await $.fs.stat(cur, { resolve: true })
+      return norm([s.realPath ?? cur, ...rest].join('/'))
+    } catch {
+      if (cur === '/') break
+      rest.unshift(cur.slice(cur.lastIndexOf('/') + 1))
+      cur = cur.slice(0, cur.lastIndexOf('/')) || '/'
+    }
+  }
+  return abs
+}
+// the edited path is within a granted root (a file grant is the file itself, a directory grant everything below it). A case-insensitive file
+// system (macOS): paths that differ only by case match when the path as the worker spelled it exists (a case-sensitive one answers no).
+async function inGrant($: Host, raw: string, roots: string[], cwd: string): Promise<{ ok: boolean; shown: string[] }> {
+  const p = await deepReal($, raw, cwd)
+  const shown: string[] = []
+  for (const r of roots) {
+    const rr = await deepReal($, r, cwd)
+    shown.push(rr === norm(r) ? rr : `${norm(r)} (= ${rr})`)
+    const isFile = (await $.fs.stat(rr).then(x => x.kind === 'file', () => false)) // a file grant is that file only
+    if (isFile ? p === rr : within(p, rr)) return { ok: true, shown }
+    if (isFile) continue
+    if (within(p.toLowerCase(), rr.toLowerCase())) {
+      const asSpelled = raw.startsWith('/') ? norm(raw) : norm(`${cwd}/${raw}`)
+      const exists = async (q: string) => $.fs.stat(q, { resolve: true }).then(() => true, () => false)
+      if ((await exists(rr)) && (await exists(asSpelled.slice(0, rr.length)))) return { ok: true, shown }
+    }
+  }
+  return { ok: false, shown }
 }
 
 // ---- shell command analysis ----------------------------------------------------------------------------------
@@ -317,11 +359,11 @@ export async function grantsFile($: Host, role: Role): Promise<string> {
 
 // Grants are written by the mod when the thread calls the Agent tool (register.tsx): `allow-edit: /abs, /abs` and
 // `allow-cmd: cmd` lines in the prompt. The subagent id is not known yet, so the grant waits as pending and is bound
-// to the first subagent of that type that acts; it is removed when the Agent call returns.
+// to the first subagent of that type that acts (or to its id when an async launch names it); it is released when the subagent ends.
 export function parseGrants(prompt: unknown): Grants {
   const t = typeof prompt === 'string' ? prompt : ''
   const list = (key: string) => [...t.matchAll(new RegExp(`^\\s*-{0,2}${key}\\s*[:=]\\s*(.+)$`, 'gim'))].flatMap(m => m[1]!.split(',')).map(x => x.trim().replace(/^["'`]|["'`]$/g, '')).filter(Boolean)
-  return { edit: list('allow-edit').filter(x => x.startsWith('/')), cmds: list('allow-cmd'), mcp: list('allow-mcp'), mcpWrite: list('allow-mcp-write'), ...(jobOf(t) ? { job: jobOf(t)! } : {}) }
+  return { edit: list('allow-edit').filter(x => x.startsWith('/') || x === '~' || x.startsWith('~/')), cmds: list('allow-cmd'), mcp: list('allow-mcp'), mcpWrite: list('allow-mcp-write'), ...(jobOf(t) ? { job: jobOf(t)! } : {}) }
 }
 // does the brief carry anything the guard must remember for the subagent it starts (a grant or a job type)?
 export const hasGrants = (g: Grants): boolean => !!(g.edit?.length || g.cmds?.length || g.mcp?.length || g.mcpWrite?.length || g.job)
@@ -334,27 +376,55 @@ function locked<T>(f: () => Promise<T>): Promise<T> {
 }
 async function readDoc($: Host, file: string): Promise<GrantDoc> {
   const d = await readJson<Partial<GrantDoc>>($, file, {})
-  return { pending: Array.isArray(d.pending) ? d.pending : [], agents: d.agents && typeof d.agents === 'object' && !Array.isArray(d.agents) ? d.agents : {} }
+  const rec = (v: unknown): Record<string, GrantRec> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, GrantRec>) : {})
+  return { pending: Array.isArray(d.pending) ? d.pending : [], agents: rec(d.agents), ended: rec(d.ended) }
 }
-
-export function recordGrant($: Host, role: Role, call: string, type: string | undefined, g: Grants): Promise<void> {
+// stale entries go on every write and at session start: older than the TTL (a subagent that never reported), or written by another session
+function prune(d: GrantDoc, now: number, o: GrantOpts): void {
+  const max = (o.ttlMin && o.ttlMin > 0 ? o.ttlMin : GRANT_TTL_MIN) * 60_000
+  const stale = (g: GrantRec) => typeof g?.at !== 'number' || now - g.at > max || (!!o.sid && !!g.sid && g.sid !== o.sid)
+  d.pending = d.pending.filter(g => !stale(g))
+  for (const m of [d.agents, d.ended!]) for (const [id, g] of Object.entries(m)) if (stale(g)) delete m[id]
+}
+// one locked read-modify-write of the grants file
+function mutate($: Host, role: Role, o: GrantOpts, f: (d: GrantDoc, now: number) => void): Promise<void> {
   return locked(async () => {
     const file = await grantsFile($, role)
     const d = await readDoc($, file)
-    d.pending.push({ call, type, edit: g.edit ?? [], cmds: g.cmds ?? [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
-    await writeJson($, file, d)
+    const now = await $.clock.now()
+    prune(d, now, o)
+    f(d, now)
+    await writeJson($, file, { pending: d.pending, agents: d.agents, ended: d.ended })
+  })
+}
+export const sweepGrants = ($: Host, role: Role, o: GrantOpts = {}): Promise<void> => mutate($, role, o, () => undefined)
+
+export function recordGrant($: Host, role: Role, call: string, type: string | undefined, g: Grants, o: GrantOpts = {}): Promise<void> {
+  return mutate($, role, o, (d, now) => {
+    d.pending.push({ call, type, at: now, ...(o.sid ? { sid: o.sid } : {}), edit: g.edit ?? [], cmds: g.cmds ?? [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
   })
 }
 
-export function releaseGrant($: Host, role: Role, call: string): Promise<void> {
-  return locked(async () => {
-    const file = await grantsFile($, role)
-    const d = await readDoc($, file)
+// The Agent call returned. A foreground call is the subagent's whole life: the unbound grant goes, the bound one is released (kept only as
+// `ended`, for a resume). An async launch ("Async agent launched", `agentId` in the result) only starts it: the pending grant is bound to that id
+// now (or stays pending, bound by type as before, when the result names no id) and lives until the subagent ends (releaseAgent).
+export function releaseGrant($: Host, role: Role, call: string, o: GrantOpts & { async?: boolean; agentId?: string } = {}): Promise<void> {
+  return mutate($, role, o, d => {
+    if (o.async) {
+      const i = o.agentId ? d.pending.findIndex(g => g.call === call) : -1
+      if (i >= 0 && !d.agents[o.agentId!] && !d.ended![o.agentId!]) d.agents[o.agentId!] = d.pending.splice(i, 1)[0]!
+      return
+    }
     d.pending = d.pending.filter(g => g.call !== call)
-    for (const [id, g] of Object.entries(d.agents)) if (g.call === call) delete d.agents[id]
-    await writeJson($, file, d)
+    for (const [id, g] of Object.entries(d.agents)) if (g.call === call) { d.ended![id] = g; delete d.agents[id] }
   })
 }
+// the subagent ended (classic.SubagentStop): its bound grant is released
+export const releaseAgent = ($: Host, role: Role, agentId: string, o: GrantOpts = {}): Promise<void> =>
+  mutate($, role, o, d => {
+    const g = d.agents[agentId]
+    if (g) { d.ended![agentId] = g; delete d.agents[agentId] }
+  })
 
 // the job type of the brief a worker was started with (the refusal and missing-tool records name it)
 export const workerJob = async ($: Host, ctx: Ctx): Promise<string | undefined> => (await grantFor($, ctx).catch(() => ({}) as Grants)).job
@@ -365,11 +435,18 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
     const d = await readDoc($, file)
     const bound = d.agents[ctx.agentId!]
     if (bound) return bound
+    const back = d.ended?.[ctx.agentId!] // a resumed / continued worker keeps its grant
+    if (back) {
+      d.agents[ctx.agentId!] = back
+      delete d.ended![ctx.agentId!]
+      await writeJson($, file, { pending: d.pending, agents: d.agents, ended: d.ended })
+      return back
+    }
     const i = d.pending.findIndex(g => !g.type || sameAgent(g.type, ctx.agentType))
     if (i < 0) return {}
     const [g] = d.pending.splice(i, 1)
     d.agents[ctx.agentId!] = g!
-    await writeJson($, file, d)
+    await writeJson($, file, { pending: d.pending, agents: d.agents, ended: d.ended })
     return g!
   })
 }
@@ -800,8 +877,19 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     const raw: string = e.file_path ?? e.notebook_path ?? ''
     if (!raw) return 'lean-agent: edit without a path'
     const p = await resolve($, raw, ctx.cwd)
-    for (const root of g.edit ?? []) if (within(p, norm(root))) return null
-    return `lean-agent: ${p} is outside the paths the thread granted this worker (allow-edit): stop and report this path to the thread (do not edit it another way); the thread adds it to allow-edit and briefs you again`
+    const tkey = ctx.role.kind === 'thread' ? `${threadsDir(await homeDir($))}/${ctx.role.id}` : ''
+    const found = 'call' in g // a grant record was found for this worker (the thread's Agent call gave it one)
+    const hit = await inGrant($, raw, g.edit ?? [], ctx.cwd)
+    if (hit.ok) {
+      if (tkey) grantArrived(tkey)
+      return null
+    }
+    const gone = tkey ? grantRefused(tkey, raw.startsWith('/') ? raw : `${ctx.cwd}/${raw}`) : null // the 3rd refusal inside a root the thread granted: the grant did not arrive
+    if (gone) return `lean-agent: ${gone} (${p})`
+    const tail = 'stop and report this path to the thread (do not edit it another way); the thread adds the path to allow-edit and briefs you again'
+    return found
+      ? `lean-agent: the path ${p} is not within the granted roots: ${hit.shown.join(', ') || 'none'}: ${tail}`
+      : `lean-agent: no grant is recorded for this worker (granted on the call: none found), path ${p}: ${tail}`
   }
   return null
 }

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Hotfix (blocked all delegated edits): a worker's `allow-edit` / `allow-cmd` / `allow-mcp` grant, its job type, its worker slot and its step budget were
+  tied to the thread's Agent CALL, but subagents run in the background by default and the call returns at once, so the grant was deleted before the worker
+  acted (every edit refused, resumed workers ended without a report, auditor verdicts lost). They now live as long as the SUBAGENT: a background launch
+  binds the grant to the agent id from the result (`async_launched`) and `classic.SubagentStop` releases it (and the slot and the step count); a foreground
+  call releases at return; a resumed worker (same id) keeps its grant; stale entries (older than `grants.ttlMinutes`, default 120, or from another session)
+  are dropped at session start and on every write.
+- A thread's Agent call for a `lean-agent:*` type is handed on with `run_in_background` false (undefined or true), so the result comes back in the call and
+  the result schema and cap apply; the grant, slot and budget hold even when the engine ignores that.
+- Grants and edited paths are compared the same way: both by the real path of the deepest existing parent (symlinks, `/private/tmp`, `..`, doubled and trailing
+  slashes, `~`, a file not yet created, a file grant versus a directory grant, case-insensitive file systems). The refusal says which it is: `no grant is
+  recorded for this worker (granted on the call: none found)` (rule `grant-missing`) or `the path <p> is not within the granted roots: <roots>` (`grant-mismatch`).
+- Fail fast instead of a retry spiral: after 2 worker edits are refused inside a root the thread granted, the next refusal and the thread's next worker Agent call
+  say `grants are not reaching workers (lean-agent bug or a version mix): do this edit yourself now`; the thread's own edit under those roots is allowed for the
+  rest of the session (refusal row `grant-lost`).
+
 ## 1.0.15
 
 ### Added

@@ -39,7 +39,7 @@ export function patternOf(rawText: string, agent: string): Pattern {
     return { key: `cmd:${who}:${prog}:${kind}`, label: `${who} refused \`${prog}\` (${why})`, fix: fixes[kind]! }
   }
   if (/may run only its built-in read-only git commands and the commands the thread granted/.test(text)) return { key: `cmd-old:${who}`, label: `${who} refused a command (older lean-agent wording: the program is not named)`, fix: 'update lean-agent: since 1.0.9 readers run the whole read-only set and the refusal names the program' }
-  m = /^lean-agent: (\/\S+) is outside the paths the thread granted this worker/.exec(text)
+  m = /^lean-agent: (?:the path )?(\/\S+?):? (?:is outside the paths the thread granted this worker|is not within the granted roots)/.exec(text) ?? /^lean-agent: no grant is recorded for this worker \(granted on the call: none found\), path (\/\S+?):/.exec(text)
   if (m) {
     const dir = dirOf(m[1]!)
     return { key: `edit:${dir}`, label: `a worker's edit outside allow-edit: ${dir}`, fix: `give it in the brief: allowEdit: ["${dir}"] on lean_thread new (a path outside the worktree, such as a repo's .claude/skills file, is the usual one), or the thread adds allow-edit: ${dir} to the worker's prompt` }
@@ -70,9 +70,15 @@ const RULE_FIX: Record<string, string> = {
   'allow-mcp-missing': 'add `allow-mcp: <server>` to the worker brief (MCP is opt-in per job), or allowMcp on lean_thread new',
   'allow-mcp-other-server': 'the worker called a server its brief did not grant: grant that server, or keep the step to the granted ones',
   'allow-mcp-write-tool': 'a worker has read-only MCP access: the write goes through the thread and the desk\'s approval',
+  'grant-missing': 'no allow-edit grant reached this worker: the thread puts `allow-edit: <abs path>` in the Agent prompt and starts it with that call (a lean-agent bug when it did)',
+  'grant-mismatch': 'the edited path is not within the granted roots as the guard resolves them (symlinks, case): the thread grants the path it gave, or its real path',
+  'grant-lost': 'the thread\'s allow-edit grants did not reach the workers: update the plugin and restart the session (a version mix); the thread edits under the roots it granted itself meanwhile',
   'run-refused': 'lean_run runs tests and builds only: push and forge commands are the desk\'s',
 }
 const RULES: [string, RegExp][] = [
+  ['grant-missing', /no grant is recorded for this worker/],
+  ['grant-mismatch', /^lean-agent: the path \S+ is not within the granted roots/],
+  ['grant-lost', /grants are not reaching workers|grant-lost/],
   ['retry-limit', /this exact job already ran (twice|once)/],
   ['desk-routing', /^the desk routes:/],
   ['why-sonnet-missing', /^haiku by default: add a prompt line/],

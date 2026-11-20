@@ -310,12 +310,13 @@ test('workers: readers are read-only; unknown subagent types are readers; grants
   expect(await run(h, thread, { tool: 'Bash', command: 'git log' }, '/r', 'unknown', 'u1')).toContain('granted')
   expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'lean-agent:reader-sonnet', 'r1')).toBeNull()
   expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
-  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-opus', 'w2')).toContain('outside')
-  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'lean-agent:worker-opus', 'w3')).toContain('outside') // no grants for plain
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/../t2/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('not within the granted roots')
+  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-opus', 'w2')).toContain('no grant is recorded')
+  expect(await run(h, plain, edit('/h/.lean-agent/worktrees/app/t1/a'), '/r', 'lean-agent:worker-opus', 'w3')).toContain('no grant is recorded') // no grants for plain
   expect(await run(h, thread, edit('/anything'), '/r')).toBeNull() // the thread's own main loop is not a worker
   await releaseGrant(h.host, thread, 'call2')
-  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w5')).toContain('no grant is recorded')
+  expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull() // the same subagent resumed keeps its grant
 })
 
 test('a throwing guard denies (fail closed)', async ($, on) => {
@@ -413,8 +414,8 @@ test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; 
   const edit = (p: string) => ({ tool: 'Edit', file_path: p })
   const ok = '/h/.lean-agent/worktrees/app/t1/src/a.ts'
   expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
-  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('outside')
-  expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-opus', 'w9')).toContain('outside') // no grant of its own
+  expect(await run(h, thread, edit('/etc/x'), '/r', 'lean-agent:worker-sonnet', 'w1')).toContain('not within the granted roots')
+  expect(await run(h, thread, edit(ok), '/r', 'lean-agent:worker-opus', 'w9')).toContain('no grant is recorded') // no grant of its own
   for (const t of ['lean-agent:reviewer', 'lean-agent:reader-haiku', 'lean-agent:explorer', 'lean-agent:auditor', 'other:worker-x', 'worker-x', 'lean-agent:lean-agent:worker-x'])
     expect(await run(h, thread, edit(ok), '/r', t, 'x1')).toContain('read-only')
   expect([isWorker('lean-agent:worker-opus'), isWorker('worker-opus'), isWorker('other:worker-opus'), isWorker(undefined)]).toEqual([true, false, false, false])

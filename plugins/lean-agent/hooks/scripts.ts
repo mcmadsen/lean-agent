@@ -542,7 +542,10 @@ async function adoptVersion(h: Host, f: Found, via: 'audit' | 'user'): Promise<O
 // "Async agent launched" at once and the LEAN-AUDIT line comes later, in a hand-back no hook records: the verdict would be lost. So an
 // auditor call always runs in the foreground: the event handed on has run_in_background false.
 export const isAuditorCall = (e: any): boolean => (e?.tool === 'Agent' || e?.tool === 'Task') && /^(lean-agent:)?auditor$/.test(String(e?.subagent_type ?? ''))
-export const wantsBackground = (e: any): boolean => e?.run_in_background === true || e?.run_in_background === 'true'
+// Current Claude Code runs a subagent in the background unless the call says run_in_background false: "not false" is a background call
+export const wantsBackground = (e: any): boolean => e?.run_in_background !== false && e?.run_in_background !== 'false'
+// a thread's own Agent call for one of this plugin's types (workers, readers, reviewer, explorer, auditor): handed on in the foreground
+export const isLeanCall = (e: any): boolean => (e?.tool === 'Agent' || e?.tool === 'Task') && /^lean-agent:/.test(String(e?.subagent_type ?? ''))
 export const foregroundCall = (e: any): any => (wantsBackground(e) ? { ...e, run_in_background: false } : e)
 export const AUDIT_FOREGROUND_NOTE = '[lean-agent] the auditor ran in the foreground (run_in_background was switched off): its verdict is recorded when it returns, which a background auditor never gets'
 export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded yet: when its LEAN-AUDIT line comes back, call lean_script record-audit with its fields (name, sha, verdict, network, deletes, secrets, generalises, reads, writes, hardcoded, changes, reason); the mod checks it like a reply. Next time start the auditor in the foreground (no run_in_background)'

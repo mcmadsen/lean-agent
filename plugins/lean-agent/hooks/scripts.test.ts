@@ -693,16 +693,18 @@ test('an auditor call that asks for the background is handed on in the foregroun
   expect(JSON.stringify(r.context)).toContain('the auditor ran in the foreground')
   expect(JSON.stringify(r.context)).toContain('cl-a: audited') // the verdict came with the reply and is recorded
   expect(meta(s.h, `${CAND.replace('count-lines', 'cl-a')}`).audit.network).toBe(true)
-  // no field, or an explicit false: handed on as it came (no key invented), and no note
+  // no field: the engine's default is the background, so it is handed on in the foreground too
   const n1: any = await $.tool.call({ tool: 'Agent', subagent_type: 'auditor', prompt: await brief('cl-b') } as any)
   expect(n1.deny).toBeUndefined()
-  expect('run_in_background' in seen[1]).toBe(false)
+  expect(seen[1].run_in_background).toBe(false)
   const f: any = await $.tool.call({ tool: 'Agent', subagent_type: 'auditor', prompt: await brief('cl-c'), run_in_background: false } as any)
   expect(seen[2].run_in_background).toBe(false)
   expect(JSON.stringify(f.context ?? '')).not.toContain('ran in the foreground')
-  // another agent type keeps its background request
-  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: 'x', run_in_background: true } as any)
+  // lean-agent types are foreground too (hotfix: grants live as long as the call); another plugin's agent keeps its background request
+  await $.tool.call({ tool: 'Agent', subagent_type: 'other:reader', prompt: 'x', run_in_background: true } as any)
   expect(seen[3].run_in_background).toBe(true)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: 'x' } as any)
+  expect(seen[4].run_in_background).toBe(false)
   // an engine that ignored the switch answers "Async agent launched": no verdict, and the thread is told so
   reply = () => 'Async agent launched. output_file: /x'
   const lost: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:auditor', prompt: await brief('cl-d'), run_in_background: true } as any)

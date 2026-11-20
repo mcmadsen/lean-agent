@@ -29,7 +29,7 @@ import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
-import { hasGrants, parseGrants, recordGrant, releaseGrant } from './guard'
+import { hasGrants, parseGrants, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
@@ -38,7 +38,7 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
-import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, markAuditStarted, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, isLeanCall, markAuditStarted, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
@@ -48,7 +48,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, loadOrch, orchEnd, orchTurnStart } from './orchestrate'
+import { isSmall, launchOf, lostEdit, loadOrch, noteGrantRoots, orchAgentEnd, orchEnd, orchTurnStart } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -644,6 +644,7 @@ export const register: Register = on => {
     // the ledger grows with every model request: a past month (or a file that starts with a 0.45 row) is renamed away, never rewritten
     let rotated: string[] = []
     await soft($, 'ledger rotation', async () => { rotated = await rotateLedger(host) })
+    if (role.kind === 'thread') await sweepGrants(host, role, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined) // stale grants (older than grants.ttlMinutes, other session) go
     if (rotated.length) await announceRotation(host, rotated) // any session may rotate: the notice is what the desk reads
     if (role.kind === 'desk') {
       // the desk's next prompt says so once, whichever session did it (the pane lists the notice until then)
@@ -678,6 +679,17 @@ export const register: Register = on => {
     if (ctx.length) pending.push(...ctx)
     return next(e)
   })
+
+  // a subagent ended (also a background one, long after its Agent call returned): its grant and worker slot are released
+  on('classic.SubagentStop', async ($, e: any, next) => {
+    const id = typeof e?.agent_id === 'string' ? e.agent_id : typeof e?.agentId === 'string' ? e.agentId : ''
+    if (id && role.kind === 'thread') {
+      const host = hostOf($)
+      orchAgentEnd(id)
+      await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
+    }
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
 
   // the app moves a pre-started session from a spare folder into the user's folder: the role is decided again
   on('classic.CwdChanged', async ($, e: any, next) => {
@@ -1040,35 +1052,44 @@ export const register: Register = on => {
       return { deny: why } as any
     }
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
-    // the thread's grants for the worker it spawns: recorded while the Agent call runs, removed when it returns
+    // the thread's grants for the worker it spawns: recorded when the Agent call starts, bound to the subagent, released when the SUBAGENT ends
+    // (a background launch returns at once; a foreground call is released at return)
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
+    const gopts = { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }
+    if (octx?.threadDir && g && isLeanCall(e)) noteGrantRoots(octx.threadDir, g.edit) // for the fail-fast when the grants do not arrive
     if (gcall) {
       try {
-        await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!)
+        await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!, gopts)
       } catch (err) {
         if (octx) orchEnd(octx, e) // the slot the guard counted is free again: the call never ran
         throw err
       }
     }
-    // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
+    // the thread's own edit the guard let through because the grants did not reach its workers: a refusal-record row (the feedback export counts them)
+    if (octx && role.kind === 'thread' && lostEdit(octx, e)) await logRefusal(host, { role: 'thread', rule: 'grant-lost', text: `grant-lost: thread edit of ${String(e.file_path ?? e.notebook_path ?? '').slice(0, 200)} allowed (fallback, grants are not reaching workers)`, tool: e.tool, thread: role.id, version: VERSION })
+    // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one);
+    // so does every other lean-agent type a thread calls (the result schema and cap apply to the call's result, the grant lives as long as the call)
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
+    const fg = audited || (role.kind === 'thread' && !e.agentId && isLeanCall(e))
     const forced = audited && wantsBackground(e)
     let r: any
+    let launch: { async: boolean; agentId?: string } | undefined
     try {
-      r = await next(audited ? foregroundCall(e) : e)
+      r = await next(fg ? foregroundCall(e) : e)
+      launch = fg || e.tool === 'Agent' || e.tool === 'Task' ? launchOf(r, texts(r?.result).join('\n')) : undefined // the engine may ignore the foreground switch
     } catch (err) {
       await noteMissingTool(host, gctx, rname, e, String((err as Error)?.message ?? err)) // a tool the session or worker does not have
       throw err
     } finally {
-      if (gcall) await releaseGrant(host, role, gcall).catch(() => undefined)
-      if (octx) orchEnd(octx, e) // a worker's slot (threads.workers) is free again
+      if (gcall) await releaseGrant(host, role, gcall, { ...gopts, async: launch?.async, agentId: launch?.agentId }).catch(() => undefined)
+      if (octx) orchEnd(octx, e, launch) // a worker's slot (threads.workers) is free again, a background worker's when it ends
     }
     if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
-    if (octx && r?.deny === undefined && !e.agentId) {
+    if (octx && r?.deny === undefined && !e.agentId && !launch?.async) { // (an async launch has no report to cut yet)
       const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))
       if (oc.on && role.kind === 'desk') r = await capTo(host, 'desk', r, oc.deskChars).catch(() => r)
       else if (oc.on && role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {
