@@ -40,6 +40,7 @@ import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
+import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, resetCap } from './cap'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
@@ -142,7 +143,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'restart', 'keep'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'restart', 'keep', 'dismiss'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
     text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line' },
     title: { type: 'string', description: 'new: short title' },
@@ -946,7 +947,11 @@ export const register: Register = on => {
     try {
       let more: string | null = null
       if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
-      else if (role.kind === 'desk') more = await takeReports(host)
+      else if (role.kind === 'desk') {
+        more = await takeReports(host)
+        const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks
+        if (tip) more = more ? `${more}\n${tip}` : tip
+      }
       if (more) extra = extra ? `${extra}\n${more}` : more
       const nudge = role.kind === 'thread' ? await takeNudges(host) : null
       if (nudge) extra = extra ? `${extra}\n${nudge}` : nudge
