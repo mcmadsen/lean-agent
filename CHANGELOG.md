@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.19
+
+### Fixed
+
+- **A thread stops working once it has checkpointed** (field, 1.0.18: a thread past `threadTokens` 120k kept working and reported the checkpoint again at
+  123k, 130k, 137k, 143k; the desk restarts only an idle session, and a thread that keeps taking turns is never idle). At or over `threadTokens` (the
+  size at a turn end, and `$.session.usage()` every 10 tool calls of a long turn) the mod writes the snapshot and ONE record per session, then refuses
+  every tool call of the thread itself but `lean_report` ("context limit reached (123k of 120k): your state is saved. End your turn now; ..."; refusal rule
+  `context-limit`). Running workers finish; their results go into the snapshot's pending results, not acted on. A thread whose last report is a question or
+  `blocked` may still ask and report. The desk restarts it as soon as its session is idle (20 s) or `threads.stopGraceMinutes` (default 3) after the
+  record, even if it still shows as working; a later turn end over the limit no longer drops the restart. The loop guard stays (one automatic restart per
+  thread per 10 minutes; a fresh session that starts over the limit asks you). Done / blocked / question threads are stopped the same way and not restarted.
+- No checkpoint chatter: the thread guide and the `lean_report` description say the mod reports it; a `lean_report` that is only a checkpoint / context notice
+  is accepted once, then answered with the stop line.
+
+### Changed
+
+- Leaner threads: the pane / list show the growth per turn (`ctx 96k/120k, +4k/turn`, last 20 turn-end samples in `context.json`); `lean_doctor context tN`
+  names the top three sources with one fix each; `threadTokens` 120000 / `threadWarnTokens` 100000 unchanged, README says it can be raised (160000) and what
+  that costs per request. Not changed: a BACKGROUND worker's result notification is not cut to the job schema (no hook sees it; only a foreground result is).
+- Measured base of a session (haiku, one word, input + cache read + cache creation): plain folder, all built-in tools 42,044 · `--tools Agent,Bash,Read`
+  10,230 · `--tools ''` 3,730 · thread folder as is 47,133 · thread folder `--tools Agent,Bash,Read` 19,779. `config threads.tools` (array) adds `--tools` to a
+  thread's fresh start, automatic restart and resume (ignored with `lean.orchestrate: false`). A subagent can only use the tools its parent
+  has (measured: a worker under `Agent,Bash,Read,Skill,SendMessage,TaskStop` has no Write), so threads now start with a default list that keeps workers
+  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a real thread folder: 47.1k -> 31.0k,
+  about 16k less on every request); `threads.tools: []` or `"all"` brings the full set back. `permissions.deny` does not remove a tool from the request.
+- `lean_doctor overhead [tN]` shows the REAL base (the first request of a session transcript) next to the text estimate; a thread session's mod records its
+  first request (`base.json`) and the start reply of a thread says the measured base.
+
 ## 1.0.18
 
 ### Changed

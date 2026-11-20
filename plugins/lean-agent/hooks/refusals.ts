@@ -71,6 +71,7 @@ const RULE_FIX: Record<string, string> = {
   'allow-mcp-other-server': 'the worker called a server its brief did not grant: grant that server, or keep the step to the granted ones',
   'allow-mcp-write-tool': 'a worker has read-only MCP access: the write goes through the thread and the desk\'s approval',
   'delegation-denied': 'the permission check (auto mode classifier or a rule) denied the thread\'s worker call: the thread did that step itself (its own edit under the call\'s allow-edit paths is allowed, the permission check still judges it); not a lean-agent fault',
+  'context-limit': 'the thread reached threadTokens: its state is saved, a fresh session continues from the handover (end the turn; raise threadTokens in config.json if the limit is too small)',
   'run-refused': 'lean_run runs tests and builds only: push and forge commands are the desk\'s',
 }
 const RULES: [string, RegExp][] = [
@@ -87,6 +88,7 @@ const RULES: [string, RegExp][] = [
   ['allow-mcp-missing', /this brief has no allow-mcp line/],
   ['allow-mcp-other-server', /is not granted for this job \(allow-mcp/],
   ['allow-mcp-write-tool', /allow-mcp-write is not honoured|looks like a write tool/],
+  ['context-limit', /^context limit reached \(/],
   ['run-refused', /^lean_run refused/],
 ]
 export function ruleOf(rawText: string, agent = ''): string {

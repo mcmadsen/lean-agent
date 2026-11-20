@@ -70,7 +70,7 @@ test('report: table, the note about what no file holds, and the transcript share
   expect(none).not.toContain('first request carried')
   const recs = [{ type: 'assistant', message: { usage: { input_tokens: 18000 }, content: [] } }]
   const withT = await overheadReport(h.host, ROOT, { tools, transcript: recs })
-  expect(withT).toContain('first request carried 18000 tokens')
+  expect(withT).toContain('the first request carried 18000 tokens')
   expect(withT).toContain('MCP named by the transcript: 0 server(s)')
   expect(await overheadReport(h.host, ROOT, { tools, transcript: [{ type: 'user' }] })).toContain('no assistant request with usage')
 })

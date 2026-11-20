@@ -402,7 +402,7 @@ types, `claude --help`, the engine binary), and what each way does:
   (`mcp__server`, `mcp__server__*`, `mcp__*`). `maxTurns:` is a frontmatter key (a backstop; the guard's step budgets are the rule).
   `skills:` preloads skills; left out, none. `agents/*.md` carry minimal `tools:` lists (readers and the reviewer / auditor / explorer:
   Read, Grep, Glob, Bash; workers: + Edit, Write): no Agent, no skill, no MCP tool, nothing else.
-- A deny rule in `settings.json` `permissions.deny` without a pattern takes the tool out of the model's tool list. `hooks/leantools.ts`
+- A deny rule in `settings.json` `permissions.deny` without a pattern was believed to take the tool out of the model's tool list; measured in 1.0.19 it does NOT remove its schema from the request (`--tools` does). `hooks/leantools.ts`
   exports `deskSettings()` (every built-in the desk's strict mode cannot allow, the claude.ai connectors, project MCP servers, cron,
   bundled skills, the engine's git text, auto-memory) and `threadSettings({ mcp, extraDeny })` (the built-ins a lean-agent thread never
   calls: plan mode, worktree, cron, task list, the install / suggest / search tools, notebook edit), and `mergeSettings(base, fragment)`.
@@ -680,7 +680,7 @@ cost. So a thread's context is capped, at turn end, and a thread can opt in to k
   answers, and `context.tokens` is the input tokens the last request was answered over (uncached, cache-written and cache-read
   together). `Stop` is not used: in the engine's types it is the person pressing Esc or Ctrl+C, not the end of a turn, and the classic
   `Stop` hook carries no size. Subagent turns do not raise it, so only the thread's own conversation is measured.
-- **What happens at the limit** (`threadTokens`, default 120000): nothing mid-turn, ever. When the NEXT message for the thread arrives
+- **What happens at the limit** (`threadTokens`, default 120000, `threadWarnTokens` 100000): since 1.0.19 the thread STOPS working (next bullet: the hard stop). When the NEXT message for the thread arrives
   (`send`, `wake`, `resume`, the chaser) and the session is idle or done, its recorded size is compared with the limit. Over it (one
   token over, equal is fine): a NEW session starts with the handover (brief, goal, notes, reports, queued messages, task first)
   instead of a resume, and the reply says so: "context was 142k (limit 120k): started a new session with the handover (old
@@ -689,7 +689,12 @@ cost. So a thread's context is capped, at turn end, and a thread can opt in to k
   was stopped inside a turn, so its last turn-end size is not current).
 - **When the size is not known** (a thread from before this feature, a write that failed, a record made by an older session id of the
   thread, a damaged file) the session counts as under the limit and is never restarted on a guess; `lean_thread list` says `ctx unknown`.
-- **The warning.** The card, the thread pane and `lean_thread list` show `ctx 108k/120k`: dim up to `threadWarnTokens`, yellow above
+- **`threadTokens` can be raised** (e.g. 160000 in `config.json`; `threadWarnTokens` follows at 83%). What it costs: every request of the thread
+  re-reads the whole context from the cache (about a tenth of the input price), so a thread that lives to 160k instead of 120k pays about a third
+  more cache reads per request near the end of its life, and a longer session summarises worse; the base of every session (next bullets) is paid
+  either way. Lower is cheaper per request but restarts more often (each restart pays the handover once).
+- **The warning.** The card, the thread pane and `lean_thread list` show `ctx 96k/120k, +4k/turn` (the growth per turn is the mean of the last
+  20 turn-end samples in `context.json`; no figure before two steps up). The colour: dim up to `threadWarnTokens`, yellow above
   it, red over the limit (the line then says the next message starts a new session). `threadWarnTokens` defaults to 100000 (83% of
   `threadTokens`, to the nearest 1000, when only `threadTokens` is set; it never exceeds the limit).
 - **Keep mode** (off by default): `keep: true` on `new` / `start` (the new-thread form has a "Keep session" choice, off), or
@@ -716,12 +721,39 @@ Everything here is done by script (the thread's or the desk's mod), never by a m
 - **See the handover.** `lean_doctor handover tN` prints exactly what a fresh session would get: the sections, the tokens of each, and
   what is missing (no goal, no notes, no snapshot). The handover is cut to `handoverTokens` (config, default 6000): the least needed text
   goes first (remembered items, notes, queued messages, older reports), the newest stays, and every cut line names the file with the full text.
-- **Automatic restart at the context limit** (config `threads.autoRestart`, default true). At a turn end over `threadTokens` with work left
-  (not after done, blocked or a question) the thread's mod writes the snapshot and a record to the desk inbox ("context 205k over the limit:
-  checkpointed, restart me"). The desk's timer restarts the thread once its session has been idle 20 s: a fresh session with the task-first
-  handover, the old one removed, a notice and a toast with the size and the estimated cost. Never mid-turn; one automatic restart per
-  thread per 10 minutes; a fresh session that starts over the limit stops and asks you; only while the desk runs. The check when the next
-  message arrives stays as the fallback.
+- **Hard stop at the limit** (1.0.19; field: a thread that had "checkpointed" kept working and reported the checkpoint again at every turn). At or
+  over `threadTokens`, from `session.measure` at a turn end and from the tool.call hook every 10 tool calls (`$.session.usage()`, so a long turn
+  cannot run past it), the thread's mod writes the snapshot and ONE record to the desk per session ("context 123k over the limit 120k: state
+  saved, restart me"; never again for the same session), then refuses every further tool call of the thread itself except `lean_report` with
+  one line ("context limit reached (123k of 120k): your state is saved. End your turn now; ..."; refusal rule `context-limit`). Workers already
+  running finish; their results are put into the snapshot's "pending results" by script and handed to the fresh session, never acted on. A
+  session whose last report is a question or `blocked` may still ask and report. A `lean_report` that is only a checkpoint / context notice is
+  accepted once, then answered with the stop line. The thread guide and the `lean_report` description say: never report a checkpoint or your
+  context size, the mod does it.
+- **Automatic restart at the context limit** (config `threads.autoRestart`, default true). The desk's timer restarts a stopped thread with work
+  left (not after done, blocked or a question: its next message starts fresh) as soon as its session is idle (20 s after the record) or
+  `threads.stopGraceMinutes` (default 3) after it even if the session still shows as working (every tool call is refused by then): a fresh session
+  with the task-first handover, the snapshot and the pending worker results, the old one removed, a notice and a toast with the size and the
+  estimated cost. One automatic restart per thread per 10 minutes; a fresh session that starts over the limit stops and asks you; a session
+  waiting for your answer is not restarted; only while the desk runs. The check when the next message arrives stays as the fallback.
+- **The base of a thread session, measured** (`claude -p 'Reply with the single word ok.' --model haiku --output-format json`, input + cache read
+  + cache creation tokens, before any work): plain folder, all built-in tools 42,044 · `--tools Agent,Bash,Read` 10,230 · `--tools ''` 3,730 ·
+  thread folder as is 47,133 · thread folder `--tools Agent,Bash,Read` 19,779. In this build (same method, thread-shaped folder, no lean-agent MCP
+  tools): default 40.7k · `Agent,Bash,Read,SendMessage,TaskStop` 12.7k · `+Skill` 21.2k (the skills listing, ~8.5k, is folder-dependent) ·
+  `+Edit,Write,Grep,Glob` 23.3k (with Skill) / 14.9k (without). The built-in tool schemas are about 38k of the base. `permissions.deny` does NOT
+  remove a tool from the request; `--tools` does. A subagent can only use tools its parent session has (measured: a `lean-agent:worker-haiku` of
+  a parent started with `--tools Agent,Bash,Read,Skill,SendMessage,TaskStop` answered "Write is disabled"; with `Edit,Write,Grep,Glob` added it
+  wrote the file), so the default list keeps what workers and readers need: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage,
+  TaskStop, ToolSearch, WebFetch, WebSearch` (measured in a real thread folder: 47.1k with the full set, 31.0k with this list, so about 16k less
+  on every request; the mod still refuses the thread's own edits). Config `threads.tools` (array of names) replaces the list; `[]` or `"all"` starts
+  threads with the full set again. A tool a thread or worker then lacks is recorded as a missing tool (feedback export). The flag goes on a fresh start, an automatic restart and a `--resume` (before the `--`); it is
+  ignored with `lean.orchestrate: false`. The desk is opened by the app without flags and no settings key equivalent to `--tools` was found: its
+  pool is cut by the mod's `tool.list` hook (`tools.desk.drop`), unmeasured. `lean_doctor overhead [tN]` shows the REAL base (the first
+  request of a session transcript) next to the text estimate, and the start reply of a thread says the measured base once a thread session
+  recorded it (`base.json`).
+- **`lean_doctor context tN`** names the three biggest sources of the thread's context (by tool, from its transcript) with one suggested fix each.
+  The result of a BACKGROUND worker arrives as an engine notification the mod has no hook for, so it is not cut to the job schema (only a
+  foreground result is); the brief asks for the foreground and the schema.
 - **Answers from the store.** `lean_thread find <words|PR|branch|project>` lists matching lines with thread id and source file.
   `lean_thread ask tN "<question>"` answers from the store by script when lines match, else starts a FRESH small session (haiku, low;
   config `ask.model`, `ask.effort`) with the handover and the question; the big old session is never resumed. `lean_thread report tN`

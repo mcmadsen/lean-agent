@@ -1,6 +1,7 @@
 // `lean_doctor context` (execution model, measure): what filled a session's context, from its transcript by script: tokens added by tool
 // and by result size, the 10 largest single results, delegated (Agent results) against direct tokens, and the Haiku share of the model
 // output. Tokens are estimated as characters / 4 (the transcript has no per-result count).
+import { readJson, threadsDir } from './state'
 import type { Host } from './state'
 
 export type Top = { tool: string; tokens: number; at: number }
@@ -80,6 +81,29 @@ export function contextText(s: ContextStat, label = ''): string {
   ].join('\n')
 }
 
+// The three biggest sources of a session's context, one suggested fix each (by script, from the stat: no model reads the transcript).
+const FIX: [RegExp, string][] = [
+  [/^(Agent|Task)$/, 'worker results are the biggest block: ask for the job schema only (job: lookup answers `path:line: fact`), one step per brief, and read less yourself'],
+  [/^Bash$/, 'pipe long output through head / tail / grep, send tests and builds through lean_run (it keeps the output in a file), never cat a log'],
+  [/^Read$/, 'read with offset and limit after a grep, or let a reader-haiku summarise the file; do not re-read a file already in context'],
+  [/^(Grep|Glob)$/, 'narrow the pattern and path (or use -l / head_limit), a broad search result stays in context for the whole session'],
+  [/^(Edit|Write|MultiEdit)$/, 'edits echo their text: give the edit to a worker-haiku and keep only its one-line result'],
+  [/^mcp__/, 'an MCP result: ask a reader-mcp worker (allow-mcp) and keep its short answer, or request fewer fields'],
+]
+export const fixFor = (tool: string): string => FIX.find(([re]) => re.test(tool))?.[1] ?? 'keep this tool\'s results out of your own context: give the step to a small worker and take its short answer'
+export function topSources(s: ContextStat, n = 3): { tool: string; tokens: number; calls: number; fix: string }[] {
+  return Object.entries(s.byTool)
+    .sort((a, b) => b[1].tokens - a[1].tokens)
+    .slice(0, n)
+    .map(([tool, v]) => ({ tool, tokens: v.tokens, calls: v.calls, fix: fixFor(tool) }))
+}
+export function sourcesText(s: ContextStat): string {
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+  const total = Object.values(s.byTool).reduce((n, v) => n + v.tokens, 0)
+  const top = topSources(s)
+  return ['top sources:', ...(top.length ? top.map((t, i) => `  ${i + 1}. ${t.tool}: ${k(t.tokens)} in ${t.calls} result(s)${total ? ` (${Math.round((100 * t.tokens) / total)}%)` : ''} - fix: ${t.fix}`) : ['  none'])].join('\n')
+}
+
 // the transcript: <home>/.claude/projects/<folder>/<session>.jsonl, the named session or the newest one
 export async function findTranscript(h: Host, home: string, session?: string): Promise<string | null> {
   const root = `${home}/.claude/projects`
@@ -103,11 +127,16 @@ export async function readRecords(h: Host, file: string): Promise<any[]> {
   return recs
 }
 
+// `session` may be a thread id (tN): the transcript of that thread's current session, and the top three sources with a fix each
 export async function contextReport(h: Host, home: string, session?: string): Promise<string> {
   try {
+    const thread = session && /^t\d+$/.test(session) ? session : ''
+    if (thread) session = (await readJson<{ sid?: string }>(h, `${threadsDir(home)}/${thread}/thread.json`, {})).sid || undefined
+    if (thread && !session) return `context: ${thread} has no session yet`
     const file = await findTranscript(h, home, session)
     if (!file) return `context: no session transcript found under ${home}/.claude/projects${session ? ` for ${session}` : ''}`
-    return contextText(contextStat(await readRecords(h, file)), `${file.split('/').pop()} `)
+    const stat = contextStat(await readRecords(h, file))
+    return [contextText(stat, `${thread ? `${thread} ` : ''}${file.split('/').pop()} `), ...(thread ? [sourcesText(stat)] : [])].join('\n')
   } catch (err) {
     return `context failed: ${String((err as Error)?.message ?? err)}`
   }

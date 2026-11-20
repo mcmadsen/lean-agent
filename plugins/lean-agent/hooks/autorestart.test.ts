@@ -2,7 +2,8 @@
 // desk's timer restarts by script once the session has been idle 20 s. Synthetic ids, names and paths only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { IDLE_MS, MIN_GAP_MS, autoRestartTick, checkpointText, threadTurnEnd, workLeft } from './autorestart'
+import { stopRecordText } from './contextstop'
+import { IDLE_MS, MIN_GAP_MS, autoRestartTick, stopGraceMs, threadTurnEnd, workLeft } from './autorestart'
 import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
@@ -47,13 +48,13 @@ const end = (h: any, o: Partial<{ sid: string; tokens: number | null; since: num
 test('turn end over the limit with work left: snapshot, a mod-authored inbox record, a pending marker', async () => {
   const { h } = setup()
   const out = await end(h)
-  expect(out).toEqual({ snapshot: true, action: 'checkpoint' })
+  expect(out).toEqual({ snapshot: true, action: 'checkpoint', stop: { tokens: 205_000, limit: 120_000 } })
   expect(JSON.parse(h.files.get(`${T1}/state.json`)!).tokens).toBe(205_000)
   const r = inbox(h)
   expect(r).toHaveLength(1)
   expect(r[0]).toMatchObject({ from: 't1', kind: 'report', state: 'checkpoint', mod: true, restart: { tokens: 205_000, limit: 120_000, sid: S1 } })
-  expect(r[0].text).toBe(checkpointText(205_000, 120_000))
-  expect(r[0].text).toMatch(/context .* over the limit .*: checkpointed, restart me/)
+  expect(r[0].text).toBe(stopRecordText(205_000, 120_000))
+  expect(r[0].text).toMatch(/context 205k over the limit 120k: state saved, restart me/)
   expect(marker(h).pending).toMatchObject({ ts: 1_000_000, sid: S1, tokens: 205_000 })
   // the same session ending another turn does not write a second checkpoint
   expect((await end(h)).action).toBe('none')
@@ -62,7 +63,7 @@ test('turn end over the limit with work left: snapshot, a mod-authored inbox rec
 
 test('turn end: under the limit, or after done / blocked / a question, only the snapshot is written', async () => {
   const under = setup().h
-  expect(await end(under, { tokens: 50_000 })).toEqual({ snapshot: true, action: 'none' })
+  expect(await end(under, { tokens: 50_000 })).toEqual({ snapshot: true, action: 'none', stop: null })
   expect(inbox(under)).toHaveLength(0)
   for (const last of [{ kind: 'report', state: 'done' }, { kind: 'report', state: 'blocked' }, { kind: 'ask' }]) {
     const { h } = setup()
@@ -77,10 +78,11 @@ test('turn end: under the limit, or after done / blocked / a question, only the 
   expect(workLeft([], 't1', 0)).toBe(true)
 })
 
-test('config threads.autoRestart false: the snapshot only, no checkpoint', async () => {
+test('config threads.autoRestart false: the stop and its record stay, but nothing is marked for a restart', async () => {
   const { h } = setup({ config: { threads: { autoRestart: false } } })
-  expect(await end(h)).toEqual({ snapshot: true, action: 'none' })
-  expect(inbox(h)).toHaveLength(0)
+  expect((await end(h)).action).toBe('checkpoint')
+  expect(inbox(h)).toHaveLength(1)
+  expect(marker(h).pending).toBeUndefined()
   expect(await autoRestartTick(h.host, { agents: async () => [], restart: async () => ({ ok: true, text: '' }) })).toEqual([])
 })
 
@@ -101,8 +103,9 @@ test('a fresh session that starts over the limit stops and asks the user, once',
   // under the limit again: restarts are allowed again
   await end(h, { tokens: 10_000 })
   expect(marker(h).stopped).toBe(false)
-  // a later overflow of the same session checkpoints normally
-  expect((await end(h)).action).toBe('checkpoint')
+  // a later overflow of the same session: stopped again, but never a second record for the same session
+  expect((await end(h)).action).toBe('none')
+  expect(inbox(h)).toHaveLength(1)
 })
 
 const rows = (state = 'idle') => async () => [{ sid: S1, name: '', cwd: T1, status: state, state, startedAt: 1, pid: 42, id: 'a', waitingFor: '' }] as any
@@ -231,4 +234,33 @@ test('desk tick: two overlapping ticks restart once (a restart can outlast the t
   let m = 0
   expect(await autoRestartTick(f.host, { agents: rows(), restart: async () => (m++, ok) })).toEqual([])
   expect(m).toBe(0)
+})
+
+test('desk tick: a session that still shows as working is restarted threads.stopGraceMinutes (default 3) after the record; idle sessions after 20 s; no restart while it waits for the user', async () => {
+  const a = setup().h
+  await end(a)
+  let n = 0
+  const dep = (state: string) => ({ agents: rows(state), restart: async () => (n++, ok) })
+  a.clock.t = 1_000_000 + 180_000 - 1
+  expect(await autoRestartTick(a.host, dep('working'))).toEqual([])
+  expect(n).toBe(0)
+  a.clock.t = 1_000_000 + 180_000
+  expect(await autoRestartTick(a.host, dep('working'))).toHaveLength(1) // the stop refuses its tool calls by then: nothing is lost
+  expect(n).toBe(1)
+  // the minutes are configurable, and a session waiting on a prompt is never restarted
+  const b = setup({ config: { threads: { stopGraceMinutes: 1 } } }).h
+  await end(b)
+  expect(await stopGraceMs(b.host, '/h')).toBe(60_000)
+  b.clock.t = 1_000_000 + 60_000
+  expect(await autoRestartTick(b.host, { agents: async () => [{ sid: S1, name: '', cwd: T1, status: 'working', state: 'blocked', startedAt: 1, pid: 42, id: 'a', waitingFor: 'permission' }] as any, restart: async () => (n++, ok) })).toEqual([])
+  expect(n).toBe(1)
+  expect(await autoRestartTick(b.host, dep('working'))).toHaveLength(1)
+})
+
+test('desk tick: a session that keeps taking turns over the limit is still restarted (a later turn end over the limit does not drop the record)', async () => {
+  const { h } = setup()
+  await end(h, { tokens: 123_000 })
+  h.files.set(`${T1}/context.json`, JSON.stringify({ tokens: 130_000, at: 1_100_000, sid: S1 }))
+  h.clock.t = 1_200_000
+  expect(await autoRestartTick(h.host, { agents: rows('working'), restart: async () => ok })).toHaveLength(1)
 })
