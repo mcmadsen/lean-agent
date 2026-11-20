@@ -25,6 +25,8 @@ import type { Loaded } from './profile'
 import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
 import { dismissAction } from './dismiss'
+import { threadToolsArgv } from './orchestrate'
+import { baseLine, readBase } from './base'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
@@ -393,7 +395,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   const old = t.sid
   const gen = old ? (t.gen ?? 1) + 1 : t.gen ? t.gen + 1 : 1 // (no old id but a recorded generation: an earlier start whose session id was not found)
   const name = sessionName(t.id, t.title, gen)
-  const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
+  const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, ...(await threadToolsArgv(h)), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
   if (!sid) {
@@ -417,7 +419,8 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   const skew = sid ? await reportedVersion(h, home, t, root, installed) : '' // "running X, installed Y" when the session loaded another plugin version
   const { notes: settled, ended } = sid ? await settle(h, home, t, { sid, old, name }) : { notes: [] as string[], ended: false }
   const started = ended ? ENDED_AT_ONCE : 'started' // loud: the head of the reply says it
-  const lt = (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
+  const base = await readBase(h).catch(() => null)
+  const lt = (base ? ` · ${baseLine({ ...base, tools: (await threadToolsArgv(h))[1] ?? '' })}` : '') + (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} ${started} (${sid}) · ${how}${lt}`, data: { fresh: true, ...(ended ? { ended: true } : {}) } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -659,7 +662,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   // lean_report while the work goes on, never as the whole turn)
   const lead = opts.lead ?? resumeLead(await taskOf(h, home, t))
   const prompt = [lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
-  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
+  const r = await h.process.run(['claude', '--bg', '--resume', t.sid, ...(await threadToolsArgv(h)), '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   // safety net: the CLI prints "started a copy as <id>" when it forked after all; the thread follows the copy
   const after = (await agents(h)) ?? []

@@ -7,7 +7,9 @@
 // parts: the rest is the engine's system prompt plus the tool schemas of built-ins and MCP servers, which no file holds; the MCP share
 // is what the transcript names (servers, tool names, their instructions text).
 import { findTranscript, readRecords } from './contextstat'
+import { readJson, threadsDir } from './state'
 import type { Host } from './state'
+import { baseLine, readBase } from './base'
 
 export const ROLES = ['desk', 'thread', 'worker-haiku', 'reader-haiku', 'reader-sonnet', 'worker-sonnet', 'reviewer', 'auditor'] as const
 export type RoleName = (typeof ROLES)[number]
@@ -97,12 +99,12 @@ export function transcriptShare(records: any[]): Share {
   return s
 }
 
-export function shareText(s: Share, measured: number): string {
+export function shareText(s: Share, measured: number, role = 'desk'): string {
   if (!s.first) return 'transcript: no assistant request with usage in it'
   const rest = Math.max(0, s.first - measured)
   return [
-    `first request carried ${s.first} tokens (usage of the first assistant record; cached input counts)`,
-    `  measured above (the desk row): ${measured} · the engine's system prompt + built-in and MCP tool schemas: about ${rest} (no file holds them)`,
+    `REAL base: the first request carried ${s.first} tokens (input + cache read + cache creation of the first assistant record), against the text estimate above (${role} row) of ${measured}`,
+    `  the engine's system prompt + built-in and MCP tool schemas: about ${rest} (no file holds them; the built-in tool schemas alone are most of it, config threads.tools cuts them for threads)`,
     `  MCP named by the transcript: ${s.mcpServers.length} server(s)${s.mcpServers.length ? ` (${s.mcpServers.join(', ')})` : ''}, ${s.mcpTools} tool name(s) (~${s.mcpNameTokens} tokens of names), instructions ~${s.mcpInstructions} tokens`,
     `  built-in tool names seen: ${s.builtinTools} (a schema is far larger than its name: remove what a role never uses, see README "Fixed overhead")`,
   ].join('\n')
@@ -115,11 +117,19 @@ export async function overheadReport(h: Host, root: string, o: { tools?: Tools; 
     const by = Object.fromEntries(rows.map(r => [r.role, r]))
     out.push(`built-in tool schemas and the engine's system prompt are not in the table (no file holds them); tools: lists in agents/*.md keep a subagent to its few built-ins and no MCP tool${o.tools?.thread ? '' : '; thread tools not given'}`)
     let recs = o.transcript
+    let thread = ''
+    let session = o.session
+    if (!recs && o.home && session && /^t\d+$/.test(session)) { // a thread id: its current session's transcript
+      thread = session
+      session = (await readJson<{ sid?: string }>(h, `${threadsDir(o.home)}/${thread}/thread.json`, {})).sid || undefined
+    }
     if (!recs && o.home && o.session !== '') {
-      const file = o.session ? await findTranscript(h, o.home, o.session) : null
+      const file = session ? await findTranscript(h, o.home, session) : null
       if (file) recs = await readRecords(h, file)
     }
-    if (recs) out.push(shareText(transcriptShare(recs), (by.desk?.total ?? 0)))
+    if (recs) out.push(shareText(transcriptShare(recs), (by[thread ? 'thread' : 'desk']?.total ?? 0), thread ? 'thread' : 'desk'))
+    const real = await readBase(h).catch(() => null)
+    if (real && !thread) out.push(`newest thread session measured by the mod: ${baseLine(real)} (${real.thread})`)
     return out.join('\n')
   } catch (err) {
     return `overhead failed: ${String((err as Error)?.message ?? err)}`

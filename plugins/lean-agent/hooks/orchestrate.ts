@@ -49,6 +49,22 @@ export function orchConfig(cfg: any): OrchConfig {
   }
 }
 
+// The built-in tool list of a thread session (config threads.tools, an array of tool names), as the argv pair for `claude --bg`, or [] (no flag: the
+// full default set). Measured (haiku, one word answer): the built-in tool definitions are most of what a session carries on EVERY request, and a
+// subagent can only use tools its parent session has (a worker needs Edit, Write, Grep, Glob), so there is NO default list: the user sets one.
+// Off with lean.orchestrate false (the thread then edits itself). Names the CLI does not know are ignored by it; anything but a plain name is dropped here.
+export async function threadToolsArgv(h: Host): Promise<string[]> {
+  try {
+    if (!(await loadOrch(h)).on) return []
+    const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, {})
+    const raw = cfg?.threads?.tools ?? cfg?.['threads.tools']
+    const names = Array.isArray(raw) ? [...new Set(raw.filter((x: unknown): x is string => typeof x === 'string' && /^[A-Za-z][A-Za-z0-9_]*$/.test(x)))] : []
+    return names.length ? ['--tools', names.join(',')] : []
+  } catch {
+    return []
+  }
+}
+
 // config.json plus a host's LEAN_ORCHESTRATE variable (0 / false = off). The engine host (host.ts) answers only $HOME, so in a real session
 // the file is the switch; a host that does answer the variable (the specs' fake host) can switch it off without a file.
 export async function loadOrch(h: Host): Promise<OrchConfig> {

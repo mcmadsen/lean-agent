@@ -60,6 +60,8 @@ import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext, threadLimits } from './threadcontext'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
+import { noteBase } from './base'
+import { threadToolsArgv } from './orchestrate'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
@@ -155,7 +157,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' } }, required: ['command'] } }
@@ -244,6 +246,7 @@ async function stopCheck($: any, e: any): Promise<{ deny: string } | null> {
   return r
 }
 async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
+  const id = role.kind === 'thread' ? role.id : ''
   try {
     const host = hostOf($)
     if (!stopped && ++mainCalls % STOP_EVERY === 0) {
@@ -253,7 +256,7 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
         const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
         lastTokens = tokens
         stopped = { sid, tokens, limit }
-        await hardStop(host, role.id, { sid, tokens, limit, since: turnStartedAt, tasks: currentTasks() })
+        await hardStop(host, id, { sid, tokens, limit, since: turnStartedAt, tasks: currentTasks() })
       }
     }
     if (!stopped) return null
@@ -263,8 +266,8 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
       return null
     }
     const st = { ...stopped, tokens: lastTokens ?? stopped.tokens, limit }
-    const r = await stopGate(host, role.id, st, e)
-    if (r) await logRefusal(host, { role: 'thread', rule: STOP_RULE, text: r.deny, tool: String(e.tool ?? ''), thread: role.id, version: VERSION })
+    const r = await stopGate(host, id, st, e)
+    if (r) await logRefusal(host, { role: 'thread', rule: STOP_RULE, text: r.deny, tool: String(e.tool ?? ''), thread: id, version: VERSION })
     return r
   } catch {
     return null // a failing check never blocks a tool
@@ -849,6 +852,7 @@ export const register: Register = on => {
     const r: any = yield* next(e)
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
+      if (role.kind === 'thread' && !e.agentId && lastSid) await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '') // the first request of the session: its real base
       const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}) }, r?.usage?.model ?? e.model, r?.usage)
       if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
     } catch {
