@@ -11,6 +11,7 @@
 // it records what is there without a toast (an install must not announce a month of old reports). While toasts are off the keys are
 // still recorded, so turning them on later announces only what happens after.
 import { readConfig } from './budget'
+import { budgetEvents } from './budgetalert'
 import { deskState } from './delivery'
 import { homeDir, readJson, writeJson } from './state'
 import type { Host } from './state'
@@ -47,7 +48,7 @@ export async function notifyTick(h: Host, toast: (text: string) => void, view?: 
     const home = await homeDir(h)
     const cfg = await notifyConfig(h)
     const v = view ?? (await loadView(h))
-    const events = eventsOf(v)
+    const events = [...eventsOf(v), ...(await budgetEvents(h))] // (the budget alerts of today: budgetalert.ts)
     const file = await readJson<{ keys?: unknown } | null>(h, seenFile(home), null)
     const first = !file
     const seen = new Set<string>(Array.isArray(file?.keys) ? file.keys.filter((k): k is string => typeof k === 'string') : [])

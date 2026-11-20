@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { dayOf, normalizeRow, rotateLedger, syncRollup } from './ledger'
 import { logRuleLoad, recordRule, rulesStats } from './rules'
-import { modelMismatches, spendLine, statsText } from './stats'
+import { modelMismatches, modelRows, spendLine, statsText } from './stats'
 import { resetLocks } from './threads'
 import { record, spentToday } from './budget'
 
@@ -355,6 +355,32 @@ test('an expensive session on a model lean-agent did not configure is named (led
   ok.files.set(`${L}/ledger.jsonl`, row(NOON, { role: 'desk', usd: 1 }))
   ok.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   expect(await modelMismatches(ok.host)).toEqual([])
+})
+
+test('the desk spend on another model counts only what was spent AFTER the pin: earlier spend today is a note, later spend is the problem', async () => {
+  const h = setup()
+  const PIN = NOON - 2 * 3_600_000 // 10:00 UTC
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { model: 'sonnet' } }))
+  h.files.set(`${L}/desk/pinned.json`, JSON.stringify({ at: PIN, model: 'sonnet' }))
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  // $7.28 on opus at 08:00 and a worker's opus request after the pin (a worker's model is its own choice): nothing to fix
+  h.files.set(`${L}/ledger.jsonl`, row(NOON - 4 * 3_600_000, { role: 'desk', model: 'claude-opus-5-5', usd: 7.28 }) + row(NOON, { role: 'desk', agent: 'lean-agent:worker-opus', model: 'claude-opus-5-5', usd: 3 }) + row(NOON, { role: 'desk', model: 'claude-sonnet-5-5', usd: 1 }))
+  expect(await modelMismatches(h.host)).toEqual([])
+  const r = await modelRows(h.host)
+  expect(r.fix).toEqual([])
+  expect(r.info).toContain('the desk spent $7.28 today on claude-opus-5-5 before lean-agent pinned sonnet at 10:00 UTC; nothing on it since')
+  // the desk's own request on opus after the pin: only that amount, named as after the pin
+  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON - 1000, { role: 'desk', model: 'claude-opus-5-5', usd: 0.5 }))
+  const after = await modelRows(h.host)
+  expect(after.fix).toHaveLength(1)
+  expect(after.fix[0]).toContain('the desk spent $0.50 on claude-opus-5-5 since lean-agent pinned sonnet at 10:00 UTC ($7.28 before that is history), lean-agent pins sonnet')
+  expect(after.fix[0]).not.toContain('$7.78')
+  expect(after.info).toEqual([])
+  // a pin from another day, or none recorded: the whole day counts, as before
+  h.files.set(`${L}/desk/pinned.json`, JSON.stringify({ at: PIN - 2 * 86_400_000, model: 'sonnet' }))
+  expect((await modelRows(h.host)).fix[0]).toContain('the desk spent $7.78 today on claude-opus-5-5, lean-agent pins sonnet')
+  h.files.delete(`${L}/desk/pinned.json`)
+  expect((await modelRows(h.host)).fix[0]).toContain('the desk spent $7.78 today on claude-opus-5-5')
 })
 
 test('a 50,000-row ledger folds within a time budget and the next sync reads nothing', async () => {

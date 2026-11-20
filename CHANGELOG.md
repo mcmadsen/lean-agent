@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Review cost: two levels and an expected cost.** `lean_review prepare` takes `level`: `light` (the default) is ONE sonnet pass on
+  correctness, behaviour and reuse and never records green; `full` is the strict review (every pass, two runs for a high-risk diff) the
+  push gate needs, asked for only before "ready to push". The level a sha was prepared at is kept in the mod's store, so a light pass
+  cannot be recorded green by leaving the level out. `prepare` prints `expected review cost ~$1.20 (2 passes, sonnet; ...)`: the median of
+  this project's earlier reviewer passes in the ledger, else a stated default of $1.50 a pass. New modules `reviewcost.ts`, `reviewexclude.ts`.
+- **Generated files are left out of a review**: out of the file lists, the risk, the line count and the diff the reviewer reads (it
+  gets `':!path'` pathspecs). Files marked `linguist-generated` in `.gitattributes`, `*.snap`, golden / fixtures / `__snapshots__` paths,
+  lockfiles, minified bundles and `config.json` `review.exclude` globs; the prepare text says how many files and lines. The prompt
+  carries the thread's registered worktree (`git -C <worktree> ...`) and the `allow-cmd:` line for it.
+- **Budget alerts by default** (`config.json` `budget.daily` 25 USD and `budget.threadDaily` 20 USD, `"off"` allowed): a desk notice and a
+  toast at 50% and 80% of the daily budget (once per day per level; today's spend, the top 3 threads and their models) and when one thread
+  passes its daily alert; the chaser asks a stale expensive thread what the spend bought. `threadCostsToday` / `costBadge` (stats.ts) give
+  the pane cards the live cost, model and over-alert flag per thread.
+- **Readers and the reviewer run more read-only commands**: unquoted globs whose every match is inside the allowed folders, `2>/dev/null`,
+  `rg`/`grep` with no path (cwd inside the roots), and `sort` (no `-o`), `uniq` (one operand), `cut`, `tr`, `nl`. `xargs`, `cd`, any other
+  redirect, `;`, `&&`, `$(...)` and paths outside the roots stay refused.
+
+### Changed
+- A worker whose edit is refused for a path outside its `allow-edit` grant is told to stop and report that path.
+- Doctor: "the desk spent $X on opus today" counts only spend after lean-agent pinned the model (earlier spend today is a note), and
+  "opus is N% of spend" is a FIX only while a thread is on opus now, naming only those threads; otherwise a note.
+
 ## 1.0.13
 
 ### Fixed
