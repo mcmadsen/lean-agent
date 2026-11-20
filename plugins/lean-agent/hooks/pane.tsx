@@ -17,6 +17,7 @@ import { NEXT_STEP, bounded, openDesk, openThreadSession, setupCheck, setupFix, 
 import type { Role } from './role'
 import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 import { openNewThread, openThreadPane } from './panelinks'
+import { notifyTick } from './notify'
 
 export const PANE = 'lean-agent'
 export const VERSION = '1.0.11'
@@ -658,6 +659,11 @@ export async function paneRole($: any, role: { kind: string; id?: string }): Pro
     await openPane($).catch(() => undefined)
     const t = $.clock.every(5_000, () => $.ui.invalidate('ui.render'))
     cancels.push(() => t.cancel())
+    // toasts for what needs the user and for done reports (notify.ts, no model); the first pass only records what is already there
+    const tick = () => notifyTick(hostOf($), (text: string) => $.ui.toast(text)).then(() => undefined, () => undefined)
+    await tick()
+    const n = $.clock.every(15_000, tick)
+    cancels.push(() => n.cancel())
   } else if (role.kind === 'thread' && role.id) {
     const id = role.id
     const tick = async () => {
