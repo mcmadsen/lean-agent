@@ -91,6 +91,34 @@ export async function capResult(h: Host, thread: string, tool: string, r: any): 
   return { ...r, result: next }
 }
 
+// Execution model (orchestrate.ts): the same cut for ANY tool at an explicit limit (the desk's tool results, a worker's Agent result).
+// `label` names the saved file. Head + tail, the full text saved first; uncut when the limit is 0, the text is short or cannot be saved.
+export async function capTo(h: Host, label: string, r: any, limit: number): Promise<any> {
+  if (!r || r.deny !== undefined || r.isError || !(limit > 0)) return r
+  const res = r.result
+  if (res === undefined || res === null || (typeof res === 'object' && !Array.isArray(res) && (res as any).isError === true)) return r
+  const rec = typeof res === 'object' && !Array.isArray(res) && typeof (res as any).stdout === 'string'
+  const all = rec ? [res.stdout as string, typeof res.stderr === 'string' ? (res.stderr as string) : ''] : textsOf(res)
+  if (!all.some(t => t.length > limit)) return r
+  let file: string
+  try {
+    file = await saveOutput(h, `${label}-${++seq}`, rec && all[1] ? `${all[0]}\n--- stderr ---\n${all[1]}` : all.filter(Boolean).join('\n--- next block ---\n'))
+  } catch {
+    return r
+  }
+  let saved = 0
+  const f = (t: string) => {
+    if (t.length <= limit) return t
+    const out = cutText(t, limit, file)
+    if (out.length >= t.length) return t
+    saved += t.length - out.length
+    return out
+  }
+  const next = rec ? { ...res, stdout: f(res.stdout), stderr: typeof res.stderr === 'string' ? f(res.stderr) : res.stderr } : mapTexts(res, f)
+  if (saved > 0) await appendJsonl(h, `${leanDir(await homeDir(h))}/capped.jsonl`, { ts: await h.clock.now(), tN: label, tool: 'orchestrate', saved }).catch(() => undefined)
+  return { ...r, result: next }
+}
+
 // for `lean_doctor stats`: characters kept out of the conversations in the last `days` days
 export async function capStats(h: Host, now: number, days: number): Promise<{ results: number; chars: number }> {
   const since = now - days * 86_400_000

@@ -231,6 +231,29 @@ is the pane's Approve, a push the desk's `approve-push`.
 | `lean-mode` | work frugally on long unattended runs |
 | `doctor` | check and repair the install, migrate from 0.45 |
 
+## Execution model
+
+All work goes to small workers; the guard enforces it (hooks/orchestrate.ts), no text has to be remembered. `lean.orchestrate` in
+`~/.lean-agent/config.json` (default `true`; `false` = the behaviour before this section, every rule below off).
+
+| Who | May do | Refused with |
+|---|---|---|
+| desk | `lean_*` tools, AskUserQuestion, Skill, Read / read-only Bash inside `~/.lean-agent` only (each result cut to `deskToolResultChars`, default 6000) | "the desk routes: start or ask a thread (lean_thread new / send)" |
+| thread | `lean_*` tools (incl. `lean_run`), Agent (workers), `git status/log/add/commit/worktree/diff --stat…`, its own thread-folder files, at most `threads.directReads` (default 3) direct Reads per turn of ≤ 200 lines | "one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku" |
+| worker / reader | ONE step, a tool-call budget `workers.steps` (default 15), answer ≤ 30 lines; never starts agents | at the budget: "return what you have; the thread splits the rest" |
+
+- Haiku by default: an Agent call to `worker-sonnet` / `reader-sonnet` needs a prompt line `why-sonnet: <reason>`; opus stays under the
+  pane approval. A worker brief is at most `workers.briefChars` (default 1500); at most `threads.workers` (default 4) run at once.
+- An Agent result of a worker / reader is cut to `agentResultChars` (default 6000, head + tail); the full text is a file under
+  `~/.lean-agent/output/`.
+- Small workers and the reviewer passes do not count against a user `agents.cap`.
+- `lean_run` runs a test / build command with its output in `~/.lean-agent/runs/<ts>.log` and returns the exit code, the failing test
+  names and the last 40 lines; a thread never reads the stream. Other Bash for a thread (tests, builds, sed, node…) is refused.
+- `hooks/preflight.ts` (`preflightText`) computes a fresh start's facts by script: branch, HEAD, `git status --short`, diff stat, last
+  report line, open tasks, PR / work-item reference.
+- `lean_doctor context [session]` measures a session from its transcript by script: tokens added by tool and result size, the ten
+  largest single results, delegated against direct tokens, the Haiku share.
+
 ## Workers
 
 Agent definitions in `plugins/lean-agent/agents/`:

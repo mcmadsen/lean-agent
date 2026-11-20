@@ -6,6 +6,7 @@ import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
+import { DESK_ROUTE, isSmall, loadOrch, orchDecide } from './orchestrate'
 import type { Host } from './state'
 import type { Role } from './role'
 
@@ -868,8 +869,11 @@ export async function agentsText($: Host, home: string, id: string): Promise<str
 async function capDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if (ctx.role.kind !== 'thread' || ctx.agentId || ctx.agentType || (e.tool !== 'Agent' && e.tool !== 'Task')) return null
   const home = await homeDir($)
-  const cap = Number((await readJson<{ agents?: { cap?: unknown } }>($, `${leanDir(home)}/config.json`, {}))?.agents?.cap)
+  const cfg = await readJson<{ agents?: { cap?: unknown } }>($, `${leanDir(home)}/config.json`, {})
+  const cap = Number(cfg?.agents?.cap)
   if (!Number.isInteger(cap) || cap <= 0) return null
+  // execution model: the small workers (worker-*, reader-*) are the work itself; they never count against the user's subagent cap
+  if ((await loadOrch($)).on && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '') && capKind(e) === 'counted') return null
   return locked(async () => {
     const dir = `${threadsDir(home)}/${ctx.role.kind === 'thread' ? ctx.role.id : ''}`
     const sid = String((await readJson<{ sid?: unknown }>($, `${dir}/thread.json`, {}))?.sid ?? '')
@@ -878,7 +882,7 @@ async function capDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const kind = capKind(e)
     if (kind === 'review' && st.review < REVIEW_EXEMPT) st.review++
     else if (kind === 'second' && st.second < SECOND_EXEMPT) st.second++
-    else if (st.counted >= cap) return `lean-agent: subagent cap reached: ${st.counted} subagents already started in this session (cap ${cap}, config.json agents.cap). Reviewer passes (lean-agent:reviewer) and the review's second-opinion reader (a line "review: second-opinion" in its prompt) do not count against it and are still allowed; do the rest yourself or report with lean_report`
+    else if (st.counted >= cap) return `lean-agent: subagent cap reached: ${st.counted} subagents already started in this session (cap ${cap}, config.json agents.cap). Reviewer passes (lean-agent:reviewer), the review's second-opinion reader (a line "review: second-opinion" in its prompt) and the small workers (lean-agent:worker-* / reader-*, execution model) do not count against it and are still allowed; do the rest yourself or report with lean_report`
     else st.counted++
     await writeJson($, `${dir}/subagents.json`, st)
     return null
@@ -911,9 +915,15 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   }
   const capped = await capDenial($, ctx, e)
   if (capped) return capped
+  const orch = await loadOrch($)
+  if (orch.on) {
+    const home = await homeDir($)
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined }, e)
+    if (o) return o
+  }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
     const d = await deskDenial($, ctx, e)
-    if (d) return d
+    if (d) return orch.on ? DESK_ROUTE : d
   }
   if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
   if ((ctx.agentType || ctx.agentId) && e.tool === 'Bash') {
