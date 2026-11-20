@@ -10,7 +10,7 @@ import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { SKEW_CAUSE, compareVersions, installedVersion, running, runsText, skewText, skewedThreads } from './skew'
 import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
-import { pruneStale, staleEntries } from './worktreereg'
+import { closedOwnerRows, pruneStale, staleEntries } from './worktreereg'
 import { removeStaleSessions, threadSessionRows } from './threadsessions'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction, manualNote } from './deskcompact'
@@ -184,6 +184,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const stale = await staleEntries(h).catch(() => [])
   if (stale.length) row(false, `worktrees.json has ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}: ${stale.slice(0, 5).map(s => `${s.key} (${s.why}${s.path ? `: ${s.path}` : ''})`).join('; ')}${stale.length > 5 ? `; ${stale.length - 5} more` : ''}. Run fix to drop them`)
   else out.push('ok   no stale worktree registry entry')
+  out.push(...(await closedOwnerRows(h).catch(() => [] as string[]))) // worktreereg.ts: worktrees owned by closed threads (info; nothing is re-owned here)
   out.push(...(await threadSessionRows(h).catch(() => [] as string[]))) // threadsessions.ts: stale thread sessions, session names
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')

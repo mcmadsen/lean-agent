@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The desk's `push` and `lean_worktree register` take over a worktree registered to a closed thread (or a thread that no longer exists): the
+  registry entry moves to the pushing/registering thread (`adopted: true`, former owner in `from`), written only after the push's gates hold,
+  logged in the thread's history and said in the reply; a worktree of an open, parked or closing thread is refused with the owner and its
+  state named. Doctor gets an info row for worktrees owned by closed threads.
+
 ## 1.0.14
 
 ### Added
