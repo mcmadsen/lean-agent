@@ -795,6 +795,15 @@ export const capKind = (e: Call): 'review' | 'second' | 'counted' => {
   if (/^lean-agent:reader-(haiku|sonnet)$/.test(sub) && SECOND_OPINION_LINE.test(String(e.prompt ?? ''))) return 'second'
   return 'counted'
 }
+// "agents 3/4": the subagents a thread's session has counted against agents.cap (reviewer passes are not in it); '' when no cap is set
+export async function agentsText($: Host, home: string, id: string): Promise<string> {
+  const cap = Number((await readJson<{ agents?: { cap?: unknown } }>($, `${leanDir(home)}/config.json`, {}))?.agents?.cap)
+  if (!Number.isInteger(cap) || cap <= 0) return ''
+  const dir = `${threadsDir(home)}/${id}`
+  const sid = String((await readJson<{ sid?: unknown }>($, `${dir}/thread.json`, {}))?.sid ?? '')
+  const had = await readJson<Partial<CapState>>($, `${dir}/subagents.json`, {})
+  return `agents ${had?.sid === sid ? Number(had.counted) || 0 : 0}/${cap}`
+}
 async function capDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if (ctx.role.kind !== 'thread' || ctx.agentId || ctx.agentType || (e.tool !== 'Agent' && e.tool !== 'Task')) return null
   const home = await homeDir($)

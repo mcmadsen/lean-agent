@@ -8,6 +8,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
+import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
@@ -236,7 +237,7 @@ async function save(h: Host, home: string, t: Thread): Promise<void> {
 
 // After a start, the new session's mod says which lean-agent code it loaded (thread.json `running`, written at its session start, a few
 // seconds after `claude --bg` returned): wait for it a little (a host that cannot sleep never waits) and answer "running X, installed Y"
-// when they differ, '' when they are the same or the session did not say yet (`threads` shows it later). The session's real version is
+// when they differ, '' when they are the same or the session did not say yet (`list` shows it later). The session's real version is
 // also what the desk then believes it runs (thread.json `version`): a resume of a session that runs older code starts a fresh one.
 export const RUNNING_WAIT_MS = 6_000
 export const UNREPORTED = 'has not reported which lean-agent version it runs (a session on code older than this feature never does, and that is the stale-plugin case): ask it for nothing newer than it can do; threads shows the version once it reports'
@@ -319,7 +320,7 @@ async function holdExpensive(h: Host, t: Thread, model: string, effort: string |
   const bad = reasonProblem(model, given)
   if (bad) return err(bad)
   const asked = given.model !== undefined
-  const reason = (given.reason ?? '').trim() || `${t.id} already runs on ${model} (recorded or configured, not chosen by this call)`
+  const reason = (given.reason ?? '').trim() || `${t.id} is configured to run on ${model} (not chosen by this call)`
   const req = await addRequest(h, { thread: t.id, model, ...(effort ? { effort } : {}), reason, action, origin: 'tool', asked })
   return {
     ok: true,
@@ -328,10 +329,22 @@ async function holdExpensive(h: Host, t: Thread, model: string, effort: string |
   }
 }
 
+// A call that names no model never inherits an expensive one that is only the thread's RECORDED model and not approved for it: it gets
+// sonnet and the reply says so (a model the call names is held by holdExpensive; an approved one is kept). A string = the refusal.
+async function pickModel(h: Host, home: string, t: Thread, given: Given): Promise<{ choice: Choice; note: string } | string> {
+  const choice = await threadChoice(h, home, given, t)
+  if (typeof choice === 'string') return choice
+  if (given.model === undefined && t.model && choice.model === t.model && isExpensiveModel(t.model) && !(await modelAllowed(h, t.id, t.model))) {
+    return { choice: { ...choice, model: 'sonnet' }, note: `${t.id} was recorded on ${t.model}; started on sonnet (${familyOf(t.model)} needs the user's approval in the pane)` }
+  }
+  return { choice, note: '' }
+}
+
 async function startSession(h: Host, home: string, t: Thread, prompt: string, given: Given = {}, installed = '', root = ''): Promise<Out> {
   const folder = tpath(home, t.id)
-  const choice = await threadChoice(h, home, given, t)
-  if (typeof choice === 'string') return err(choice)
+  const picked = await pickModel(h, home, t, given)
+  if (typeof picked === 'string') return err(picked)
+  const { choice, note } = picked
   const held = await holdExpensive(h, t, choice.model, choice.effort, given, given.action === 'new' ? 'new' : given.action === 'reopen' || given.action === 'restart' ? given.action : 'start')
   if (held) return held
   t.model = choice.model
@@ -374,7 +387,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
   const skew = sid ? await reportedVersion(h, home, t, root, installed) : '' // "running X, installed Y" when the session loaded another plugin version
-  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
+  const lt = (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} started (${sid}) · ${how}${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -465,11 +478,11 @@ async function inFolder(h: Host, cwd: string, own: string): Promise<boolean> {
 // from the current template when lean-agent wrote it, so the fresh session also gets today's rules.
 // `restart`: the user asked for it in the pane (or the desk on request), so a working session is stopped too (its current step is lost);
 // otherwise a working session is never touched.
-async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: Given, restart = false): Promise<Out> {
+async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: Given, restart = false, limit = false): Promise<Out> {
   // an expensive model without the user's approval is held BEFORE anything is stopped: a restart never loses work for a session that cannot start
-  const want = await threadChoice(h, home, given, t)
+  const want = await pickModel(h, home, t, given)
   if (typeof want !== 'string') {
-    const held = await holdExpensive(h, t, want.model, want.effort, given, given.action ?? 'resume')
+    const held = await holdExpensive(h, t, want.choice.model, want.choice.effort, given, given.action ?? 'resume')
     if (held) return held
   }
   const listed = t.sid ? await agents(h) : []
@@ -477,7 +490,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
   if (isWorking(row) && !restart) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
   if (row && (row.pid > 0 || (restart && isWorking(row)))) {
-    const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}) })
+    const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}), ...(limit ? { limit: true } : {}) })
     if (stopped) return stopped
   }
   await refreshGuide(h, root, home, t, given)
@@ -496,8 +509,8 @@ async function refreshGuide(h: Host, root: string, home: string, t: Thread, give
   try {
     const have = await h.fs.read(file)
     if (typeof have !== 'string' || !have.startsWith('<!-- generated by lean-agent')) return // the user's own file stays
-    const choice = await threadChoice(h, home, given, t) // the one the new session starts with (startSession picks it the same way)
-    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, typeof choice === 'string' ? undefined : choice, await resolveLoaded(h, home, t.project, t.needs ?? []))
+    const choice = await pickModel(h, home, t, given) // the one the new session starts with (startSession picks it the same way)
+    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, typeof choice === 'string' ? undefined : choice.choice,await resolveLoaded(h, home, t.project, t.needs ?? []))
     if (want && want !== have) await h.fs.write(file, want)
   } catch {
     /* no guide yet: nothing to refresh */
@@ -531,11 +544,12 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
     const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', 'Its previous session reported done and was finished; this message starts a new session.', {})
     return fresh(r) ? { ...r, text: `${t.id} finished earlier: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
   }
-  // a resume continues the model the session was started on: one that is expensive and not approved (an older thread, or a model that
-  // was asked for before this rule) waits for the user, the messages stay queued
-  if (t.model) {
-    const held = await holdExpensive(h, t, t.model, t.effort, { action: 'resume' }, 'resume')
-    if (held) return held
+  // a resume continues the model the session was started on, and cannot change it: when that is expensive and not approved for the thread
+  // (an older thread, or a model asked for before the rule) a NEW session on sonnet starts with the handover instead (queued messages included)
+  if (t.model && isExpensiveModel(t.model) && !(await modelAllowed(h, t.id, t.model))) {
+    const was = t.model
+    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', `Its saved model ${was} is not approved for this thread and a resume cannot change a saved model; this is a new session on sonnet.`, {}, false, !!opts.limit)
+    return fresh(r) ? { ...r, text: `${t.id} was recorded on ${was}, which needs the user's approval, and a resume cannot change a saved model: a new session was started with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
   }
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
@@ -558,7 +572,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   t.delivered = upTo
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   await save(h, home, t)
-  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
+  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}` }
 }
 
 async function list(h: Host, home: string, root = ''): Promise<Out> {
@@ -581,9 +595,10 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const skew = threadSkew(ran, installed)
     // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -687,9 +702,15 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           // the pane's Restart button, or the desk on request: the session is stopped (a working one too: its current step is lost; only
           // a session in the thread's own folder) and a NEW session starts with the handover (brief, goal, notes, reports, queued
           // messages, branch and worktree from the reports; the thread's recorded model and effort)
-          if (t.state !== 'open') return err(`${id} is ${t.state}: reopen it first`)
+          if (t.state !== 'open' && t.state !== 'parked') return err(`${id} is ${t.state}: reopen it first`)
+          const wasParked = t.state === 'parked' // a parked thread is reopened by the restart itself, in one step
+          t.state = 'open'
           const r = await freshSession(h, root, home, t, installed, 'Restarted from the pane.', i, true) // (a model named here is asked for like a start's)
-          return fresh(r) ? { ...r, text: `${id} restarted as a new session (old conversation kept read-only). ${r.text}` } : r
+          if (!fresh(r)) {
+            if (wasParked) t.state = 'parked' // nothing was saved: it stays parked
+            return r
+          }
+          return { ...r, text: `${id} ${wasParked ? 'was parked: reopened and restarted' : 'restarted'} as a new session (old conversation kept read-only). ${r.text}` }
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)

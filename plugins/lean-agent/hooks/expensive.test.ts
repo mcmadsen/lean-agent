@@ -211,51 +211,111 @@ test('an approval that expired, belongs to another thread or ended with a close 
   expect(bg()).toHaveLength(0)
 })
 
-test('restart of an opus thread without approval changes NOTHING: the running session is not stopped, no work is lost; after the approval it restarts on opus', async () => {
-  const { h, call, bg, thread, running, state } = world()
+test('restart of a thread recorded on opus (not approved) starts a sonnet/high session and says so; no request is made; an approved opus is kept', async () => {
+  const { h, call, bg, thread, running } = world()
   thread()
   running()
   const r = await call({ action: 'restart', tN: 't1' })
-  expect(r.text).toContain('NOT started on opus')
-  expect(r.text).toContain('already runs on opus')
-  expect(h.claudeCalls().some(a => a[0] === 'stop')).toBe(false)
-  expect(state.rows).toHaveLength(1)
-  expect(bg()).toHaveLength(0)
-  await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'x' })
-  const ok = await call({ action: 'restart', tN: 't1' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 restarted as a new session')
+  expect(r.text).toContain("t1 was recorded on opus; started on sonnet (opus needs the user's approval in the pane)")
+  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).model).toBe('sonnet') // the record follows what runs
+  expect(await listRequests(h.host)).toEqual([]) // nothing was asked for
+  // an approved opus is honoured as before
+  const a = world()
+  a.thread()
+  a.running()
+  await grantModelApproval(a.h.host, { scope: 't1', model: 'opus', reason: 'x' })
+  const ok = await a.call({ action: 'restart', tN: 't1' })
   expect(ok.text).toContain('t1 restarted as a new session')
-  expect(h.claudeCalls().some(a => a[0] === 'stop')).toBe(true)
-  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'opus', '--effort', 'high'])
-  // a restart that names sonnet instead is the "start on sonnet instead" of the pane
+  expect(ok.text).not.toContain('was recorded on')
+  expect(a.bg()[0]!.slice(3, 7)).toEqual(['--model', 'opus', '--effort', 'high'])
+  // a restart that NAMES opus is held exactly as before, and the running session is not stopped
+  const n = world()
+  n.thread({ model: 'sonnet' })
+  n.running()
+  const held = await n.call({ action: 'restart', tN: 't1', model: 'opus', reason: 'a cross-module change' })
+  expect(held.text).toContain('NOT started on opus')
+  expect(n.h.claudeCalls().some(c => c[0] === 'stop')).toBe(false)
+  expect(n.bg()).toHaveLength(0)
+  expect(await listRequests(n.h.host)).toEqual([expect.objectContaining({ thread: 't1', model: 'opus', action: 'restart', asked: true, state: 'pending' })])
+  // naming sonnet is sonnet
   const w = world()
   w.thread()
   w.running()
-  expect((await w.call({ action: 'restart', tN: 't1', model: 'sonnet' })).text).toContain('t1 restarted as a new session')
+  const s = await w.call({ action: 'restart', tN: 't1', model: 'sonnet' })
+  expect(s.text).toContain('t1 restarted as a new session')
   expect(w.bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
 })
 
-test('resume, wake and send of an opus thread wait for the approval: the messages stay queued and nothing is resumed', async () => {
-  const { h, call, thread, state } = world()
+test('restart of a PARKED thread reopens it in the same step (no separate reopen); a closed one is still refused', async () => {
+  const { h, call, bg, thread } = world()
+  thread({ state: 'parked' })
+  const r = await call({ action: 'restart', tN: 't1' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 was parked: reopened and restarted as a new session')
+  expect(r.text).toContain('t1 was recorded on opus; started on sonnet')
+  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).state).toBe('open')
+  // a restart that is held (a named opus) leaves it parked
+  const w = world()
+  w.thread({ state: 'parked' })
+  expect((await w.call({ action: 'restart', tN: 't1', model: 'opus', reason: 'r' })).text).toContain('NOT started on opus')
+  expect(JSON.parse(w.h.files.get(`${T1}/thread.json`)!).state).toBe('parked')
+  const c = world()
+  c.thread({ state: 'closed' })
+  expect((await c.call({ action: 'restart', tN: 't1' })).text).toContain('is closed: reopen it first')
+})
+
+test('resume, wake and send of a session recorded on opus (not approved) start a NEW sonnet session with the handover: a resume cannot change a saved model', async () => {
+  const { h, call, bg, thread, state } = world()
   thread()
   state.rows = [{ sessionId: SID, name: 't1 · a', cwd: T1, status: 'idle', state: 'done', startedAt: 1 }]
   h.clock.t += 60_000
-  for (const i of [{ action: 'send', tN: 't1', text: 'one more thing' }, { action: 'wake', tN: 't1' }, { action: 'resume', tN: 't1' }]) {
-    const r = await call(i)
-    expect([i.action, r.text.includes('NOT resumed on opus')]).toEqual([i.action, true])
-  }
+  const r = await call({ action: 'send', tN: 't1', text: 'one more thing' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('a resume cannot change a saved model')
+  expect(r.text).toContain('a new session was started')
   expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
-  expect(h.files.get(`${T1}/inbox.jsonl`)).toContain('one more thing') // queued
-  // a resume that names opus is held too, for a thread recorded on sonnet
+  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(bg()[0]!.join(' ')).toContain('one more thing') // the queued message is in the handover
+  expect(await listRequests(h.host)).toEqual([])
+  // an explicit resume (and the pane's Resume button) is the same
   const w = world()
-  w.thread({ model: 'sonnet' })
+  w.thread()
   w.state.rows = [{ sessionId: SID, name: 't1 · a', cwd: T1, status: 'idle', state: 'done', startedAt: 1 }]
-  expect((await w.call({ action: 'resume', tN: 't1', model: 'opus', reason: 'r' })).text).toContain('NOT resumed on opus')
-  expect(w.h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
-  // approved: resumed
-  await grantModelApproval(h.host, { scope: 't1', model: 'opus', reason: 'x' })
-  h.clock.t += 60_000
-  expect((await call({ action: 'resume', tN: 't1' })).text).toContain('t1 woken')
-  expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(true)
+  expect((await w.call({ action: 'resume', tN: 't1' })).text).toContain('a new session was started')
+  expect(w.bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  // a resume that names opus is held, for a thread recorded on sonnet
+  const n = world()
+  n.thread({ model: 'sonnet' })
+  n.state.rows = [{ sessionId: SID, name: 't1 · a', cwd: T1, status: 'idle', state: 'done', startedAt: 1 }]
+  expect((await n.call({ action: 'resume', tN: 't1', model: 'opus', reason: 'r' })).text).toContain('NOT resumed on opus')
+  expect(n.h.claudeCalls().some(a => a.includes('--resume') || a[0] === '--bg')).toBe(false)
+  // approved: a plain resume of the saved session
+  const a = world()
+  a.thread()
+  a.state.rows = [{ sessionId: SID, name: 't1 · a', cwd: T1, status: 'idle', state: 'done', startedAt: 1 }]
+  await grantModelApproval(a.h.host, { scope: 't1', model: 'opus', reason: 'x' })
+  a.h.clock.t += 60_000
+  expect((await a.call({ action: 'resume', tN: 't1' })).text).toContain('t1 woken')
+  expect(a.h.claudeCalls().some(c => c.includes('--resume'))).toBe(true)
+})
+
+test('start and reopen of a thread recorded on opus (not approved) start on sonnet; a named model still counts', async () => {
+  const { h, call, bg, thread } = world()
+  thread({ sid: '' })
+  const s = await call({ action: 'start', tN: 't1' })
+  expect(s.text).toContain('t1 started')
+  expect(s.text).toContain('t1 was recorded on opus; started on sonnet')
+  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).model).toBe('sonnet')
+  const w = world()
+  w.thread({ sid: '', state: 'closed' })
+  const re = await w.call({ action: 'reopen', tN: 't1' })
+  expect(re.text).toContain('t1 was recorded on opus; started on sonnet')
+  expect(w.bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
 })
 
 test('a configured threads.model of opus is no approval: a thread started without a model still waits for the press', async () => {
@@ -263,7 +323,7 @@ test('a configured threads.model of opus is no approval: a thread started withou
   h.files.set(`${L}/config.json`, JSON.stringify({ threads: { model: 'opus' }, desk: { model: 'opus' }, approvals: { t1: ['opus'] } }))
   const r = await call({ action: 'new', title: 'cfg', text: 'x' })
   expect(r.text).toContain('t1 NOT started on opus')
-  expect(r.text).toContain('already runs on opus (recorded or configured')
+  expect(r.text).toContain('is configured to run on opus')
   expect(bg()).toHaveLength(0)
   expect((await listRequests(h.host))[0]).toMatchObject({ thread: 't1', asked: false, model: 'opus' })
 })

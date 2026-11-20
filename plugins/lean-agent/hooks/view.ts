@@ -18,6 +18,7 @@ import { contextSize, deskNote, deskTokens } from './deskcompact'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
 import { slugOk } from './rules'
+import { agentsText } from './guard'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
 export type GoalRow = { id: string; text: string; ts: number; tone: GoalTone }
@@ -30,7 +31,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // lastReport: the last report or question as one flat line; branch / sha: what its last reports name (and the review record knows);
 // review: the verdict of that sha; cost: today's usd; ready: done, a green review, and the report does not say it was pushed; recTs: when
 // the last record was written (an event's identity)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; ready: boolean; recTs: number }
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -276,7 +277,9 @@ export async function loadView(h: Host): Promise<View> {
       const isDone = !!lr && lr.kind === 'report' && lr.state === 'done'
       // the desk's push is recorded in the thread's history (push.ts), not in the desk inbox: a pushed commit is not "ready to push"
       const pushed = isDone && review === 'green' && !!full && (await readJsonl<{ kind?: string; ok?: boolean; sha?: string }>(h, `${threadsDir(home)}/${t.id}/history.jsonl`).catch(() => [])).some(x => x?.kind === 'push' && x.ok === true && typeof x.sha === 'string' && x.sha.length >= 7 && full!.startsWith(x.sha))
+      const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       v.threads.push({
+        ...(used ? { agents: used } : {}),
         lastReport: flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
         ...(branch ? { branch } : {}),
         ...(sha ? { sha } : {}),

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A restart, start or resume that names no model no longer waits for approval of an opus the thread was only recorded on.** It starts
+  on sonnet and the reply says so ("tN was recorded on opus; started on sonnet"); an opus you approved for the thread is still kept, and
+  a call that names opus is still held for your Approve. `restart` of a parked thread reopens it in the same step; a resume of a
+  session recorded on an unapproved opus starts a new session on sonnet (a resume cannot change a saved model).
+- **A subagent cap in your own CLAUDE.md no longer stops the review.** Reviewer passes and the second-opinion reader are exempt from any
+  subagent cap, and the review skill, the thread guide and the prepare text now say so. The push gate's refusal says how many passes
+  are still missing and over which commits; `lean_thread list` and the pane card show "agents 3/4" when `agents.cap` is set.
+- Handovers and docs said `lean_thread threads`; the action is `list`.
+
 ## 1.0.12
 
 ### Added

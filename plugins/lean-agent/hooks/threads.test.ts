@@ -488,6 +488,21 @@ test('start, new and reopen say the model and effort the session got; the thread
   expect(h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')).toContain('model: haiku, effort: high (from thread.json)')
 })
 
+test('list shows "agents 3/4" next to a thread when agents.cap is set (reviewer passes are not in the count), and nothing without a cap', async () => {
+  const { h, call } = setup()
+  await call({ action: 'new', title: 'one', text: 'y' })
+  expect((await call({ action: 'list' })).text).not.toContain('agents')
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ agents: { cap: 4 } }))
+  const sid = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/thread.json')!).sid
+  h.files.set('/h/.lean-agent/threads/t1/subagents.json', JSON.stringify({ sid, counted: 3, review: 2, second: 0 }))
+  const l = await call({ action: 'list' })
+  expect(l.text).toContain(' · agents 3/4')
+  expect((l.data as any[])[0].agents).toBe('agents 3/4')
+  // a count of another session (a restart) starts again at 0
+  h.files.set('/h/.lean-agent/threads/t1/subagents.json', JSON.stringify({ sid: 'old', counted: 3, review: 0, second: 0 }))
+  expect((await call({ action: 'list' })).text).toContain(' · agents 0/4')
+})
+
 test('new refuses an unknown project with the known names and creates nothing; list shows the project', async () => {
   const { h, call } = setup()
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' }, vault: { path: '/r/vault', private: true } }))

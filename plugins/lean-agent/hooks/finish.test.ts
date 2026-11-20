@@ -265,13 +265,16 @@ test('restart: a WORKING session is stopped too (its current step is lost)', asy
   expect(st.rows[0].pid).toBe(0) // it was gone before the new session started
 })
 
-test('restart: parked or closed threads, a session outside the thread folder and a failing stop start nothing', async () => {
-  for (const state of ['parked', 'closed']) {
-    const s = setup({ thread: { state } })
-    const r = await s.run({ action: 'restart', tN: 't1' })
-    expect([state, r.ok, r.text.includes('reopen it first')]).toEqual([state, false, true])
-    expect(s.starts().length + s.stops().length).toBe(0)
-  }
+test('restart: a closed thread, a session outside the thread folder and a failing stop start nothing (a parked thread is reopened by the restart itself)', async () => {
+  const closed = setup({ thread: { state: 'closed' } })
+  const c = await closed.run({ action: 'restart', tN: 't1' })
+  expect([c.ok, c.text.includes('reopen it first')]).toEqual([false, true])
+  expect(closed.starts().length + closed.stops().length).toBe(0)
+  const parked = setup({ thread: { state: 'parked' } })
+  const p = await parked.run({ action: 'restart', tN: 't1' })
+  expect([p.ok, p.text.includes('was parked: reopened and restarted')]).toEqual([true, true])
+  expect(parked.starts().length).toBe(1)
+  expect(parked.thread().state).toBe('open')
   const away = setup({ row: { cwd: '/somewhere/else', status: 'busy' } })
   const a = await away.run({ action: 'restart', tN: 't1' })
   expect(a.ok).toBe(false)

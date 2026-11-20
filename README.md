@@ -507,7 +507,7 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   app is running (it waits ten minutes and never launches it). `/lean-agent-setup` (or `doctor fix`) reinstalls it.
 - **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `/lean-agent-setup`
   repeats it; if `~/.claude.json` does not parse, lean-agent leaves it alone: accept the trust dialog once.
-- **A thread runs an older lean-agent than the installed one** (`threads` and the start reply say "running 1.0.9, installed 1.0.11"; its
+- **A thread runs an older lean-agent than the installed one** (`lean_thread list` and the start reply say "running 1.0.9, installed 1.0.11"; its
   `review` skill comes from `~/.claude/plugins/cache/<marketplace>/lean-agent/1.0.9/`, its `lean_review` lacks newer fields, a guard refusal
   ends with `(lean-agent 1.0.9)`). The thread's own mod writes the version it runs into `thread.json` (`running`) at its session start;
   `thread.json` `version` is only what the desk saw installed when it started the session, which is why this used to go unnoticed.
