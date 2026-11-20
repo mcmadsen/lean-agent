@@ -101,7 +101,8 @@ test('a [working] report is stale unless the session is running; a start that ma
   expect(staleWorking('done', 'idle')).toBe(false)
   expect(staleWorking('blocked', 'idle')).toBe(false)
   expect(endedAtOnce({ word: 'idle', req0: 5, req: 6, reportsSince: 0 })).toBe(true) // one request: no tool call
-  expect(endedAtOnce({ word: 'idle', req0: 5, req: 7, reportsSince: 1 })).toBe(true) // one tool call (a status report)
+  expect(endedAtOnce({ word: 'idle', req0: 5, req: 7, reportsSince: 1 })).toBe(false) // a status ping answered with one report is a tool call
+  expect(endedAtOnce({ word: 'idle', req0: 5, req: 6, reportsSince: 1 })).toBe(false) // it reported: not "no tool call"
   expect(endedAtOnce({ word: 'idle', req0: 5, req: 12, reportsSince: 3 })).toBe(false) // it worked
   expect(endedAtOnce({ word: 'running', req0: 5, req: 5, reportsSince: 0 })).toBe(false)
   expect(endedAtOnce({ word: 'idle', req0: undefined, req: 5, reportsSince: 0 })).toBe(false) // no start count: no claim
@@ -133,8 +134,27 @@ test('send to an idle session whose listed status still says busy wakes it (stop
   expect(w.resumes()).toHaveLength(1)
 })
 
-test('send to a stuck session queues and says so; wake replaces it (stop, new session with the handover, the old one closed)', async () => {
+test('a stuck session that still WORKS is never stopped by send, wake or resume (one long tool call looks stuck); only restart replaces it', async () => {
   const w = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })], inbox: msg(12, 'old question') })
+  for (const action of ['send', 'wake', 'resume']) {
+    const r = await w.run({ action, tN: 't1', text: 'new question' })
+    expect(r.text, action).toContain('stuck: ')
+    expect(r.text, action).toContain('it still works: restart t1 replaces it (its current step is lost)')
+  }
+  const st = await w.run({ action: 'start', tN: 't1' })
+  expect(st.text).toContain('it still works: restart t1 replaces it')
+  expect(w.calls('stop')).toHaveLength(0)
+  expect(w.starts()).toHaveLength(0)
+  expect(w.resumes()).toHaveLength(0)
+  const r = await w.run({ action: 'restart', tN: 't1' }) // the explicit restart: stopped, a new session with the handover, queued messages included
+  expect(r.ok).toBe(true)
+  expect(w.calls('stop')).toEqual([['stop', OLD.slice(0, 8)]])
+  expect(w.starts()).toHaveLength(1)
+  expect(w.starts()[0]!.pop()).toContain('old question')
+})
+
+test('send to a stuck session whose turn ended queues and says so; wake replaces it (stop, new session with the handover, the old one closed)', async () => {
+  const w = world({ rows: [row({ status: 'busy', state: 'idle', pid: 42 })], inbox: msg(12, 'old question') })
   const s = await w.run({ action: 'send', tN: 't1', text: 'new question' })
   expect(s.text).toContain('stuck: 2 unread queued for 12 min, no tool call or inbox read')
   expect(s.text).toContain('wake or restart it')
@@ -224,6 +244,33 @@ test('list reports a session that ended its turn at once (the ledger shows no wo
   expect((await busy.run({ action: 'list' })).text).not.toContain('ended its turn at once')
 })
 
+test('a status ping answered with one report, then idle, is not "ended at once"; the start count is not reset by a wake', async () => {
+  const ledger = (n: number) => Array.from({ length: n }, (_, i) => JSON.stringify({ ts: NOW - 1000 * (i + 1), role: 'thread', tN: 't1', model: 'sonnet', usd: 0.01 })).join('\n') + '\n'
+  const w = world({ rows: [row()], thread: { req0: 5, lastWake: NOW - 30_000 } })
+  w.h.files.set(`${L}/ledger.jsonl`, ledger(7))
+  w.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: NOW - 20_000, from: 't1', kind: 'report', state: 'working', text: 'status: milestone 1 under way' }) + '\n')
+  const t = (await w.run({ action: 'list' })).text
+  expect(t).not.toContain('ended its turn at once')
+  // a wake keeps req0 (only a start writes it)
+  const idle = world({ rows: [row()], thread: { req0: 5 } })
+  await idle.run({ action: 'wake', tN: 't1' })
+  expect(idle.thread().req0).toBe(5)
+})
+
+test('a start of a thread that had a session (the start action) says what it costs and closes the old session; a first start does not', async () => {
+  const w = world({ rows: [stopped(OLD)] })
+  const r = await w.run({ action: 'start', tN: 't1' })
+  expect(r.text).toContain('new session: handover about')
+  expect(w.calls('rm')).toEqual([['rm', OLD.slice(0, 8)]])
+  expect(w.starts()[0]![2]).toBe('t1 · fix login (2)')
+  // a start whose session id could not be found still counts as a generation: the next start does not repeat the name
+  const lost = world({ rows: [], thread: { sid: '', gen: 1 } })
+  lost.h.claude.handler = (a: string[]) => (a[0] === '--bg' ? { exitCode: 0, stdout: 'started\n' } : a[0] === 'agents' ? { exitCode: 0, stdout: '[]' } : { exitCode: 0, stdout: '' })
+  await lost.run({ action: 'start', tN: 't1' })
+  await lost.run({ action: 'start', tN: 't1' })
+  expect(lost.starts().map(a => a[a.indexOf('-n') + 1])).toEqual(['t1 · fix login (2)', 't1 · fix login (3)'])
+})
+
 test('the pane row and the thread pane carry the truth: stuck is a word of its own, idle names the unread count, a stale report is said', async () => {
   const report = JSON.stringify({ ts: NOW - 5 * MIN, from: 't1', kind: 'report', state: 'working', text: 'milestone 1 under way' }) + '\n'
   const stuck = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })], inbox: msg(15) })
@@ -231,10 +278,12 @@ test('the pane row and the thread pane carry the truth: stuck is a word of its o
   const th = v.threads.find(x => x.id === 't1')!
   expect(th).toMatchObject({ live: 'stuck', unread: 1 })
   expect(stateOf(th).word).toBe('stuck')
-  expect(th.liveNote).toContain('wake or restart it')
+  expect(th.liveNote).toContain('it still works: restart replaces it') // a stuck session that works: only restart replaces it
   const d = await loadThreadDetail(stuck.h.host, 't1')
   expect(d?.live).toBe('stuck')
   expect(d?.liveNote).toContain('stuck: 1 unread queued for 15 min')
+  const turnEnded = world({ rows: [row({ status: 'busy', state: 'idle', pid: 42 })], inbox: msg(15) })
+  expect((await loadView(turnEnded.h.host)).threads[0]!.liveNote).toContain('wake or restart it')
 
   const idle = world({ rows: [row()], inbox: msg(1) + msg(2) })
   idle.h.files.set(`${L}/desk/inbox.jsonl`, report)
@@ -395,6 +444,8 @@ test('doctor fix: a refusal is left (never forced); a session with a live proces
   const live = world({ rows: [row({ sessionId: OLD, state: 'idle', status: 'idle', pid: 5 }), worker(NEW)], thread: { sid: NEW, sids: [OLD, NEW] } })
   expect(await removeStaleSessions(live.h.host)).toEqual([])
   expect(live.calls('rm')).toHaveLength(0)
+  const elsewhere = world({ rows: [stopped(OLD, { cwd: '/h/elsewhere' }), worker(NEW)], thread: { sid: NEW, sids: [OLD, NEW], gen: 2 } })
+  expect(await threadSessionRows(elsewhere.h.host)).toEqual(['ok   no stale thread sessions']) // not ours to remove, so not a FIX row either
   const single = world({ rows: [stopped(OLD)], thread: { sid: OLD, sids: [OLD] } })
   expect(await threadSessionRows(single.h.host)).toEqual(['ok   no stale thread sessions'])
   expect(await removeStaleSessions(single.h.host)).toEqual([])

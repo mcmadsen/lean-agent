@@ -12,7 +12,7 @@ import { resolveRange } from './reviewprep'
 import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { isRunning, isWorking, listAgents, needsYou } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import type { AgentRow, Inbox, Thread } from './threads'
 
@@ -242,7 +242,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     const last = all[all.length - 1]
     const stale = !!last && last.kind === 'report' && staleWorking(last.state, truth.word)
     const ended = t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, id, now), reportsSince: all.filter(r => r.ts >= t.lastWake).length })
-    d.liveNote = [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: wake or restart it` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
+    d.liveNote = [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: ${stuckAdvice(sessionRow)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
   })
   return d
 }

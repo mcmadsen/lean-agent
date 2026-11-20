@@ -58,6 +58,9 @@ export function truthOf(o: { threadState: string; finished?: boolean; row: Agent
   return { word, unread, oldestMs, text }
 }
 
+// what to do about a stuck session: wake replaces one whose turn ended; one that still works is replaced only by restart
+export const stuckAdvice = (r: AgentRow | undefined): string => (liveOf(r) === 'working' ? 'it still works: restart replaces it (its current step is lost)' : 'wake or restart it')
+
 // A [working] report is only true while the session works: a working report of a session that is not running is stale
 export const staleWorking = (lastState: string | undefined, word: Word): boolean => (lastState === undefined || lastState === '' || lastState === 'working') && (word === 'idle' || word === 'done' || word === 'stuck')
 
@@ -83,10 +86,10 @@ export async function requestsOf(h: Host, id: string, now: number): Promise<numb
     return null
   }
 }
-// evidence that the session made no progress since it was started or woken: at most one tool call (a status report is one) and no
-// record of its own in the desk inbox beyond one
+// evidence that the session made no tool call since it was STARTED (req0 is written by a start only: a wake never resets it, so a
+// status ping answered with one report is not flagged): one request in the ledger and no report of its own in the desk inbox
 export const endedAtOnce = (o: { word: Word; req0?: number; req?: number | null; reportsSince: number }): boolean =>
-  (o.word === 'idle' || o.word === 'done') && typeof o.req0 === 'number' && typeof o.req === 'number' && o.req - o.req0 <= 2 && o.reportsSince <= 1
+  (o.word === 'idle' || o.word === 'done') && typeof o.req0 === 'number' && typeof o.req === 'number' && o.req - o.req0 <= 1 && o.reportsSince === 0
 
 // ---- the session's name ------------------------------------------------------------------------------------------------------
 // "tN · title" for the first session, "tN · title (2)", "(3)" after each replacement
@@ -104,6 +107,11 @@ export function nameProblem(row: AgentRow | undefined, want: string): string | n
 // `claude rm <id>` takes the session out of the app's list and keeps its conversation. It also deletes a worktree the session was started
 // in, so only a session that lives in the thread's own folder is removed, and NEVER with --discard-unpushed or --force-remove-worktree:
 // a refusal ("not safe") is logged and left. Never a session that works, never the thread's current one.
+// does the listed `cwd` belong to the thread's own folder (the listing may print the real path of a linked home)?
+export async function inThreadFolder(h: Host, home: string, id: string, cwd: string): Promise<boolean> {
+  const own = `${threadsDir(home)}/${id}`
+  return !!cwd && (cwd === own || (await realPath(h, cwd)) === (await realPath(h, own)))
+}
 export type RemoveOut = { removed: boolean; skipped?: string; refused?: string }
 export async function removeSession(h: Host, home: string, o: { id: string; sid: string; current: string; row: AgentRow | undefined; log?: boolean }): Promise<RemoveOut> {
   const { row } = o
@@ -111,7 +119,7 @@ export async function removeSession(h: Host, home: string, o: { id: string; sid:
   if (!o.sid || o.sid === o.current) return { removed: false, skipped: 'it is the thread\'s current session' }
   if (liveOf(row) === 'working' || row.pid > 0) return { removed: false, skipped: 'its process is still alive' }
   const own = `${threadsDir(home)}/${o.id}`
-  if (!row.cwd || (row.cwd !== own && (await realPath(h, row.cwd)) !== (await realPath(h, own)))) return { removed: false, skipped: `it runs outside the thread folder (${row.cwd || 'unknown'})` }
+  if (!(await inThreadFolder(h, home, o.id, row.cwd))) return { removed: false, skipped: `it runs outside the thread folder (${row.cwd || 'unknown'})` }
   const argv = ['claude', 'rm', row.id || o.sid.slice(0, 8)] // no flag, ever
   const r = await h.process.run(argv).catch(() => null)
   if (r && r.exitCode === 0) {

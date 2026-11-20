@@ -127,16 +127,18 @@ anything is read. `lean_thread list`, the pane cards, the thread pane and the se
 | stuck | a queued message has been unread for `threads.stuckMinutes` (config.json, default 10): no tool call and no inbox read (a working session reads its queue at every tool call) |
 | done / parked | the session ended or finished, or you parked the thread |
 
-- **send** to an idle session wakes it (stops a lingering process, resumes with the batch). A reply never says "running" for an idle
-  or stuck session: it says "queued, session idle: wake or restart it" (or the stuck line) and the list shows the unread count.
-- **wake** (and **resume**) replaces a **stuck** session (stops it, starts a new session with the handover, queued messages included)
-  and wakes an **idle** one even when nothing is queued (the prompt is the task). A plain `send` never replaces a stuck session, and a
-  session that is genuinely working (a fresh message, or nothing unread) is never touched. A session that waits on a prompt for you is
-  never "stuck". The threshold is a heuristic: one tool call that runs longer than `threads.stuckMinutes` looks stuck, so raise it for
-  long builds.
-- A `[working]` report of a session that is not running is marked stale in the list, the card and the thread pane. A start, restart or
-  wake whose session ended its turn at once (idle moments after the start; later, the ledger shows at most one tool call since) is
-  reported loudly: "started, but it ended its turn at once: wake it with the task".
+- **send** to an idle session wakes it (stops a lingering process, resumes with the batch); a send within 30 s of the last wake, or to a
+  stuck session, only queues and says so ("queued, session idle: wake or restart it", or the stuck line), and the list shows the unread
+  count. A reply never says "running" for an idle or stuck session.
+- **wake** (and **resume**) wakes an **idle** session even when nothing is queued (the prompt is the task) and replaces a **stuck**
+  session whose turn ended (stops it, starts a new session with the handover, queued messages included). A plain `send` never
+  replaces a stuck session. A session that is still **working** is never stopped by send, wake or resume, even when it looks stuck
+  (one tool call that runs longer than `threads.stuckMinutes`, or a subagent wait, reads no queue: raise the setting for long builds);
+  only `restart` replaces it (its current step is lost). A session that waits on a prompt for you is never "stuck".
+- A `[working]` report of a session that is not running is marked stale in the list, the card and the thread pane. A start whose
+  session ended its turn without a tool call (idle moments after the start; later, the ledger shows no request beyond the first and the
+  thread reported nothing since the start) is reported loudly: "started, but it ended its turn at once: wake it with the task".
+  Nothing here has been checked against a live session's real `state` values yet.
 - **The prompt starts with the task**: "Resume the work now (task: ...). Answer status requests with a short lean_report as a side
   effect, never as the whole turn." (the task is the goal, else the first line of the brief). Restart, wake and the handover all start
   that way, and the thread guide says the same: a status request arriving mid-work gets one short report and the work goes on.

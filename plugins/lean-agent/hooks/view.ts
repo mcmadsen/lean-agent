@@ -9,7 +9,7 @@ import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
 import { spendNumbers, spendText } from './stats'
 import type { Spend } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
@@ -239,6 +239,7 @@ export async function loadView(h: Host): Promise<View> {
   })
   const reviews: Reviews = new Map()
   await guard('threads', async () => {
+    const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes // (once per refresh, not per thread)
     let ents: { name: string }[] = []
     try {
       ents = await h.fs.list(threadsDir(home))
@@ -286,11 +287,11 @@ export async function loadView(h: Host): Promise<View> {
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
       const queued = (await unconsumed(h, home, t.id)).msgs
-      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
-      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: wake or restart it` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
+      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       v.threads.push({
         ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
         unread: truth.unread,

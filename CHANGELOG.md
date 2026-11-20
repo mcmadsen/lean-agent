@@ -6,10 +6,12 @@
 - **"Running" is what `claude agents --json --all` says, not a recorded flag.** `lean_thread list`, the pane cards, the thread pane and
   the send / wake replies show running | idle (N unread queued) | stuck (unread for `threads.stuckMinutes`, default 10, no tool call or
   inbox read) | done / parked. A `send` to an idle or stuck session says "queued, session idle: wake or restart it" and never
-  "running"; `wake` replaces a stuck session (stop, handover session) and wakes an idle one even with nothing queued, instead of
-  refusing "recorded as running"; a genuinely working session is never touched. A `[working]` report of a session that is not
-  running is marked stale; a start that ended its turn at once is reported loudly ("started, but it ended its turn at once: wake it
-  with the task"). The listed `state` (working / idle) now beats a `status` that still says busy.
+  "running" (a send within 30 s of a wake queues and says so; a later one wakes the idle session); `wake` replaces a stuck session
+  whose turn ended (stop, handover session) and wakes an idle one even with nothing queued, instead of refusing "recorded as
+  running"; a session that is still working is never stopped by send, wake or resume (only `restart` replaces it, even when it looks
+  stuck). A `[working]` report of a session that is not running is marked stale; a start that ended its turn without a tool call is
+  reported loudly ("started, but it ended its turn at once: wake it with the task"). The listed `state` (working / idle) now beats a
+  `status` that still says busy.
 - **Restart, wake and the handover put the task first**: "Resume the work now (task: ...). Answer status requests with a short
   lean_report as a side effect, never as the whole turn." A status request mid-work gets a one-line report without ending the turn.
 - **Session names**: every fresh start and restart passes `-n "tN · title"` with the generation ("(2)", "(3)" after restarts); the name

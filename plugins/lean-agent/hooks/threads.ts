@@ -378,7 +378,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (root) await refreshGuide(h, root, home, t, choice)
   // the session's name: "tN · title", then "(2)", "(3)" for each session that replaces an older one (the sidebar shows two rows otherwise)
   const old = t.sid
-  const gen = old ? (t.gen ?? 1) + 1 : t.gen ?? 1
+  const gen = old ? (t.gen ?? 1) + 1 : t.gen ? t.gen + 1 : 1 // (no old id but a recorded generation: an earlier start whose session id was not found)
   const name = sessionName(t.id, t.title, gen)
   const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
@@ -590,7 +590,10 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   const limited = !!opts.limit && isLimitRow(row)
   if (truth.word === 'running' && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
   if (!msgs.length && !opts.force && truth.word !== 'idle' && truth.word !== 'stuck') return { ok: true, text: `${t.id}: nothing queued` }
-  if (truth.word === 'stuck' && !(opts.explicit && !t.finished && !opts.limit)) return { ok: true, text: `${t.id} is ${truth.text}: ${msgs.length} message(s) queued, wake or restart it`, data: { resumed: false } }
+  // A stuck session that is still WORKING (one long tool call, a subagent wait: it reads nothing meanwhile) is replaced only by an
+  // explicit restart (its current step is lost): wake never stops a working session. A stuck session whose turn ended (idle) is replaced by wake.
+  const stuckWorking = truth.word === 'stuck' && liveOf(row) === 'working'
+  if (truth.word === 'stuck' && (!(opts.explicit && !t.finished && !opts.limit) || stuckWorking)) return { ok: true, text: `${t.id} is ${truth.text}: ${msgs.length} message(s) queued, ${stuckWorking ? `it still works: restart ${t.id} replaces it (its current step is lost)` : 'wake or restart it'}`, data: { resumed: false } }
   if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: ${msgs.length} message(s) queued, session ${truth.word === 'stuck' ? 'stuck' : 'idle'}: wake or restart it if it stays idle` }
   // a stuck session (nothing read for stuckMinutes) is replaced: stopped and a NEW session starts with the handover, queued messages
   // included (never a session that waits on a prompt for the user: truthOf calls that one running)
@@ -633,9 +636,6 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (copied) t.sid = copied
   t.lastWake = now
   t.delivered = upTo
-  const req0 = await requestsOf(h, t.id, now)
-  if (req0 === null) delete t.req0
-  else t.req0 = req0
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   await save(h, home, t)
   // the name a resumed session keeps is the one it was started with (`--resume` takes no -n): read back, said when it is not the thread's
@@ -802,7 +802,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined
           if (t.sid && isRunning(srow)) {
             const tr = truthOf({ threadState: t.state, row: srow, queued: await pending(h, home, t), now: await h.clock.now(), stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
-            return { ok: true, text: tr.word === 'stuck' ? `${id} is ${tr.text}: nothing started; wake or restart ${id} replaces it` : `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
+            return { ok: true, text: tr.word === 'stuck' ? `${id} is ${tr.text}: nothing started; it still works: restart ${id} replaces it (its current step is lost)` : `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
           }
           // an idle session whose process is still alive is stopped before a new one takes its place (never a working one, never one outside the thread folder)
           if (srow && !t.finished && srow.pid > 0) {
@@ -817,12 +817,14 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
-          const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'), i, installed, root)
+          const prompt = [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n')
+          const replaces = !!t.sid // a start that replaces an older session is a fresh start: it says what it costs
+          const r = await startSession(h, home, t, prompt, i, installed, root)
           if (r.ok && msgs.length) {
             t.delivered = u.upTo
             await save(h, home, t)
           }
-          return r
+          return replaces && fresh(r) ? { ...r, text: `${r.text} · ${restartCost(prompt, t.model ?? 'sonnet')}` } : r
         }
         case 'release': {
           // the pane's "Open tN" (a thread blocked on an `approval`): the user answers Claude Code's permission check in the thread's OWN

@@ -4,7 +4,7 @@ import { homeDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { listAgents } from './threads'
 import type { AgentRow, Thread } from './threads'
-import { RENAME_NOTE, liveOf, nameProblem, removeSession, sessionName, threadsConfig } from './threadstate'
+import { RENAME_NOTE, inThreadFolder, liveOf, nameProblem, removeSession, sessionName, threadsConfig } from './threadstate'
 
 type Found = { threads: Thread[]; rows: AgentRow[] | null; stale: { id: string; sid: string; row: AgentRow }[] }
 
@@ -29,7 +29,7 @@ async function find(h: Host, home: string): Promise<Found> {
     for (const sid of new Set(t.sids ?? [])) {
       if (typeof sid !== 'string' || sid === t.sid || current.has(sid)) continue
       const row = rows.find(a => a.sid === sid)
-      if (row && row.pid === 0 && liveOf(row) !== 'working') stale.push({ id: t.id, sid, row })
+      if (row && row.pid === 0 && liveOf(row) !== 'working' && (await inThreadFolder(h, home, t.id, row.cwd))) stale.push({ id: t.id, sid, row }) // (a session elsewhere is never ours to remove)
     }
   }
   return { threads, rows, stale }
