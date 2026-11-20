@@ -109,6 +109,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 | `review` | review the branch diff in passes and record the verdict for HEAD |
 | `review-learn` | learn from review comments on pull requests |
 | `learn` | write path-scoped rules for a project |
+| `rules-pr` | draft PR with optimised Claude files (CLAUDE.md, `.claude/rules`) for a project; needs the user's yes to push like any push |
 | `compare` | what a session costs at start vs a clean Claude Code session (overhead), or one read-only task both ways with a judge |
 | `scripts` | scripts over models: propose, audit, adopt and reuse small scripts (`lean_script`) |
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
@@ -150,6 +151,32 @@ into `<repo>/.claude/rules/lean-agent/` (symlinked rule folders do not load) and
 
 An area is stale after a commit touches many of its files, its manifest changes or workers report gaps for it; the
 desk then says "rules for X are stale: re-learn when you touch it". `stats` lists rules that never loaded (and says "loading unverified" when no load was ever recorded).
+
+### Rules PR: the team gets what lean-agent learned
+
+Learned rules live in `~/.lean-agent`, so only the user benefits. Ask the desk "propose a rules PR for `<project>`": it routes
+the work to a thread with the `rules-pr` skill, which opens a **draft** PR that improves the project's own Claude files
+(every `CLAUDE.md`, `.claude/rules/*.md`): path-specific sections move out of the always-loaded files into `.claude/rules/<topic>.md`
+with `paths:`, rules lean-agent saw used again and again are added in the team's voice, stale and duplicate lines go. The push
+and the PR follow the usual flow (the thread reports "ready to push", the desk asks you, nothing is pushed without your yes).
+
+No model counts anything. `lean_rules` `pr-plan` reads the repo's Claude files (tracked or not; `CLAUDE.local.md` counts for
+tokens but is never changed), the rule-load log, the review lesson store and the workers' "missing context" reports, and writes
+`~/.lean-agent/<project>/rules-pr/plan-<date>.json` and `.md`:
+
+| What | How it is decided |
+|---|---|
+| tokens per session before -> after | characters / 4 of every file that loads in every session (root and `.claude` `CLAUDE.md`, rules without `paths:`) vs only in an area |
+| sections to move | an always-loaded section whose heading or text names one folder or glob that exists in the repo (not one that holds most of the repo) |
+| rules to add | a lean rule loaded in at least 3 sessions over at least 7 days (`config.json` `rulesPr.minSessions`, `minDays`) whose lines are not already in the repo; lines that are stale or name lean-agent, thread ids, costs, personal paths, emails or ticket numbers are left out |
+| stale lines | backticked paths and symbols the repo no longer has (`remove` when every name is gone, `review` when only some are) |
+| duplicates | lean rules and lessons whose lines are in the repo files, and repo lines said twice (the copy that loads in fewer sessions goes) |
+| missing context | workers' `missing` reports clustered by words, recurring and not covered by any rule |
+
+The PR body carries the table of tokens per session, the moved sections, the added rules with their evidence (sessions, days,
+missing-context counts) and the removed lines. After the PR merged, `lean_rules` `retire-upstreamed` (dry run unless
+`apply: true`; `ref: origin/main` checks the merged state) retires the lean rules and review lessons whose text now lives in the
+repo files into `rules-pr/retired/<date>/` so nothing loads twice; `lean_rules` `check` lists the duplicates that remain.
 
 ## Compare
 

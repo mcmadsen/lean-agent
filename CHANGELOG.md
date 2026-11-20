@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **A rules PR: what lean-agent learned goes to the whole team.** New skill `rules-pr` (thread): a draft PR that improves a
+  project's own Claude files, with the always-loaded text shrinking. The desk routes "propose a rules PR for <project>" to a
+  thread; the push and the PR use the existing flow (`lean_report` "ready to push", the user's yes, `approve-push`, `push` with
+  `pr: {draft: true}`).
+- **`lean_rules` `pr-plan`** (`hooks/rulespr.ts`, no model): reads every `CLAUDE.md` / `CLAUDE.local.md` and `.claude/rules/*.md`
+  (tracked or not; local files count for tokens and are never proposed for change), lean-agent's learned rules with their load log
+  (loads, distinct sessions, span in days, last use, triggering paths), the review lessons (live lines, how often offered) and the
+  workers' missing-context reports, and computes duplicates, always-loaded sections that name one folder (to move into
+  `.claude/rules/<topic>.md` with `paths:`), upstream candidates (loaded in >= 3 sessions over >= 7 days, not already in the repo;
+  `config.json` `rulesPr`), stale lines, recurring missing-context clusters with no rule, and tokens per session before and after.
+  It writes `~/.lean-agent/<project>/rules-pr/plan-<date>.json` and `.md`; the same inputs give the same plan.
+- **`lean_rules` `retire-upstreamed`**: after the PR merged, lean rules and review lessons whose text now lives in the repo's files
+  are retired from `~/.lean-agent` into `rules-pr/retired/<date>/` (a dry run unless `apply: true`), so nothing loads twice.
+  `lean_rules` `check` now reports the duplicates that remain between the repo files and lean-agent's rules and lessons.
+
 ## 1.0.11
 
 ### Fixed
