@@ -183,6 +183,56 @@ test('direct send to the desk: done / blocked / questions (and important progres
   expect((await threadTool(h.host, 't1', 'lean_report', { text: 'z', state: 'done' })).text).not.toContain('sent') // no send function: today's behaviour
 })
 
+test('after a desk restart the refused send looks up the desk\'s live session, keeps that id for every thread and sends again; no live desk = the refusal stands', async () => {
+  const { h, state } = setup()
+  const OLD = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const NEW = 'bbbbbbbb-0000-0000-0000-000000000002'
+  await recordDeskSid(h.host, OLD)
+  const sent: string[] = []
+  // the engine refuses the dead id and takes the live one
+  const send = async (sid: string, _t: string) => {
+    sent.push(sid)
+    return sid === OLD ? { isDelivered: false, reason: `no live session on this machine has id ${OLD}` } : { isDelivered: true }
+  }
+  // a listing without a desk session (only a thread, and an ended old desk): nothing to find, the refusal stands
+  state.rows = [{ sessionId: SID, cwd: T, status: 'busy', startedAt: 1 }, { sessionId: OLD, cwd: '/h/lean-agent-desk', status: 'stopped', startedAt: 1 }]
+  const gone = await threadTool(h.host, 't1', 'lean_report', { text: 'done!', state: 'done' }, send)
+  expect(gone.text).toContain(`refused: no live session on this machine has id ${OLD}`)
+  expect(sent).toEqual([OLD]) // (one retry only when a different live id was found)
+  expect(JSON.parse(h.files.get('/h/.lean-agent/desk.json')!).sid).toBe(OLD)
+  // the restarted desk is listed (two desk sessions listed: the newer one wins)
+  sent.length = 0
+  state.rows = [{ sessionId: SID, cwd: T, status: 'busy', startedAt: 1 }, { sessionId: 'cccccccc-0000-0000-0000-000000000003', cwd: '/h/lean-agent-desk', status: 'idle', startedAt: 5 }, { sessionId: NEW, cwd: '/h/lean-agent-desk/', status: 'busy', startedAt: 9 }]
+  const ok = await threadTool(h.host, 't1', 'lean_report', { text: 'done!', state: 'done' }, send)
+  expect(sent).toEqual([OLD, NEW])
+  expect(ok.text).toContain('also sent to the desk')
+  expect(ok.text).toContain('the desk had a new session')
+  expect(JSON.parse(h.files.get('/h/.lean-agent/desk.json')!).sid).toBe(NEW) // kept for the next thread's report
+  sent.length = 0
+  await threadTool(h.host, 't2', 'lean_ask', { question: 'which?' }, send)
+  expect(sent).toEqual([NEW]) // no lookup, no retry
+  // no desk recorded and none live: the lookup runs once, a miss is remembered for a minute (not one `claude agents` per report)
+  h.files.delete('/h/.lean-agent/desk.json')
+  state.rows = []
+  const lookups = () => h.claudeCalls().filter(a => a[0] === 'agents').length
+  const before = lookups()
+  await threadTool(h.host, 't1', 'lean_report', { text: 'one', state: 'blocked' }, send)
+  await threadTool(h.host, 't1', 'lean_report', { text: 'two', state: 'blocked' }, send)
+  expect(lookups() - before).toBe(1)
+  h.clock.t += 61_000
+  await threadTool(h.host, 't1', 'lean_report', { text: 'three', state: 'blocked' }, send)
+  expect(lookups() - before).toBe(2)
+  state.rows = [{ sessionId: NEW, cwd: '/h/lean-agent-desk', status: 'busy', startedAt: 9 }]
+  h.clock.t += 61_000
+  // nothing recorded at all (the desk's own record never happened): the live session is found and recorded
+  h.files.delete('/h/.lean-agent/desk.json')
+  sent.length = 0
+  const first = await threadTool(h.host, 't1', 'lean_report', { text: 'again', state: 'blocked' }, send)
+  expect(sent).toEqual([NEW])
+  expect(first.text).toContain('the desk had a new session')
+  expect(JSON.parse(h.files.get('/h/.lean-agent/desk.json')!).sid).toBe(NEW)
+})
+
 test('a direct message that arrived marks its inbox row delivered: the next prompt and the relay do not repeat it', async () => {
   const { h } = setup()
   let line = ''

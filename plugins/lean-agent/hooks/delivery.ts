@@ -2,7 +2,7 @@
 // Desk -> thread: threads/tN/inbox.jsonl (a line's id is its 1-based position). The thread reads lines past
 // max(thread.json.delivered, consumed.json.n) and marks them consumed, so each line is delivered once.
 // Thread -> desk: desk/inbox.jsonl (reports, questions), read marker desk/inbox-read.json.
-import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
+import { appendJsonl, atomicWrite, deskDir, homeDir, leanDir, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
@@ -95,9 +95,9 @@ const obj = (properties: Record<string, unknown>, required: string[]) => ({ type
 export const THREAD_TOOLS: Tool[] = [
   {
     name: 'lean_review',
-    description: 'The strict review\'s script side. action prepare (project, base, head, branch, model): the brief computed from the diff without a model (new symbols and files, edited tests, defaulted parameters, module state, changed exports, declines, a re-review\'s open findings), the reviewer (always sonnet; two independent runs for a high-risk diff; opus only when config review.model or the brief asks AND the user approved it in the pane for this thread) and whether a second opinion comes first. action merge (project, reviews = the two runs\' JSON blocks): merges them (findings both found are marked [2/2], the union counts) and returns the merged block. action record (default; project, sha, base, green, review = the reviewer\'s JSON block, or reviews = the two runs\' blocks of a high-risk diff, second, passes, branch): records the verdict for a commit (the push gate reads it; only this tool can write it); green is REFUSED, with the reason, when a new symbol has no reuse entry, an edited test no coverage entry, a second-opinion candidate no answer, or a blocker/major finding is open. action decline (project, branch or all, kind, symbol, why): a finding the user decided not to fix; later reviews do not raise it again. The project\'s learned review lessons (the checklist and the shared helpers earlier human reviews found), no model involved: action lessons (project, base, head or paths, goal, repo, budget): the text block for the reviewer\'s prompt, chosen from the changed files and the diff; learn (checklist, helpers {name, where, what}, replace [{old, new}], source): add lines, near-duplicates skipped; lessons-list; lessons-rm (which); lessons-undo (the last batch); lessons-verify (repo, apply): helper lines whose code cannot be found.',
+    description: 'The strict review\'s script side. action prepare (project, base, head, branch, model): the brief computed from the diff without a model (new symbols and files, edited tests, defaulted parameters, module state, changed exports, declines, a re-review\'s open findings), the reviewer (always sonnet; two independent runs for a high-risk diff; opus only when config review.model or the brief asks AND the user approved it in the pane for this thread) and whether a second opinion comes first. action merge (project, reviews = the two runs\' JSON blocks): merges them (findings both found are marked [2/2], the union counts) and returns the merged block. action record (default; project, sha, base, green, review = the reviewer\'s JSON block, or reviews = the two runs\' blocks of a high-risk diff, second, passes, branch): records the verdict for a commit (the push gate reads it; only this tool can write it); green is REFUSED, with the reason, when a new symbol has no reuse entry, an edited test no coverage entry, a second-opinion candidate no answer, or a blocker/major finding is open. action decline (project, branch or all, kind, symbol, why): a finding the user decided not to fix; later reviews do not raise it again. The project\'s learned review lessons (the checklist and the shared helpers earlier human reviews found), no model involved: action lessons (project, base, head or paths, goal, repo, budget): the text block for the reviewer\'s prompt, chosen from the changed files and the diff; learn (checklist, helpers {name, where, what}, replace [{old, new}], source): add lines, near-duplicates skipped; lessons-list; lessons-rm (which); lessons-undo (the last batch); lessons-verify (repo, apply): helper lines whose code cannot be found. action prs (project, repo, pr or last, base): the review comments of a project\'s recent completed PRs, or one, as the origin host gives them (github.com via gh; Azure DevOps via az, a bearer token never printed), with the owner\'s own comments, system threads, deleted comments, bare approvals and typo fixes already dropped and counted, thread status noted.',
     inputSchema: obj({
-      action: { type: 'string', enum: ['prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify'] },
+      action: { type: 'string', enum: ['prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'prs'] },
       project: { type: 'string' },
       sha: { type: 'string', description: 'record: full HEAD sha that was reviewed' },
       base: { type: 'string', description: 'prepare, record, lessons: the base branch or sha (default for prepare and lessons: the default branch)' },
@@ -121,12 +121,14 @@ export const THREAD_TOOLS: Tool[] = [
       paths: { type: 'array', items: { type: 'string' }, description: 'lessons: changed paths relative to the repo (instead of or besides base/head)' },
       goal: { type: 'string', description: 'lessons: the change\'s goal; its words select lessons too' },
       budget: { type: 'number', description: 'lessons: tokens (default config.json review.lessonTokens, 3200)' },
-      checklist: { type: 'array', items: { type: 'string' }, description: 'learn: general checklist lines' },
-      helpers: { type: 'array', items: { type: 'object' }, description: 'learn: shared helpers {name, where (path relative to the repo), what}' },
+      checklist: { type: 'array', items: {}, description: 'learn: general checklist lines, each a string, or {text, area} when the line is about ONE area\'s commands or layout: that one is not stored, it comes back to be put in the area\'s rule (learn skill, --area)' },
+      helpers: { type: 'array', items: { type: 'object' }, description: 'learn: shared helpers {name, where (path relative to the repo), what}; a helper whose path and symbol are not in the code is refused by name' },
       replace: { type: 'array', items: { type: 'object' }, description: 'learn: corrections {old, new}' },
       source: { type: 'string', description: 'learn: where the lines come from' },
       which: { type: 'string', description: 'lessons-rm: the number from lessons-list, or a unique piece of the text' },
       apply: { type: 'boolean', description: 'lessons-verify: remove the flagged lines' },
+      pr: { type: 'number', description: 'prs: one pull request number (default: the last `last` completed PRs)' },
+      last: { type: 'number', description: 'prs: how many completed PRs (default 10, at most 30)' },
     }, ['project']),
   },
   { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. A done report is a handover for whoever continues the thread: branch, worktree path, last commit, pushed or not, open items, next step. Done ends this session: when your turn ends it is stopped, and a later message starts a NEW session that reads the handover (not this conversation).', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: the brief you were given is superseded by a later message from the user (say which in text); the desk shows it' }, important: { type: 'boolean', description: 'true: a working progress report the desk should see at once (done, blocked and questions always reach it directly)' }, approval: { type: 'string', description: 'state blocked only: the exact command or action Claude Code\'s permission check denied and the user must approve in YOUR session (the pane shows an Open button for the user; never retry it another way)' } }, ['text']) },
@@ -190,6 +192,46 @@ export const ASK_MAX = 8000
 const OPTIONS_MAX = 1000
 export const reportFile = (home: string, r: { ts: number; from: string; kind: 'report' | 'ask' }) => `${deskState(home)}/reports/${r.ts}-${r.from}-${r.kind}.md` // (the kind: a report and a question of one thread in one millisecond never share a file)
 
+// The desk's CURRENT session id, looked up when desk.json has none or the send says the recorded one is gone (a desk restart, a resume, an
+// older mod that never recorded it): the live session `claude agents --json` lists in the desk folder (the newest when several). '' = none.
+// `cached`: the lookup for a send with NO recorded id: a miss is remembered for a minute (every report would otherwise run `claude agents`
+// again while no desk is live); the lookup after a refusal is never cached.
+export const DESK_MISS_MS = 60_000
+export async function liveDeskSid(h: Host, home: string, cached = false): Promise<string> {
+  const missAt = cached ? await h.store.get('desk-sid-miss').catch(() => undefined) : undefined
+  if (typeof missAt === 'number') {
+    const now = await h.clock.now()
+    if (now >= missAt && now - missAt < DESK_MISS_MS) return ''
+  }
+  const sid = await lookupDeskSid(h, home)
+  if (cached && !sid) await h.store.set('desk-sid-miss', await h.clock.now()).catch(() => undefined)
+  return sid
+}
+async function lookupDeskSid(h: Host, home: string): Promise<string> {
+  const r = await h.process.run(['claude', 'agents', '--json'], { timeoutMs: 20_000 }).catch(() => null)
+  if (!r || r.exitCode !== 0) return ''
+  let v: any
+  try {
+    v = JSON.parse(r.stdout)
+  } catch {
+    return ''
+  }
+  const list: any[] = Array.isArray(v) ? v : Array.isArray(v?.agents) ? v.agents : Array.isArray(v?.sessions) ? v.sessions : []
+  const desk = await realPath(h, deskDir(home))
+  const rows: { sid: string; at: number }[] = []
+  for (const a of list) {
+    const sid = String(a?.sessionId ?? a?.session_id ?? '')
+    if (!sid || /^(stopped|exited|dead|failed|error)$/i.test(String(a?.status ?? ''))) continue
+    const cwd = typeof a?.cwd === 'string' ? a.cwd.replace(/(.)\/+$/, '$1') : ''
+    if (cwd && (cwd === desk || (await realPath(h, cwd)) === desk)) rows.push({ sid, at: Number(a?.startedAt ?? a?.started_at ?? 0) || 0 })
+  }
+  return rows.sort((a, b) => b.at - a.at)[0]?.sid ?? ''
+}
+
+// the text of a full-text file (a report or a question, with its options)
+export const reportBody = (rec: { from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[] }) =>
+  rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
+
 export async function recordDeskSid(h: Host, sid: string): Promise<void> {
   if (!sid) return
   const home = await homeDir(h)
@@ -251,7 +293,15 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!send) return ''
   const worth = rec.kind === 'ask' || rec.state === 'done' || rec.state === 'blocked' || important
   if (!worth) return ''
-  const sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
+  let sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
+  let renewed = false // the desk's session id was looked up now (none recorded, or the recorded one was refused)
+  if (!sid) {
+    sid = await liveDeskSid(h, home, true)
+    if (sid) {
+      await recordDeskSid(h, sid).catch(() => undefined)
+      renewed = true
+    }
+  }
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
   // a long text: its full text goes to its own file first (the cut line points at it, by absolute path). `from` must be a thread id: it
   // is part of the file name. No file (bad name, write failed): the cut line is unkeyed and the row stays unread.
@@ -259,15 +309,25 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   let file: string | undefined
   if (first.cut && /^t\d+$/.test(rec.from)) {
     const path = reportFile(home, rec)
-    const body = rec.kind === 'ask' ? `# Question from ${rec.from}\n\n${rec.text.trim()}\n${rec.options?.length ? `\nOptions:\n${rec.options.map(o => `- ${o}`).join('\n')}\n` : ''}` : `# Report from ${rec.from} (${rec.state ?? 'progress'})\n\n${rec.text.trim()}\n`
-    file = await atomicWrite(h, path, body).then(() => path, () => undefined)
+    file = await atomicWrite(h, path, reportBody(rec)).then(() => path, () => undefined)
     if (file) await pruneReports(h, home, file)
   }
   const { line, cut, keyed } = file ? directLine(rec, file) : first
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
     if (keyed) await setKey(h, home, key, true)
-    const r = await send(sid, line)
+    let r = await send(sid, line)
+    // refused ("no live session on this machine has id ..."): the desk was restarted since it recorded its id. Look up its current session
+    // once, keep that id for every thread, and send again; no live desk = the refusal stands and the inbox has the row.
+    if (r && r.isDelivered === false && !renewed) {
+      const live = await liveDeskSid(h, home)
+      if (live && live !== sid) {
+        await recordDeskSid(h, live).catch(() => undefined)
+        sid = live
+        renewed = true
+        r = await send(live, line)
+      }
+    }
     if (r && r.isDelivered === false) {
       if (keyed) await setKey(h, home, key, false)
       // refused: nothing points at the file, and the unread row hands the full text over at the next prompt (a send that THREW may have
@@ -275,7 +335,8 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
       if (file) await h.process.run(['rm', '-f', file]).catch(() => undefined)
       return ` (direct send to the desk refused: ${oneLine(String(r.reason ?? 'no reason'), 120)}; it reads this from its inbox)`
     }
-    return !cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)'
+    const moved = renewed ? ' [the desk had a new session: found it and sent there]' : ''
+    return (!cut ? ' (also sent to the desk)' : keyed ? ' (sent to the desk cut short; the full report is in a file the desk can read, and is not handed over again)' : ' (sent to the desk cut short; the full report is in its inbox and is handed over at its next prompt)') + moved
   } catch (e) {
     if (keyed) await setKey(h, home, key, false).catch(() => undefined)
     return ` (direct send to the desk failed: ${oneLine(String((e as Error)?.message ?? e), 120)}; it reads this from its inbox)`

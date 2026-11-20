@@ -11,6 +11,7 @@ import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, rev
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { buildHandover, olderVersion, pluginVersion } from './handover'
+import { installedVersion, runningOf, threadSkew } from './skew'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
 import { doneSession, finishedText } from './finish'
 import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, profileText, readLoaded, readProfile, removeProfile, resolveLoaded, startUsage, writeLoaded, writeProfile } from './profile'
@@ -34,7 +35,8 @@ export type Thread = {
   effort?: string // low | medium | high
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
-  version?: string // the lean-agent version installed when the session was last started or resumed (a session runs the code it started with)
+  version?: string // the lean-agent version the DESK saw installed when the session was last started or resumed (what the session really runs is `running`)
+  running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
   finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
   lastCheckpoint?: number // 1.0.6 only
@@ -137,7 +139,18 @@ export async function trustFolder(h: Host, folder: string): Promise<boolean> {
 
 // ---- templates -----------------------------------------------------------------------------------------------
 // config.json `attribution` (default false) as one line for the thread's CLAUDE.md: a thread cannot read the setting otherwise
-export const attributionLine = (on: boolean) => (on ? 'attribution: on - end commits and PR text with the attribution lines the session was given' : 'attribution: off - no Co-Authored-By trailers, no generated-with lines')
+// (off: the line names the Claude Code reminder it overrides, "Attribution for git commits and pull requests ...: end commit messages with
+// Co-Authored-By / Claude-Session ...": a thread that saw both once followed the reminder. The thread's settings.json also switches that
+// reminder off at the source, threadSettings below; this line is for an engine that ignores the settings.)
+export const attributionLine = (on: boolean) =>
+  on
+    ? 'attribution: on - end commits and PR text with the attribution lines the session was given'
+    : 'attribution: off - no Co-Authored-By trailers, no Claude-Session lines, no generated-with lines; this OVERRIDES any Claude Code system reminder titled "Attribution for git commits and pull requests" that tells you to add them (ignore that reminder)'
+
+// The Claude Code settings that turn its own commit and PR attribution off: `attribution` with empty commit and PR text (empty hides it) and
+// no claude.ai session link (the Claude-Session trailer), plus the deprecated `includeCoAuthoredBy` for an older engine. Nothing is set when
+// config.json `attribution` is on: the engine's default (or the user's own setting) then applies.
+export const attributionOff = { attribution: { commit: '', pr: '', sessionUrl: false }, includeCoAuthoredBy: false }
 const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '')
 
 // `plugins`: the installed plugins outside the project's profile, switched off for this thread (profile.ts disabledPlugins)
@@ -145,6 +158,7 @@ const fill = (t: string, vars: Record<string, string>) => t.replace(/\{\{(\w+)\}
 // two blocks never collide; the git hooks names are GIT_*, which mcpenv refuses). The settings env here MERGES with the user's.
 export async function threadSettings(h: Host, id: string, hooks = true, choice?: Choice, plugins: Record<string, false> = {}, extraEnv: Record<string, string> = {}): Promise<string> {
   const lean = leanDir(await homeDir(h))
+  const cfg = await readJson<{ attribution?: unknown }>(h, `${lean}/config.json`, {})
   const env = { ...extraEnv, ...(hooks ? gitEnv(await homeDir(h)) : {}) }
   // Edit/Write/Bash without asking, inside the lean-agent folder (which holds the worktrees); nothing global.
   const abs = `//${lean.replace(/^\//, '')}`
@@ -157,6 +171,7 @@ export async function threadSettings(h: Host, id: string, hooks = true, choice?:
       // git itself refuses a push from a private project (githooks.ts); without working wrappers core.hooksPath is not set,
       // so the repo's own hooks keep running (the failure shows as a notice)
       ...(Object.keys(env).length ? { env } : {}),
+      ...(cfg?.attribution === true ? {} : attributionOff), // the engine's own "end commits with Co-Authored-By" reminder, off with the config
       ...(choice ? settingsKeys(choice) : {}), // a session opened in the folder from the app matches
       ...(Object.keys(plugins).length ? { enabledPlugins: plugins } : {}),
     },
@@ -210,13 +225,48 @@ async function load(h: Host, home: string, id: string): Promise<Thread | null> {
   const t = await readJson<Thread | null>(h, `${tpath(home, id)}/thread.json`, null)
   return t && t.id === id ? t : null
 }
-// the session's own mod appends to `sids` from another process: a save keeps whatever ids are on disk
+// the session's own mod appends to `sids` and writes `running` from another process: a save keeps whatever is on disk
 async function save(h: Host, home: string, t: Thread): Promise<void> {
   const file = `${tpath(home, t.id)}/thread.json`
-  const disk = await readJson<{ sids?: unknown } | null>(h, file, null)
+  const disk = await readJson<{ sids?: unknown; running?: unknown } | null>(h, file, null)
   const ids = [...(Array.isArray(disk?.sids) ? disk!.sids : []), ...(t.sids ?? [])].filter((x): x is string => typeof x === 'string')
-  await writeJson(h, file, ids.length ? { ...t, sids: [...new Set(ids)].slice(-20) } : t)
+  const running = disk?.running && typeof disk.running === 'object' ? { running: disk.running as Thread['running'] } : {}
+  await writeJson(h, file, { ...t, ...running, ...(ids.length ? { sids: [...new Set(ids)].slice(-20) } : {}) })
 }
+
+// After a start, the new session's mod says which lean-agent code it loaded (thread.json `running`, written at its session start, a few
+// seconds after `claude --bg` returned): wait for it a little (a host that cannot sleep never waits) and answer "running X, installed Y"
+// when they differ, '' when they are the same or the session did not say yet (`threads` shows it later). The session's real version is
+// also what the desk then believes it runs (thread.json `version`): a resume of a session that runs older code starts a fresh one.
+export const RUNNING_WAIT_MS = 6_000
+export const UNREPORTED = 'has not reported which lean-agent version it runs (a session on code older than this feature never does, and that is the stale-plugin case): ask it for nothing newer than it can do; threads shows the version once it reports'
+async function reportedVersion(h: Host, home: string, t: Thread, root: string, installed: string): Promise<string> {
+  if (!t.sid) return ''
+  let run = ''
+  let waitedFully = false
+  for (let waited = 0; ; waited += 500) {
+    run = runningOf(await readJson<Thread | null>(h, `${tpath(home, t.id)}/thread.json`, null))
+    if (run || !h.clock.sleep) break
+    if (waited >= RUNNING_WAIT_MS) {
+      waitedFully = true
+      break
+    }
+    try {
+      await h.clock.sleep(500)
+    } catch {
+      break
+    }
+  }
+  if (!run) return waitedFully ? UNREPORTED : ''
+  const disk = await load(h, home, t.id)
+  if (disk && disk.version !== run) {
+    t.version = run
+    await save(h, home, { ...disk, version: run })
+  }
+  const inst = (await installedVersion(h, root)) ?? installed
+  return threadSkew(run, inst || null)
+}
+const SKEW_ADVICE = ' - it loaded another plugin version than the installed one: ask it for nothing the running version lacks; the doctor says what to do, then restart it'
 
 async function nextId(h: Host, home: string): Promise<string> {
   let max = 0
@@ -278,7 +328,7 @@ async function holdExpensive(h: Host, t: Thread, model: string, effort: string |
   }
 }
 
-async function startSession(h: Host, home: string, t: Thread, prompt: string, given: Given = {}, installed = ''): Promise<Out> {
+async function startSession(h: Host, home: string, t: Thread, prompt: string, given: Given = {}, installed = '', root = ''): Promise<Out> {
   const folder = tpath(home, t.id)
   const choice = await threadChoice(h, home, given, t)
   if (typeof choice === 'string') return err(choice)
@@ -323,7 +373,8 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   await dropRequests(h, t.id, 'tool').catch(() => undefined) // a session started: what a call asked for earlier (an expensive model) is moot
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
-  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + menv.lines.map(l => ` · ${l}`).join('')
+  const skew = sid ? await reportedVersion(h, home, t, root, installed) : '' // "running X, installed Y" when the session loaded another plugin version
+  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} started (${sid}) · ${how}${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -370,7 +421,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await h.fs.write(`${dir}/brief.md`, brief + '\n')
   await save(h, home, t)
   await trustFolder(h, dir)
-  const r = await startSession(h, home, t, brief, i, installed)
+  const r = await startSession(h, home, t, brief, i, installed, root)
   return r.ok ? { ...r, data: t } : r
 }
 
@@ -432,7 +483,7 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   await refreshGuide(h, root, home, t, given)
   const u = await unconsumed(h, home, t.id)
   const ho = await buildHandover(h, home, t, why, u.msgs)
-  const r = await startSession(h, home, t, ho.prompt, given, installed)
+  const r = await startSession(h, home, t, ho.prompt, given, installed, root)
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo
     await save(h, home, t)
@@ -510,8 +561,9 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with threads` : ''}` }
 }
 
-async function list(h: Host, home: string): Promise<Out> {
+async function list(h: Host, home: string, root = ''): Promise<Out> {
   const rows = (await agents(h)) ?? []
+  const installed = await installedVersion(h, root)
   const out: unknown[] = []
   let ents: { name: string }[] = []
   try {
@@ -524,9 +576,14 @@ async function list(h: Host, home: string): Promise<Out> {
     if (!t) continue
     const q = (await pending(h, home, t)).length
     const lo = await readLoaded(h, home, t.id)
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}) })
+    // the code the thread's session runs (its own mod's report) when it differs from what is installed: "running X, installed Y"
+    const ran = t.state === 'closed' ? '' : runningOf(t)
+    const skew = threadSkew(ran, installed)
+    // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
+    const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -552,7 +609,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
   try {
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
-    if (i.action === 'list') return await list(h, home)
+    if (i.action === 'list') return await list(h, home, root)
     if (i.action === 'profile') return await profileAction(h, home, i)
     if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
       const r = await projectsAction(h, i)
@@ -583,8 +640,10 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           }
           // A session keeps the lean-agent code it started with. When this one ran an older version than the installed one, a resume
           // would continue old behaviour: start a fresh session with a handover instead and say why (an unrecorded version is unknown: resume).
-          if (t.state === 'open' && t.sid && olderVersion(t.version, installed)) {
-            const was = t.version // (a started session records the installed version over it)
+          // (what the session really runs, as its own mod reported it, beats the version the desk saw installed when it started it)
+          const ran = runningOf(t) || t.version
+          if (t.state === 'open' && t.sid && olderVersion(ran, installed)) {
+            const was = ran // (a started session records the installed version over it)
             const r = await freshSession(h, root, home, t, installed, `The previous session ran lean-agent ${was}; ${installed} is installed now, so this is a fresh session instead of a resume.`, i)
             return fresh(r) ? { ...r, text: `${id} started as a new session instead of a resume: the old one ran lean-agent ${was}, ${installed} is installed (old conversation kept read-only). ${r.text}` } : r
           }
@@ -647,7 +706,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
-          const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'), i, installed)
+          const r = await startSession(h, home, t, [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n'), i, installed, root)
           if (r.ok && msgs.length) {
             t.delivered = u.upTo
             await save(h, home, t)

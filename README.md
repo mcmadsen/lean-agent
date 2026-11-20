@@ -507,6 +507,20 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   app is running (it waits ten minutes and never launches it). `/lean-agent-setup` (or `doctor fix`) reinstalls it.
 - **"folder not trusted" from a thread start**: the desk trusts folders by real path (`~/.claude.json`). `/lean-agent-setup`
   repeats it; if `~/.claude.json` does not parse, lean-agent leaves it alone: accept the trust dialog once.
+- **A thread runs an older lean-agent than the installed one** (`threads` and the start reply say "running 1.0.9, installed 1.0.11"; its
+  `review` skill comes from `~/.claude/plugins/cache/<marketplace>/lean-agent/1.0.9/`, its `lean_review` lacks newer fields, a guard refusal
+  ends with `(lean-agent 1.0.9)`). The thread's own mod writes the version it runs into `thread.json` (`running`) at its session start;
+  `thread.json` `version` is only what the desk saw installed when it started the session, which is why this used to go unnoticed.
+  *Cause, as far as it could be established:* lean-agent pins nothing (a thread's `settings.json` only switches OTHER plugins off, and
+  `claude --bg` is started without `--plugin-dir`); the plugin cache keeps every installed version's folder, so an older path still
+  resolves; and Claude Code applies a plugin update only to a session started after it (`claude plugin update` says "restart required to
+  apply"). The thread above was started from the pane while the background service behind `claude --bg` still held the plugin it
+  loaded at its own start, and a session it starts gets that state, not the installed one. This was concluded from the code and the CLI
+  (not reproduced: it needs a service started before an update). *What you can do:* when no thread is working, quit and reopen the Claude
+  app (that restarts the service; `claude respawn <id>` restarts one session onto the current binary, whether it also reloads plugins
+  was not verified), then restart the thread from the pane; the start reply shows the version it now runs. The doctor shows a
+  `FIX thread tN running X, installed Y` row with this advice. lean-agent never restarts a service itself and never tells the desk to.
+  Until it is fixed, do not ask that thread for anything its version lacks.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.

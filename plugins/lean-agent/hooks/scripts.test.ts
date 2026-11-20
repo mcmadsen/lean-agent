@@ -672,6 +672,44 @@ test('an auditor\'s Agent reply with a LEAN-AUDIT line is recorded by the mod, w
   expect(JSON.stringify(r2.context ?? '')).not.toContain('count-lines')
 })
 
+test('an auditor call that asks for the background is handed on in the foreground, so its verdict is recorded; other agents are left alone', async ($, on) => {
+  let sha = ''
+  const seen: any[] = []
+  let reply = (): string => ''
+  const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', { tool: 'Agent' }, ((_: any, e: any) => (seen.push(e), { result: reply() })) as any))
+  // a brief goes stale once its audit is recorded: every auditor call gets its own script (a new name) and the brief of that
+  let cur = ''
+  const brief = async (name: string) => {
+    cur = name
+    s.h.files.set(`/tmp/w/${name}.py`, `print("${name}")\n`) // (the same text under another name is refused as already audited)
+    const p = await propose(s.h, { name, path: `/tmp/w/${name}.py` })
+    expect(p.text).toContain(`audit ${name}`)
+    sha = meta(s.h, `/h/.lean-agent/scripts/candidates/${name}`).sha256
+    return briefFor(s.h.host, name)
+  }
+  reply = () => `fine\n${line({ name: cur, network: true, sha })}\nLEAN-FEEDBACK {"status":"done","missing":"","remember":[]}` // (a claim of network use: audited, never adopted by itself)
+  const r: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:auditor', prompt: await brief('cl-a'), run_in_background: true } as any)
+  expect(seen[0].run_in_background).toBe(false) // what the engine runs: the foreground
+  expect(JSON.stringify(r.context)).toContain('the auditor ran in the foreground')
+  expect(JSON.stringify(r.context)).toContain('cl-a: audited') // the verdict came with the reply and is recorded
+  expect(meta(s.h, `${CAND.replace('count-lines', 'cl-a')}`).audit.network).toBe(true)
+  // no field, or an explicit false: handed on as it came (no key invented), and no note
+  const n1: any = await $.tool.call({ tool: 'Agent', subagent_type: 'auditor', prompt: await brief('cl-b') } as any)
+  expect(n1.deny).toBeUndefined()
+  expect('run_in_background' in seen[1]).toBe(false)
+  const f: any = await $.tool.call({ tool: 'Agent', subagent_type: 'auditor', prompt: await brief('cl-c'), run_in_background: false } as any)
+  expect(seen[2].run_in_background).toBe(false)
+  expect(JSON.stringify(f.context ?? '')).not.toContain('ran in the foreground')
+  // another agent type keeps its background request
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: 'x', run_in_background: true } as any)
+  expect(seen[3].run_in_background).toBe(true)
+  // an engine that ignored the switch answers "Async agent launched": no verdict, and the thread is told so
+  reply = () => 'Async agent launched. output_file: /x'
+  const lost: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:auditor', prompt: await brief('cl-d'), run_in_background: true } as any)
+  expect(JSON.stringify(lost.context)).toContain('its verdict was NOT recorded')
+  expect(JSON.stringify(lost.context)).not.toContain('ran in the foreground')
+})
+
 test('through the engine: a scratch script that ran is nudged once at the next prompt; a run of an adopted one is counted', async ($, on) => {
   const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', () => ({ result: 'ok' }) as any))
   s.h.files.set('/tmp/w/tot.py', 'print(1)\n')

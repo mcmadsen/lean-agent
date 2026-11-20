@@ -25,6 +25,57 @@
 - **`lean_doctor stats` shows the opus share** of the window's spend with the threads that run on opus, and `lean_doctor check` has a FIX
   row when opus is over 40 % of the last 7 days' spend ("opus is 64% of spend: threads t1, t3 run on opus").
 - **A red "Needs you" row** when the app started the desk on an expensive model and the mod could not switch it to sonnet / high.
+- **`lean_review` `learn` follow-ups.** (1) A checklist line may be `{text, area}`: a line about ONE area's commands or layout is not stored,
+  the answer returns it under "NOT stored ... run the learn skill with --area <area>" (the tool never writes a rule file: the rule caps
+  and the scripts block stay the learn skill's), a line a reviewer would check in any change stays a plain string and goes to the store;
+  the review-learn skill has the one-line test. An area that is not a folder or rule name is refused. (2) `learn` runs the helper
+  existence check of `lessons-verify` (one shared function) before it adds a helper and refuses one whose path and symbol it cannot find,
+  naming it ("refused helper X (path): path ... and symbol ... not found on HEAD"); the other helpers are added; with no repo or no commit
+  the helpers are added and the answer says they were not checked. (3) The answer ends with what the last `prs` fetch dropped (the owner's
+  own comments, system threads, deleted comments, approvals, typo fixes) next to its own result, for twelve hours after the fetch.
+- **One PR-comment fetch for GitHub and Azure DevOps, shared by the `pr` and `review-learn` skills** (`hooks/prhost.ts`, `lean_review`
+  action `prs`: `project`, `pr` or `last` (default 10, at most 30), `base`, `repo`). `review-learn` was GitHub-only (`gh api user`); an
+  Azure DevOps project (origin on `dev.azure.com`, `*.visualstudio.com`, or the ssh forms) got nothing. The host now comes from the origin
+  URL, like the `pr` skill: github.com uses `gh` (owner = `gh api user --jq .login`, the last merged PRs, `gh pr view --json
+  reviews,comments` and the inline comments); Azure DevOps uses `az` (owner = `az account show --query user.name`; `az repos pr list
+  --status completed --top N --target-branch <base>`, then other targets when fewer than N; the threads from the REST endpoint
+  `.../pullRequests/<n>/threads` with a bearer token from `az account get-access-token --resource
+  499b84ac-1321-427f-aa17-267ca6975798`, handed to curl on stdin, kept out of every argument list, scrubbed from every error and never
+  printed; never a PAT). A script drops what is never a lesson and counts each kind: the owner's own comments, system threads (the
+  `CodeReviewThreadType` property: votes, policy results, ref updates, reviewer changes, and comments with `commentType: system`), deleted
+  threads and comments, bare approvals and typo fixes; an Azure thread's status (active, fixed, wontFix, closed, byDesign) stays with its
+  comments, replies are marked. The `comments` step of the `pr` skill uses the same call, so the two cannot drift. GitHub reads the
+  inline comments with gh's own `{owner}/{repo}` placeholders (a fork, or an Enterprise host gh is logged in to, reads the repo the PRs
+  are in; an origin host that is neither github.com nor Azure is tried through `gh repo view` before it is refused), joins paginated pages
+  by scanning (a `[1] [2]` inside a comment is left alone), and the Azure thread read uses plain `curl -f` (no curl 7.76 option). Only a
+  fetch of the last N PRs is remembered for `learn`'s report; a look at one PR does not replace it. Direct sends to a desk that is not
+  recorded and not live remember the miss for a minute instead of running `claude agents` for every report.
+- **A thread says which lean-agent code it runs, and the desk shows it when that is not the installed one.** A thread restarted from the
+  pane while 1.0.11 was installed loaded the review skill from the cached 1.0.9 folder, its `lean_review` only took 1.0.9's fields, its
+  refusals said "(lean-agent 1.0.9)", and nothing told the desk: `thread.json` `version` is the version the DESK saw installed when it
+  started the session, not what the session loaded. Now the thread's own mod writes `running` (`version`, `sid`, `at`) into `thread.json`
+  at its session start (once per session; a desk save keeps it; the record of an older session is ignored). `lean_thread` `list` adds
+  `running 1.0.9, installed 1.0.11` to a thread's line when they differ (and `codeVersion` / `skew` to its data); a start, restart or
+  reopen waits up to 6 s for the new session's report and adds the same words and "ask it for nothing the running version lacks" to
+  its reply. A session on code older than this feature never reports, which is exactly the stale-plugin case: after the wait the reply
+  says "tN has not reported which lean-agent version it runs ... ask it for nothing newer than it can do", and `threads` shows "version
+  unreported" for a live session a minute after its start; `resume` trusts what the session reported (a session that really runs older code is replaced by a fresh one, not resumed);
+  the doctor has a `FIX thread tN running X, installed Y` row per skewed thread (a newer, dev copy is a note) with the cause and what the
+  user can do. The desk guide says not to ask such a thread for features its version lacks and to restart it once the cause is fixed
+  (and never to restart a service itself). Finding (README "Troubleshooting"): lean-agent causes none of it: a thread's `settings.json`
+  only switches other plugins off (no `enabledPlugins` pin on lean-agent, no `--plugin-dir`), and the plugin cache keeps every installed
+  version's folder. The most likely cause is the background service behind `claude --bg`, which keeps the plugin state it loaded at its
+  own start and hands it to every session it starts until it is restarted (`claude plugin update` itself says "restart required to
+  apply"). Established from the code and the CLI help, not reproduced. The doctor row tells the user to quit and reopen the Claude app
+  when no thread is working, then restart the thread; lean-agent never restarts a service itself.
+- **A subagent cap that leaves room for the review.** `config.json` `agents.cap` (a whole number; absent or 0 = lean-agent sets none) is
+  the most subagents a thread's own loop may start in one session (the session id in thread.json; a restart counts from zero again,
+  the count is `threads/<tN>/subagents.json`). Reviewer passes (`lean-agent:reviewer`, up to 6 per session: two independent runs of up to
+  three passes fit) and the review's second-opinion reader (a `lean-agent:reader-haiku|sonnet` whose prompt has the line `review:
+  second-opinion`, up to 2) are not counted and never refused by the cap; past those numbers they count like any subagent, so the marker
+  cannot dodge the cap. A thread that spent its cap on traces used to have room for one reviewer pass; the review skill now says how the
+  cap applies (a cap in the user's own CLAUDE.md is read the same way) and tells the thread to put the marker line on the second-opinion
+  reader only.
 
 ### Changed
 - **MODEL POLICY (cost data: by model opus $93.78, sonnet $26.79, haiku $0.75; reviewer agents in threads $13.89 of that).**
@@ -104,6 +155,44 @@
   <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,
   today only, not when a later session could not be set).
 
+- **The review skill's `allow-cmd` grants work from the thread folder.** The thread's session folder is not a repository, so the grants
+  `git diff <base>...<sha>`, `git log ...`, `git show <sha>` and `git merge-base ...` failed with "not a git repository" there. The skill
+  now grants them as `git -C <worktree> diff|log|show|merge-base ...`. Grant matching in the guard compares word by word: spacing, quotes,
+  `--no-pager` and the spelling of the `-C` path (`/w/`, `/w/../w`) no longer decide, a grant for one checkout is never one for another,
+  and a command with a pipe, redirect or substitution still never rides on a grant. `git merge-base` (read-only) is now built in for the
+  readers and the reviewer, like `diff`, `log`, `show`, `status` and `rev-parse`.
+- **An auditor's verdict is recorded even when the thread asked for the background.** An `lean-agent:auditor` Agent call with
+  `run_in_background: true` returned "Async agent launched" at once and its `LEAN-AUDIT` line arrived later in a hand-back that no hook
+  records, so the script stayed unaudited. The thread's `tool.call` hook now hands such a call on with `run_in_background: false` (other
+  agent types keep their request) and tells the thread; if an engine ignores the switch and the reply is still "Async agent launched",
+  the thread is told no verdict was recorded and to run the audit again in the foreground.
+- **A thread's direct report finds the desk again after a desk restart.** A report refused with "no live session on this machine has
+  id <uuid>" (the desk had restarted, the thread still held the old id in `desk.json`) fell back to the inbox and kept sending to the dead
+  id. The send now looks up the desk's live session (`claude agents --json`, the session in the desk folder, the newest when several)
+  when it is refused or when no id is recorded, writes it to `desk.json` for every thread, and sends once more; the result line says
+  "the desk had a new session". No live desk session = the refusal stands and the inbox has the row, as before.
+- **With `attribution` off a thread no longer follows Claude Code's own "end commits with Co-Authored-By / Claude-Session" reminder.**
+  The reminder comes from the engine's attribution setting, which a thread's CLAUDE.md ("no trailers") could not outvote. The thread's
+  `.claude/settings.json` now carries `attribution: {commit: "", pr: "", sessionUrl: false}` (empty text hides the trailer and the
+  PR line, `sessionUrl: false` drops the `Claude-Session` link) and the deprecated `includeCoAuthoredBy: false` for an older engine,
+  written at every start and restart; nothing is set when config.json `attribution` is on. The CLAUDE.md line also names the reminder it
+  overrides ("Attribution for git commits and pull requests") for an engine that ignores the settings.
+- **A restart brief says where the full text of a cut report is.** Earlier reports in the handover are cut to 700 characters (the newest
+  is whole up to 20,000) and used to end in "..." with nothing to follow. A cut line now ends in `(cut: full text in
+  <home>/.lean-agent/desk/reports/<ts>-<thread>-<kind>.md)`; the handover writes that file when the desk never did (a short report, or
+  one pruned after 30 days), never overwrites one that exists, and names the inbox row instead when a file cannot be written.
+- **The read-only agents no longer open with a refused `cd <dir> && cat ...`.** `reader-sonnet`, `reader-haiku` and `explorer` now say up
+  front "absolute paths only, never `cd`" (use `/abs/path/file` or `git -C /abs/repo ...`); the skills contract check fails when one of
+  them loses the sentence.
+- **Type warnings.** `claude plugin validate` no longer reports the implicit-`any` warnings of the pane specs, and the four
+  `mcp__lean-agent__*` tool matchers are `as const` template literals (validate passes with only the existing icon warning).
+
+### Removed
+- **The 1.0.10 opus pin of the desk** (the desk default is sonnet / high again; `lean_doctor fix` replaces the pin 1.0.10 and 1.0.11 wrote).
+- **The automatic opus choice of the reviewer by risk** (`chooseModel` returned opus for security, concurrency, schema, UI strings,
+  public API, config formats, removed symbols and large diffs): the same risk now means two sonnet runs.
+- **`worker-opus` as a default choice**: it stays available, but only when the user asks and approves it in the pane.
+- **The pane's stub buttons** (`hooks/panelinks.ts` said "comes in this release"): Open and New thread open the real panes.
 
 ## 1.0.11
 

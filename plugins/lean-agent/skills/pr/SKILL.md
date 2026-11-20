@@ -52,9 +52,14 @@ with the token in the header, read from an environment variable and never printe
   find a branch's PR with `gh pr list --head <branch> --json number,url,state`. Azure: `az repos pr show --id <n>`;
   `az repos pr list --source-branch <branch> --status all --output json`. One row per PR: `tN | #n | state | checks | review`.
   A status the desk cannot read (no CLI, not logged in, other host) is reported as such; the desk then asks the thread with `send`.
-- **comments** (thread only; the desk reads the summary of `status` and asks the thread for details): github: `gh pr view <n> --json reviews,comments`
-  plus `gh api repos/{owner}/{repo}/pulls/<n>/comments`. Azure: `az repos pr show --id <n>` for the state and REST `.../pullRequests/<n>/threads`
-  for the comments.
+- **comments** (thread only; the desk reads the summary of `status` and asks the thread for details): thread: `lean_review` `prs` with
+  `project` and `pr` = the number. It is the one fetch `review-learn` uses too (`hooks/prhost.ts`), so the two never drift: it picks the
+  host from the origin URL as above and returns the comments in one shape, with each Azure thread's status (active, fixed, wontFix,
+  closed ...), the file and line, replies marked, and the owner's own comments, system threads (votes, policy results, ref updates),
+  deleted comments, bare approvals and typo fixes already dropped and counted. For GitHub it runs `gh pr view <n> --json reviews,comments`
+  and `gh api repos/{owner}/{repo}/pulls/<n>/comments`; for Azure DevOps `az repos pr show --id <n>` and REST
+  `.../pullRequests/<n>/threads` with a bearer token from `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`
+  (never a PAT, never printed). Use the CLI forms by hand only when the tool is missing.
 - **update status** (thread only): `az repos pr update --id <n> --status abandoned|active|completed`; github: the user does it, or `gh pr ready` / `gh pr close`.
 - Merging, completing, closing and deleting remote branches are the user's call. thread: ask first with `lean_ask`; desk: ask with AskUserQuestion,
   then `send` the decision to the thread.

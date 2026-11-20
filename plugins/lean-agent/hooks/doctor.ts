@@ -8,7 +8,7 @@ import { DESK_DEFAULT, deskChoice, deskModelConfigured, hasAdditionalDirectory, 
 import { setNotice } from './notices'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
-import { compareVersions, installedVersion, running, skewText } from './skew'
+import { SKEW_CAUSE, compareVersions, installedVersion, running, runsText, skewText, skewedThreads } from './skew'
 import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
 import { pruneStale, staleEntries } from './worktreereg'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
@@ -131,6 +131,14 @@ export async function check(h: Host, root: string): Promise<string[]> {
     if (inst && compareVersions(inst, running.version) > 0) row(false, skewText(running.version, inst))
     else out.push(`ok   lean-agent code ${running.version}${inst ? ' = installed' : ' (installed version could not be read)'}`)
   }
+  // threads whose session runs another plugin version than the installed one (the thread's own mod reports it, thread.json `running`):
+  // an older one is a FIX row with the cause and what the user can do; a newer one (a dev copy) only a note
+  const skewed = await skewedThreads(h, root).catch(() => [])
+  for (const s of skewed) {
+    if (compareVersions(s.run, s.installed) < 0) row(false, `thread ${s.id} ${runsText(s.run, s.installed)}: its session loaded the older plugin; do not ask it for what ${s.installed} added, and restart it once the cause below is fixed`)
+    else out.push(`note thread ${s.id} ${runsText(s.run, s.installed)}: a newer copy than the installed plugin (a dev copy?)`)
+  }
+  if (skewed.some(s => compareVersions(s.run, s.installed) < 0)) out.push(`note ${SKEW_CAUSE}`)
   row(await h.fs.exists(deskDir(home)), 'desk folder ~/lean-agent-desk')
   const real = await realPath(h, deskDir(home))
   let doc: Record<string, any> = {}

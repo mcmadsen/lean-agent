@@ -12,6 +12,7 @@ import type { Host } from './state'
 import { globProblem, globRe, projectDir, slugOk } from './rules'
 import { withFolderLock } from './folderlock'
 import { readConfig } from './budget'
+import { countsLine, lastFetchCounts } from './prhost'
 
 export type Family = 'review-checklist' | 'shared-helpers'
 export const FAMILIES: Family[] = ['review-checklist', 'shared-helpers']
@@ -261,29 +262,43 @@ async function git(h: Host, repo: string, ...a: string[]): Promise<string | null
     return null
   }
 }
-export async function verifyLessons(h: Host, project: string, repo: string, apply = false): Promise<{ lines: string[]; flagged: number }> {
-  const home = await homeDir(h)
-  const now = await h.clock.now()
-  // the git work (many spawns for a big store) runs OUTSIDE the lock; the drops are applied under it to a fresh read, by id and unchanged text
+// The refs of a checkout a helper may be found on (HEAD, origin/HEAD, main, master: those that exist) and their file lists.
+type Tree = { refs: string[]; files: Map<string, string[]> }
+async function treeOf(h: Host, repo: string): Promise<Tree> {
   const refs: string[] = []
   for (const r of ['HEAD', 'origin/HEAD', 'main', 'master']) if ((await git(h, repo, 'rev-parse', '--verify', '--quiet', `${r}^{commit}`)) !== null && !refs.includes(r)) refs.push(r)
   const files = new Map<string, string[]>()
   for (const r of refs) files.set(r, ((await git(h, repo, 'ls-tree', '-r', '--name-only', r)) ?? '').split('\n').filter(Boolean))
+  return { refs, files }
+}
+// '' = the helper's code path or its symbol exists; else why not. The ONE check: `learn` uses it before it adds a helper, `lessons-verify`
+// for the helpers already in the store.
+async function helperProblem(h: Host, repo: string, tree: Tree, text: string): Promise<string> {
+  const { refs, files } = tree
+  const hp = helperParts(text)
+  let why = ''
+  const where = pathsIn(hp.where)
+  const hasPath = where.some(p => refs.some(r => files.get(r)!.some(f => f === p || f.endsWith('/' + p) || f.startsWith(p.replace(/\/$/, '') + '/'))))
+  if (!hasPath) {
+    const names = (hp.name.match(/[A-Za-z_$][\w$]{2,}/g) ?? []).slice(0, 3)
+    let sym = false
+    for (const r of refs) for (const n of names) if (!sym && (await git(h, repo, 'grep', '-q', '-F', '-w', '-e', n, r, '--')) !== null) sym = true
+    if (!sym) why = `path ${where.join(', ') || '(none)'} and symbol ${names.join(', ') || '(none)'} not found on ${refs.join(', ')}`
+  }
+  if (/not confirmed/i.test(text)) why = 'it says it was not confirmed'
+  return why
+}
+export async function verifyLessons(h: Host, project: string, repo: string, apply = false): Promise<{ lines: string[]; flagged: number }> {
+  const home = await homeDir(h)
+  const now = await h.clock.now()
+  // the git work (many spawns for a big store) runs OUTSIDE the lock; the drops are applied under it to a fresh read, by id and unchanged text
+  const tree = await treeOf(h, repo)
+  const { refs } = tree
   const lines = [`checking against: ${refs.join(', ') || 'nothing (no git ref found)'}`]
   if (!refs.length) return { lines: [...lines, 'cannot verify: the repo has no commit'], flagged: 0 }
   const bad: { l: Lesson; why: string }[] = []
   for (const l of live(await readLessons(h, project)).filter(x => x.family === 'shared-helpers')) {
-    const hp = helperParts(l.text)
-    let why = ''
-    const where = pathsIn(hp.where)
-    const hasPath = where.some(p => refs.some(r => files.get(r)!.some(f => f === p || f.endsWith('/' + p) || f.startsWith(p.replace(/\/$/, '') + '/'))))
-    if (!hasPath) {
-      const names = (hp.name.match(/[A-Za-z_$][\w$]{2,}/g) ?? []).slice(0, 3)
-      let sym = false
-      for (const r of refs) for (const n of names) if (!sym && (await git(h, repo, 'grep', '-q', '-F', '-w', '-e', n, r, '--')) !== null) sym = true
-      if (!sym) why = `path ${where.join(', ') || '(none)'} and symbol ${names.join(', ') || '(none)'} not found on ${refs.join(', ')}`
-    }
-    if (/not confirmed/i.test(l.text)) why = 'it says it was not confirmed'
+    const why = await helperProblem(h, repo, tree, l.text)
     if (why) bad.push({ l, why })
   }
   for (const b of bad) lines.push(`${apply ? 'removed' : 'would remove'} #${b.l.id}: ${b.l.text.slice(0, 120)}\n    because ${b.why}`)
@@ -430,6 +445,62 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
   return { ok: true, text: r.text + tail }
 }
 
+// ---- learn, the tool side ------------------------------------------------------------------------------------------------------------
+// A checklist line is a string, or {text, area}: a line about ONE area's commands or layout (how that folder builds, tests or is laid
+// out) carries its `area` (a folder or rule name) and goes to that area's rule file, not to the store; a line a reviewer would check in
+// ANY change ("before adding X, check Y") has no area and goes to the store. The tool cannot write a rule file (the learn skill's thread
+// does, under the rule caps), so area lines are not stored: they come back as a block naming the area to run `learn --area <area>` for.
+const AREA = /^[A-Za-z0-9][\w./-]{0,80}$/
+export function splitChecklist(list: unknown[]): { store: unknown[]; routed: { area: string; text: string }[]; bad: string[] } {
+  const store: unknown[] = []
+  const routed: { area: string; text: string }[] = []
+  const bad: string[] = []
+  for (const c of list) {
+    const o = asObj(c)
+    const text = lineOf(String(typeof c === 'string' ? c : o.text ?? ''))
+    if (!text) continue
+    const area = typeof c === 'string' ? '' : String(o.area ?? '').trim()
+    if (!area) store.push(text)
+    else if (AREA.test(area) && !area.split('/').includes('..')) routed.push({ area: area.replace(/\/+$/, ''), text })
+    else bad.push(`area "${area.slice(0, 40)}" is not a folder or rule name: ${text.slice(0, 60)}`)
+  }
+  return { store, routed, bad }
+}
+async function learnTool(h: Host, project: string, i: any): Promise<{ ok: boolean; text: string }> {
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  const split = splitChecklist(Array.isArray(i.checklist) ? i.checklist : [])
+  // a helper is added only when its code path or symbol exists (the same check as lessons-verify): the others are refused, by name
+  let helpers: unknown[] = Array.isArray(i.helpers) ? i.helpers : []
+  const refusedHelpers: string[] = []
+  const notes: string[] = []
+  if (helpers.length) {
+    const repo = await repoOf(h, project, str(i.repo) || undefined)
+    const tree = repo.startsWith('/') ? await treeOf(h, repo) : null
+    if (!tree || !tree.refs.length) notes.push(`helpers were NOT checked against the code (${repo.startsWith('/') ? 'the repo has no commit' : 'no repo: pass repo, or register the project'})`)
+    else {
+      const ok: unknown[] = []
+      for (const hv of helpers) {
+        const t = helperLine(hv)
+        const why = t ? await helperProblem(h, repo, tree, t) : ''
+        if (why) refusedHelpers.push(`refused helper ${helperParts(t).name || t.slice(0, 40)} (${helperParts(t).where}): ${why}; open the code, give its real path, or leave it out`)
+        else ok.push(hv)
+      }
+      helpers = ok
+    }
+  }
+  const r = await learnLessons(h, project, { checklist: split.store, helpers, replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
+  const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`), ...refusedHelpers, ...split.bad.map(x => `NOT added: ${x}`), ...notes]
+  if (split.routed.length) {
+    const byArea = new Map<string, string[]>()
+    for (const x of split.routed) byArea.set(x.area, [...(byArea.get(x.area) ?? []), x.text])
+    rows.push(`${split.routed.length} line(s) name an area: NOT stored; they belong in that area's rule file: run the learn skill with --area <area> and put them there (it keeps the rule's size cap):`, ...[...byArea].flatMap(([a, ls]) => [`  area ${a}:`, ...ls.map(l => `    - ${l}`)]))
+  }
+  // what the last `prs` fetch dropped before the model saw it, next to what this call did
+  const seen = await lastFetchCounts(h, project)
+  if (seen) rows.push(`from ${seen.prs.length} PR(s): ${countsLine(seen.counts)}`)
+  return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
+}
+
 // ---- the lean_review actions of the lesson store (reviewtool.ts hands them over; null = not one of mine) ------------------------------
 export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify']
 export async function lessonsTool(h: Host, project: string, i: any): Promise<{ ok: boolean; text: string } | null> {
@@ -439,11 +510,7 @@ export async function lessonsTool(h: Host, project: string, i: any): Promise<{ o
   const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
   const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
   if (action === 'lessons') return lessonsFor(h, { project, repo: str(i.repo) || undefined, base: str(i.base) || undefined, head: str(i.head) || undefined, paths: strs(i.paths), goal: str(i.goal) || undefined, budget: typeof i.budget === 'number' && i.budget > 0 ? i.budget : undefined })
-  if (action === 'learn') {
-    const r = await learnLessons(h, project, { checklist: Array.isArray(i.checklist) ? i.checklist : [], helpers: Array.isArray(i.helpers) ? i.helpers : [], replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
-    const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`)]
-    return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
-  }
+  if (action === 'learn') return learnTool(h, project, i)
   if (action === 'lessons-list') return { ok: true, text: await listLessons(h, project) }
   if (action === 'lessons-rm') return str(i.which) ? removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
   if (action === 'lessons-undo') return undoLessons(h, project)

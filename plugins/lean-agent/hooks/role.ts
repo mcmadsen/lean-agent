@@ -69,6 +69,21 @@ export async function recordSid($: Host, id: string, sid: string): Promise<boole
   return true
 }
 
+// The thread's session says which lean-agent code it runs (its own VERSION), once per session: thread.json `running` {version, sid, at}.
+// The desk reads it (list, the start reply, the doctor) and shows "running X, installed Y" when they differ (skew.ts runningOf).
+// Written onto the latest record (the desk saves too); a closed thread's record is left alone. true = the record says it now.
+export async function recordRunning($: Host, id: string, sid: string, version: string): Promise<boolean> {
+  if (!sid || !version || !/^t\d+$/.test(id)) return false
+  const file = `${threadsDir(await homeDir($))}/${id}/thread.json`
+  const t = await readJson<Record<string, any> | null>($, file, null)
+  if (!t || typeof t !== 'object' || t.id !== id || t.state === 'closed') return false
+  if (t.running?.version === version && t.running?.sid === sid) return true
+  const fresh = await readJson<Record<string, any> | null>($, file, null)
+  if (!fresh || fresh.id !== id || fresh.state === 'closed') return false
+  await writeJson($, file, { ...fresh, running: { version, sid, at: await $.clock.now() } })
+  return true
+}
+
 // why a role-bound tool refuses: the role, where the session started, what its id matched
 export async function roleReport($: Host, o: { tool: string; need: 'thread' | 'desk'; role: Role; startDir: string; sid: string }): Promise<string> {
   const have = o.role.kind === 'thread' ? `thread ${o.role.id}` : o.role.kind

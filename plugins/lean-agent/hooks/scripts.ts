@@ -462,6 +462,15 @@ async function adoptVersion(h: Host, f: Found, via: 'audit' | 'user'): Promise<O
 }
 
 // An auditor's Agent reply: when it ends with a LEAN-AUDIT line the mod records the verdict. null = no such line.
+// An auditor's verdict is recorded from the reply of its own Agent call (auditFromReply). A call that asks for the background returns
+// "Async agent launched" at once and the LEAN-AUDIT line comes later, in a hand-back no hook records: the verdict would be lost. So an
+// auditor call always runs in the foreground: the event handed on has run_in_background false.
+export const isAuditorCall = (e: any): boolean => (e?.tool === 'Agent' || e?.tool === 'Task') && /^(lean-agent:)?auditor$/.test(String(e?.subagent_type ?? ''))
+export const wantsBackground = (e: any): boolean => e?.run_in_background === true || e?.run_in_background === 'true'
+export const foregroundCall = (e: any): any => (wantsBackground(e) ? { ...e, run_in_background: false } : e)
+export const AUDIT_FOREGROUND_NOTE = '[lean-agent] the auditor ran in the foreground (run_in_background was switched off): its verdict is recorded when it returns, which a background auditor never gets'
+export const AUDIT_ASYNC_NOTE = '[lean-agent] the auditor was started in the background, so its verdict was NOT recorded: when its LEAN-AUDIT line comes back, run lean_script audit again and start the auditor in the foreground (no run_in_background)'
+
 export async function auditFromReply(h: Host, by: string, text: string, prompt: string): Promise<string | null> {
   const r = parseAudit(text)
   if (!r) return null

@@ -2,7 +2,7 @@
 // the plugin folder: after `claude plugin update` a long-lived session runs OLD code against NEW text (a 1.0.3 guard that
 // refuses what the 1.0.4 explorer skill promises). The mod knows its own version (`running`, set once by register.tsx from
 // pane.tsx VERSION) and compares it with the installed one; a difference is shown (status line, one prompt line, doctor).
-import { homeDir } from './state'
+import { homeDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
 
 export const running = { version: '' } // the version of this code; '' = unknown (specs, helpers used alone)
@@ -71,6 +71,45 @@ export async function installedKeys(h: Host): Promise<string[]> {
     return []
   }
 }
+
+// ---- what a THREAD's session really runs ----
+// The thread's own mod writes `running` {version, sid, at} into thread.json when its session starts (role.ts recordRunning): its own
+// VERSION, the code that session loaded. thread.json `version` is only what the DESK saw installed when it started the session, so a
+// session that loaded an older plugin than the one installed was recorded as the new version and nobody could tell. `running` counts
+// only for the session the record names (a restart replaces the session; the old record is then stale and ignored).
+export type RunningRec = { version: string; sid: string; at: number }
+export function runningOf(t: { sid?: string; running?: unknown } | null | undefined): string {
+  const r = t?.running as Partial<RunningRec> | undefined
+  if (!r || typeof r.version !== 'string' || !SEMVER.test(r.version) || typeof r.sid !== 'string' || !r.sid) return ''
+  return t?.sid && r.sid === t.sid ? r.version : '' // (the older session's id is in `sids`, never `sid`: its record is stale)
+}
+export const runsText = (run: string, installed: string) => `running ${run}, installed ${installed}`
+// '' = same, or either one unknown
+export const threadSkew = (run: string, installed: string | null): string => (run && installed && compareVersions(run, installed) !== 0 ? runsText(run, installed) : '')
+
+// The not-closed threads whose current session runs another lean-agent version than the installed one (the doctor's rows).
+export async function skewedThreads(h: Host, root: string): Promise<{ id: string; run: string; installed: string }[]> {
+  const installed = await installedVersion(h, root)
+  if (!installed) return []
+  const dir = threadsDir(await homeDir(h))
+  const out: { id: string; run: string; installed: string }[] = []
+  for (const e of await h.fs.list(dir).catch(() => [] as { name: string }[])) {
+    if (!/^t\d+$/.test(e.name)) continue
+    const t = await readJson<{ state?: string; sid?: string; running?: unknown } | null>(h, `${dir}/${e.name}/thread.json`, null)
+    if (!t || t.state === 'closed') continue
+    const run = runningOf(t)
+    if (threadSkew(run, installed)) out.push({ id: e.name, run, installed })
+  }
+  return out.sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)))
+}
+
+// What the user can do when a session started on an older plugin than the installed one. The cause: lean-agent pins nothing (the thread
+// settings only switch OTHER plugins off, checked in threads.ts threadSettings), and the plugin cache keeps every version's folder, so an
+// older path still works; the Claude background service that starts `claude --bg` sessions keeps the plugin state it loaded when it
+// started and hands it to every session it starts until it is restarted. lean-agent never restarts a service itself.
+export const SKEW_CAUSE =
+  'cause: lean-agent pins no version (a thread\'s settings only switch other plugins off); the Claude background service that starts `claude --bg` sessions keeps the plugin it loaded when it started, and the plugin cache still holds the older version. ' +
+  'What you can do: when no thread is working, quit and reopen the Claude app (that restarts the service), then restart the thread from the pane. lean-agent never restarts services itself'
 
 export const skewText = (run: string, installed: string) =>
   `lean-agent code ${run} is running but ${installed} is installed: start a new session (threads: close and Start)`

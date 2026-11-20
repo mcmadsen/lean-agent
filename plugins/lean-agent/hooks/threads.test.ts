@@ -541,6 +541,26 @@ test('new writes the attribution line into the thread CLAUDE.md: off by default,
   expect(await mk({ attribution: true })).toContain('attribution: on')
 })
 
+test('attribution off: the CLAUDE.md line names the Claude Code reminder it overrides, and the thread settings.json switches that reminder off', async () => {
+  const mk = async (cfg?: unknown) => {
+    const s = setup()
+    s.h.files.set(`${ROOT}/templates/thread.md`, '{{attribution}}')
+    if (cfg) s.h.files.set('/h/.lean-agent/config.json', JSON.stringify(cfg))
+    await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
+    return { md: String(s.h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')), settings: JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/.claude/settings.json'))) }
+  }
+  for (const cfg of [undefined, { attribution: false }]) {
+    const off = await mk(cfg)
+    expect(off.md).toContain('OVERRIDES any Claude Code system reminder titled "Attribution for git commits and pull requests"')
+    expect(off.md).toContain('Claude-Session')
+    expect(off.settings.attribution).toEqual({ commit: '', pr: '', sessionUrl: false }) // empty text hides it; no session link
+    expect(off.settings.includeCoAuthoredBy).toBe(false)
+  }
+  const on = await mk({ attribution: true })
+  expect(on.md).toContain('attribution: on')
+  expect('attribution' in on.settings || 'includeCoAuthoredBy' in on.settings).toBe(false) // the engine's default (or the user's) stays
+})
+
 test('a desk save keeps the session ids the thread\'s own mod appended meanwhile', async () => {
   const s = setup()
   await leanThread(s.h.host, ROOT, { action: 'new', title: 'x' })
@@ -699,6 +719,38 @@ test('a huge report and queue cannot blow the handover past one argv string; a c
   const prompt = bg[1]![bg[1]!.length - 1]!
   expect(prompt.length).toBeLessThanOrEqual(PROMPT_MAX + 200)
   expect(prompt).toContain('older messages omitted')
+})
+
+test('an older report cut in the handover names the file with its full text, written when the desk never made one', async () => {
+  const { h, state, bg, call } = fresh()
+  await call({ action: 'new', title: 'a', text: 'brief' })
+  const long = 'L'.repeat(1200)
+  const rows = [
+    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (700) and the desk never wrote a file: the handover does
+    { ts: 12, from: 't1', kind: 'report', text: `middle ${long}`, state: 'working' }, // cut, the desk's own file already exists
+    { ts: 13, from: 't1', kind: 'report', text: 'short one', state: 'working' }, // whole: no pointer
+    { ts: 14, from: 't1', kind: 'report', text: 'last one', state: 'done' },
+  ]
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
+  h.files.set('/h/.lean-agent/desk/reports/12-t1-report.md', 'the desk wrote this')
+  await call({ action: 'close', tN: 't1' })
+  state.rows = []
+  await call({ action: 'reopen', tN: 't1' })
+  const prompt = bg[1]![bg[1]!.length - 1]!
+  expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/11-t1-report.md)')
+  expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/12-t1-report.md)')
+  expect(h.files.get('/h/.lean-agent/desk/reports/11-t1-report.md')).toBe(`# Report from t1 (working)\n\nearly ${long}\n`)
+  expect(h.files.get('/h/.lean-agent/desk/reports/12-t1-report.md')).toBe('the desk wrote this') // never overwritten
+  expect(h.files.has('/h/.lean-agent/desk/reports/13-t1-report.md')).toBe(false) // a report that is whole needs no file
+  expect(prompt.split('\n').find(l => l.includes('short one'))).not.toContain('cut:')
+})
+
+test('reportHistory names the full-text path of a cut line only when asked, and reports which were cut', () => {
+  const recs = [{ ts: 1, from: 't1', kind: 'report' as const, text: 'x'.repeat(900), state: 'working' }, { ts: 2, from: 't1', kind: 'ask' as const, text: 'last?', state: undefined }]
+  expect(reportHistory(recs).lines[0]).not.toContain('full text in')
+  const r = reportHistory(recs, REPORT_BUDGET, x => `/d/reports/${x.ts}.md`)
+  expect(r.lines[0]).toContain('(cut: full text in /d/reports/1.md)')
+  expect(r.cutRecs.map(x => x.ts)).toEqual([1])
 })
 
 test('the handover keeps the newest report whole and cuts older ones to the budget', () => {
