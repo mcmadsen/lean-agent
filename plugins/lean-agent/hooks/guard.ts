@@ -365,6 +365,28 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
   })
 }
 
+// A grant (`allow-cmd: git -C /w diff main...abc1234`) matches a command that is the grant itself or the grant followed by more words
+// (flags, paths), compared word by word: spacing, quotes, `--no-pager` and a `-C` path spelled with `..`, `.` or a trailing slash do not
+// matter (a thread folder is not a repository, so the review grants its git commands in the `git -C <worktree> ...` form). The command
+// must have passed hasMeta already: no pipe, redirect or substitution ever rides on a grant.
+const grantWords = (s: string): string[] => {
+  const w = words(s)
+  const out: string[] = []
+  for (let i = 0; i < w.length; i++) {
+    if (w[i] === '--no-pager') continue
+    if (w[i] === '-C' && w[i + 1]?.startsWith('/')) {
+      out.push('-C', norm(w[i + 1]!))
+      i++
+    } else out.push(w[i]!)
+  }
+  return out
+}
+export const grantMatches = (command: string, grant: string): boolean => {
+  const c = grantWords(command)
+  const x = grantWords(grant)
+  return x.length > 0 && x.length <= c.length && x.every((t, i) => t === c[i])
+}
+
 // Built-in read-only commands, so a reader never depends on a brief: only OUR agent types (exact `lean-agent:` prefix) get them;
 // other:explorer, a bare explorer and every other type get nothing (an allow-cmd grant adds on top). One plain `git` command
 // (shell.ts plainPipeline: no redirect, substitution, expansion, glob, brace or tilde outside quotes), the only global options are
@@ -373,7 +395,7 @@ async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
 // config can run programs for status (core.fsmonitor) and diff/show/log -p (diff.external, textconv drivers), git status refreshes
 // .git/index, and `git diff A B` with paths outside the work tree reads them; -c / --ext-diff / -C escapes are what is refused.
 const GIT_EXPLORER = ['log', 'ls-files']
-const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse']
+const GIT_READER = ['log', 'ls-files', 'show', 'diff', 'status', 'rev-parse', 'merge-base'] // (merge-base: the review's `git -C <worktree> merge-base <base> <sha>`; it only reads)
 export const builtinGit = (t?: string): string[] => {
   const n = ownName(t) ?? ''
   return n === 'explorer' || n === 'auditor' ? GIT_EXPLORER : /^reader-/.test(n) || n === 'reviewer' ? GIT_READER : []
@@ -694,7 +716,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
       const refused = await builtinReadOnly($, ctx, c)
       if (!refused) return null
       const g = await grantFor($, ctx)
-      const ok = !hasMeta(c) && (g.cmds ?? []).some(x => c === x || c.startsWith(x + ' '))
+      const ok = !hasMeta(c) && (g.cmds ?? []).some(x => grantMatches(c, x))
       // the refused program is named (first word only) so the feedback export shows WHAT readers ask for
       return ok ? null : `lean-agent: refused: ${refused.prog} (${refused.why}); ${t} may run only its built-in read-only commands (${builtinList(t)}) and the commands the thread granted (allow-cmd)`
     }
@@ -709,6 +731,43 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     return `lean-agent: ${p} is outside the paths the thread granted this worker (allow-edit)`
   }
   return null
+}
+
+// ---- the subagent cap ----------------------------------------------------------------------------------------
+// config.json `agents.cap` (a whole number; absent or 0 = lean-agent sets none, and a cap in the user's own CLAUDE.md is the model's to
+// count): the most subagents a thread's own loop may start in one session (the session id of thread.json; a restart starts again at 0).
+// The review is not "work" under that cap: a thread that spent its cap on traces still gets its reviewer passes. Not counted, and never
+// refused by the cap: `lean-agent:reviewer` (at most REVIEW_EXEMPT per session) and the review's second-opinion reader, a
+// `lean-agent:reader-*` whose prompt has the line `review: second-opinion` (at most SECOND_EXEMPT). Past those numbers they count like any
+// other subagent, so the marker cannot be used to dodge the cap.
+export const REVIEW_EXEMPT = 6
+export const SECOND_EXEMPT = 2
+export const SECOND_OPINION_LINE = /^\s*review:\s*second-opinion\s*$/im
+type CapState = { sid: string; counted: number; review: number; second: number }
+export const capKind = (e: Call): 'review' | 'second' | 'counted' => {
+  const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''
+  if (sub === 'lean-agent:reviewer') return 'review'
+  if (/^lean-agent:reader-(haiku|sonnet)$/.test(sub) && SECOND_OPINION_LINE.test(String(e.prompt ?? ''))) return 'second'
+  return 'counted'
+}
+async function capDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  if (ctx.role.kind !== 'thread' || ctx.agentId || ctx.agentType || (e.tool !== 'Agent' && e.tool !== 'Task')) return null
+  const home = await homeDir($)
+  const cap = Number((await readJson<{ agents?: { cap?: unknown } }>($, `${leanDir(home)}/config.json`, {}))?.agents?.cap)
+  if (!Number.isInteger(cap) || cap <= 0) return null
+  return locked(async () => {
+    const dir = `${threadsDir(home)}/${ctx.role.kind === 'thread' ? ctx.role.id : ''}`
+    const sid = String((await readJson<{ sid?: unknown }>($, `${dir}/thread.json`, {}))?.sid ?? '')
+    const had = await readJson<Partial<CapState>>($, `${dir}/subagents.json`, {})
+    const st: CapState = had?.sid === sid ? { sid, counted: Number(had.counted) || 0, review: Number(had.review) || 0, second: Number(had.second) || 0 } : { sid, counted: 0, review: 0, second: 0 }
+    const kind = capKind(e)
+    if (kind === 'review' && st.review < REVIEW_EXEMPT) st.review++
+    else if (kind === 'second' && st.second < SECOND_EXEMPT) st.second++
+    else if (st.counted >= cap) return `lean-agent: subagent cap reached: ${st.counted} subagents already started in this session (cap ${cap}, config.json agents.cap). Reviewer passes (lean-agent:reviewer) and the review's second-opinion reader (a line "review: second-opinion" in its prompt) do not count against it and are still allowed; do the rest yourself or report with lean_report`
+    else st.counted++
+    await writeJson($, `${dir}/subagents.json`, st)
+    return null
+  })
 }
 
 // ---- entry ---------------------------------------------------------------------------------------------------
@@ -733,6 +792,8 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const p = await auditorPromptProblem($, String(e.prompt ?? ''))
     if (p) return p
   }
+  const capped = await capDenial($, ctx, e)
+  if (capped) return capped
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
     const d = await deskDenial($, ctx, e)
     if (d) return d

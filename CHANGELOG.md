@@ -2,7 +2,22 @@
 
 ## Unreleased
 
+### Added
+- **A subagent cap that leaves room for the review.** `config.json` `agents.cap` (a whole number; absent or 0 = lean-agent sets none) is
+  the most subagents a thread's own loop may start in one session (the session id in thread.json; a restart counts from zero again,
+  the count is `threads/<tN>/subagents.json`). Reviewer passes (`lean-agent:reviewer`, up to 6 per session) and the review's
+  second-opinion reader (a `lean-agent:reader-haiku|sonnet` whose prompt has the line `review: second-opinion`, up to 2) are not
+  counted and never refused by the cap; past those numbers they count like any subagent, so the marker cannot dodge the cap. A thread
+  that spent its cap on traces used to have room for one reviewer pass; the review skill now says how the cap applies (a cap in the
+  user's own CLAUDE.md is read the same way) and tells the thread to put the marker line on the second-opinion reader only.
+
 ### Fixed
+- **The review skill's `allow-cmd` grants work from the thread folder.** The thread's session folder is not a repository, so the grants
+  `git diff <base>...<sha>`, `git log ...`, `git show <sha>` and `git merge-base ...` failed with "not a git repository" there. The skill
+  now grants them as `git -C <worktree> diff|log|show|merge-base ...`. Grant matching in the guard compares word by word: spacing, quotes,
+  `--no-pager` and the spelling of the `-C` path (`/w/`, `/w/../w`) no longer decide, a grant for one checkout is never one for another,
+  and a command with a pipe, redirect or substitution still never rides on a grant. `git merge-base` (read-only) is now built in for the
+  readers and the reviewer, like `diff`, `log`, `show`, `status` and `rev-parse`.
 - **An auditor's verdict is recorded even when the thread asked for the background.** An `lean-agent:auditor` Agent call with
   `run_in_background: true` returned "Async agent launched" at once and its `LEAN-AUDIT` line arrived later in a hand-back that no hook
   records, so the script stayed unaudited. The thread's `tool.call` hook now hands such a call on with `run_in_background: false` (other

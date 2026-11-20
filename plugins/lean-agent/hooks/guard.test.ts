@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { decide, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
+import { REVIEW_EXEMPT, capKind, decide, grantMatches, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
 
@@ -342,7 +342,68 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git diff main...abc1234 | head -5')).toBeNull() // a pipe between two built-in reads
   expect(await bash('git push origin x')).toContain('granted')
   expect(await bash('git diff')).toBeNull() // built in for a reviewer
-  expect(await bash('git merge-base main x')).toContain('granted')
+  expect(await bash('git merge-base main x')).toBeNull() // read-only, so built in for a reader and the reviewer (from 1.0.12)
+})
+
+test('the review grants its git commands as `git -C <worktree> ...`: the thread folder is not a repository; matching is word by word', async () => {
+  const h = setup()
+  const wt = '/h/.lean-agent/worktrees/app/fix-x'
+  const cwd = '/h/.lean-agent/threads/t1'
+  const g = parseGrants(`Review it.\nallow-cmd: git -C ${wt} diff main...abc1234, git -C ${wt} log main..abc1234, git -C ${wt} show abc1234, git -C ${wt} merge-base main abc1234`)
+  expect(g.cmds).toHaveLength(4)
+  await recordGrant(h.host, thread, 'c1', 'lean-agent:reviewer', g)
+  const bash = (command: string, t = 'lean-agent:reviewer') => run(h, thread, { tool: 'Bash', command }, cwd, t, 'r1')
+  expect(await bash(`git -C ${wt} diff main...abc1234 --stat`)).toBeNull()
+  expect(await bash(`git -C ${wt} log main..abc1234 --oneline`)).toBeNull()
+  expect(await bash(`git -C ${wt} show abc1234`)).toBeNull()
+  expect(await bash(`git -C ${wt} merge-base main abc1234`)).toBeNull()
+  // grant matching ignores spacing, --no-pager and the spelling of the -C path
+  expect(grantMatches(`git  --no-pager -C ${wt}/ diff main...abc1234 -- src`, `git -C ${wt} diff main...abc1234`)).toBe(true)
+  expect(grantMatches(`git -C ${wt}/../fix-x diff main...abc1234`, `git -C ${wt} diff main...abc1234`)).toBe(true)
+  expect(grantMatches('git logx', 'git log')).toBe(false) // whole words only
+  expect(grantMatches(`git -C ${wt}-other diff main...abc1234`, `git -C ${wt} diff main...abc1234`)).toBe(false) // another checkout
+  expect(grantMatches('git -C /x diff', '')).toBe(false)
+  // a grant is no grant for another checkout, and never carries a write or a redirect
+  expect(await bash('git -C /elsewhere diff main...abc1234')).toContain('granted') // outside the allowed folders
+  expect(await bash(`git -C ${wt} push origin x`)).toContain('granted')
+  expect(await bash(`git -C ${wt} merge-base main abc1234 > /tmp/x`)).toContain('granted')
+})
+
+test('the subagent cap (config.json agents.cap) counts a thread\'s subagents per session; the reviewer passes and the second-opinion reader do not count', async () => {
+  const h = setup()
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', sid: 'sess-1' }))
+  const agent = (sub: string, prompt = 'do it') => run(h, thread, { tool: 'Agent', subagent_type: sub, prompt }, '/h/.lean-agent/threads/t1')
+  // no cap configured: nothing is counted or refused
+  for (let i = 0; i < 6; i++) expect(await agent('lean-agent:reader-haiku')).toBeNull()
+  expect(h.files.has('/h/.lean-agent/threads/t1/subagents.json')).toBe(false)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ agents: { cap: 3 } }))
+  for (let i = 0; i < 3; i++) expect(await agent('lean-agent:reader-haiku')).toBeNull() // traces: the cap is used up
+  expect(await agent('lean-agent:worker-sonnet')).toContain('subagent cap reached: 3 subagents already started in this session (cap 3')
+  expect(await agent('general-purpose')).toContain('subagent cap reached')
+  // the review still runs: reviewer passes and the marked second-opinion reader are neither counted nor refused
+  const second = 'Look for duplicates.\nallow-cmd: git -C /w log\nreview: second-opinion\n'
+  expect(await agent('lean-agent:reader-haiku', second)).toBeNull()
+  expect(await agent('lean-agent:reviewer', 'review the diff')).toBeNull()
+  expect(await agent('lean-agent:reviewer', 'review the diff again')).toBeNull()
+  expect(await agent('lean-agent:reviewer', 'third pass')).toBeNull()
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/subagents.json')!)).toEqual({ sid: 'sess-1', counted: 3, review: 3, second: 1 })
+  expect(await agent('lean-agent:reader-haiku')).toContain('subagent cap reached') // an unmarked reader is work
+  // the marker is no way round the cap: past 2 second-opinion readers a marked one counts (and is refused here); a bare or foreign type is never exempt
+  expect(await agent('lean-agent:reader-sonnet', second)).toBeNull()
+  expect(await agent('lean-agent:reader-haiku', second)).toContain('subagent cap reached')
+  expect(await agent('reviewer', 'x')).toContain('subagent cap reached')
+  expect(await agent('other:reviewer', 'x')).toContain('subagent cap reached')
+  expect(await agent('lean-agent:worker-haiku', second)).toContain('subagent cap reached') // not a reader
+  // more than REVIEW_EXEMPT reviewer calls in one session count like any other
+  for (let i = 0; i < REVIEW_EXEMPT - 3; i++) expect(await agent('lean-agent:reviewer', 'x')).toBeNull()
+  expect(await agent('lean-agent:reviewer', 'one too many')).toContain('subagent cap reached')
+  // a new session of the thread starts again at zero
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', sid: 'sess-2' }))
+  expect(await agent('lean-agent:worker-sonnet')).toBeNull()
+  expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/subagents.json')!)).toEqual({ sid: 'sess-2', counted: 1, review: 0, second: 0 })
+  // only a thread's own loop is capped: a subagent's own Agent call is not
+  expect(await run(h, thread, { tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: 'x' }, '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
+  expect(capKind({ tool: 'Agent', subagent_type: 'lean-agent:reviewer' } as any)).toBe('review')
 })
 
 test('the plugin-prefixed agent types: lean-agent:worker-* edits under a grant; reviewer, readers, foreign and bare types are read-only', async () => {

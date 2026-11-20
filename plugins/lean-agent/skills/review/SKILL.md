@@ -37,19 +37,25 @@ tool's refusal: do what it says.
    register, subscribe, store, cache, overlay, defer, retry, debounce, poll, map) for existing code that already does the same job.
    A thin wrapper or hook that calls existing code is `wraps-existing`, not a duplicate. Also name siblings that share the problem.
    Do not review style, tests or correctness. Answer as `symbol -> file:line candidate (duplicate | extends-existing |
-   wraps-existing | justified-new, why)`, brief." Give it the same `allow-cmd` line as the reviewer. Pass its candidates (only those
+   wraps-existing | justified-new, why)`, brief." Give it the same `allow-cmd` line as the reviewer and one more line of its own, `review: second-opinion` (that line is how
+   the guard knows this reader belongs to the review: see "Subagent cap" in step 5). Pass its candidates (only those
    with a candidate that is not `justified-new`) to the reviewer as "second opinion: you must confirm or reject EACH one in `reuse`";
    keep them as `second` (`[{symbol, candidate}]`) for the record.
 5. **Pass 1:** spawn the `lean-agent:reviewer` agent on the model prepare chose (the Agent call's `model`: `opus` for security,
    concurrency, migrations/schema/storage, UI strings/locales, public API, config formats, removed public symbols or ~800+ changed
    lines; `sonnet` otherwise and on a re-review; the model line `prepare` prints is the one to use, `config.json` `review.model` wins). Its prompt: the project path, base and full HEAD sha, the goal, the whole
    prepare text, the lessons, the second opinion, the project's test command, and these lines, with the real base and full HEAD sha
-   filled in (a grant matches the command or a prefix of it followed by a space; nothing else, no pipes or redirects):
-   `allow-cmd: git diff <base>...<sha>, git log <base>..<sha>, git show <sha>, git merge-base <base> <sha>`
-   On a re-review add `git diff <since>...<sha>` to that line. The prepare text names its commands as `git -C <checkout> diff|show`;
-   when the reviewer reports one refused (a checkout the guard does not know), add `git -C <checkout> diff, git -C <checkout> show,
-   git -C <checkout> log` to the same line. Tell it to use them as written; `git diff|log|show|status|rev-parse`
+   filled in (a grant matches the command or a prefix of it followed by more words; nothing else, no pipes or redirects). Your session's
+   folder is the thread folder, which is NOT a repository, so every git command names the checkout: `<worktree>` is the absolute path of the
+   worktree (or repo) you review, the same path `git -C` takes everywhere else here:
+   `allow-cmd: git -C <worktree> diff <base>...<sha>, git -C <worktree> log <base>..<sha>, git -C <worktree> show <sha>, git -C <worktree> merge-base <base> <sha>`
+   On a re-review add `git -C <worktree> diff <since>...<sha>` to that line. The prepare text names its commands as `git -C <checkout> diff|show`
+   too: use that checkout as written. Tell the reviewer to use these as written; `git -C <worktree> diff|log|show|status|rev-parse|merge-base`
    and read-only `rg`/`grep`/`find`/`ls`/`cat` are built in, and Read covers the rest; it has no other shell access (no `git grep`).
+   **Subagent cap.** A cap on subagents (`config.json` `agents.cap`, or one in the user's CLAUDE.md) is for the thread's work, not for the
+   review: the reviewer passes (up to 3 per review, 6 per session) and the second-opinion reader (the `review: second-opinion` line) do not
+   count against it, and the guard lets them through when the cap is used up. Never skip or merge a reviewer pass to save a slot, and do not
+   put the `review: second-opinion` line on any other agent.
    It answers in prose plus ONE fenced `json` block (findings, gaps, user_facing, risks, checks, reuse, coverage, siblings, searches,
    unverified) before its LEAN-FEEDBACK line. Keep that block: it is the `review` of the record.
 6. Fix every blocker and major finding (edit, test, commit). A finding the user decides not to fix is declined, never ignored: ask
