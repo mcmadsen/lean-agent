@@ -13,7 +13,7 @@ import { scriptTool } from './scripts'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
-import { NEXT_STEP, bounded, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
+import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 import { openNewThread, openThreadPane } from './panelinks'
@@ -38,7 +38,7 @@ let lastRefresh = ''
 let notice = ''
 const noteSeen = new Map<string, number>() // a model-change note -> when the pane first drew it
 // setup state: the last doctor check (kept 30 s; any press drops it), the lines of the last fix, a press in flight
-let chk: { at: number; problems: string[]; notes: string[]; mcp?: string[]; failed?: boolean } | null = null
+let chk: { at: number; problems: string[]; notes: string[]; info?: string[]; mcp?: string[]; failed?: boolean } | null = null
 let checking: Promise<void> | null = null // a check in flight (a second pane shares it)
 let lastSetup: string[] = []
 let busy = false
@@ -164,7 +164,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       checking ??= (async () => {
         try {
           const c = await bounded($, setupCheck(host, $.plugin.root), 'check', 20_000)
-          chk = { at: now, problems: c.problems, notes: c.notes, mcp: c.mcp }
+          chk = { at: now, problems: c.problems, notes: c.notes, info: infoOf(c.checked), mcp: c.mcp }
         } catch (err) {
           chk = { at: now, problems: [], notes: [`check failed: ${String((err as Error)?.message ?? err).slice(0, 120)}`], failed: true }
         }
@@ -175,6 +175,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     }
     const problems = chk?.problems ?? []
     const notes = chk?.notes ?? []
+    // "lean-agent is not set up" only when the setup itself is missing; everything else the doctor found is a finding (fix vs info)
+    const missing = missingOf(problems)
+    const fixes = [...problems.filter(p => !missing.includes(p)), ...notes]
+    const info = chk?.info ?? []
     // one press at a time; a press that finds a run in flight does nothing
     const setupPress = (label: string, f: () => Promise<{ ok: boolean; text: string } | void>) => async () => {
       if (busy) {
@@ -197,7 +201,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       resetViewCache()
       const o = await setupFix(host, $.plugin.root)
       lastSetup = o.fixed
-      chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes, mcp: o.mcp }
+      chk = { at: await host.clock.now(), problems: o.problems, notes: o.notes, info: infoOf(o.checked), mcp: o.mcp }
     })
     const openIt = setupPress('open desk', () => openDesk(host, e.surface))
     const setupRows = lastSetup.map((l, i) => (
@@ -245,16 +249,35 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {noteRows}
       </Box>
     )
+    // what the doctor found beyond the setup: "Doctor: N findings (F fix, I info)", the fix rows red, the info rows dim; Run fix only when something needs a fix
+    const nFindings = fixes.length + info.length
+    const doctorRows =
+      nFindings > 0 ? (
+        <Box flexDirection="column">
+          <Text bold color={fixes.length ? 'yellow' : undefined}>{`Doctor: ${nFindings} finding${nFindings === 1 ? '' : 's'} (${fixes.length} fix, ${info.length} info)`}</Text>
+          {fixes.map((m, i) => (
+            <Text key={`df-${i}`} color="red">
+              {m}
+            </Text>
+          ))}
+          {info.map((m, i) => (
+            <Text key={`di-${i}`} dimColor>
+              {short(m, 200)}
+            </Text>
+          ))}
+          {fixes.length > 0 && <Button key="doctor-fix" label="Run fix" onPress={runSetup} />}
+        </Box>
+      ) : null
     if (kind !== 'desk') {
       // a session that is not the desk: setup first (or the way to the desk), the desk's own view only in the desk
       return (
         <Box flexDirection="column">
-          {problems.length > 0 ? (
+          {missing.length > 0 ? (
             problemRows
           ) : (
             <Box flexDirection="column">
               <Text bold>This is not the desk</Text>
-              {noteRows}
+              {doctorRows}
               <Text>{NEXT_STEP}</Text>
               <Box>
                 <Button key="open-desk" label="Open desk" onPress={openIt} />
@@ -357,6 +380,15 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       tell()
     }
     const closeOne = (id: string) => twoStep(`close:${id}`, () => closeIds([id]))
+    // Dismiss on a blocked card: the user acknowledged that report (dismiss.ts); the card and badge go until a NEWER blocked report arrives
+    const dismissBlocked = (id: string) =>
+      twoStep(`dismiss:${id}`, async () => {
+        const r = await leanThread(host, $.plugin.root, { action: 'dismiss', tN: id })
+        resetViewCache()
+        notice = short(r.text, 200)
+        if (!r.ok) lastError = notice
+        tell()
+      })
     // Restart: the session is stopped (a working one too) and a NEW one starts with the handover (threads.ts action restart)
     const restartOne = (id: string) =>
       twoStep(`restart:${id}`, async () => {
@@ -550,6 +582,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box flexWrap="wrap" columnGap={1}>
             {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
             {(n.kind === 'question' || n.kind === 'push' || n.kind === 'blocked') && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
+            {n.kind === 'blocked' && !!n.thread && n.key.startsWith('blocked:') && <Button key={`dismiss-${n.thread}`} label={confirming(ui, `dismiss:${n.thread}`, now2) ? `Confirm dismiss ${n.thread}` : 'Dismiss'} onPress={dismissBlocked(n.thread)} />}
             {!!w && <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />}
             {!!w && <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />}
             {n.kind === 'context' && <Button key="restart-desk-top" label={restartLabel} onPress={restartDeskPress} />}
@@ -661,7 +694,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     return (
       <Box flexDirection="column">
         {header}
-        {problems.length > 0 ? problemRows : noteRows}
+        {missing.length > 0 ? problemRows : doctorRows}
         {mcpBlock}
         {!!notice && !errors.includes(notice) && <Text color="yellow">{notice}</Text>}
         {errors.map((m, i) => (

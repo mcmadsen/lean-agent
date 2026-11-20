@@ -1,6 +1,7 @@
 ---
 name: stats
 description: Show what lean-agent sessions and workers cost (per model, role, agent and thread), the daily caps, which learned rules load, and how workers rated their briefs. Use when the user asks about spend, usage or whether the rules help.
+argument-hint: [days] [project]
 roles: desk, thread
 ---
 

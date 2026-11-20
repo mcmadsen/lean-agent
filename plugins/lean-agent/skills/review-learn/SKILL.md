@@ -2,10 +2,16 @@
 name: review-learn
 description: Learn from the review comments on a pull request or a project's recent PRs on GitHub or Azure DevOps, by the host in the origin URL (what reviewers repeatedly ask for), and feed them into the project's rules. Excludes only the lean-agent owner's own comments. Use for "learn from reviews" or after a PR round.
 argument-hint: <project> [PR number]
-roles: thread
+roles: desk, thread
 ---
 
 # Learn from reviews
+
+## Desk
+
+`/lean-agent:review-learn <project> [PR number]` runs in a thread, never on the desk: `lean_thread` action `new` with `project` and `text` "Run lean-agent:review-learn for <project> <PR number if given>; report what changed in the rules". No project: ask which (`lean_thread` `projects`).
+
+## Thread
 
 1. Collect with ONE call: `lean_review` `prs` (`project`; `pr` = a number, or `last` = how many, default 10; `base` = the branch the work
    goes into). It is the same fetch the `pr` skill uses for `comments` (`hooks/prhost.ts`) and picks the host from the project's origin

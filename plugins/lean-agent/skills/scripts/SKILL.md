@@ -1,5 +1,6 @@
 ---
 name: scripts
+argument-hint: [list | <name>]
 roles: desk, thread
 description: Scripts over models - propose, audit, adopt, list and reuse small scripts through the lean_script tool, so counting, summing, aggregating, transforming, diffing and validating never needs a model reading the data. Use when you wrote a script that worked, before writing a new one, or for "which scripts do we have".
 ---

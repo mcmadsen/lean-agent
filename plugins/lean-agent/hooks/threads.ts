@@ -23,6 +23,8 @@ import { doneSession, finishedText } from './finish'
 import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, profileText, readLoaded, readProfile, removeProfile, resolveLoaded, startUsage, writeLoaded, writeProfile } from './profile'
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
+import { newOrReview } from './reviewkind'
+import { dismissAction } from './dismiss'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
@@ -791,7 +793,8 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
       return r
     }
     const installed = await pluginVersion(h, root)
-    if (i.action === 'new') return await create(h, root, home, i, installed)
+    if (i.action === 'new') return await newOrReview(h, root, i, x => create(h, root, home, x, installed)) // review: {..} starts a kind-review thread (reviewkind.ts)
+    if (i.action === 'dismiss') return await dismissAction(h, i) // the user acknowledged tN's blocked report (dismiss.ts)
     const id = i.tN ?? ''
     if (!ID.test(id)) return err(`${i.action} needs tN (like t3)`)
     return await serial(id, async () => {

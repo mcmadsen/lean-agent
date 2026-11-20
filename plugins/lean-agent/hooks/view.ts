@@ -139,6 +139,7 @@ export function groupInbox(answers: AnswerRow[], now: number, titles: Map<string
 }
 
 import { STALE_MS } from './chaser'
+import { dismissedTs } from './dismiss'
 export { STALE_MS }
 const ID = /^t\d+$/
 
@@ -329,7 +330,7 @@ export async function loadView(h: Host): Promise<View> {
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
         asking: asking.has(t.id) || lr?.kind === 'ask',
-        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv), // not once its approval ended: it carried on
+        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv) && !((await dismissedTs(h, home, t.id)) >= lr.ts), // not once its approval ended: it carried on; not once the user dismissed THIS report (a newer blocked one shows again)
         needsYou: !!ag?.needsYou && !paused,
         ...(apv ? { approval: apv } : {}),
         ...(paused ? { pausedUntil: paused.resetAt } : {}),

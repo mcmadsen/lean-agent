@@ -1,6 +1,7 @@
 ---
 name: doctor
 description: Check and repair the lean-agent install (desk folder, login opener, trust), migrate 0.45 state to 1.0 once, and set the variable an MCP server needs (a site or domain). Use when the user says doctor, migrate, "desk did not open at login", after updating from 0.45, or when an MCP server fails with "ENOTFOUND not-setup".
+argument-hint: [check | fix | migrate | export]
 roles: desk
 ---
 

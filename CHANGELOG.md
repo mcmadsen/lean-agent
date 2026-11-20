@@ -110,6 +110,34 @@ and replaceable. All by script, no model turn.
   1h 13m) | 7d: 41%" and the snapshot age (`windowLine(h)` is exported from stats.ts for the pane); the desk notices at 80 % and 90 % once
   per window, naming the working threads; above config `window.holdAbove` (default 85) `new` and `start` replies carry a warning.
 
+### Added
+- **Every review runs through `lean-agent:review`, with evidence.** `lean_thread new` takes `review: {pr | branch | sha, base?}` (and
+  `project`): it starts a review thread whose brief the mod builds from `templates/review-brief.md` (load the skill, prepare at level full,
+  run the passes, record, report); sonnet / high by default, a haiku is raised to sonnet and the reply says so. A kind-review thread
+  cannot report `done` unless a signed `lean_review` record of the full level exists for the sha it prepared; the mod appends the evidence
+  (record sha, level, passes, per-pass verdicts, findings by severity) from the store to the report itself
+  (`reviewkind.ts`, `reviewevidence.ts`; the gate runs in `register.tsx` before `lean_report`).
+- **External review.** `lean_review prepare` takes `ref` (a PR number or URL, a branch, a tag or a sha of the project's origin) and reads it
+  read-only: the mod fetches the ref and the base into its own scratch repository and never touches the user's tree or refs.
+  `record` with `mode: "external"` is never green and says it never counts for the push gate (`reviewext.ts`; skill section "External review").
+  The record now also keeps `level`, `verdicts` and `counts` (display data, not signed).
+- **Direct calls.** `/lean-agent:review <pr|branch|sha|url> [base]` on the desk starts the review thread, in a thread it reviews the
+  worktree as before (the skill is offered to both roles, body by role). `/lean-agent:list` lists threads (`/lean-agent:threads` stays as an
+  alias). `handover`, `rules-pr` and `review-learn` are offered on the desk too (they route to a thread); `stats`, `doctor`, `budget` and
+  `scripts` got an argument-hint. The skills contract checks that every desk skill and command has a description and an argument-hint, and
+  understands `## Desk` / `## Thread` sections.
+- **Coaching tips.** `hooks/intents.ts` is a table (regex -> command + example); when what the user typed to the desk matches, the turn gets one
+  line to add to the reply ("Tip: do this directly with /lean-agent:review <pr>"): at most once per command per day, silent for 7 days after
+  the user used that command directly, one per turn, desk only, config `tips` (default on, `false` switches it off). The table decides,
+  never a model, and a tip never blocks anything.
+- **Dismiss.** `lean_thread dismiss tN` and a two-press **Dismiss** button on a blocked card record in `history.jsonl` that the user
+  acknowledged that blocked report: the notice and the blocked badge go until a NEWER blocked report arrives; the report stays in the inbox.
+
+### Changed
+- **Pane header.** "lean-agent is not set up" and the Set up button show only when the setup itself is missing (desk folder, trust, model
+  line, folder access, opener, launch agent, 1.0 state). What else the doctor found shows as "Doctor: N findings (F fix, I info)" with a
+  Run fix button when something needs a fix.
+
 ## 1.0.14
 
 ### Added

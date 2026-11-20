@@ -2,10 +2,16 @@
 name: handover
 description: Write a handover note (what was done, state, next steps, open questions) as a Markdown file so the next session or person can continue. Use when ending a long thread or when asked for a handoff.
 argument-hint: [tN]
-roles: thread
+roles: desk, thread
 ---
 
 # Handover
+
+## Desk
+
+`/lean-agent:handover <tN>`: the desk writes nothing. `lean_thread` action `send` to `<tN>`: "Write a handover note (lean-agent:handover) and report its path to the desk." No `tN`: ask which thread (`lean_thread` `list`).
+
+## Thread
 
 Write `~/.lean-agent/handovers/<YYYY-MM-DD>-<slug>.md` (create the folder). Contents, short and concrete:
 

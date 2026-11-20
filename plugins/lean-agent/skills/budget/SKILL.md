@@ -1,6 +1,7 @@
 ---
 name: budget
 description: Show today's lean-agent spend against the daily cap and set caps. Use when the user asks about remaining budget or wants to change a cap.
+argument-hint: [show | cap <usd>]
 roles: desk, thread
 ---
 
