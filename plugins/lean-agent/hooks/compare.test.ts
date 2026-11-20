@@ -232,6 +232,7 @@ test('a thread running compare is told to ask the desk (it cannot set a profile)
 
 test('the thread column starts like a thread of the project: its profile is applied and shown, the clean and desk columns are not', async () => {
   const { h, seen } = setup({ installed: true, mcp: true })
+  h.files.set('/h/.lean-agent/config.json', '{"threads":{"plugins":"all","skills":"all"}}') // the pre-1.0.20 behaviour (the lean defaults: threadlean.test.ts)
   h.files.set('/h/.claude/plugins/installed_plugins.json', JSON.stringify({ version: 2, plugins: { 'lean-agent@mk': [{ installPath: '/c/la' }], 'other@mk': [{ installPath: '/c/other' }] } }))
   h.files.set('/c/other/.claude-plugin/plugin.json', '{"name":"other"}')
   h.files.set('/c/other/skills/x/SKILL.md', '# x') // skills and nothing else: the one kind of plugin the profile switches off
@@ -253,6 +254,7 @@ test('the thread column starts like a thread of the project: its profile is appl
 
 test('a project without a profile shows no loaded line; the thread folder still gets loaded.json (everything loads)', async () => {
   const { h } = setup({ installed: true })
+  h.files.set('/h/.lean-agent/config.json', '{"threads":{"plugins":"all","skills":"all"}}') // the pre-1.0.20 behaviour (the lean defaults: threadlean.test.ts)
   const r = await overhead(h.host, ROOT, 'proj')
   expect(r.text).not.toContain('Loaded in')
 })

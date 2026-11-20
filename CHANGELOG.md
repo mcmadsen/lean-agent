@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A thread's base was double what 1.0.19 claimed** (field: "base 62k-63k tokens on every request" with the short tool list; the 31k was measured in a bare
+  container, the rest is the user's own environment). About 31k is the floor; your base depends on your plugins, skills and connectors.
+  - `lean_doctor overhead probe [tN]`: a handful of one-word haiku calls (`claude -p "Reply with the single word ok." --model haiku --output-format json`,
+    prompt first, flags after, a few cents, the output says so) in a thread-shaped folder, each switching one thing off (MCP `--strict-mcp-config`, skills
+    `--disable-slash-commands`, other plugins `enabledPlugins`, your user CLAUDE.md and rules `claudeMdExcludes`, and all of them: the tool list alone). It
+    prints base tokens per variant, names the biggest component and the config line that removes it.
+  - Lean defaults for threads, each with a switch, stated in the start reply ("lean base: plugins lean-agent only, skills lean-agent's only, MCP all
+    available"): `threads.plugins` (default none: a thread loads only lean-agent; an array of names adds more, `"all"` is the old behaviour). Before, other
+    plugins were switched off only when the project had a profile, and then only skill-only plugins (a plugin with hooks, agents or commands never was), so
+    "plugins: all" meant every plugin's text in every request. A plugin that brings an MCP server stays on (switching it off would remove the server).
+    `threads.skills` (default `"lean"`: a thread's skills listing keeps lean-agent's skills, as on the desk; `"all"` lists everything; a user-level skill
+    folder is trimmed from the listing, not hidden from the engine). `threads.mcp`: `"all"` (default, unchanged: connectors available so `allow-mcp:`
+    jobs work), `"project"` (only servers `projects.json` `<name>.mcp` or the profile lists, plus the thread's needs), `"none"`; a server outside the list is
+    deferred (findable through ToolSearch), never removed.
+
 ## 1.0.19
 
 ### Fixed
@@ -24,7 +43,7 @@
   10,230 · `--tools ''` 3,730 · thread folder as is 47,133 · thread folder `--tools Agent,Bash,Read` 19,779. `config threads.tools` (array) adds `--tools` to a
   thread's fresh start, automatic restart and resume (ignored with `lean.orchestrate: false`). A subagent can only use the tools its parent
   has (measured: a worker under `Agent,Bash,Read,Skill,SendMessage,TaskStop` has no Write), so threads now start with a default list that keeps workers
-  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a real thread folder: 47.1k -> 31.0k,
+  working: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage, TaskStop, ToolSearch, WebFetch, WebSearch` (a bare environment: 47.1k -> 31.0k, your base depends on your plugins, skills and connectors: run the probe (see Unreleased),
   about 16k less on every request); `threads.tools: []` or `"all"` brings the full set back. `permissions.deny` does not remove a tool from the request.
 - `lean_doctor overhead [tN]` shows the REAL base (the first request of a session transcript) next to the text estimate; a thread session's mod records its
   first request (`base.json`) and the start reply of a thread says the measured base.

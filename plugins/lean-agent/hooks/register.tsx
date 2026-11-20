@@ -32,6 +32,8 @@ import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, n
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
+import { threadSkillsLean } from './threadlean'
+import { overheadProbe } from './probe'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
 import { statsText } from './stats'
@@ -157,7 +159,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); "probe" or "probe tN": a few one-word haiku calls (about 5 cents) that switch MCP, skills, other plugins and your user CLAUDE.md off one at a time and name the biggest part of the base; context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' } }, required: ['command'] } }
@@ -892,7 +894,7 @@ export const register: Register = on => {
       return { ...r, text: null } // (not the skill stat: that one is the listing's alone)
     }
     if (!isSkillAttachment(type)) return r
-    if (role.kind !== 'desk') {
+    if (role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) {
       skillsSeen(type, `not the desk (role ${role.kind}): untouched`)
       return r
     }
@@ -904,7 +906,7 @@ export const register: Register = on => {
   // a build may list skills in the Skill tool's description instead: same filter, same safety rule
   on('tool.describe', { tool: 'Skill' }, async ($, e: any, next) => {
     const r: any = await next(e)
-    if (role.kind !== 'desk' || typeof r?.description !== 'string') return r
+    if ((role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) || typeof r?.description !== 'string') return r
     const t = trimListing(r.description)
     if (t.text === null) return r
     skillsSeen('Skill tool description', t.reason)
@@ -1067,6 +1069,7 @@ export const register: Register = on => {
         if (o.ok) dropSetupCheck()
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any // the reply never contains the value
       }
+      if (e.action === 'overhead' && /^probe\b/.test(String(e.session ?? ''))) return { result: await overheadProbe(host, String($.plugin.root), String(e.session)) } as any
       if (e.action === 'overhead') return { result: await overheadReport(host, String($.plugin.root), { session: typeof e.session === 'string' && e.session ? e.session : undefined, home: await homeDir(host), tools: { desk: [...seenSpecs.values()], thread: [...THREAD_TOOLS, SCRIPT_SPEC, RUN_SPEC] } }) } as any
       if (e.action === 'context') return { result: await contextReport(host, await homeDir(host), typeof e.session === 'string' && e.session ? e.session : undefined) } as any
       if (e.action === 'dismiss-old-desk') {

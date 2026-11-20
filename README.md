@@ -744,8 +744,9 @@ Everything here is done by script (the thread's or the desk's mod), never by a m
   remove a tool from the request; `--tools` does. A subagent can only use tools its parent session has (measured: a `lean-agent:worker-haiku` of
   a parent started with `--tools Agent,Bash,Read,Skill,SendMessage,TaskStop` answered "Write is disabled"; with `Edit,Write,Grep,Glob` added it
   wrote the file), so the default list keeps what workers and readers need: `Agent, Bash, Read, Edit, Write, Grep, Glob, Skill, SendMessage,
-  TaskStop, ToolSearch, WebFetch, WebSearch` (measured in a real thread folder: 47.1k with the full set, 31.0k with this list, so about 16k less
-  on every request; the mod still refuses the thread's own edits). Config `threads.tools` (array of names) replaces the list; `[]` or `"all"` starts
+  TaskStop, ToolSearch, WebFetch, WebSearch` (measured in a bare environment: 47.1k with the full set, 31.0k with this list, so about 16k less
+  on every request; that is the floor: your base depends on your plugins, skills and connectors (a field machine measured 62k with the same list): run
+  `lean_doctor overhead probe [tN]` to see where yours goes; the mod still refuses the thread's own edits). Config `threads.tools` (array of names) replaces the list; `[]` or `"all"` starts
   threads with the full set again. A tool a thread or worker then lacks is recorded as a missing tool (feedback export). The flag goes on a fresh start, an automatic restart and a `--resume` (before the `--`); it is
   ignored with `lean.orchestrate: false`. The desk is opened by the app without flags and no settings key equivalent to `--tools` was found: its
   pool is cut by the mod's `tool.list` hook (`tools.desk.drop`), unmeasured. `lean_doctor overhead [tN]` shows the REAL base (the first
