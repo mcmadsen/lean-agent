@@ -237,20 +237,26 @@ async function save(h: Host, home: string, t: Thread): Promise<void> {
 // seconds after `claude --bg` returned): wait for it a little (a host that cannot sleep never waits) and answer "running X, installed Y"
 // when they differ, '' when they are the same or the session did not say yet (`threads` shows it later). The session's real version is
 // also what the desk then believes it runs (thread.json `version`): a resume of a session that runs older code starts a fresh one.
-export const RUNNING_WAIT_MS = 8_000
+export const RUNNING_WAIT_MS = 6_000
+export const UNREPORTED = 'has not reported which lean-agent version it runs (a session on code older than this feature never does, and that is the stale-plugin case): ask it for nothing newer than it can do; threads shows the version once it reports'
 async function reportedVersion(h: Host, home: string, t: Thread, root: string, installed: string): Promise<string> {
   if (!t.sid) return ''
   let run = ''
+  let waitedFully = false
   for (let waited = 0; ; waited += 500) {
     run = runningOf(await readJson<Thread | null>(h, `${tpath(home, t.id)}/thread.json`, null))
-    if (run || waited >= RUNNING_WAIT_MS || !h.clock.sleep) break
+    if (run || !h.clock.sleep) break
+    if (waited >= RUNNING_WAIT_MS) {
+      waitedFully = true
+      break
+    }
     try {
       await h.clock.sleep(500)
     } catch {
       break
     }
   }
-  if (!run) return ''
+  if (!run) return waitedFully ? UNREPORTED : ''
   const disk = await load(h, home, t.id)
   if (disk && disk.version !== run) {
     t.version = run
@@ -338,7 +344,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
   const skew = sid ? await reportedVersion(h, home, t, root, installed) : '' // "running X, installed Y" when the session loaded another plugin version
-  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
+  const lt = (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} started (${sid}) · ${how}${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -529,7 +535,9 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     // the code the thread's session runs (its own mod's report) when it differs from what is installed: "running X, installed Y"
     const ran = t.state === 'closed' ? '' : runningOf(t)
     const skew = threadSkew(ran, installed)
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}) })
+    // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
+    const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }

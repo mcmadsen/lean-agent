@@ -116,6 +116,17 @@ test('the start and restart reply says "running X, installed Y" when the new ses
   const r = await call({ action: 'restart', tN: 't1' })
   expect(r.ok).toBe(true)
   expect(r.text).not.toContain('running 1.0')
+  // ... but after the wait it SAYS so: a session on code older than the report feature (the stale-plugin case) never reports
+  expect(r.text).toContain('t1 has not reported which lean-agent version it runs')
+  expect(r.text).toContain('ask it for nothing newer than it can do')
+  // threads shows the same for a live session, a minute after its start
+  state.rows = [{ sessionId: rec(h).sid, id: 'x', name: 't1 · a', cwd: '/h/.lean-agent/threads/t1', startedAt: 1, status: 'busy' }]
+  expect(((await call({ action: 'list' })).data as any[])[0].skew).toBeUndefined() // just started
+  h.clock.t += 61_000
+  const l = await call({ action: 'list' })
+  expect(l.text).toContain('version unreported')
+  await recordRunning(h.host, 't1', rec(h).sid, '1.0.11')
+  expect((await call({ action: 'list' })).text).not.toContain('version unreported')
 })
 
 test('a thread session records the version it runs at its start (through the engine)', async ($, on) => {

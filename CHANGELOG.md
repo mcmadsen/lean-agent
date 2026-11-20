@@ -22,15 +22,22 @@
   printed; never a PAT). A script drops what is never a lesson and counts each kind: the owner's own comments, system threads (the
   `CodeReviewThreadType` property: votes, policy results, ref updates, reviewer changes, and comments with `commentType: system`), deleted
   threads and comments, bare approvals and typo fixes; an Azure thread's status (active, fixed, wontFix, closed, byDesign) stays with its
-  comments, replies are marked. The `comments` step of the `pr` skill uses the same call, so the two cannot drift.
+  comments, replies are marked. The `comments` step of the `pr` skill uses the same call, so the two cannot drift. GitHub reads the
+  inline comments with gh's own `{owner}/{repo}` placeholders (a fork, or an Enterprise host gh is logged in to, reads the repo the PRs
+  are in; an origin host that is neither github.com nor Azure is tried through `gh repo view` before it is refused), joins paginated pages
+  by scanning (a `[1] [2]` inside a comment is left alone), and the Azure thread read uses plain `curl -f` (no curl 7.76 option). Only a
+  fetch of the last N PRs is remembered for `learn`'s report; a look at one PR does not replace it. Direct sends to a desk that is not
+  recorded and not live remember the miss for a minute instead of running `claude agents` for every report.
 - **A thread says which lean-agent code it runs, and the desk shows it when that is not the installed one.** A thread restarted from the
   pane while 1.0.11 was installed loaded the review skill from the cached 1.0.9 folder, its `lean_review` only took 1.0.9's fields, its
   refusals said "(lean-agent 1.0.9)", and nothing told the desk: `thread.json` `version` is the version the DESK saw installed when it
   started the session, not what the session loaded. Now the thread's own mod writes `running` (`version`, `sid`, `at`) into `thread.json`
   at its session start (once per session; a desk save keeps it; the record of an older session is ignored). `lean_thread` `list` adds
   `running 1.0.9, installed 1.0.11` to a thread's line when they differ (and `codeVersion` / `skew` to its data); a start, restart or
-  reopen waits up to 8 s for the new session's report and adds the same words and "ask it for nothing the running version lacks" to
-  its reply; `resume` trusts what the session reported (a session that really runs older code is replaced by a fresh one, not resumed);
+  reopen waits up to 6 s for the new session's report and adds the same words and "ask it for nothing the running version lacks" to
+  its reply. A session on code older than this feature never reports, which is exactly the stale-plugin case: after the wait the reply
+  says "tN has not reported which lean-agent version it runs ... ask it for nothing newer than it can do", and `threads` shows "version
+  unreported" for a live session a minute after its start; `resume` trusts what the session reported (a session that really runs older code is replaced by a fresh one, not resumed);
   the doctor has a `FIX thread tN running X, installed Y` row per skewed thread (a newer, dev copy is a note) with the cause and what the
   user can do. The desk guide says not to ask such a thread for features its version lacks and to restart it once the cause is fixed
   (and never to restart a service itself).

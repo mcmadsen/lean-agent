@@ -211,6 +211,19 @@ test('after a desk restart the refused send looks up the desk\'s live session, k
   sent.length = 0
   await threadTool(h.host, 't2', 'lean_ask', { question: 'which?' }, send)
   expect(sent).toEqual([NEW]) // no lookup, no retry
+  // no desk recorded and none live: the lookup runs once, a miss is remembered for a minute (not one `claude agents` per report)
+  h.files.delete('/h/.lean-agent/desk.json')
+  state.rows = []
+  const lookups = () => h.claudeCalls().filter(a => a[0] === 'agents').length
+  const before = lookups()
+  await threadTool(h.host, 't1', 'lean_report', { text: 'one', state: 'blocked' }, send)
+  await threadTool(h.host, 't1', 'lean_report', { text: 'two', state: 'blocked' }, send)
+  expect(lookups() - before).toBe(1)
+  h.clock.t += 61_000
+  await threadTool(h.host, 't1', 'lean_report', { text: 'three', state: 'blocked' }, send)
+  expect(lookups() - before).toBe(2)
+  state.rows = [{ sessionId: NEW, cwd: '/h/lean-agent-desk', status: 'busy', startedAt: 9 }]
+  h.clock.t += 61_000
   // nothing recorded at all (the desk's own record never happened): the live session is found and recorded
   h.files.delete('/h/.lean-agent/desk.json')
   sent.length = 0

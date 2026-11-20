@@ -2,7 +2,7 @@
 // with canned gh / az / curl answers. All names, ids and URLs here are synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { AZURE_DEVOPS_RESOURCE, azureComments, fetchPrs, githubComments, isApproval, isTypo, keepLessons, lastFetchCounts, parseOrigin, renderFetched } from './prhost'
+import { AZURE_DEVOPS_RESOURCE, azureComments, fetchPrs, githubComments, isApproval, isTypo, joinPages, keepLessons, lastFetchCounts, parseOrigin, renderFetched } from './prhost'
 import { reviewTool } from './reviewtool'
 
 test('the host comes from the origin URL: github, Azure DevOps in its four spellings, anything else is unsupported', () => {
@@ -99,7 +99,7 @@ test('Azure: the owner is the signed-in az user; the last N completed PRs by tar
   expect(tok.argv).toEqual(['az', 'account', 'get-access-token', '--resource', AZURE_DEVOPS_RESOURCE, '--query', 'accessToken', '--output', 'tsv'])
   const curls = seen.filter(s => s.argv[0] === 'curl')
   expect(curls).toHaveLength(3)
-  expect(curls[0]!.argv).toEqual(['curl', '-sS', '--fail-with-body', '-H', '@-', 'https://dev.azure.com/acme/Big%20Project/_apis/git/repositories/widgets/pullRequests/11/threads?api-version=7.1'])
+  expect(curls[0]!.argv).toEqual(['curl', '-sS', '-f', '-H', '@-', 'https://dev.azure.com/acme/Big%20Project/_apis/git/repositories/widgets/pullRequests/11/threads?api-version=7.1'])
   expect(curls[0]!.stdin).toContain(`Authorization: Bearer ${TOKEN}`) // the header goes on stdin
   for (const s of seen) expect(s.argv.join(' ')).not.toContain(TOKEN) // never in an argument list
   expect(r.text).not.toContain(TOKEN)
@@ -146,8 +146,8 @@ test('GitHub: the owner is the gh login; the last N merged PRs into the base, th
     if (j.startsWith('gh pr list')) return { exitCode: 0, stdout: JSON.stringify([{ number: 3, title: 't3', baseRefName: 'main', url: 'u3' }, { number: 4, title: 't4', baseRefName: 'dev', url: 'u4' }]) }
     if (j.startsWith('gh pr view 3 --json reviews')) return { exitCode: 0, stdout: JSON.stringify({ reviews: [{ author: { login: 'rev' }, body: 'Reuse formatDate from lib/dates.ts', state: 'COMMENTED' }], comments: [] }) }
     if (j.startsWith('gh pr view 4 --json reviews')) return { exitCode: 0, stdout: JSON.stringify({ reviews: [], comments: [{ author: { login: 'me' }, body: 'mine' }] }) }
-    if (j.startsWith('gh api repos/acme/widgets/pulls/3/comments')) return { exitCode: 0, stdout: '[{"user":{"login":"rev"},"body":"first page","path":"a.ts","line":1}][{"user":{"login":"rev"},"body":"second page","path":"b.ts","line":2}]' }
-    if (j.startsWith('gh api repos/acme/widgets/pulls/4/comments')) return { exitCode: 0, stdout: '[]' }
+    if (j.startsWith('gh api repos/{owner}/{repo}/pulls/3/comments')) return { exitCode: 0, stdout: '[{"user":{"login":"rev"},"body":"first page","path":"a.ts","line":1}][{"user":{"login":"rev"},"body":"second page","path":"b.ts","line":2}]' }
+    if (j.startsWith('gh api repos/{owner}/{repo}/pulls/4/comments')) return { exitCode: 0, stdout: '[]' }
     return { exitCode: 127, stdout: '', stderr: 'unknown' }
   }
   const r = await fetchPrs(h.host, 'widgets', { repo: '/r/widgets', last: 2, base: 'main' })
@@ -157,6 +157,37 @@ test('GitHub: the owner is the gh login; the last N merged PRs into the base, th
   expect(r.text).toContain('second page')
   expect(r.fetched!.counts).toMatchObject({ owner: 1, kept: 3 })
   expect(seen.some(a => a.includes('--state') && a.includes('merged'))).toBe(true)
+})
+
+test('paginated gh output is joined by scanning: a bracket inside a comment body is left alone', () => {
+  const pages = '[{"body":"see a[1] [2]"},{"body":"quote \\" ] ["}]\n[{"body":"page two"}]'
+  expect(joinPages(pages)).toEqual([{ body: 'see a[1] [2]' }, { body: 'quote " ] [' }, { body: 'page two' }])
+  expect(joinPages('')).toEqual([])
+  expect(joinPages('not json')).toEqual([])
+})
+
+test('an Enterprise origin gh knows is used through gh (repo and host resolved by gh); a single-PR look leaves the last round\'s counts alone', async () => {
+  const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ widgets: { path: '/r/widgets' } }))
+  h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'git@github.corp.example:acme/widgets.git\n' } : { exitCode: 1, stdout: '' })
+  h.exec.handler = argv => {
+    const j = argv.join(' ')
+    if (j === 'gh repo view --json nameWithOwner') return { exitCode: 0, stdout: '{"nameWithOwner":"upstream/widgets"}' }
+    if (j === 'gh api user --jq .login') return { exitCode: 0, stdout: 'me\n' }
+    if (j.startsWith('gh pr list')) return { exitCode: 0, stdout: JSON.stringify([{ number: 8, title: 't8', baseRefName: 'main' }]) }
+    if (j.startsWith('gh pr view 8 --json number')) return { exitCode: 0, stdout: JSON.stringify({ number: 8, title: 't8', baseRefName: 'main' }) }
+    if (j.startsWith('gh pr view 8')) return { exitCode: 0, stdout: JSON.stringify({ reviews: [{ author: { login: 'rev' }, body: 'Reuse the shared retry helper', state: 'COMMENTED' }], comments: [] }) }
+    if (j.startsWith('gh api repos/{owner}/{repo}/pulls/8/comments')) return { exitCode: 0, stdout: '[]' }
+    return { exitCode: 127, stdout: '', stderr: 'unknown' }
+  }
+  const r = await fetchPrs(h.host, 'widgets', { repo: '/r/widgets' })
+  expect(r.ok).toBe(true)
+  expect(r.fetched!.host).toEqual({ kind: 'github', owner: 'upstream', repo: 'widgets' })
+  expect((await lastFetchCounts(h.host, 'widgets'))!.prs).toEqual([8])
+  h.clock.t += 1000
+  await fetchPrs(h.host, 'widgets', { repo: '/r/widgets', pr: 8 })
+  expect((await lastFetchCounts(h.host, 'widgets'))!.prs).toEqual([8]) // still the last-N round's record, written once
+  expect(h.files.get('/h/.lean-agent/widgets/pr-fetch.json')).toContain('"at": 1000000')
 })
 
 test('an unsupported host, no origin, a relative repo and a bad base are refused with the reason; lean_review prs goes through the same fetch', async () => {

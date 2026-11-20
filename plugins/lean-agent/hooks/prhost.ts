@@ -170,6 +170,33 @@ const json = (t: string): unknown => {
 }
 const oneLine = (s: string, n = 200) => s.replace(/\s+/g, ' ').trim().slice(0, n)
 
+// `gh api --paginate` prints one JSON array per page, back to back: joined by scanning (strings and escapes respected), never by a
+// text replace, which would also rewrite a comment body such as "see a[1] [2]".
+export function joinPages(text: string): unknown[] {
+  const out: unknown[] = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') inStr = true
+    else if (ch === '[') {
+      if (depth++ === 0) start = i
+    } else if (ch === ']' && depth > 0 && --depth === 0) {
+      const page = json(text.slice(start, i + 1))
+      if (Array.isArray(page)) out.push(...page)
+    }
+  }
+  return out
+}
+
 export type FetchIn = { repo: string; pr?: number; last?: number; base?: string }
 // `project` only names where the last fetch's counts are kept (learn reports them next to its own result)
 export async function fetchPrs(h: Host, project: string, i: FetchIn): Promise<{ ok: boolean; text: string; fetched?: Fetched }> {
@@ -177,7 +204,13 @@ export async function fetchPrs(h: Host, project: string, i: FetchIn): Promise<{ 
   if (!repo.startsWith('/')) return { ok: false, text: 'prs needs repo (an absolute path of the checkout) or a registered project' }
   const url = await sh(h, ['git', '-C', repo, 'remote', 'get-url', 'origin'])
   if (!url.ok || !url.out.trim()) return { ok: false, text: `prs: ${repo} has no origin remote (${oneLine(url.err, 120) || 'git remote get-url origin failed'})` }
-  const host = parseOrigin(url.out)
+  let host = parseOrigin(url.out)
+  if (host.kind === 'other') {
+    // an Enterprise host (or a mirror) that gh itself is logged in to: gh knows the repo from the checkout
+    const nwo = await sh(h, ['gh', 'repo', 'view', '--json', 'nameWithOwner'], { cwd: repo })
+    const [o, r] = str(obj(json(nwo.out)).nameWithOwner).split('/')
+    if (nwo.ok && o && r) host = { kind: 'github', owner: o, repo: r }
+  }
   if (host.kind === 'other') return { ok: false, text: `prs: the host ${host.host} is not supported (github.com and Azure DevOps are); give the branch name instead` }
   const n = Number.isInteger(i.pr) && (i.pr as number) > 0 ? (i.pr as number) : 0
   const last = Math.max(1, Math.min(MAX_PRS, Number.isInteger(i.last) ? (i.last as number) : DEFAULT_PRS))
@@ -186,7 +219,8 @@ export async function fetchPrs(h: Host, project: string, i: FetchIn): Promise<{ 
   const notes: string[] = []
   const f = host.kind === 'github' ? await fromGithub(h, repo, host, n, last, base, notes) : await fromAzure(h, host, n, last, base, notes)
   if (typeof f === 'string') return { ok: false, text: f }
-  await writeJson(h, `${leanDir(await homeDir(h))}/${project}/pr-fetch.json`, { at: await h.clock.now(), host: host.kind, prs: f.prs.map(p => p.n), counts: f.counts }).catch(() => undefined) // (a note for learn's report, never a failed fetch)
+  // (only a fetch of the last N: learn reports it, and a look at one PR must not replace the numbers of the round it is learning from)
+  if (!n) await writeJson(h, `${leanDir(await homeDir(h))}/${project}/pr-fetch.json`, { at: await h.clock.now(), host: host.kind, prs: f.prs.map(p => p.n), counts: f.counts }).catch(() => undefined) // (a note for learn's report, never a failed fetch)
   return { ok: true, text: renderFetched(f), fetched: f }
 }
 
@@ -220,10 +254,11 @@ async function fromGithub(h: Host, repo: string, host: Extract<PrHost, { kind: '
   let raw: Raw[] = []
   for (const p of prs) {
     const view = await sh(h, ['gh', 'pr', 'view', String(p.n), '--json', 'reviews,comments'], { cwd: repo })
-    const inline = await sh(h, ['gh', 'api', `repos/${host.owner}/${host.repo}/pulls/${p.n}/comments`, '--paginate'], { cwd: repo })
+    // ({owner}/{repo} are gh's own placeholders: it resolves them from the checkout, so a fork or an Enterprise host reads the repo its PRs are in)
+    const inline = await sh(h, ['gh', 'api', `repos/{owner}/{repo}/pulls/${p.n}/comments`, '--paginate'], { cwd: repo })
     if (!view.ok) notes.push(`#${p.n}: reviews and comments could not be read (${oneLine(view.err, 80)})`)
     if (!inline.ok) notes.push(`#${p.n}: inline comments could not be read (${oneLine(inline.err, 80)})`)
-    raw = raw.concat(githubComments(p.n, json(view.out), json(inline.out.replace(/\]\s*\[/g, ',')))) // (--paginate prints one array per page)
+    raw = raw.concat(githubComments(p.n, json(view.out), joinPages(inline.out)))
   }
   const { kept, counts } = keepLessons(raw, owner)
   return { host, owner, prs, comments: kept, counts, notes }
@@ -256,7 +291,7 @@ async function fromAzure(h: Host, host: Extract<PrHost, { kind: 'azure' }>, n: n
   const scrub = (s: string) => s.split(token).join('***')
   let raw: Raw[] = []
   for (const p of prs) {
-    const r = await sh(h, ['curl', '-sS', '--fail-with-body', '-H', '@-', `${azureBase(host)}/pullRequests/${p.n}/threads?api-version=7.1`], { stdin: `Authorization: Bearer ${token}\nAccept: application/json\n` })
+    const r = await sh(h, ['curl', '-sS', '-f', '-H', '@-', `${azureBase(host)}/pullRequests/${p.n}/threads?api-version=7.1`], { stdin: `Authorization: Bearer ${token}\nAccept: application/json\n` })
     const parsed = json(r.out)
     if (!r.ok || parsed === null) notes.push(`#${p.n}: threads could not be read (${scrub(oneLine(r.err, 100))})`)
     else raw = raw.concat(azureComments(p.n, parsed))

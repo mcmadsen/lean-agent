@@ -180,7 +180,20 @@ export const reportFile = (home: string, r: { ts: number; from: string; kind: 'r
 
 // The desk's CURRENT session id, looked up when desk.json has none or the send says the recorded one is gone (a desk restart, a resume, an
 // older mod that never recorded it): the live session `claude agents --json` lists in the desk folder (the newest when several). '' = none.
-export async function liveDeskSid(h: Host, home: string): Promise<string> {
+// `cached`: the lookup for a send with NO recorded id: a miss is remembered for a minute (every report would otherwise run `claude agents`
+// again while no desk is live); the lookup after a refusal is never cached.
+export const DESK_MISS_MS = 60_000
+export async function liveDeskSid(h: Host, home: string, cached = false): Promise<string> {
+  const missAt = cached ? await h.store.get('desk-sid-miss').catch(() => undefined) : undefined
+  if (typeof missAt === 'number') {
+    const now = await h.clock.now()
+    if (now >= missAt && now - missAt < DESK_MISS_MS) return ''
+  }
+  const sid = await lookupDeskSid(h, home)
+  if (cached && !sid) await h.store.set('desk-sid-miss', await h.clock.now()).catch(() => undefined)
+  return sid
+}
+async function lookupDeskSid(h: Host, home: string): Promise<string> {
   const r = await h.process.run(['claude', 'agents', '--json'], { timeoutMs: 20_000 }).catch(() => null)
   if (!r || r.exitCode !== 0) return ''
   let v: any
@@ -269,7 +282,7 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   let sid = (await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid
   let renewed = false // the desk's session id was looked up now (none recorded, or the recorded one was refused)
   if (!sid) {
-    sid = await liveDeskSid(h, home)
+    sid = await liveDeskSid(h, home, true)
     if (sid) {
       await recordDeskSid(h, sid).catch(() => undefined)
       renewed = true
