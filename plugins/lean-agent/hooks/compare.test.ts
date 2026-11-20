@@ -2,7 +2,7 @@
 // columns, report naming and no contents, suggestions, task mode, the desk and thread entry points.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { allTokens, bySource, compare, historyText, overhead, parseContext, parseRun, parseTokens, taskMode } from './compare'
+import { allTokens, bySource, compare, historyText, markTracked, overhead, parseContext, parseRun, parseTokens, renderReport, suggestions, taskMode } from './compare'
 import { resetLocks } from './threads'
 
 const L = '/h/.lean-agent'
@@ -150,6 +150,31 @@ test('a project that is unknown, private or without usage is refused plainly', a
   const r = await overhead(h.host, ROOT, 'proj')
   expect(r.ok).toBe(false)
   expect(r.text).toContain('the clean run gave no usage')
+})
+
+test('memory files are marked tracked or untracked (git ls-files); a tracked one is a team file: no --gaps advice, only "trimming needs a PR"', async () => {
+  const h = fakeHost(null)
+  h.git.handler = a => (a.includes('ls-files') && a[1] === '/repo' && a[a.length - 1] === 'CLAUDE.md' ? { exitCode: 0, stdout: 'CLAUDE.md\n' } : { exitCode: 1, stdout: '', stderr: "error: pathspec 'CLAUDE.md' did not match any file(s) known to git" })
+  const item = (name: string, source: string, tokens: number) => ({ name, source, tokens })
+  const mk = () => ({ name: 'clean', input: 1000, cost: 0, notes: [], ctx: { total: 1, model: 'm', rows: {}, lists: { 'memory files': [item('/repo/CLAUDE.md', 'Project', 1700), item('~/.claude/CLAUDE.md', 'User', 2000), item('CLAUDE.md', 'Project', 1600), item('/repo/sub/CLAUDE.md', 'Project', 1800), item('/repo/', 'x', 10)] } } }) as any
+  const cols = [mk()]
+  await markTracked(h.host, '/h', cols)
+  expect(cols[0].ctx.lists['memory files'].map((i: any) => i.tracked)).toEqual([true, false, false, false, false])
+  expect(h.calls.filter(c => c.argv.includes('ls-files')).map(c => c.argv.slice(0, 2).join(' '))).toEqual(['git -C', 'git -C', 'git -C']) // asked once per absolute file; a relative name is never guessed at
+  expect(h.calls.find(c => c.argv.includes('ls-files'))!.argv).toEqual(['git', '-C', '/repo', 'ls-files', '--error-unmatch', '--', 'CLAUDE.md'])
+  const s = await suggestions(h.host, '/repo', 'proj', cols)
+  expect(s).toContain('memory file …/CLAUDE.md is ~1.7k tokens in every session; team file (tracked in the repo): trimming needs a PR in the repo (a learned rule that repeats its lines would load them twice)')
+  // the three biggest files get a line: the user's (2.0k) and the untracked sub/CLAUDE.md (1.8k) keep the advice, the tracked 1.7k one does not
+  expect(s.filter(x => x.startsWith('memory file') && x.includes('--gaps')).map(x => x.slice(0, 39))).toEqual(['memory file …/CLAUDE.md is ~2.0k tokens', 'memory file …/CLAUDE.md is ~1.8k tokens'])
+  expect(s.some(x => x.includes('~1.7k') && x.includes('--gaps'))).toBe(false)
+  const md = renderReport({ project: 'proj', model: 'm', cols, attribution: [], suggestions: s, cost: 0, skipped: [], ts: 0 }, x => x)
+  expect(md).toContain('Memory files in clean: …/CLAUDE.md 1.7k (tracked), …/CLAUDE.md 2.0k (untracked), CLAUDE.md 1.6k (untracked), …/CLAUDE.md 1.8k (untracked)')
+  // git cannot answer (not even spawn): untracked, the advice stays
+  const g = fakeHost(null)
+  g.git.handler = () => { throw new Error('spawn git ENOENT') }
+  const c2 = [mk()]
+  await markTracked(g.host, '/h', c2)
+  expect(c2[0].ctx.lists['memory files'][0].tracked).toBe(false)
 })
 
 test('suggestions come from the numbers, each with the concrete step', async () => {

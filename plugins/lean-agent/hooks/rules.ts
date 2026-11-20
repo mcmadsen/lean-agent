@@ -133,6 +133,42 @@ export function withRelies(t: string, relies: string[], sha: string, date: strin
 // non-empty body lines of a rule: what the line cap counts (the scripts block's lines too; frontmatter and comments are free)
 export const bodyLines = (t: string): number => ruleMetrics(t).lines
 
+// ---- lines an always-loaded file already says ---------------------------------------------------------------------
+// CLAUDE.md of the repo (tracked by git or not), .claude/CLAUDE.md, CLAUDE.local.md and the user's ~/.claude/CLAUDE.md load in every
+// session. A learned rule that repeats their lines loads them a second time (and cannot trim the team's file). `recordRule` refuses such
+// a rule, `lean_rules check` reports it. A line counts when its words (markup, bullet and case aside) are inside a line of such a file, or
+// a whole line of such a file (long enough to be no accident) is inside it; lines under DUP_MIN characters are never compared.
+export const DUP_MIN = 20
+const flatLine = (l: string) => l.replace(/<!--.*?-->/g, '').replace(/^\s*(?:[-+*]|\d+[.)])\s+/, '').replace(/[`*_>#|]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+export type Always = { name: string; lines: string[] }
+export async function alwaysLoaded(h: Host, home: string, project: string): Promise<Always[]> {
+  const projs = await readJson<Record<string, { path?: unknown }>>(h, `${leanDir(home)}/projects.json`, {})
+  const repo = typeof projs?.[project]?.path === 'string' && (projs[project]!.path as string).startsWith('/') ? (projs[project]!.path as string).replace(/\/+$/, '') : ''
+  const cands: [string, string][] = [...(repo ? ([['CLAUDE.md', `${repo}/CLAUDE.md`], ['.claude/CLAUDE.md', `${repo}/.claude/CLAUDE.md`], ['CLAUDE.local.md', `${repo}/CLAUDE.local.md`]] as [string, string][]) : []), ['~/.claude/CLAUDE.md (user memory)', `${home}/.claude/CLAUDE.md`]]
+  const out: Always[] = []
+  for (const [name, p] of cands) {
+    const t = await h.fs.read(p).then(String).catch(() => null)
+    if (t !== null) out.push({ name, lines: t.split('\n').map(flatLine).filter(Boolean) })
+  }
+  return out
+}
+// the rule lines (body only: no frontmatter, comments, headings or the scripts block) that one of `files` already says
+export function dupLines(ruleText: string, files: Always[]): { line: string; file: string }[] {
+  const out: { line: string; file: string }[] = []
+  for (const raw of bodyOf(ruleText.replace(SCRIPTS_BLOCK, '')).split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const n = flatLine(line)
+    if (n.length < DUP_MIN) continue
+    const hit = files.find(f => f.lines.some(fl => fl.includes(n) || (fl.length >= DUP_MIN + 5 && n.includes(fl))))
+    if (hit) out.push({ line, file: hit.name })
+  }
+  return out
+}
+const cut = (s: string, n = 80) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+// the rule's own lines: body lines that are no heading (what dupLines looks at)
+const contentLines = (t: string) => bodyOf(t.replace(SCRIPTS_BLOCK, '')).split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length
+
 // over: rules past a cap that were copied anyway (grandfathered, warned); skipped: not copied at all (kept as they are in the checkout)
 export type SyncOut = { copied: string[]; removed: string[]; skipped: string[]; over?: string[]; excluded: boolean; exclude?: 'ok' | 'failed' | 'n/a' }
 
@@ -318,6 +354,12 @@ async function recordRuleLocked(h: Host, project: string, area: string, a: Recor
     const t = await h.fs.read(file).then(String).catch(() => null)
     if (t === null) notes.push(`WARNING rules/${ruleFile(area)} does not exist: recorded with 0 lines`)
     else {
+      const dups = dupLines(t, await alwaysLoaded(h, home, project))
+      if (dups.length) {
+        const files = [...new Set(dups.map(d => d.file))].join(', ')
+        const all = dups.length >= contentLines(t)
+        return `NOT recorded ${area}: ${dups.length} rule line(s) already appear in ${files}, which every session loads (the rule would load them twice): ${dups.slice(0, 3).map(d => JSON.stringify(cut(d.line))).join(', ')}${dups.length > 3 ? `, ... ${dups.length - 3} more` : ''}. Remove them from rules/${ruleFile(area)}${all ? ' (nothing else is left: record the area with covered_by instead of writing a rule)' : ''}, then record again. A tracked CLAUDE.md is the team's: trimming it needs a PR in the repo`
+      }
       const m = ruleMetrics(t)
       lines = m.lines
       chars = m.chars
@@ -442,6 +484,7 @@ export async function checkRules(h: Host, project: string, maxExplorers = MAX_EX
   const names = (await h.fs.list(`${pdir}/rules`).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.md')).map(f => f.name).sort()
   const lines: string[] = []
   let over = 0
+  const always = await alwaysLoaded(h, home, project).catch(() => [] as Always[])
   for (const n of names) {
     const t = String(await h.fs.read(`${pdir}/rules/${n}`).catch(() => ''))
     const m = ruleMetrics(t)
@@ -449,6 +492,8 @@ export async function checkRules(h: Host, project: string, maxExplorers = MAX_EX
     const bad = ruleProblems(n, t)
     const globs = pathsOf(t)
     const warn = n !== '_project.md' && !globs.length ? ['no paths: it would load in every session'] : []
+    const dups = dupLines(t, always)
+    if (dups.length) warn.push(`${dups.length} line(s) repeat ${[...new Set(dups.map(d => d.file))].join(', ')} (loaded twice; remove them from the rule: ${dups.slice(0, 2).map(d => JSON.stringify(cut(d.line, 50))).join(', ')})`)
     for (const g of globs) { const p = globProblem(g); if (p) warn.push(`path pattern ${JSON.stringify(g.slice(0, 60))} is ${p}: it never matches`) }
     if (bad.length) over++
     lines.push(`${n}: ${m.lines}/${cap.lines} lines, ${m.chars}/${cap.chars} chars, widest ${m.widest}${bad.length ? ` OVER: ${bad.join(', ')}` : warn.length ? ` WARN: ${warn.join(', ')}` : ' ok'}`)

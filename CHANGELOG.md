@@ -18,6 +18,11 @@
   (`register`, `list`; `hooks/worktreereg.ts`) replaces hand-editing `worktrees.json`: a key whose recorded path is gone or no longer a
   worktree is replaced; a key held by another live worktree gets a suffixed key (`<project>/<branch>~2`); the same worktree of another
   thread, a damaged file and a failed write are refusals that say why. The review skill's ready-to-push step registers first.
+- **A tracked, team-shared `CLAUDE.md` is no "memory file" to trim.** `compare` marks every memory file tracked or untracked
+  (`git ls-files` in its folder, shown as `(tracked)` / `(untracked)` in the report); a tracked one gets "team file: trimming needs a PR
+  in the repo", no `learn --gaps` advice. `lean_rules` `record` now refuses a rule whose lines already appear in an always-loaded file
+  (the repo's `CLAUDE.md`, tracked or not, `.claude/CLAUDE.md`, `CLAUDE.local.md`, the user's `~/.claude/CLAUDE.md`; it names the lines,
+  and `covered_by` is the way out when nothing else is left), and `lean_rules` `check` reports such lines (the rule would load them twice).
 - **Doctor:** a stale registry entry (folder gone, or git says it is no worktree) is a FIX row and `fix` prunes it; a git that does not
   answer never makes an entry stale. The desk's spend on the model the app started it on is an info note ("the app started the desk on
   <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,

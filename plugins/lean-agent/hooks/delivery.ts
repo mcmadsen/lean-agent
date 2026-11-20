@@ -412,7 +412,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         if (str(i.area) !== '_project' && !slugOk(str(i.area))) return { ok: false, text: 'record: the area must be a plain name (letters, digits, . _ -)' }
         const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : undefined)
         const covered = str(i.covered_by) || str(i.coveredBy) || str(i['covered-by'])
-        return { ok: true, text: await recordRule(h, project, str(i.area), { globs: strs(i.globs) ?? [], sha: str(i.sha), lines: typeof i.lines === 'number' ? i.lines : undefined, relies: strs(i.relies), coveredBy: covered || undefined }) }
+        const text = await recordRule(h, project, str(i.area), { globs: strs(i.globs) ?? [], sha: str(i.sha), lines: typeof i.lines === 'number' ? i.lines : undefined, relies: strs(i.relies), coveredBy: covered || undefined })
+        return { ok: !text.startsWith('NOT recorded'), text } // (a rule that repeats an always-loaded file is refused: rules.ts)
       }
       if (!repo.startsWith('/')) return { ok: false, text: `${i.action} needs repo (an absolute path)` }
       if (i.action === 'sync') {
