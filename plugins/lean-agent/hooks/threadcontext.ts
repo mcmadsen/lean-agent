@@ -51,12 +51,17 @@ export async function recordContext(h: Host, id: string, sid: string, tokens: un
   }
 }
 
-// The recorded size of the thread's CURRENT session, or null (no record, damaged, or recorded by another session id).
-export async function readContext(h: Host, home: string, t: { id: string; sid?: string }): Promise<ContextRec | null> {
+// The recorded size of the thread's CURRENT session, or null (no record, damaged, or recorded by another session id). The mod writes the
+// id its own session resolved to, which can differ from thread.json `sid` after a resume or reload (role.ts recordSid keeps such ids in
+// `sids`): that record counts too, but only when it was written since this session was started or woken (`at` >= `lastWake`), so an
+// older session's record is never believed.
+export async function readContext(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number }): Promise<ContextRec | null> {
   if (!t.sid) return null
   const r = await readJson<Partial<ContextRec> | null>(h, contextFile(home, t.id), null)
-  if (!r || typeof r !== 'object' || r.sid !== t.sid || typeof r.tokens !== 'number' || !Number.isFinite(r.tokens) || r.tokens < 0) return null
-  return { tokens: r.tokens, at: typeof r.at === 'number' ? r.at : 0, sid: r.sid }
+  if (!r || typeof r !== 'object' || typeof r.sid !== 'string' || typeof r.tokens !== 'number' || !Number.isFinite(r.tokens) || r.tokens < 0) return null
+  const at = typeof r.at === 'number' ? r.at : 0
+  const mine = r.sid === t.sid || (Array.isArray(t.sids) && t.sids.includes(r.sid) && at >= (t.lastWake ?? 0) && at > 0)
+  return mine ? { tokens: r.tokens, at, sid: r.sid } : null
 }
 
 // ---- level and text ----
@@ -73,7 +78,7 @@ export function ctxView(rec: ContextRec | null, l: Limits): CtxView {
   const tokens = rec?.tokens
   return { text: ctxText(tokens, l), level: levelOf(tokens, l), ...(typeof tokens === 'number' ? { tokens } : {}) }
 }
-export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string }, l?: Limits): Promise<CtxView> {
+export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number }, l?: Limits): Promise<CtxView> {
   return ctxView(await readContext(h, home, t), l ?? (await threadLimits(h)))
 }
 

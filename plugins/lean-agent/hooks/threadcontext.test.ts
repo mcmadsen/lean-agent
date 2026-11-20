@@ -281,6 +281,53 @@ test('the limit follows config.json threadTokens; a bad value falls back to 1200
   expect(bad.starts().length).toBe(0)
 })
 
+test('a record under another id of the same session (a resume or reload, kept in sids) counts only when written since the last wake', async () => {
+  const MOD = 'aaaaaaaa-2222-3333-4444-555555555555'
+  const h = fakeHost(null)
+  h.files.set(CTX, JSON.stringify({ tokens: 130_000, at: 9_000_000, sid: MOD }))
+  const t = { id: 't1', sid: SID, sids: [MOD], lastWake: 8_000_000 }
+  expect((await readContext(h.host, '/h', t))?.tokens).toBe(130_000)
+  expect(await readContext(h.host, '/h', { ...t, lastWake: 9_500_000 })).toBeNull() // written before this session was started or woken
+  expect(await readContext(h.host, '/h', { ...t, sids: [] })).toBeNull() // not an id the thread ever resolved as
+  const s = setup({ ctx: 130_000, ctxSid: MOD, thread: { sids: [MOD], lastWake: 8_000_000 } })
+  expect((await s.run({ action: 'send', tN: 't1', text: 'x' })).text).toContain('context was 130k (limit 120k)')
+})
+
+test('over the limit inside the 30 s wake gap the message still queues; a usage-limit resume skips the size check', async () => {
+  const gap = setup({ ctx: 500_000, thread: { lastWake: 10_000_000 - 5_000 } })
+  const r = await gap.run({ action: 'send', tN: 't1', text: 'x' })
+  expect(r.text).toContain('was woken')
+  expect(gap.starts().length + gap.resumes().length).toBe(0)
+  // the desk's usage-limit resume: the session was blocked inside a turn, so its last turn-end size is not current
+  const lim = setup({ ctx: 500_000 })
+  lim.h.files.set(`${T1}/limit.json`, JSON.stringify({ resetAt: 9_900_000, seenAt: 9_000_000, source: 'mod', sid: SID, resumedFor: 9_900_000, resumedAt: 9_950_000 }))
+  const l = await lim.run({ action: 'limit-resume', tN: 't1' })
+  expect(l.ok).toBe(true)
+  expect(lim.resumes().length).toBe(1)
+  expect(lim.starts().length).toBe(0)
+})
+
+test('over the limit on a recorded opus that is not approved: no opus session is started (the replacement is held or runs on sonnet)', async () => {
+  const s = setup({ ctx: 150_000, thread: { model: 'opus' } })
+  const r = await s.run({ action: 'send', tN: 't1', text: 'x' })
+  expect(r.ok).toBe(true)
+  expect(s.resumes().length).toBe(0)
+  const bg = s.starts()
+  expect(bg.length).toBeLessThanOrEqual(1)
+  for (const a of bg) expect(a).not.toContain('opus')
+})
+
+test('keep on a parked thread is stored; a closed thread refuses the new session but keeps the flag', async () => {
+  const p = setup({ queued: false, thread: { state: 'parked' } })
+  expect((await p.run({ action: 'keep', tN: 't1', on: true })).ok).toBe(true)
+  expect(p.thread().keep).toBe(true)
+  expect(p.thread().state).toBe('parked')
+  const c = setup({ queued: false, thread: { state: 'closed' } })
+  expect((await c.run({ action: 'keep', tN: 't1', on: true })).ok).toBe(true)
+  expect(c.thread().keep).toBe(true)
+  expect(c.thread().state).toBe('closed')
+})
+
 // ---- keep mode: storing and finishing ----
 test('keep tN on|off is stored in thread.json; without on/off it says what is set', async () => {
   const s = setup({ queued: false })
