@@ -194,7 +194,9 @@ export async function markTracked(h: Host, home: string, cols: Col[]): Promise<v
   const seen = new Map<string, boolean>()
   for (const c of cols) {
     for (const it of c.ctx?.lists['memory files'] ?? []) {
-      const p = it.name.startsWith('~/') ? `${home}${it.name.slice(1)}` : it.name
+      // the path is the item's name (or, in a layout where the first cell is the type, its source)
+      const raw = [it.name, it.source].find(x => x.startsWith('/') || x.startsWith('~/')) ?? it.name
+      const p = raw.startsWith('~/') ? `${home}${raw.slice(1)}` : raw
       if (!p.startsWith('/') || p.endsWith('/')) { it.tracked = false; continue }
       if (!seen.has(p)) {
         const dir = p.slice(0, p.lastIndexOf('/')) || '/'

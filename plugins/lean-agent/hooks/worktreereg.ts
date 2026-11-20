@@ -101,14 +101,22 @@ async function doRegister(h: Host, o: RegInput): Promise<RegResult> {
   const real = await realPath(h, o.path)
   const base = `${o.project}/${o.branch}`
   const notes: string[] = []
+  // the same worktree under ANY key (its branch may have changed since): another thread's, not shared, is never taken over
+  let sharedPath = false
+  for (const [k, e] of Object.entries(reg)) {
+    if (!e || typeof e !== 'object' || !abs(e.path) || (await realPath(h, e.path)) !== real) continue
+    if (typeof e.thread === 'string' && e.thread && e.thread !== o.thread && e.shared !== true) return { ok: false, key: k, text: `worktree NOT registered: ${e.path} is ${e.thread}'s (${k}, not shared); make a new worktree, or ask the user to mark it shared` }
+    if (e.shared === true) sharedPath = true
+  }
   for (let n = 1; n <= MAX_SUFFIX; n++) {
     const key = n === 1 ? base : `${base}~${n}`
     const cur = reg[key]
     let take = false
     if (!cur || typeof cur !== 'object') take = true
     else if (abs(cur.path) && (await realPath(h, cur.path)) === real) {
-      // the same worktree: a refresh, unless another thread owns it
-      if (typeof cur.thread === 'string' && cur.thread && cur.thread !== o.thread && cur.shared !== true) return { ok: false, key, text: `worktree NOT registered: ${key} is ${cur.thread}'s (not shared); make a new worktree, or ask the user to mark it shared` }
+      // the same worktree: a refresh of this thread's own entry; a shared one of another thread stays as it is (it keeps its thread, so
+      // it can still push) and this thread gets an entry of its own under the next key
+      if (typeof cur.thread === 'string' && cur.thread && cur.thread !== o.thread) { notes.push(`${key} is ${cur.thread}'s shared entry`); continue }
       take = true
     } else if (!abs(cur.path) || isStale(await worktreeState(h, cur.path))) {
       notes.push(`replaced the stale entry ${key}${abs(cur.path) ? ` (${cur.path} is gone or no longer a worktree)` : ' (no usable path)'}`)
@@ -118,7 +126,7 @@ async function doRegister(h: Host, o: RegInput): Promise<RegResult> {
     }
     if (!take) continue
     const prev = reg[key] && typeof reg[key] === 'object' ? reg[key]! : {}
-    reg[key] = { ...(prev.path && abs(prev.path) && (await realPath(h, prev.path)) === real ? prev : {}), path: o.path, repo: o.repo, branch: o.branch, thread: o.thread, ...(o.adopted ? { adopted: true } : {}), ...(o.shared ? { shared: true } : {}) }
+    reg[key] = { ...(prev.path && abs(prev.path) && (await realPath(h, prev.path)) === real ? prev : {}), path: o.path, repo: o.repo, branch: o.branch, thread: o.thread, ...(o.adopted ? { adopted: true } : {}), ...(o.shared || sharedPath ? { shared: true } : {}) }
     try {
       await writeJson(h, registryFile(home), reg)
     } catch (e) {
@@ -184,9 +192,11 @@ export const pruneStale = (h: Host): Promise<Stale[]> =>
     if (!stale.length) return []
     const { reg, damaged } = await readRegistry(h, home)
     if (damaged) return []
-    for (const s of stale) delete reg[s.key]
-    await writeJson(h, registryFile(home), reg)
-    return stale
+    // only what was seen stale: an entry another process replaced since (same key, another path) stays
+    const dropped = stale.filter(s => (typeof reg[s.key]?.path === 'string' ? (reg[s.key]!.path as string) : '') === s.path)
+    for (const s of dropped) delete reg[s.key]
+    if (dropped.length) await writeJson(h, registryFile(home), reg)
+    return dropped
   })
 
 // The desk's push: a linked worktree of the project's repository whose HEAD is `sha`, on a branch, that no registry entry (of any thread)

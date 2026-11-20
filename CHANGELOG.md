@@ -32,6 +32,15 @@
   word after "reply to", "asked by", "from" or "to" becomes `<name>` unless it is a product or common word. "Darwin 25.6.0" becomes
   "Darwin" (also Linux, Windows_NT, macOS). The final check refuses to write the file when a known branch, a branch after the word
   "branch", an unmasked worktree folder, a name after "reply to" / "asked by" or an OS build survives.
+- **Push and registry hardening (from the strict review of the above).** A worktree is the project's by its git common dir, not by the
+  folder it sits in, so one made with `git worktree add ../x` keeps working on the second push after it was adopted or registered (the
+  main checkout itself is refused); an adopted worktree gets the project's own `guards.push-deny` list; adoption happens only when the
+  thread has no live registered worktree and the registry is written only once the review and the approval hold (a refused push changes
+  nothing); another thread's worktree is never taken over under a new key, and a shared one keeps its owner while the newcomer gets its
+  own key; `prune` only drops what it saw stale. On Azure DevOps a PR title or body that starts with `@` is padded so `az` never reads it
+  as a file, `@` is no part of a project or repository name, and a URL such as `https://host#@dev.azure.com/..` is not Azure DevOps. The
+  export keeps tool names (Read, Bash ...) after "from" / "to", keeps the file inside a worktree folder, and masks `branch (x/y)` and
+  comma lists of branches. `compare` also reads the memory file's path from the source column when that is where `/context` puts it.
 - **Doctor:** a stale registry entry (folder gone, or git says it is no worktree) is a FIX row and `fix` prunes it; a git that does not
   answer never makes an entry stale. The desk's spend on the model the app started it on is an info note ("the app started the desk on
   <model>; lean-agent switched it to opus"), not FIX, once the pin switched the session (`desk/model-set.json`, verified switches only,

@@ -45,6 +45,7 @@ Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch 
 - **list**: `lean_worktree` `list` (entries, each marked ok or STALE: folder gone or no longer a worktree), and show
   `git -C <path> status -sb` for the live ones. Stale entries are dropped by the doctor's `fix`.
 - **rm**: refuse when `git status --porcelain` is not empty or unpushed commits exist (`git log @{u}..`) unless the
-  user says to discard; then `git -C <repo> worktree remove <path>` and drop the registry entry.
+  user says to discard; then `git -C <repo> worktree remove <path>`. The registry entry is then stale (`lean_worktree` `list` shows it) and the doctor's `fix`
+  drops it; a new worktree of the same branch replaces it by itself. Never edit `worktrees.json` by hand.
 
 Never delete a worktree you did not create or that another thread's entry points at.

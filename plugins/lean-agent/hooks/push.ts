@@ -8,9 +8,9 @@
 import { appendJsonl, leanDir, readJson, realPath, threadsDir } from './state'
 import type { Host } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
-import { PROTECTED, guardedBy, patternsFor, projectOf } from './guard'
+import { DEFAULT_PUSH_DENY, PROTECTED, guardedBy } from './guard'
 import type { Inbox, Out, Thread } from './threads'
-import { registerWorktree, unregisteredAt } from './worktreereg'
+import { registerWorktree, unregisteredAt, worktreeState } from './worktreereg'
 
 export type PrInput = { title?: unknown; body?: unknown; base?: unknown; draft?: unknown }
 
@@ -80,18 +80,18 @@ const decoded = (s: string) => {
 // a project or repository name: decoded, one line, no path or URL syntax, never a flag (it travels as an argv element, never through a shell)
 const adoName = (s: string | undefined): string | null => {
   const d = s === undefined ? null : decoded(s)
-  return d !== null && d === d.trim() && /^[^\x00-\x1f\x7f\\/?#:*"<>|%]{1,128}$/.test(d) && !d.startsWith('-') ? d : null
+  return d !== null && d === d.trim() && /^[^\x00-\x1f\x7f\\/?#:*"<>|%@]{1,128}$/.test(d) && !d.startsWith('-') ? d : null
 }
 export function adoOf(url: string): Ado | null {
   const u = url.trim()
-  const user = '(?:[^@/\\s]+@)?'
+  const user = '(?:[A-Za-z0-9._~%+-]+@)?' // (no `#`, `?` or `/`: `https://evil.example#@dev.azure.com/..` is not Azure DevOps)
   let m: RegExpExecArray | null
   let org: string | undefined
   let project: string | undefined
   let repo: string | undefined
   if ((m = new RegExp(`^https?://${user}dev\\.azure\\.com/([^/\\s]+)/(?:([^/\\s]+)/)?_git/([^/\\s]+?)/?$`, 'i').exec(u))) [, org, project, repo] = m
   else if ((m = new RegExp(`^https?://${user}([A-Za-z0-9-]+)\\.visualstudio\\.com/(?:DefaultCollection/)?(?:([^/\\s]+)/)?_git/([^/\\s]+?)/?$`, 'i').exec(u))) [, org, project, repo] = m
-  else if ((m = /^(?:ssh:\/\/)?[^@/\s]+@(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)(?::\d+)?[:/]v3\/([^/\s]+)\/([^/\s]+)\/([^/\s]+?)\/?$/i.exec(u))) [, org, project, repo] = m
+  else if ((m = /^(?:ssh:\/\/)?[A-Za-z0-9._~%+-]+@(?:ssh\.dev\.azure\.com|vs-ssh\.visualstudio\.com)(?::\d+)?[:/]v3\/([^/\s]+)\/([^/\s]+)\/([^/\s]+?)\/?$/i.exec(u))) [, org, project, repo] = m
   if (!m || !org || !ADO_ORG.test(org)) return null
   const r = adoName(repo)
   const p = project === undefined ? r : adoName(project) // dev.azure.com/<org>/_git/<repo>: the project is named like the repository
@@ -132,7 +132,9 @@ async function adoPullRequest(h: Host, dir: string, a: Ado, pr: { title: string;
       return { exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }
     }
   }
-  const created = await run([az, 'repos', 'pr', 'create', ...scope, '--source-branch', branch, '--target-branch', base, `--title=${pr.title}`, ...(pr.body ? [`--description=${pr.body}`] : []), ...(pr.draft ? ['--draft'] : []), '--output', 'json'])
+  // az reads a file named by a value that STARTS with `@` (`--title=@~/.ssh/id_rsa` would publish it): a thread's text never starts with one
+  const noAt = (s: string, pad: string) => (s.startsWith('@') ? pad + s : s)
+  const created = await run([az, 'repos', 'pr', 'create', ...scope, '--source-branch', branch, '--target-branch', base, `--title=${noAt(pr.title, ' ')}`, ...(pr.body ? [`--description=${noAt(pr.body, '\n')}`] : []), ...(pr.draft ? ['--draft'] : []), '--output', 'json'])
   const url = adoPrUrl(created.stdout, a)
   if (created.exitCode === 0 && url) return { kind: 'created', url }
   const all = `${created.stderr}\n${created.stdout}`
@@ -209,13 +211,12 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   const mine = Object.values(reg && typeof reg === 'object' ? reg : {}).filter((w): w is Wt & { path: string } => !!w && typeof w === 'object' && w.thread === id && typeof w.path === 'string' && w.path.startsWith('/'))
   let wt = null as (Wt & { path: string }) | null // (set inside pick: the cast keeps the compiler from narrowing it to null)
   let seen = ''
-  // `listed`: the worktree came from `git worktree list` of the project's own repository (adopted below), so it needs no folder-based
-  // project check (a plain `git worktree add ../x` lives outside the project's folders); a registry entry is thread-writable and does
-  const pick = async (list: (Wt & { path: string })[], listed = false): Promise<Out | null> => {
+  // What makes a worktree the project's is its git common dir (below), not the folder it sits in: a plain `git worktree add ../x` lives
+  // outside the project's folders and must keep working after it is registered. The main checkout itself is not a linked worktree.
+  const projectReal = await realPath(h, pj.path)
+  const pick = async (list: (Wt & { path: string })[]): Promise<Out | null> => {
     for (const w of [...list].reverse()) {
-      const p = listed ? { slug: t.project, private: false } : await projectOf(h, w.path)
-      if (!p || p.slug !== t.project) { seen = seen || `${w.path} does not belong to project ${t.project}`; continue }
-      if (p.private) return err(`${p.slug} is a private project: it is never pushed. Give the user the manual push command instead`)
+      if ((await realPath(h, w.path)) === projectReal) { seen = seen || `${w.path} is the main checkout of project ${t.project}, not a linked worktree`; continue }
       const wc = await git(h, w.path, 'rev-parse', '--path-format=absolute', '--git-common-dir')
       if (!wc.ok || (await realPath(h, wc.out)) !== (await realPath(h, common.out))) { seen = seen || `${w.path} is not a worktree of the repository of project ${t.project}`; continue }
       const head = await git(h, w.path, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}')
@@ -228,18 +229,22 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   }
   const refused = await pick(mine)
   if (refused) return refused
+  // A worktree made with plain `git worktree add` was never registered. It is adopted when the thread has no live registered worktree
+  // (one that merely moved past the sha is told, not replaced by somebody else's), and the candidate is a LINKED worktree of the
+  // project's own repository (`git worktree list`), on a branch, with HEAD == the approved commit, that no registry entry (of any
+  // thread) has: the facts the worktree skill's adopt checks. Every gate below still applies to it, and the registry is written only
+  // once the review and the approval hold (just before the approval is consumed): a refused push changes nothing.
+  let adopt: { path: string; branch: string } | null = null
   if (!wt) {
-    // A worktree made with plain `git worktree add` was never registered. It is adopted here when it is a LINKED worktree of the
-    // project's own repository, on a branch, with HEAD == the approved commit, and no registry entry (of any thread) has it: the same
-    // facts the worktree skill's adopt checks. The gates below (project, branch, review, approval) still apply to it.
-    const un = await unregisteredAt(h, home, pj.path, sha)
-    if (un.why) seen = seen || un.why
-    if (un.one) {
-      const reg2 = await registerWorktree(h, { project: t.project, path: un.one.path, repo: pj.path, branch: un.one.branch, thread: id, adopted: true })
-      if (!reg2.ok) seen = seen || reg2.text
-      else {
-        const refused2 = await pick([{ path: un.one.path, branch: un.one.branch, thread: id }], true)
+    let liveMine = 0
+    for (const w of mine) if ((await worktreeState(h, w.path)) === 'live') liveMine++
+    if (!liveMine) {
+      const un = await unregisteredAt(h, home, pj.path, sha)
+      if (un.why) seen = seen || un.why
+      if (un.one) {
+        const refused2 = await pick([{ path: un.one.path, branch: un.one.branch, thread: id }])
         if (refused2) return refused2
+        if (wt) adopt = { path: un.one.path, branch: un.one.branch }
       }
     }
   }
@@ -255,7 +260,9 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (typeof wt.branch === 'string' && wt.branch && wt.branch !== branch) return err(`not pushed: ${dir} is on ${branch} but worktrees.json says ${wt.branch}`)
   if (!nameOk(branch)) return err(`not pushed: ${JSON.stringify(branch)} is not a plain branch name`)
   if (PROTECTED.test(branch)) return err(`not pushed: ${branch} is a protected branch; the desk pushes a feature branch only`)
-  const guard = guardedBy(branch, await patternsFor(h, dir))
+  // the project's own push-deny list (guard.ts patternsFor finds the project by folder, which an adopted worktree outside it would miss)
+  const deny = (pj as { guards?: Record<string, unknown> }).guards?.['push-deny']
+  const guard = guardedBy(branch, Array.isArray(deny) ? deny.filter((x): x is string => typeof x === 'string') : DEFAULT_PUSH_DENY)
   if (guard) return err(`not pushed: ${branch} matches the guard '${guard}' of project ${t.project}`)
   const bc = async (k: string) => (await git(h, dir, 'config', `branch.${branch}.${k}`)).out
   const remote = (await bc('pushRemote')) || (await bc('remote')) || 'origin'
@@ -277,6 +284,10 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (!(await greenReview(h, t.project, sha))) return err(`not pushed: no green review record for ${short} (project ${t.project}): have ${id} run the review skill on this commit`)
   // 5. the user's approval for (project, sha, thread): valid, unused; consumed here, once, just before the push
   if (!(await hasApproval(h, t.project, sha, id))) return err(`not pushed: no valid approval for ${short} from ${id} (none, used, expired or for another thread). The user's yes goes through approve-push first (single use, 2 h)`)
+  if (adopt) {
+    const r = await registerWorktree(h, { project: t.project, path: adopt.path, repo: pj.path, branch: adopt.branch, thread: id, adopted: true })
+    if (!r.ok) return err(`not pushed: ${r.text}; the approval is kept`)
+  }
   if (!(await takeApproval(h, t.project, sha, id))) return err(`not pushed: the approval for ${short} was just used by another push`)
 
   const where = `${remote}/${branch}`

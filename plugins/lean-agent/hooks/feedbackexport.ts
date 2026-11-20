@@ -87,16 +87,22 @@ const maskBranchDir = (d: string): string => {
 // a name that looks like a branch (a plain word does not: it may just be a word) and is no default branch
 const branchLike = (b: string) => b.length >= 4 && !GENERIC_BRANCHES.has(b.toLowerCase()) && (/[/_.-]/.test(b) || /\d/.test(b)) && !b.includes('<')
 // the word `branch`, then a branch-like name: "Branch infra/alpha-beta", "branch `x/y`", "branch: x-1"
-const AFTER_BRANCH_RE = /\b(branch(?:es)?\b\s*[:=]?\s*[`'"]?)([A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9])/gi
+// (also "branch (x/y)", and a comma list: "branches: a-b, c-d")
+const BRANCH_NAME = '[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]'
+const AFTER_BRANCH_RE = new RegExp(`\\b(branch(?:es)?\\b\\s*[:=]?\\s*[\`'"(]?)(${BRANCH_NAME}(?:\\s*,\\s*(?!branch(?:es)?\\b)${BRANCH_NAME})*)`, 'gi')
+// every branch-like name of a matched list, masked
+const maskList = (list: string) => list.replace(new RegExp(BRANCH_NAME, 'g'), n => (branchLike(n) ? maskBranch(n) : n))
 // <label>/<type>/<rest>: a registry key (project/branch) after the project rule ran
 const LABEL_BRANCH_RE = new RegExp(`(project-(?:[A-Z]|\\d+)/(?:${[...BRANCH_TYPES].join('|')})/)[A-Za-z0-9][A-Za-z0-9._/~-]*[A-Za-z0-9]`, 'g')
 // .../worktrees/<project>/<branch folder>
-const WORKTREE_PATH_RE = /(\/worktrees\/[^/\s`'"<>]+\/)([^\s`'"),;:]+)/g
+// (one folder, or a branch type and the folder after it: `feature/alpha`; whatever follows, a file inside the worktree, stays)
+const WORKTREE_PATH_RE = new RegExp(`(\\/worktrees\\/[^/\\s\`'"<>]+\\/)((?:(?:${[...BRANCH_TYPES].join('|')})\\/)?[^/\\s\`'"),;:]+)`, 'g')
 // a first name after the words that introduce a person; a product or common word is no name
 const NAME_AFTER_RE = /(?<![A-Za-z0-9])((?:[Rr]eply to|[Rr]eplied to|[Aa]sked by|[Ff]rom|[Tt]o))(\s+)([A-Z][a-z]{2,14})(?![A-Za-z0-9_-])/g
 const NOT_A_NAME = new Set(
   ('claude opus sonnet haiku fable anthropic github gitlab bitbucket azure devops desk mac macos darwin linux windows homebrew node bun git docker desktop code doctor thread threads pane stats budget review learn compare worktree plugin plugins skill skills settings config json markdown python typescript javascript yarn npm pnpm jira slack google microsoft apple openai notion ' +
     'the this that these those it its an your you each every all any none one some main master origin upstream remote now here there then when where what which once after before both either neither my our their his her them today tomorrow yesterday true false null step phase version section line file folder page chapter item list table row column ' +
+    'read write edit bash grep glob agent task notebookedit webfetch websearch todowrite askuserquestion ' +
     'monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december').split(' '),
 )
 const nameAfter = (t: string) => t.replace(NAME_AFTER_RE, (m, trig: string, sp: string, name: string) => (NOT_A_NAME.has(name.toLowerCase()) ? m : `${trig}${sp}<name>`))
@@ -216,7 +222,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     // folder, then whatever follows the word "branch"
     for (const [b, m] of branches) t = t.replace(branchRe(b), m)
     t = t.replace(WORKTREE_PATH_RE, (_m, p: string, rest: string) => p + maskBranchDir(rest))
-    t = t.replace(AFTER_BRANCH_RE, (m, lead: string, name: string) => (branchLike(name) ? lead + maskBranch(name) : m))
+    t = t.replace(AFTER_BRANCH_RE, (_m, lead: string, list: string) => lead + maskList(list))
     t = names(t)
     t = t.replace(LABEL_BRANCH_RE, '$1<branch>')
     t = nameAfter(t)
@@ -247,7 +253,7 @@ export async function makeAnonymiser(h: Host): Promise<Anonymiser> {
     if ((t.match(URL_RE) ?? []).some(u => !REPO_URL.test(u.replace(/[.,;:!?]+$/, '')))) out.push('URL')
     if (new RegExp(ID_WORD_RE.source, 'i').test(t)) out.push('work item, PR or thread id')
     // a branch name that survived: one the machine knows, one after the word "branch", or an unmasked worktree folder
-    if (branches.some(([b]) => branchRe(b).test(tn)) || Array.from(t.matchAll(AFTER_BRANCH_RE)).some(m => branchLike(m[2]!)) || Array.from(t.matchAll(WORKTREE_PATH_RE)).some(m => !m[2]!.includes('<'))) out.push('branch name')
+    if (branches.some(([b]) => branchRe(b).test(tn)) || Array.from(t.matchAll(AFTER_BRANCH_RE)).some(m => (m[2]!.match(new RegExp(BRANCH_NAME, 'g')) ?? []).some(branchLike)) || Array.from(t.matchAll(WORKTREE_PATH_RE)).some(m => !m[2]!.includes('<'))) out.push('branch name')
     if (Array.from(t.matchAll(NAME_AFTER_RE)).some(m => /^(?:reply|replied|asked)/i.test(m[1]!) && !NOT_A_NAME.has(m[3]!.toLowerCase()))) out.push('person name')
     if (/\b(?:Darwin|Linux|Windows_NT)\s+\d+\.\d+/.test(t)) out.push('OS build')
     return [...new Set(out)]

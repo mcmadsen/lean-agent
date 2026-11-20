@@ -178,6 +178,11 @@ test('branch names after the word branch keep a type prefix and mask the rest; p
   for (const same of ['the branch is ready', 'branch main', 'on branch master and branch develop', 'branch protection rules', 'branch names stay', 'a branch', 'branch-protection', 'branch Infra']) expect([same, a.anonymise(same)]).toEqual([same, same])
   const once = a.anonymise('Branch infra/zulu-yankee-xray, branch bugfix/q-1')
   expect(a.anonymise(once)).toBe(once)
+  // a parenthesis before the name, and a comma list
+  expect(a.anonymise('(branch (feature/zulu-1) was dropped)')).toBe('(branch (feature/<branch>) was dropped)')
+  expect(a.anonymise('branches: infra/a-b, bugfix/c-d, main and e-f')).toBe('branches: infra/<branch>, bugfix/<branch>, main and e-f')
+  expect(a.missed('branches: infra/a-b, c-d')).toContain('branch name')
+  expect(a.missed('branches: infra/<branch>, <branch>')).toEqual([])
 })
 
 test('worktree folders and registry keys: the branch is masked, the type prefix and the project label stay', async () => {
@@ -190,6 +195,10 @@ test('worktree folders and registry keys: the branch is masked, the type prefix 
   // a registry key of a project (its label stays) after the project rule ran
   expect(a.anonymise('worktrees.json has alpha/feature/zulu-yankee for t1')).toBe('worktrees.json has project-A/feature/<branch> for t1')
   expect(a.anonymise('the folder worktrees/ and src/main.ts')).toBe('the folder worktrees/ and src/main.ts')
+  // what is inside the worktree stays: only the branch folder goes
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/fix-x/src/a.ts:12')).toBe('~/.lean-agent/worktrees/zebra/fix-<branch>/src/a.ts:12')
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/zulu-x/src/a.ts:12')).toBe('~/.lean-agent/worktrees/zebra/<branch>/src/a.ts:12')
+  expect(a.anonymise('/h/.lean-agent/worktrees/zebra/feature/zulu/src/a.ts')).toBe('~/.lean-agent/worktrees/zebra/feature/<branch>/src/a.ts')
   const once = a.anonymise('/h/.lean-agent/worktrees/zebra/feature-zulu and alpha/bugfix/q-1')
   expect(a.anonymise(once)).toBe(once)
 })
@@ -250,7 +259,7 @@ test('a first name after "reply to", "asked by", "from" or "to" is masked unless
   expect(a.anonymise('Reply to Zed and replied to Yara')).toBe('Reply to <name> and replied to <name>')
   expect(a.anonymise('asked by Zed, a note from Yara, sent to Xena.')).toBe('asked by <name>, a note from <name>, sent to <name>.')
   expect(a.anonymise("from Zed's side")).toBe("from <name>'s side")
-  for (const same of ['reply to Claude', 'switched from Sonnet to Opus', 'from GitHub to Azure DevOps', 'went from Monday to March', 'go to Settings', 'back to The start', 'asked by Anthropic', 'from the desk', 'to zed', 'from a colleague', 'REPLY TO ZED', 'reply to Ab', 'to Zed-Marie']) expect([same, a.anonymise(same)]).toEqual([same, same])
+  for (const same of ['reply to Claude', 'switched from Sonnet to Opus', 'from GitHub to Azure DevOps', 'went from Monday to March', 'go to Settings', 'switched to Bash and from Read to Agent', 'moved from Grep to Task', 'back to The start', 'asked by Anthropic', 'from the desk', 'to zed', 'from a colleague', 'REPLY TO ZED', 'reply to Ab', 'to Zed-Marie']) expect([same, a.anonymise(same)]).toEqual([same, same])
   const once = a.anonymise('the reply to Zed, asked by Yara')
   expect(a.anonymise(once)).toBe(once)
   // the check flags the two person-specific phrases only (from / to are too common to judge)
@@ -263,7 +272,7 @@ test('a first name after "reply to", "asked by", "from" or "to" is masked unless
 test('the OS build goes, the OS family stays', async () => {
   const a = await makeAnonymiser(setup().host)
   expect(a.anonymise('Darwin 25.6.0 arm64')).toBe('Darwin arm64')
-  expect(a.anonymise('Linux 6.18.44-fc-v726 x86_64 and Windows_NT 10.0.19045 and macOS 15.1')).toBe('Linux x86_64 and Windows_NT and macOS')
+  expect(a.anonymise('Linux 9.9.9-test x86_64 and Windows_NT 10.0.19045 and macOS 15.1')).toBe('Linux x86_64 and Windows_NT and macOS')
   expect(a.anonymise('Linux 6.1.2.3 beats it')).toBe('Linux beats it') // not read as an address
   for (const same of ['Darwin', 'on Linux', 'Windows is slow', 'OS family: macOS (Darwin)']) expect([same, a.anonymise(same)]).toEqual([same, same])
   expect(a.missed('Darwin 25.6.0')).toContain('OS build')

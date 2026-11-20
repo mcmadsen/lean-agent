@@ -67,7 +67,8 @@ test('push refuses with the precise reason before anything leaves the machine, a
     ['a draft that is not a boolean', {}, { pr: { title: 't', draft: 'yes' } }, 'true or false'],
     ['no worktree registered', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', '{}')],
     ['a worktree of another thread', {}, {}, 'no registered worktree', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/feat': { path: WT, branch: 'feat', thread: 't2' } }))],
-    ['a worktree outside the project', {}, {}, 'does not belong to project app', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/elsewhere/feat', branch: 'feat', thread: 't1' } }))],
+    ['a worktree of another repository, outside the project', {}, {}, 'is not a worktree of the repository of project app', s => { s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/elsewhere/feat', branch: 'feat', thread: 't1' } })); const old = s.h.git.handler; s.h.git.handler = (a: string[], c: any) => (a.join(' ').includes('--git-common-dir') && a[1] === '/elsewhere/feat' ? { exitCode: 0, stdout: '/other/.git\n' } : old(a, c)) }],
+    ['the main checkout registered as a worktree', {}, {}, 'is the main checkout of project app', s => void s.h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ x: { path: '/r/app', branch: 'feat', thread: 't1' } }))],
     ['a worktree of another repository (its config is the thread\'s own)', { wtCommon: '/h/.lean-agent/worktrees/app/feat/.git' }, {}, 'is not a worktree of the repository of project app'],
     ['a project without a folder', {}, {}, 'not a registered project with a folder', s => void s.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: {} }))],
     ['the default branch of the remote is unknown', { defaultBranch: '', lsFail: true }, {}, 'default branch of origin is unknown'],
@@ -304,7 +305,7 @@ test('adoOf reads org, project and repository from every Azure DevOps remote for
   // an encoded name is decoded; a project-less url names the project like the repository
   expect(adoOf('https://dev.azure.com/org1/My%20Proj/_git/my%20repo')).toEqual({ org: 'org1', project: 'My Proj', repo: 'my repo' })
   expect(adoOf('https://dev.azure.com/org1/_git/repo1')).toEqual({ org: 'org1', project: 'repo1', repo: 'repo1' })
-  for (const bad of ['https://github.com/o/r', 'git@github.com:o/r.git', '/srv/git/r', '', 'https://dev.azure.com/org1/proj1', 'https://dev.azure.com/org1/proj1/_git/', 'https://dev.azure.com/-org/proj1/_git/repo1', 'https://dev.azure.com/org1/-p/_git/repo1', 'https://dev.azure.com/org1/p%0Aq/_git/repo1', 'https://dev.azure.com/org1/p%2Fq/_git/repo1', 'https://example.com/dev.azure.com/org1/proj1/_git/repo1', 'git@ssh.dev.azure.com:v3/org1/proj1']) expect([bad, adoOf(bad)]).toEqual([bad, null])
+  for (const bad of ['https://github.com/o/r', 'git@github.com:o/r.git', '/srv/git/r', '', 'https://dev.azure.com/org1/proj1', 'https://dev.azure.com/org1/proj1/_git/', 'https://dev.azure.com/-org/proj1/_git/repo1', 'https://dev.azure.com/org1/-p/_git/repo1', 'https://dev.azure.com/org1/p%0Aq/_git/repo1', 'https://dev.azure.com/org1/p%2Fq/_git/repo1', 'https://dev.azure.com/org1/p%40q/_git/repo1', 'https://evil.example#@dev.azure.com/org1/proj1/_git/repo1', 'https://evil.example?x=@dev.azure.com/org1/proj1/_git/repo1', 'x#y@ssh.dev.azure.com:v3/org1/proj1/repo1', 'https://example.com/dev.azure.com/org1/proj1/_git/repo1', 'git@ssh.dev.azure.com:v3/org1/proj1']) expect([bad, adoOf(bad)]).toEqual([bad, null])
 })
 
 test('the create-PR link is URL-encoded, and the PR link is read from az JSON', () => {
@@ -345,6 +346,19 @@ test('Azure DevOps remote: push, then az repos pr create (argv, no shell, the us
   const n = await setup({ urls: { origin: ADO_ORIGIN }, pushResult: { exitCode: 0, stderr: '' } })
   expect(await n.push()).toMatchObject({ ok: true, text: `pushed ${SHA} to origin/feat; compare URL ${ADO_LINK}` })
   expect(n.ghCalls).toEqual([])
+})
+
+test('Azure DevOps remote: a title or body that starts with @ never reaches az as a file reference', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN } })
+  await s.push({ pr: { title: '@~/.ssh/id_rsa', body: '@/etc/hosts\nmore' } })
+  const argv = s.ghCalls[0]!.argv
+  expect(argv).toContain('--title= @~/.ssh/id_rsa')
+  expect(argv).toContain('--description=\n@/etc/hosts\nmore')
+  expect(argv.filter(a => /^--(title|description)=@/.test(a))).toEqual([])
+  // an @ later in the text is untouched
+  const t = await setup({ urls: { origin: ADO_ORIGIN } })
+  await t.push({ pr: { title: 'ping @team', body: 'a @b' } })
+  expect(t.ghCalls[0]!.argv).toContain('--title=ping @team')
 })
 
 test('Azure DevOps remote: az is found in the usual places; missing az names az, never gh, and gives the create-PR link', async () => {
@@ -411,7 +425,23 @@ test('an unregistered linked worktree at the approved sha is adopted by the push
   const b = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']), review: false })
   expect((await b.push()).text).toContain('no green review record')
   expect(b.pushes()).toEqual([])
-  expect(Object.keys(registry(b))).toEqual(['app/feat'])
+  expect(registry(b)).toEqual({}) // a refused push changes nothing: the registry is written only once the review and approval hold
+  // the second push of that worktree (re-approved) finds it registered, though it lives outside the project's folders
+  await writeApproval(a.h.host, { project: 'app', sha: SHA, thread: 't1' })
+  const log2 = a.log.length
+  expect((await a.push()).ok).toBe(true)
+  expect(a.pushes()).toHaveLength(2)
+  expect(a.log.slice(log2).filter(x => x.includes('worktree'))).toEqual([]) // registered: no search for another
+  // a refused approval does not register either
+  const e = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']), approve: false })
+  expect((await e.push()).text).toContain('no valid approval')
+  expect(registry(e)).toEqual({})
+  // the project's own guard list applies to an adopted worktree (it sits outside the project's folders)
+  const g = await setup({ registry: {}, wtList: LIST(['/w/feat', SHA, 'feat']) })
+  g.h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app', guards: { 'push-deny': ['feat*'] } } }))
+  expect((await g.push()).text).toContain("guard 'feat*'")
+  expect(g.pushes()).toEqual([])
+  expect(registry(g)).toEqual({})
   // a protected branch is refused as for a registered worktree
   const c = await setup({ registry: {}, wtList: LIST(['/w/rel', SHA, 'release/1.0']), branch: 'release/1.0' })
   expect((await c.push()).text).toContain('protected branch')
@@ -439,6 +469,25 @@ test('an unregistered worktree is NOT adopted unless it is the one linked worktr
     expect([name, s.history()]).toEqual([name, '']) // nothing consumed
     if (name.startsWith('registered for another')) expect(registry(s)['app/feat'].thread).toBe('t2')
   }
+})
+
+test('a thread whose own registered worktree moved past the approved sha is told so, not given another thread\'s worktree', async () => {
+  const s = await setup({ head: 'f'.repeat(40), wtList: LIST(['/w/other', SHA, 'feat2']) })
+  s.h.files.set(`${WT}/.git`, 'x') // its own worktree is live, at another commit
+  const old = s.h.git.handler
+  s.h.git.handler = (a: string[], c: any) => (a[1] === '/w/other' && a.includes('rev-parse') && !a.includes('--git-common-dir') && !a.includes('--show-toplevel') ? { exitCode: 0, stdout: SHA + '\n' } : old(a, c))
+  const r = await s.push()
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain(`HEAD of ${WT} is ffffffff, not ${SHA.slice(0, 8)}`)
+  expect(s.pushes()).toEqual([])
+  expect(Object.keys(registry(s))).toEqual(['app/feat'])
+  // its registered worktree is gone (removed): the unregistered one at the sha is adopted
+  const t = await setup({ wtList: LIST(['/w/other', SHA, 'feat']) })
+  const oldT = t.h.git.handler
+  t.h.git.handler = (a: string[], c: any) => (a[1] === WT && a.includes('rev-parse') && !a.includes('--git-common-dir') ? { exitCode: 128, stdout: '', stderr: 'fatal: cannot change to the folder' } : oldT(a, c))
+  const r2 = await t.push()
+  expect(r2.ok).toBe(true)
+  expect(t.pushes()[0]![1]).toBe('/w/other')
 })
 
 test('adopting under a key that another live worktree holds registers a suffixed key, never silently fails', async () => {

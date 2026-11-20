@@ -82,11 +82,39 @@ test('the same worktree of another thread is refused with the reason, unless it 
   s.live('/w/a')
   const r = await registerWorktree(s.h.host, input('/w/a'))
   expect(r.ok).toBe(false)
-  expect(r.text).toContain("worktree NOT registered: app/feat is t2's (not shared)")
+  expect(r.text).toContain("worktree NOT registered: /w/a is t2's (app/feat, not shared)")
   expect(s.reg()['app/feat'].thread).toBe('t2')
   const sh = setup({ registry: { 'app/feat': { path: '/w/a', branch: 'feat', thread: 't2', shared: true } } })
   sh.live('/w/a')
-  expect((await registerWorktree(sh.h.host, input('/w/a'))).ok).toBe(true)
+  const r2 = await registerWorktree(sh.h.host, input('/w/a'))
+  expect(r2).toMatchObject({ ok: true, key: 'app/feat~2' })
+  // the owner keeps its entry (and can still push); the newcomer has one of its own
+  expect(sh.reg()['app/feat']).toEqual({ path: '/w/a', branch: 'feat', thread: 't2', shared: true })
+  expect(sh.reg()['app/feat~2']).toMatchObject({ path: '/w/a', thread: 't1', shared: true })
+  // the same thread again: its own entry is refreshed, no third key
+  expect((await registerWorktree(sh.h.host, input('/w/a'))).key).toBe('app/feat~2')
+  expect(Object.keys(sh.reg())).toEqual(['app/feat', 'app/feat~2'])
+  // another thread's worktree is never taken over under a NEW key either (its branch may have changed since it was registered)
+  const moved = setup({ registry: { 'app/old-name': { path: '/w/a', branch: 'old-name', thread: 't2' } } })
+  moved.live('/w/a')
+  const mr = await registerWorktree(moved.h.host, input('/w/a', { branch: 'new-name' }))
+  expect(mr.ok).toBe(false)
+  expect(mr.text).toContain("/w/a is t2's (app/old-name, not shared)")
+  expect(Object.keys(moved.reg())).toEqual(['app/old-name'])
+})
+
+test('prune drops only the entries it saw stale: one replaced meanwhile (same key, another path) stays', async () => {
+  const s = setup({ registry: { 'app/gone': { path: '/w/gone', branch: 'gone', thread: 't1' } } })
+  const old = s.h.host.fs.exists
+  // between the staleness check and the write, another process replaced the entry with a live worktree
+  let swapped = false
+  s.h.host.fs.exists = async (p: string) => {
+    const r = await old(p)
+    if (!swapped && p === '/w/gone') { swapped = true; s.live('/w/new'); s.h.files.set(FILE, JSON.stringify({ 'app/gone': { path: '/w/new', branch: 'gone', thread: 't1' } })) }
+    return r
+  }
+  expect(await pruneStale(s.h.host)).toEqual([])
+  expect(s.reg()['app/gone'].path).toBe('/w/new')
 })
 
 test('a damaged registry is never overwritten; a registry that cannot be written says so', async () => {
