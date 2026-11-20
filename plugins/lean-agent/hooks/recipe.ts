@@ -22,7 +22,11 @@ export type Audit = {
   blockers: string[]
   reason: string
   waits?: boolean // the auditor said adopt but the mod's rules did not let it adopt on its own: it waits for the desk's decision
+  via?: 'record-audit' | 'thread-report' // how the verdict came, when not from the auditor's own Agent reply: a record-audit tool call, or the audit thread's report (decide's fallback)
 }
+// An audit that was started and has no verdict yet, for the script text `sha` (the candidate, or the pending update): the mod saw an auditor
+// Agent call start with the exact brief (`agent`, by `by`), and/or the desk started an audit thread (`thread`). record-audit needs `agent`.
+export type Auditing = { sha: string; ts: number; thread?: string; by?: string; agent?: number }
 export type Decision = { value: 'adopt' | 'reject'; by: 'user'; reason: string; ts: number; overrode?: string[] }
 // One version of an adopted script: scripts/<name>/v<N>/<file>. The stable copy of the current one is scripts/<name>/run.
 export type Version = { v: string; file: string; sha256: string; author: string; ts: number; purpose: string; run: string; audit?: Audit; decision?: Decision; changes?: string[] }
@@ -50,6 +54,7 @@ export type Meta = {
   failures?: number // failed runs since the last update or rollback
   state?: 'needs-update'
   badWhy?: string
+  auditing?: Auditing
   history?: { ts: number; what: string }[]
 }
 

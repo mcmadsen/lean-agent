@@ -33,7 +33,7 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
-import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
+import { AUDIT_ASYNC_NOTE, AUDIT_FOREGROUND_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, foregroundCall, isAuditorCall, markAuditStarted, wantsBackground, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback, logRefusal } from './feedbackexport'
 import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
@@ -834,6 +834,7 @@ export const register: Register = on => {
     // a script auditor always runs in the foreground: its verdict is recorded from this call's reply (a background call never gets one)
     const audited = role.kind === 'thread' && !e.agentId && isAuditorCall(e)
     const forced = audited && wantsBackground(e)
+    if (audited && role.kind === 'thread') await markAuditStarted(host, role.id, String(e.prompt ?? '')).catch(() => false) // an audit of this text is under way (record-audit needs it)
     let r: any
     try {
       r = await next(audited ? foregroundCall(e) : e)

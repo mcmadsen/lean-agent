@@ -540,6 +540,15 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
      copy: lean-agent now treats that copy as the thread, but its history is the copy's), or a new session in another folder (the link did
      not resolve the id).
   Whatever the link does, `claude attach <id>` in a terminal reaches the thread's own session, and the app's session list shows it by name.
+- **A script audit never got a verdict** (`lean_script show` says "unaudited" after the auditor finished, or `decide` says "was never audited").
+  The mod records the verdict from the auditor's `LEAN-AUDIT` line when the auditor's Agent call returns; with a background auditor that
+  return carries no verdict (1.0.12 forces auditor calls to the foreground; whether the engine honours that is *unverified*). Now:
+  `lean_script audit` says "Audit started; verdict not recorded yet" and `show` says "audited, waiting for the verdict" until it arrives;
+  the audit thread passes a background hand-back on with `lean_script record-audit` (name, sha, verdict, flags, reason; the mod checks it
+  like a reply and needs its own record that an auditor started with the exact brief for that text), and `decide` falls back to the audit
+  thread's last report with a `LEAN-AUDIT` line for that script text ("verdict taken from the audit thread's report", logged). Only one
+  audit thread runs per script text. A network flag still needs your explicit adopt. A verdict passed on this way is as reliable as the
+  session that relays it; the mod's rules and your decision are the limits.
 - **A rule does not load**: it must be a real file in `.claude/rules/lean-agent/`; `lean_rules sync` recreates it.
 - **A thread seems stuck**: `goals` shows its last goal line; a status request goes out after an hour of quiet.
 - **Spend refused**: `budget` shows which cap was hit; raise it in `config.json`.

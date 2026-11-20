@@ -10,6 +10,15 @@
 - **"Open tN" no longer implies the right session opened.** After the link is handed to the system opener the reply says: if a new desk
   opened instead, close it; the thread's session is in the app's session list as `tN · title`; `claude attach <id>` reaches it from a
   terminal. README Troubleshooting has the checks to run on a Mac (not verified that the app resolves a `claude --bg` id).
+- **A script audit's verdict is no longer lost when the auditor ran in the background.** The mod recorded the verdict only from the
+  auditor's own Agent reply, which a background call does not have (1.0.12 forces the foreground; unverified in the engine). New
+  `lean_script record-audit` (name, sha, verdict adopt|adapt|reject, network / deletes / secrets / generalises, reads, writes, hardcoded,
+  changes, reason) for the audit thread or the thread that started the auditor: checked like a reply (stored sha, every flag answered,
+  the mod's own rules on top) and only after the mod saw an auditor start with the exact brief for that text. `audit` says "Audit started;
+  verdict not recorded yet", `show` says "audited, waiting for the verdict" (not "unaudited") until it arrives, and the desk starts only
+  one audit thread per script text. `decide adopt` with no stored verdict takes the audit thread's last report with a `LEAN-AUDIT` line
+  for that text instead of "was never audited" ("verdict taken from the audit thread's report", logged); a network flag still needs
+  your explicit adopt.
 
 ### Added
 - **Restart desk remembers the desk it replaced and keeps asking you to archive it.** No engine call closes a session, and the desk is a
