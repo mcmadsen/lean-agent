@@ -16,6 +16,7 @@ import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 import { notePending } from './approvals'
 import { ACTION_KINDS, addActionRequest } from './deskactions'
 import { logRefusal } from './feedback'
+import { missingOutputs, notDoneText } from './donecheck'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -432,6 +433,15 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
     if (name === 'lean_report') {
       if (!str(i.text)) return { ok: false, text: 'lean_report needs text' }
+      // a done report counts only when every output file it names exists (donecheck.ts): checked by script, before anything is written or sent
+      if (str(i.state) === 'done') {
+        const gone = await missingOutputs(h, str(i.text))
+        if (gone.length) {
+          const text = notDoneText(gone)
+          await logRefusal(h, { role: 'thread', rule: 'done-output-missing', text: text.slice(0, 200), tool: 'lean_report', thread: id })
+          return { ok: false, text }
+        }
+      }
       // A report is never lost: a failed write is tried once more with the user's home as the working folder (a session whose own folder
       // is gone makes every spawn fail); when that fails too the thread gets the text back with the exact error, to paste to the user
       // an `action` is a typed remote write for the DESK to send after the user's yes (deskactions.ts): checked against the fixed table first,
