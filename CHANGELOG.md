@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.11
 
 ### Fixed
 - **The learned review checklist was orphaned by the 0.45 -> 1.0 migration, so reviews ran without it.** 0.45 kept the lessons human
