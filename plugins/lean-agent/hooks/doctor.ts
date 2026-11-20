@@ -11,6 +11,7 @@ import { seenNames, skillStat } from './skilltrim'
 import { SKEW_CAUSE, compareVersions, installedVersion, running, runsText, skewText, skewedThreads } from './skew'
 import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
 import { pruneStale, staleEntries } from './worktreereg'
+import { removeStaleSessions, threadSessionRows } from './threadsessions'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
 import { kTokens, lastCompaction, manualNote } from './deskcompact'
 import { reportFailures } from './delivery'
@@ -116,6 +117,7 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
   } catch (e) {
     lines.push(`worktree registry: stale entries not pruned (${String((e as Error)?.message ?? e).slice(0, 100)})`)
   }
+  lines.push(...(await removeStaleSessions(h).catch(() => [] as string[]))) // threadsessions.ts: claude rm of stale thread sessions, never forced
   return { lines }
 }
 
@@ -177,6 +179,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const stale = await staleEntries(h).catch(() => [])
   if (stale.length) row(false, `worktrees.json has ${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}: ${stale.slice(0, 5).map(s => `${s.key} (${s.why}${s.path ? `: ${s.path}` : ''})`).join('; ')}${stale.length > 5 ? `; ${stale.length - 5} more` : ''}. Run fix to drop them`)
   else out.push('ok   no stale worktree registry entry')
+  out.push(...(await threadSessionRows(h).catch(() => [] as string[]))) // threadsessions.ts: stale thread sessions, session names
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

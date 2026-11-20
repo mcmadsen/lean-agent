@@ -71,7 +71,8 @@ test('send to an idle thread resumes exactly once with the batch', async () => {
   await call({ action: 'send', tN: 't1', text: 'one' })
   const resumes = h.claudeCalls().filter(a => a.includes('--resume'))
   expect(resumes.length).toBe(1)
-  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '--', 'one\n\n<!-- lean:n=1 -->'])
+  // the task first, then the queued message (a status check among them is a side effect, never the whole turn)
+  expect(resumes[0]).toEqual(['--bg', '--resume', SID, '--', 'Resume the work now (task: brief). Answer status requests with a short lean_report as a side effect, never as the whole turn.\n\none\n\n<!-- lean:n=1 -->'])
 })
 
 test('two sends within 30 s make one wake; the second waits queued', async () => {
@@ -638,8 +639,9 @@ test('reopen of a closed thread starts a NEW session (claude --bg, never --resum
   expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
   expect(bg).toHaveLength(2) // the first start and the fresh one
   const argv = bg[1]!
-  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'haiku', '--effort', 'low']) // thread.json's model/effort
+  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login (2)', '--model', 'haiku', '--effort', 'low']) // thread.json's model/effort; the second session
   const prompt = argv[argv.length - 1]!
+  expect(prompt.startsWith('Resume the work now (task: login fixed and reviewed).')).toBe(true) // the goal is the task, first
   for (const need of ['NEW session', 'fix the login bug in the api', 'login fixed and reviewed', 'branch fix-login', 'worktrees/app/fix-login', 'the flaky part is the clock', 'api uses pnpm', 'also bump the changelog', 'first look done', 'last commit abc1234, not pushed']) expect(prompt).toContain(need)
   expect(prompt).not.toContain('unrelated thread')
   expect(prompt).not.toContain('someone elses')

@@ -3,7 +3,8 @@ import { deskPush } from './push'
 import type { PrInput } from './push'
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
 import type { Host } from './state'
-import { goalsLocked, unconsumed, wakeMark } from './delivery'
+import { deskState, goalsLocked, unconsumed, wakeMark } from './delivery'
+import type { DeskRec } from './delivery'
 import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
@@ -11,7 +12,10 @@ import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, rev
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
-import { buildHandover, olderVersion, pluginVersion } from './handover'
+import { buildHandover, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
+import { ENDED_AT_ONCE, endedAtOnce, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, threadsConfig, truthOf } from './threadstate'
+import type { Truth } from './threadstate'
+import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
 import { doneSession, finishedText } from './finish'
@@ -39,6 +43,8 @@ export type Thread = {
   version?: string // the lean-agent version the DESK saw installed when the session was last started or resumed (what the session really runs is `running`)
   running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
   finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
+  gen?: number // how many sessions this thread has had (1 = the first): the name of the session is "tN · title", "tN · title (2)" ... (threadstate.ts sessionName)
+  req0?: number // the thread's request count in the ledger when its session was started or woken: a session that ended its turn at once added at most two
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
   lastCheckpoint?: number // 1.0.6 only
 }
@@ -82,10 +88,10 @@ export function parseAgents(text: string): AgentRow[] {
   return out
 }
 
-// Only these mean "no live work": anything else (busy, running, waiting, an unknown word) counts as running,
-// so an uncertain session is never resumed (a resume of a running session forks it).
-const IDLE = new Set(['idle', 'done', 'completed', 'complete', 'finished', 'stopped', 'exited', 'failed', 'error', 'dead'])
-export const isRunning = (r: AgentRow | undefined) => !!r && !IDLE.has(r.status)
+// `state` (working | idle | done ...) says what the session is doing, `status` is the older word; threadstate.ts liveOf reads them. Only an
+// idle or done session is "no live work": anything else (busy, running, waiting, an unknown word) counts as running, so an uncertain
+// session is never resumed (a resume of a running session forks it).
+export const isRunning = (r: AgentRow | undefined) => !!r && liveOf(r) === 'working'
 // working = busy or reported working: nothing may close, stop or replace it
 export const isWorking = (r: AgentRow | undefined) => isRunning(r) || r?.state === 'working'
 // waiting on a prompt nobody answers (a background session cannot): the user has to open it in the app
@@ -282,7 +288,6 @@ async function nextId(h: Host, home: string): Promise<string> {
   return `t${max + 1}`
 }
 
-const label = (t: Thread) => `${t.id} · ${t.title}`
 // did this answer come from a session that was really started (not a "running" or refusal text)?
 const fresh = (r: Out) => r.ok && !!(r.data as { fresh?: boolean } | undefined)?.fresh
 
@@ -369,17 +374,27 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (hasEnv && !kept) menv.lines = [...menv.lines.filter(l => !l.startsWith('mcp env for this thread')), "mcp env: the thread's settings file could not be made user-only, so its variables were left out"]
   await writeLoaded(h, home, t.id, loaded).catch(() => undefined)
   await startUsage(h, home, t.id).catch(() => undefined)
-  const r = await h.process.run(['claude', '--bg', '-n', label(t), '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
+  // the guide's model line is the one this session starts with (a recorded opus may start on sonnet): written from the choice made now
+  if (root) await refreshGuide(h, root, home, t, choice)
+  // the session's name: "tN · title", then "(2)", "(3)" for each session that replaces an older one (the sidebar shows two rows otherwise)
+  const old = t.sid
+  const gen = old ? (t.gen ?? 1) + 1 : t.gen ?? 1
+  const name = sessionName(t.id, t.title, gen)
+  const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, '--', prompt], { cwd: folder, timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
   if (!sid) {
-    const rows = ((await agents(h)) ?? []).filter(a => a.cwd === folder || a.name === label(t))
+    const rows = ((await agents(h)) ?? []).filter(a => a.cwd === folder || a.name === name)
     rows.sort((a, b) => b.startedAt - a.startedAt)
     sid = rows[0]?.sid ?? ''
   }
   if (t.sid && sid !== t.sid) t.sids = [...(t.sids ?? []), t.sid] // the old session id stays as history; its conversation is never resumed
   t.sid = sid
+  t.gen = gen
   t.lastWake = await h.clock.now()
+  const req0 = await requestsOf(h, t.id, t.lastWake)
+  if (req0 === null) delete t.req0
+  else t.req0 = req0
   delete t.finished // a new session is a new piece of work
   if (installed) t.version = installed
   await save(h, home, t)
@@ -387,8 +402,28 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   // one reply line: what was chosen (model/effort, so the desk need not look it up) and, when a profile applies, what the thread loads
   const how = `${choice.model}/${choice.effort}`
   const skew = sid ? await reportedVersion(h, home, t, root, installed) : '' // "running X, installed Y" when the session loaded another plugin version
-  const lt = (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('')
-  return sid ? { ok: true, text: `${t.id} started (${sid}) · ${how}${lt}`, data: { fresh: true } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
+  const { notes: settled, ended } = sid ? await settle(h, home, t, { sid, old, name }) : { notes: [] as string[], ended: false }
+  const started = ended ? ENDED_AT_ONCE : 'started' // loud: the head of the reply says it
+  const lt = (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
+  return sid ? { ok: true, text: `${t.id} ${started} (${sid}) · ${how}${lt}`, data: { fresh: true, ...(ended ? { ended: true } : {}) } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
+}
+
+// After a session was started: the name the app lists for it (read back from `claude agents`), the session it replaced taken out of the
+// app's list (claude rm, never forced), and whether it already ended its turn (a session that is idle moments after its start made no
+// tool call). Lines for the reply; `ended`: the session is not working.
+async function settle(h: Host, home: string, t: Thread, o: { sid: string; old: string; name: string }): Promise<{ notes: string[]; ended: boolean }> {
+  const notes: string[] = []
+  const rows = await agents(h).catch(() => null)
+  const row = rows?.find(a => a.sid === o.sid)
+  const bad = nameProblem(row, o.name)
+  if (bad) notes.push(`the app lists it as "${bad.slice(0, 60)}", not "${o.name}": Claude Code cannot rename a background session (the doctor says more)`)
+  const ended = !!row && liveOf(row) !== 'working'
+  if (rows && o.old && o.old !== o.sid && (await threadsConfig(h, home)).removeOld) {
+    const rm = await removeSession(h, home, { id: t.id, sid: o.old, current: o.sid, row: rows.find(a => a.sid === o.old), log: true }).catch(() => null)
+    if (rm?.removed) notes.push("the old session was removed from the app's list (its conversation is kept)")
+    else if (rm?.refused) notes.push(`the old session stays in the app's list (claude rm refused: ${rm.refused})`)
+  }
+  return { notes, ended }
 }
 
 // start / reopen with needs: added to what the thread already asked for (kept in thread.json, so a later start keeps them); a string = refusal
@@ -487,29 +522,42 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   const listed = t.sid ? await agents(h) : []
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so no new session is started`)
   const row = t.sid ? listed.find(a => a.sid === t.sid) : undefined
-  if (isWorking(row) && !restart && !(limit && isLimitRow(row))) return { ok: true, text: `${t.id} is running: no new session started (stop it from the Claude app first)` }
+  const u = await unconsumed(h, home, t.id)
+  if (isWorking(row) && !restart && !(limit && isLimitRow(row))) {
+    const tr = truthOf({ threadState: t.state, row, queued: u.msgs, now: await h.clock.now(), stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+    return { ok: true, text: tr.word === 'stuck' ? `${t.id} is ${tr.text}: no new session started; restart ${t.id} replaces it` : `${t.id} is running: no new session started (stop it from the Claude app first)` }
+  }
   if (row && (row.pid > 0 || (restart && isWorking(row)))) {
     const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}), ...(limit ? { limit: true } : {}) })
     if (stopped) return stopped
   }
-  await refreshGuide(h, root, home, t, given)
-  const u = await unconsumed(h, home, t.id)
   const ho = await buildHandover(h, home, t, why, u.msgs)
   const r = await startSession(h, home, t, ho.prompt, given, installed, root)
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo
     await save(h, home, t)
   }
-  return r
+  return fresh(r) ? { ...r, text: `${r.text} · ${restartCost(ho.prompt, t.model ?? given.model ?? 'sonnet')}` } : r
 }
 
-async function refreshGuide(h: Host, root: string, home: string, t: Thread, given: Given = {}): Promise<void> {
+// "new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old session's conversation is not resumed". The estimate:
+// the handover prompt at about four characters a token, priced as uncached input of the model the session starts on (the guide and the
+// tool listing are not counted)
+export function restartCost(prompt: string, model: string): string {
+  const tokens = Math.ceil(prompt.length / 4)
+  const usd = (tokens * priceOf(model).in) / 1e6
+  const n = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
+  return `new session: handover about ${n} tokens (~$${Math.max(0.01, usd).toFixed(2)} first turn, estimate); the old session's conversation is not resumed`
+}
+
+// The thread's CLAUDE.md is regenerated from the template at every fresh start when lean-agent wrote it (its model line is the one the
+// new session starts with, so a model change never leaves a stale line); a file the user wrote stays.
+async function refreshGuide(h: Host, root: string, home: string, t: Thread, choice?: Choice): Promise<void> {
   const file = `${tpath(home, t.id)}/CLAUDE.md`
   try {
     const have = await h.fs.read(file)
     if (typeof have !== 'string' || !have.startsWith('<!-- generated by lean-agent')) return // the user's own file stays
-    const choice = await pickModel(h, home, t, given) // the one the new session starts with (startSession picks it the same way)
-    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, typeof choice === 'string' ? undefined : choice.choice, await resolveLoaded(h, home, t.project, t.needs ?? []))
+    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, choice, await resolveLoaded(h, home, t.project, t.needs ?? []))
     if (want && want !== have) await h.fs.write(file, want)
   } catch {
     /* no guide yet: nothing to refresh */
@@ -525,18 +573,31 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 // `limit`: the resume after a usage limit (docs/usage-limit-resume.md): a session blocked by the limit counts as not running, is
 // stopped when its process lingers, and the 30 s gap does not apply (the desk's tick marks one resume per reset itself).
 // `root` and `current` (the installed plugin version) are only for the fresh session a finished thread gets instead of a resume.
-async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string } = {}): Promise<Out> {
+// `explicit`: a wake the user or desk asked for by name (wake, resume): it also wakes an idle session with nothing queued (the prompt
+// then is the task) and replaces a STUCK one (queued messages unread for threads.stuckMinutes, no tool call or inbox read) with the
+// handover session. A plain send never replaces a stuck session: it says so and leaves the choice to wake or restart.
+async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; explicit?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
   const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
   const msgs = u.msgs
-  if (!msgs.length && !opts.force) return { ok: true, text: `${t.id}: nothing queued` }
+  if (!msgs.length && !opts.force && !opts.explicit) return { ok: true, text: `${t.id}: nothing queued` }
   const listed = await agents(h)
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
   const row = listed.find(a => a.sid === t.sid)
-  if (isRunning(row) && !(opts.limit && isLimitRow(row))) return { ok: true, text: `${t.id} is running: ${msgs.length} message(s) queued, it reads them itself`, data: { resumed: false } }
   const now = await h.clock.now()
-  if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: queued for the next wake` }
+  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+  const limited = !!opts.limit && isLimitRow(row)
+  if (truth.word === 'running' && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
+  if (!msgs.length && !opts.force && truth.word !== 'idle' && truth.word !== 'stuck') return { ok: true, text: `${t.id}: nothing queued` }
+  if (truth.word === 'stuck' && !(opts.explicit && !t.finished && !opts.limit)) return { ok: true, text: `${t.id} is ${truth.text}: ${msgs.length} message(s) queued, wake or restart it`, data: { resumed: false } }
+  if (!opts.limit && t.lastWake && now - t.lastWake < WAKE_GAP_MS) return { ok: true, text: `${t.id} was woken ${Math.round((now - t.lastWake) / 1000)} s ago: ${msgs.length} message(s) queued, session ${truth.word === 'stuck' ? 'stuck' : 'idle'}: wake or restart it if it stays idle` }
+  // a stuck session (nothing read for stuckMinutes) is replaced: stopped and a NEW session starts with the handover, queued messages
+  // included (never a session that waits on a prompt for the user: truthOf calls that one running)
+  if (truth.word === 'stuck' && !t.finished) {
+    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', `Its previous session was stuck: ${truth.unread} queued message(s) unread for ${Math.round(truth.oldestMs / 60_000)} min with no tool call.`, {}, true)
+    return fresh(r) ? { ...r, text: `${t.id} was ${truth.text}: replaced by a new session with the handover (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
+  }
   // A session that reported done is over (finish.ts): its conversation is never resumed. Marked finished, or its last report is done
   // and the session is idle (the desk's tick has not stopped it yet): a NEW session starts with the handover, queued messages included.
   if (t.finished || (!opts.limit && (await doneSession(h, home, t)))) {
@@ -558,7 +619,10 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
     if (stopped) return stopped.ok ? { ...stopped, data: { resumed: false } } : stopped
   }
   const upTo = u.upTo
-  const prompt = [opts.lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
+  // the task first: "Resume the work now (task: ...)", then the queued messages (a status check among them is answered with a short
+  // lean_report while the work goes on, never as the whole turn)
+  const lead = opts.lead ?? resumeLead(await taskOf(h, home, t))
+  const prompt = [lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
   const r = await h.process.run(['claude', '--bg', '--resume', t.sid, '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   // safety net: the CLI prints "started a copy as <id>" when it forked after all; the thread follows the copy
@@ -569,14 +633,24 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; l
   if (copied) t.sid = copied
   t.lastWake = now
   t.delivered = upTo
+  const req0 = await requestsOf(h, t.id, now)
+  if (req0 === null) delete t.req0
+  else t.req0 = req0
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   await save(h, home, t)
-  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}` }
+  // the name a resumed session keeps is the one it was started with (`--resume` takes no -n): read back, said when it is not the thread's
+  const bad = nameProblem(after.find(a => a.sid === t.sid), sessionName(t.id, t.title, t.gen ?? 1))
+  const named = bad ? ` · the app lists it as "${bad.slice(0, 60)}": Claude Code cannot rename a background session (the doctor says more)` : ''
+  return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}${named}` }
 }
 
 async function list(h: Host, home: string, root = ''): Promise<Out> {
-  const rows = (await agents(h)) ?? []
+  const listed = await agents(h)
+  const rows = listed ?? []
   const installed = await installedVersion(h, root)
+  const now0 = await h.clock.now()
+  const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes
+  const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) // the last report of each thread (a [working] one can be stale)
   const out: unknown[] = []
   let ents: { name: string }[] = []
   try {
@@ -587,7 +661,15 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
   for (const e of ents.filter(x => ID.test(x.name)).sort((a, b) => Number(a.name.slice(1)) - Number(b.name.slice(1)))) {
     const t = await load(h, home, e.name)
     if (!t) continue
-    const q = (await pending(h, home, t)).length
+    const queued = await pending(h, home, t)
+    const q = queued.length
+    const row = rows.find(a => a.sid === t.sid)
+    // running | idle | stuck | done: from the session's own state and the queue, never from the thread's last report
+    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes }) : null
+    const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
+    const lastRec = mine[mine.length - 1]
+    const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
+    const ended = !!truth && !!t.sid && t.lastWake > 0 && endedAtOnce({ word: truth.word, req0: t.req0, req: typeof t.req0 === 'number' ? await requestsOf(h, t.id, now0) : null, reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
     const lo = await readLoaded(h, home, t.id)
     // the code the thread's session runs (its own mod's report) when it differs from what is installed: "running X, installed Y"
     const ran = t.state === 'closed' ? '' : runningOf(t)
@@ -595,9 +677,9 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
     const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(rows.find(a => a.sid === t.sid)), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(truth ? { live: truth.word, unread: truth.unread, liveText: truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.running ? ', running' : ''}${o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}`).join('\n') : 'no threads'
+  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}`).join('\n') : 'no threads'
   return { ok: true, text, data: out }
 }
 
@@ -645,7 +727,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           return await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
         }
         case 'wake':
-          return await wake(h, home, t, { root, current: installed })
+          return await wake(h, home, t, { root, current: installed, explicit: true })
         case 'resume': {
           // a resume that names an expensive model is held like a start on it (the model itself is the session's saved one)
           if (i.model !== undefined && isExpensiveModel(i.model)) {
@@ -661,7 +743,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
             const r = await freshSession(h, root, home, t, installed, `The previous session ran lean-agent ${was}; ${installed} is installed now, so this is a fresh session instead of a resume.`, i)
             return fresh(r) ? { ...r, text: `${id} started as a new session instead of a resume: the old one ran lean-agent ${was}, ${installed} is installed (old conversation kept read-only). ${r.text}` } : r
           }
-          return await wake(h, home, t, { force: true, lead: 'Continue where you left off.', installed, root, current: installed })
+          return await wake(h, home, t, { force: true, explicit: true, installed, root, current: installed })
         }
         case 'limit-resume': {
           // only the desk's tick calls this (not in the tool's schema): the session was seen blocked by the usage limit and its reset
@@ -717,13 +799,21 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
           if (bad) return err(bad)
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
-          if (t.sid && isRunning(live.find(a => a.sid === t.sid))) return { ok: true, text: `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
+          const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined
+          if (t.sid && isRunning(srow)) {
+            const tr = truthOf({ threadState: t.state, row: srow, queued: await pending(h, home, t), now: await h.clock.now(), stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+            return { ok: true, text: tr.word === 'stuck' ? `${id} is ${tr.text}: nothing started; wake or restart ${id} replaces it` : `${id} is already running${i.needs?.length ? ' (needs apply to a new session only: nothing was changed)' : ''}` }
+          }
+          // an idle session whose process is still alive is stopped before a new one takes its place (never a working one, never one outside the thread folder)
+          if (srow && !t.finished && srow.pid > 0) {
+            const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, id) })
+            if (stopped) return stopped
+          }
           if (t.finished) {
             // a finished thread never continues its old conversation: a new session with the handover
             const r = await freshSession(h, root, home, t, installed, 'Its previous session reported done and was finished; it is started again.', i)
             return fresh(r) ? { ...r, text: `${id} finished earlier: started as a new session with the handover (old conversation kept read-only). ${r.text}` } : r
           }
-          if (i.model === undefined) await refreshGuide(h, root, home, t, i) // the guide's model line is the one this session starts with (a recorded opus may start on sonnet)
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs

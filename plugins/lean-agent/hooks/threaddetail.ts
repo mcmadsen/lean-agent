@@ -12,6 +12,8 @@ import { resolveRange } from './reviewprep'
 import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { isRunning, isWorking, listAgents, needsYou } from './threads'
+import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, threadsConfig, truthOf } from './threadstate'
+import type { Word } from './threadstate'
 import type { AgentRow, Inbox, Thread } from './threads'
 
 export const REPORTS_MAX = 10 // reports drawn (newest first)
@@ -36,6 +38,8 @@ export type ThreadDetail = {
   brief: string
   goal: string
   run: 'running' | 'idle' | 'parked' | 'unknown' // unknown: `claude agents` could not be read
+  live?: Word // running | idle | stuck | done | parked (threadstate.ts truthOf); absent when the listing could not be read
+  liveNote: string // "2 unread queued: wake or restart it", a stale [working] report, a start that ended its turn at once ('' = nothing to say)
   working: boolean // never closed or restarted behind the user's back: an unreadable listing counts as working
   needsYou: boolean
   finished: boolean
@@ -162,7 +166,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   const dir = `${threadsDir(home)}/${id}`
   const t = await readJson<Thread | null>(h, `${dir}/thread.json`, null)
   if (!t || t.id !== id) return null
-  const d: ThreadDetail = { id, title: String(t.title ?? ''), project: String(t.project ?? ''), state: t.state, model: t.model, effort: t.effort, brief: '', goal: '', run: 'unknown', working: false, needsYou: false, finished: typeof t.finished === 'number' && t.finished > 0, approval: '', cost: null, reports: [], reportsTotal: 0, queued: [], queuedTotal: 0, errors: [] }
+  const d: ThreadDetail = { id, title: String(t.title ?? ''), project: String(t.project ?? ''), state: t.state, model: t.model, effort: t.effort, brief: '', goal: '', run: 'unknown', liveNote: '', working: false, needsYou: false, finished: typeof t.finished === 'number' && t.finished > 0, approval: '', cost: null, reports: [], reportsTotal: 0, queued: [], queuedTotal: 0, errors: [] }
   if (t.state === 'closed') return d
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
@@ -180,9 +184,13 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     const g = goals?.[id]?.text
     d.goal = (typeof g === 'string' ? g.trim() : '') || (t.lastGoal ?? '').trim()
   })
+  let sessionRow: AgentRow | undefined
+  let listed = false
   await guard('session', async () => {
     const rows = await agentRows(h, now)
     const row = t.sid && rows ? rows.find(a => a.sid === t.sid) : undefined
+    sessionRow = row
+    listed = !!rows
     d.run = t.state === 'parked' ? 'parked' : !rows ? 'unknown' : isRunning(row) ? 'running' : 'idle'
     d.working = !rows || isWorking(row) // an unreadable listing is never "not working"
     d.needsYou = needsYou(row)
@@ -223,6 +231,18 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     const q: Inbox[] = (await unconsumed(h, home, id)).msgs
     d.queuedTotal = q.length
     d.queued = q.slice(-QUEUED_MAX).map(m => ({ ts: m.ts, ...(m.from ? { from: m.from } : {}), text: String(m.text ?? '') }))
+  })
+  // the truth about "running": the session's own state and the queue (idle with N unread, stuck, a stale [working] report, an instant end)
+  await guard('live', async () => {
+    if (!listed || !t.sid) return // (no listing, or no session yet: nothing is claimed)
+    const q = (await unconsumed(h, home, id)).msgs
+    const truth = truthOf({ threadState: t.state, finished: d.finished, row: t.sid ? sessionRow : undefined, queued: q, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+    d.live = truth.word
+    const all = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask'))
+    const last = all[all.length - 1]
+    const stale = !!last && last.kind === 'report' && staleWorking(last.state, truth.word)
+    const ended = t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, id, now), reportsSince: all.filter(r => r.ts >= t.lastWake).length })
+    d.liveNote = [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: wake or restart it` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
   })
   return d
 }

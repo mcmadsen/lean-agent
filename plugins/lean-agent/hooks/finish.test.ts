@@ -248,8 +248,11 @@ test('restart: the session is stopped and a NEW one starts with the handover, sa
   expect(starts().length).toBe(1)
   expect(h.claudeCalls().some(a => a.includes('--resume'))).toBe(false)
   const argv = starts()[0]!
-  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'haiku', '--effort', 'medium'])
+  expect(argv.slice(0, 7)).toEqual(['--bg', '-n', 't1 · fix login (2)', '--model', 'haiku', '--effort', 'medium']) // the second session of the thread
   const prompt = argv[argv.length - 1]!
+  expect(prompt.startsWith('Resume the work now (task: ship the login fix). Answer status requests with a short lean_report as a side effect, never as the whole turn.')).toBe(true) // the task first
+  expect(r.text).toContain("new session: handover about ") // the cost of a restart, an estimate
+  expect(r.text).toContain("the old session's conversation is not resumed")
   for (const w of ['Restarted from the pane.', 'fix the login bug', 'ship the login fix', 'last commit abc1234', 'remember the staging url']) expect(prompt).toContain(w)
   expect(thread().sid).toBe(NEW)
   expect(thread().sids).toContain(SID)

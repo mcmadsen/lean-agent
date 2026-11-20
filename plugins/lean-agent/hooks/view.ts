@@ -9,8 +9,10 @@ import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
 import { spendNumbers, spendText } from './stats'
 import type { Spend } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
+import { ENDED_AT_ONCE, endedAtOnce, requestsOf, staleWorking, threadsConfig, truthOf } from './threadstate'
+import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
-import type { Thread } from './threads'
+import type { AgentRow, Thread } from './threads'
 import { deskChoice } from './models'
 import { isExpensiveModel, listRequests } from './expensive'
 import type { ModelRequest } from './expensive'
@@ -31,7 +33,10 @@ export type Verdict = 'green' | 'red' | 'none'
 // lastReport: the last report or question as one flat line; branch / sha: what its last reports name (and the review record knows);
 // review: the verdict of that sha; cost: today's usd; ready: done, a green review, and the report does not say it was pushed; recTs: when
 // the last record was written (an event's identity)
-export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; ready: boolean; recTs: number; agents?: string }
+// live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
+// (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
+// [working] report, a start that ended its turn at once)
+export type ThreadRow = { id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; ready: boolean; recTs: number; agents?: string }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -54,7 +59,7 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'working' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'working' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
@@ -62,6 +67,7 @@ export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.approval) return { word: 'approval', color: 'warning' }
   if (t.blocked) return { word: 'blocked', color: 'error' }
   if (t.asking) return { word: 'asking', color: 'warning' }
+  if (t.live === 'stuck') return { word: 'stuck', color: 'error' }
   if (t.working) return { word: 'working', color: 'success' }
   if (t.done || t.finished) return { word: 'done', color: 'inactive' }
   return { word: 'idle', color: 'inactive' }
@@ -198,7 +204,7 @@ export async function loadView(h: Host): Promise<View> {
       .slice(0, ANSWERS_MAX)
   })
   await guard('questions', async () => { v.openQuestions = await openQuestions(h) })
-  const rows = new Map<string, { run: boolean; working: boolean; needsYou: boolean; limit: boolean }>()
+  const rows = new Map<string, { run: boolean; working: boolean; needsYou: boolean; limit: boolean; agent: AgentRow }>()
   let agentsOk = true
   await guard('agents', async () => {
     const t = await h.clock.now()
@@ -212,7 +218,7 @@ export async function loadView(h: Host): Promise<View> {
       agentsOk = false
       throw new Error(`claude agents exited ${r.exitCode}`)
     }
-    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a), working: isWorking(a), needsYou: needsYou(a), limit: isLimitRow(a) })
+    for (const a of parseAgents(r.stdout)) rows.set(a.sid, { run: isRunning(a), working: isWorking(a), needsYou: needsYou(a), limit: isLimitRow(a), agent: a })
   })
   const asking = new Set<string>()
   const owner = new Map<string, string>() // tN -> last record text
@@ -278,7 +284,17 @@ export async function loadView(h: Host): Promise<View> {
       // the desk's push is recorded in the thread's history (push.ts), not in the desk inbox: a pushed commit is not "ready to push"
       const pushed = isDone && review === 'green' && !!full && (await readJsonl<{ kind?: string; ok?: boolean; sha?: string }>(h, `${threadsDir(home)}/${t.id}/history.jsonl`).catch(() => [])).some(x => x?.kind === 'push' && x.ok === true && typeof x.sha === 'string' && x.sha.length >= 7 && full!.startsWith(x.sha))
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
+      // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
+      const queued = (await unconsumed(h, home, t.id)).msgs
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+      const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
+      const mine = recsOf.get(t.id) ?? []
+      const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
+      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', truth.word === 'stuck' ? `${truth.text}: wake or restart it` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       v.threads.push({
+        ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
+        unread: truth.unread,
+        ...(liveNote ? { liveNote } : {}),
         ...(used ? { agents: used } : {}),
         lastReport: flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
         ...(branch ? { branch } : {}),
