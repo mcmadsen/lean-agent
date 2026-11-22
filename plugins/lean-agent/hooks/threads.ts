@@ -33,6 +33,7 @@ import { baseLine, readBase } from './base'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
+import { briefLintLine, isForgeWrite } from './forgewrite'
 import { threadSettings as leanThreadSettings } from './leantools'
 
 export const WAKE_GAP_MS = 30_000
@@ -770,12 +771,19 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
       return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!)
     }
-    const out = await leanThreadCore(h, root, i)
+    // brief lint (script, no refusal): a `new` / `send` text that asks for a forge write by script (curl / az / gh) cannot be carried out by
+    // a thread. One warning line goes to the desk in the reply, and the same line is appended to the brief the thread receives.
+    let lint = ''
+    if ((i.action === 'new' || i.action === 'send') && typeof i.text === 'string' && isForgeWrite(i.text)) {
+      lint = briefLintLine()
+      i = { ...i, text: `${i.text}\n\n${lint}` }
+    }
+    let out = await leanThreadCore(h, root, i)
     if (out.ok && (i.action === 'new' || i.action === 'start')) {
       const warn = await holdWarning(h, await homeDir(h))
-      if (warn) return { ...out, text: `${out.text}\n${warn}` }
+      if (warn) out = { ...out, text: `${out.text}\n${warn}` }
     }
-    return out
+    return lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
   } catch (e) {
     return err(`${i.action} failed: ${(e as Error)?.message ?? e}`)
   }

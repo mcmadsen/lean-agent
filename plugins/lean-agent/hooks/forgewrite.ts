@@ -8,6 +8,8 @@ import { ACTION_KINDS } from './deskactions'
 // the kinds as one line, from the action table: `ado-pr-reply (optional status) | ado-pr-thread-status | ... | batch`
 export const kindsLine = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => (/optional status/.test(p) ? `${k} (optional status)` : k)).join(' | ')
 export const forgeRefusal = (): string => `forge writes go through the desk: lean_report with action {kind: ${kindsLine()}}; the user approves, the mod sends it. Reads: lean_run ci, or a reader.`
+export const briefLintLine = (): string => `this brief asks for a forge write by script; a thread cannot: it must request an action kind (${kindsLine()})`
+export const RETIRED_NOTE = '(retired: forge writes go through action kinds)'
 export const FORGE_RULE = 'forge-write'
 export const forgeRefusalHead = /^forge writes go through the desk/
 

@@ -50,6 +50,26 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(h.files.has('/h/.lean-agent/threads/t2/thread.json')).toBe(true)
 })
 
+test('1.0.24 brief lint: a new / send text that asks for a forge write by script gets one warning line, in the reply and in the brief the thread receives', async () => {
+  const { h, state, call } = setup()
+  h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
+  const bad = `set the PR threads to fixed with curl -X PATCH https://dev.azure.com/org-a/proj-a/_apis/git/repositories/repo-a/pullRequests/42/threads/7 -d '{"status":"fixed"}'`
+  const r = await call({ action: 'new', title: 'pr', text: bad, project: 'app' })
+  const line = 'this brief asks for a forge write by script; a thread cannot: it must request an action kind (ado-pr-reply (optional status) | ado-pr-thread-status'
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain(line)
+  expect(r.text.split(line).length).toBe(2) // once
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.at(-1)).toContain(line) // the brief the thread receives
+  state.rows = [{ sessionId: SID, name: 't1 · pr', cwd: '/h/.lean-agent/threads/t1', status: 'busy', startedAt: 1 }]
+  h.clock.t += 60_000
+  const s = await call({ action: 'send', tN: 't1', text: 'then run gh api -X POST repos/o/r/issues/3/comments -f body=hi' })
+  expect(s.text).toContain(line)
+  expect(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl')).toContain('kind: ado-pr-reply')
+  const ok = await call({ action: 'send', tN: 't1', text: 'run the tests and report' })
+  expect(ok.text).not.toContain('forge write by script')
+  expect(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl')!.split('forge write by script').length).toBe(2) // only the flagged send carries it
+})
+
 test('send to a running thread is queued only, never resumed', async () => {
   const { h, state, call } = setup()
   await call({ action: 'new', title: 'a', text: 'brief' })
