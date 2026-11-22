@@ -2,7 +2,7 @@
 // session runs older lean-agent code). Built by the mod from what lean-agent already keeps; the old conversation is never resumed.
 import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { deskState, reportBody, reportFile, unconsumed } from './delivery'
+import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import type { Inbox, Thread } from './threads'
@@ -79,7 +79,18 @@ export async function taskOf(h: Host, home: string, t: Thread): Promise<string> 
   return taskLine(goal, typeof brief === 'string' ? brief : '', t.title)
 }
 
-export async function buildHandover(h: Host, home: string, t: Thread, why: string, queued: Inbox[]): Promise<Handover> {
+// The prompt of a thread restarted at the context limit while it WAITED (its last report was blocked or a question): script-built from the
+// store, the open question / request verbatim with its id. null = the last report is not an open question (nothing to wait for).
+export const OPEN_MAX = 2000
+export function waitingLead(recs: DeskRec[]): string | null {
+  const last = recs[recs.length - 1]
+  if (!last || !(last.kind === 'ask' || last.state === 'blocked')) return null
+  const ap = approvalOf(last)
+  const body = `${last.text.length > OPEN_MAX ? `${last.text.slice(0, OPEN_MAX)} [cut]` : last.text}${ap ? ` [needs the user's yes: ${ap}]` : ''}`
+  return `You were restarted at the context limit while WAITING for: ${last.ts}-${last.from}-${last.kind}: ${body}. If the answer is in the messages below, act on it. If not, do nothing: end your turn without a report and wait.`
+}
+
+export async function buildHandover(h: Host, home: string, t: Thread, why: string, queued: Inbox[], waiting = false): Promise<Handover> {
   const dir = `${threadsDir(home)}/${t.id}`
   const text = async (p: string) => {
     const r = await h.fs.read(p).catch(() => '')
@@ -102,10 +113,11 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const snap = await readSnapshot(h, home, t.id)
   const pre = await preflightOf(h, home, t)
   const inbox = `${deskState(home)}/inbox.jsonl`
+  const wait = waiting ? waitingLead(recs) : null // restarted at the limit while waiting: the open question is the lead, nothing to carry on with
   const parts: Part[] = [
-    { name: 'lead', body: resumeLead(taskLine(goal, brief, t.title)), mode: 'fixed' },
+    { name: 'lead', body: wait ?? resumeLead(taskLine(goal, brief, t.title)), mode: 'fixed' },
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
-    { name: 'check', body: `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
+    { name: 'check', body: wait ? '' : `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
     { name: 'brief', head: '## Brief', body: cut(brief, BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goal, mode: 'fixed' },

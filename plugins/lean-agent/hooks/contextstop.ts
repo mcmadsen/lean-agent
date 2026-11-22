@@ -9,11 +9,11 @@ import { readJson, readJsonl, writeJson, homeDir, threadsDir } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
-import { kTokens } from './threadcontext'
+import { kTokens, readContext } from './threadcontext'
 import type { SnapPending } from './snapshot'
 
 export const STOP_RULE = 'context-limit'
-export type StopRec = { sid: string; at: number; tokens: number; limit: number; notices: number; pending: SnapPending[] }
+export type StopRec = { sid: string; at: number; tokens: number; limit: number; notices: number; pending: SnapPending[]; waiting?: boolean } // waiting: the thread's last report was blocked or a question when it was stopped
 export const stopFile = (home: string, id: string) => `${threadsDir(home)}/${id}/contextstop.json`
 
 export const stopLine = (tokens: number, limit: number) =>
@@ -23,9 +23,28 @@ export const stopRecordText = (tokens: number, limit: number) => `context ${kTok
 export async function readStop(h: Host, home: string, id: string, sid: string): Promise<StopRec | null> {
   const r = await readJson<Partial<StopRec> | null>(h, stopFile(home, id), null)
   if (!r || typeof r !== 'object' || r.sid !== sid || typeof r.tokens !== 'number') return null // (an unknown session id '' is a key too: a turn end without one must not write a record every turn)
-  return { sid, at: Number(r.at) || 0, tokens: r.tokens, limit: Number(r.limit) || 0, notices: Number(r.notices) || 0, pending: Array.isArray(r.pending) ? r.pending : [] }
+  return { sid, at: Number(r.at) || 0, tokens: r.tokens, limit: Number(r.limit) || 0, notices: Number(r.notices) || 0, pending: Array.isArray(r.pending) ? r.pending : [], ...(r.waiting === true ? { waiting: true } : {}) }
+}
+
+// Is the thread's CURRENT session hard-stopped (1.0.22)? Its stop record is there, and no later turn of it ended under the limit (a compaction
+// or a raised limit lifts the stop, as the desk's tick sees it). A message for such a session never queues behind it: a fresh session starts.
+export async function hardStopped(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number }): Promise<StopRec | null> {
+  if (!t.sid) return null
+  const rec = await readStop(h, home, t.id, t.sid)
+  if (!rec) return null
+  const ctx = await readContext(h, home, t)
+  return ctx && ctx.sid === t.sid && ctx.at > rec.at + 10_000 && ctx.tokens < rec.limit ? null : rec
 }
 export const writeStop = (h: Host, home: string, id: string, rec: StopRec) => writeJson(h, stopFile(home, id), rec)
+
+// The pane / list word "restarting": the open thread is hard-stopped and the mod's restart is still pending (a give-up drops the marker's `pending`:
+// then the existing notice and Restart apply). Nothing for the user to do.
+export async function isRestarting(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number; state?: string; finished?: unknown }): Promise<boolean> {
+  if (t.state !== 'open' || !t.sid || (typeof t.finished === 'number' && t.finished > 0) || t.finished === true) return false
+  if (!(await hardStopped(h, home, t))) return false
+  return !!(await readJson<{ pending?: unknown } | null>(h, `${threadsDir(home)}/${t.id}/autorestart.json`, null))?.pending
+}
+export const RESTARTING_TEXT = 'context limit, the mod restarts it'
 
 // ---- a report that is only a checkpoint / context-size notice (the chatter the mod's own record replaces) ----
 const NOTICE = /\b(check-?point(ed|ing)?|restart me|context (size|limit|window|is|at|over|reached)|over (the|my) (context )?limit|\d+\s?k(\s+tokens)?\b[^.\n]{0,40}\b(context|limit))/i

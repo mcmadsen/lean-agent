@@ -2,7 +2,8 @@
 // Thread side (hardStop, from threadTurnEnd at the end of every main turn and from the tool.call check every 10 calls, register.tsx): at or over
 // `threadTokens` the thread is STOPPED (contextstop.ts: every tool call but lean_report is refused), the state snapshot is written (snapshot.ts)
 // and, once per session, a MOD-authored record goes to the desk inbox ("context 123k over the limit 120k: state saved, restart me"); with work
-// left (the turn did not end with done / blocked / a question) <thread>/autorestart.json marks it for the desk.
+// left <thread>/autorestart.json marks it for the desk; a thread that was WAITING (blocked, a question) is marked and restarted too, with a prompt
+// that names the open question; only a thread that reported done is not restarted (1.0.22).
 // Desk side (autoRestartTick, the desk mod's timer): the thread is restarted by script (leanThread auto-restart: a fresh session with the
 // handover, the snapshot and the pending worker results, the old one removed) as soon as its session is idle (IDLE_MS after the record) or,
 // whatever the session shows (then with force: the session is stopped exactly like the manual restart), `threads.stopGraceMinutes` (default 3) after it;
@@ -58,7 +59,17 @@ export function workLeft(recs: DeskRec[], id: string, since: number): boolean {
   return !last || (last.kind !== 'ask' && last.state !== 'done' && last.state !== 'blocked')
 }
 
-export type TurnEnd = { sid: string; tokens: number | null; since: number; tasks?: unknown }
+// How the turn that just ended left the thread (1.0.22): 'done' (finished: its next message starts a fresh session), 'waiting' (its last report was
+// blocked or a question: it waits for an answer or an approval) or 'work' (anything else). A stopped thread is restarted for 'work' and 'waiting' alike.
+export function turnState(recs: DeskRec[], id: string, since: number): 'work' | 'waiting' | 'done' {
+  const mine = recs.filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask') && !(r as any).mod && r.ts >= since)
+  const last = mine[mine.length - 1]
+  if (!last) return 'work'
+  if (last.kind === 'ask' || last.state === 'blocked') return 'waiting'
+  return last.state === 'done' ? 'done' : 'work'
+}
+
+export type TurnEnd ={ sid: string; tokens: number | null; since: number; tasks?: unknown }
 export type TurnOut = { snapshot: boolean; action: 'none' | 'checkpoint' | 'ask'; stop?: { tokens: number; limit: number } | null } // stop: the hard stop applies (null: under the limit)
 
 const firstOf = (mk: Marker, sid: string) => !!(mk.last && sid && sid !== mk.last.oldSid && !mk.last.newSid) // the first turn of the session an automatic restart started
@@ -76,8 +87,10 @@ export async function hardStop(h: Host, id: string, o0: { sid: string; tokens: n
     let mk = await readMarker(h, home, id)
     const first = firstOf(mk, o.sid)
     if (first) mk = { ...mk, last: { ...mk.last!, newSid: o.sid } }
+    const recs = await readJsonl<DeskRec>(h, inbox)
+    const st = turnState(recs, id, o.since)
     await writeSnapshot(h, home, await buildSnapshot(h, home, id, { sid: o.sid, tokens: o.tokens, edited: takeEdited(), tasks: o.tasks }))
-    await writeStop(h, home, id, { sid: o.sid, at: now, tokens: o.tokens, limit: o.limit, notices: 0, pending: [] })
+    await writeStop(h, home, id, { sid: o.sid, at: now, tokens: o.tokens, limit: o.limit, notices: 0, pending: [], ...(st === 'waiting' ? { waiting: true } : {}) })
     // a fresh session that starts over the limit: restarting again would loop; the user decides
     if (first) {
       await appendJsonl(h, inbox, { ts: now, from: id, kind: 'ask', mod: true, text: `${id} was restarted at the context limit, but the new session is again over it (${kTokens(o.tokens)} over ${kTokens(o.limit)}): the handover plus the work do not fit. No more automatic restarts for ${id} until it is under the limit. Raise threadTokens, trim notes.md, or split the task?`, options: ['raise threadTokens', 'trim notes.md and restart', 'split the task'] } satisfies Record<string, unknown>)
@@ -85,11 +98,11 @@ export async function hardStop(h: Host, id: string, o0: { sid: string; tokens: n
       await logRefusal(h, { role: 'thread', rule: 'auto-restart-loop', text: `automatic restart stopped: the new session is again over the context limit (${kTokens(o.tokens)} over ${kTokens(o.limit)})`, thread: id })
       return 'ask'
     }
-    const recs = await readJsonl<DeskRec>(h, inbox)
-    if (!workLeft(recs, id, o.since)) return 'none' // done, blocked or a question: stopped, but the next message starts the fresh session (wake)
-    await appendJsonl(h, inbox, { ts: now, from: id, kind: 'report', state: 'checkpoint', mod: true, text: stopRecordText(o.tokens, o.limit), restart: { tokens: o.tokens, limit: o.limit, sid: o.sid } })
+    if (st === 'done') return 'none' // done: stopped, but the next message starts the fresh session (wake)
+    // work left: the one record to the desk. Waiting (blocked / a question): none, the open question or request stays as it is at the desk; the restart still happens
+    if (st === 'work') await appendJsonl(h, inbox, { ts: now, from: id, kind: 'report', state: 'checkpoint', mod: true, text: stopRecordText(o.tokens, o.limit), restart: { tokens: o.tokens, limit: o.limit, sid: o.sid } })
     if (!mk.stopped && (await autoRestartOn(h, home))) await writeJson(h, markerFile(home, id), { ...mk, pending: { ts: now, sid: o.sid, tokens: o.tokens, limit: o.limit } } satisfies Marker)
-    return 'checkpoint'
+    return st === 'work' ? 'checkpoint' : 'none'
   } catch {
     return 'none'
   }
