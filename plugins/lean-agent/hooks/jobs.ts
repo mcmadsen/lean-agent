@@ -1,5 +1,6 @@
 // Job types (execution model, fail fast): the first line of a worker brief names the job, `job: lookup|edit|run|check`. By job:
-//  - a step budget (tool calls): lookup 5, edit 8, run 3, check 5; config.json `workers.stepsByJob`; `workers.steps` stays the ceiling
+//  - a step budget (tool calls): lookup 10, edit 16, run 6, check 10; config.json `workers.stepsByJob`; `workers.steps` (24) stays the ceiling.
+//    At 75% of the budget the worker's next tool result carries "N tool calls left: finish and answer" (orchestrate.ts); the refusal stays at the budget.
 //  - a return schema, enforced by script: the Agent result is cut to it and marked (trimJobResult / jobResult)
 //  - a retry count per (thread, job hash): the second identical brief needs a `why-sonnet:` line, the third is refused (retryDenial checks, retryRan counts)
 // Pure: no host, no model. A brief without a `job:` line keeps today's rules (workers.steps, no schema).
@@ -7,7 +8,8 @@ import { mapTexts } from './cap'
 
 export type Job = 'lookup' | 'edit' | 'run' | 'check'
 export const JOBS: readonly Job[] = ['lookup', 'edit', 'run', 'check']
-export const STEPS_BY_JOB: Record<Job, number> = { lookup: 5, edit: 8, run: 3, check: 5 }
+export const STEPS_BY_JOB: Record<Job, number> = { lookup: 10, edit: 16, run: 6, check: 10 }
+export const STEP_WARN = 0.75 // at this share of the budget the worker's next tool result says how many calls are left
 export const RESULT_LINES = 20
 
 const isJob = (s: unknown): s is Job => JOBS.includes(s as Job)
@@ -26,6 +28,13 @@ export function stepBudget(job: string | undefined | null, ceiling: number, byJo
   const own = byJob?.[job]
   const n = typeof own === 'number' && Number.isFinite(own) && own >= 1 ? Math.floor(own) : STEPS_BY_JOB[job]
   return Math.min(n, ceiling)
+}
+
+// the line a worker's tool result carries once it has used 75% of its budget (call number `n` of `budget`): at the threshold and at the last call; null otherwise
+export function stepNote(n: number, budget: number): string | null {
+  const left = budget - n
+  if (left < 1 || n < Math.ceil(budget * STEP_WARN) || (n > Math.ceil(budget * STEP_WARN) && left !== 1)) return null
+  return `${left} tool call${left === 1 ? '' : 's'} left: finish and answer`
 }
 
 // ---- retries per (thread, job hash) --------------------------------------------------------------------------------

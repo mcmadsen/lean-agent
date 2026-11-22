@@ -382,7 +382,7 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     for (const t of arr(r.unverifiedClaims)) texts.unverified!.push({ text: A(t), ts: tsOf(r) })
     for (const t of arr(r.unreachedFolders)) texts.unreached!.push({ text: A(t), ts: tsOf(r) })
   }
-  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string; kind?: string; role?: string; rule?: string; version?: string; tool?: string; job?: string }>(h, `${lean}/refusals.jsonl`)
+  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string; kind?: string; role?: string; rule?: string; version?: string; tool?: string; job?: string; what?: string }>(h, `${lean}/refusals.jsonl`)
   // a refusal a worker reported: its command and the refusal text, as the worker quoted them
   for (const r of refRows) if (r?.src === 'worker' && typeof r.command === 'string' && isNew(r, st)) texts.refused!.push({ text: A(`${r.command}${r.text ? ` -> ${r.text}` : ''}`), ts: tsOf(r) })
   // `missing` also comes from the gap logs (one line per gap a worker reported)
@@ -402,8 +402,10 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     }
     if (typeof r?.text !== 'string' || !isNew(r, st) || r.src === 'worker' || r.command !== undefined) continue // the guard's own rows only
     const agent = (r.agent ?? r.role ?? 'session').replace(/^lean-agent:/, '')
-    const t = A(r.text).replace(/\s+/g, ' ').trim()
-    const k = `${agent}\u0000${r.rule ?? ''}\u0000${key(t)}`
+    const what = typeof r.what === 'string' && r.what ? A(r.what).replace(/\s+/g, ' ').trim() : '' // what was tried (a program and subcommand, or a tool and a path's kind): the export groups by it
+    const t0 = A(r.text).replace(/\s+/g, ' ').trim()
+    const t = what && !t0.includes(`[tried: ${what}]`) ? `${t0} [tried: ${what}]` : t0
+    const k = `${agent}\u0000${r.rule ?? ''}\u0000${what}\u0000${key(t0)}`
     const cur = ref.get(k)
     if (cur) cur.n++
     else ref.set(k, { text: t, agent, n: 1, ...(r.rule ? { rule: r.rule } : {}), ...(r.version ? { version: r.version } : {}) })

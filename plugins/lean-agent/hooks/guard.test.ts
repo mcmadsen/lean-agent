@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { REVIEW_EXEMPT, capKind, decide, isWorker, parseGrants, recordGrant, releaseGrant } from './guard'
+import { REVIEW_EXEMPT, capKind, decide, forgeTried, isWorker, parseGrants, readerWrite, recordGrant, releaseGrant, statePattern } from './guard'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
 
@@ -305,8 +305,8 @@ test('workers: readers are read-only; unknown subagent types are readers; grants
   expect(await run(h, thread, edit('/anything'), '/r', 'unknown')).toContain('read-only')
   expect(await run(h, thread, edit('/anything'), '/r', 'general-purpose')).toContain('read-only')
   expect(await run(h, thread, { tool: 'Bash', command: 'git log -5' }, '/r', 'lean-agent:reviewer', 'r1')).toBeNull()
-  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'lean-agent:reviewer', 'r1')).toContain('may run only')
-  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'lean-agent:reviewer', 'r1')).toContain('may run only')
+  expect(await run(h, thread, { tool: 'Bash', command: 'rm -rf x' }, '/r', 'lean-agent:reviewer', 'r1')).toContain('changes nothing in the project') // the readers' shell rule (1.0.22)
+  expect(await run(h, thread, { tool: 'Bash', command: 'ls; rm x' }, '/r', 'lean-agent:reviewer', 'r1')).toContain('changes nothing in the project')
   expect(await run(h, thread, { tool: 'Bash', command: 'git log' }, '/r', 'unknown', 'u1')).toContain('may run only')
   expect(await run(h, thread, { tool: 'Read', file_path: '/x' }, '/r', 'lean-agent:reviewer', 'r1')).toBeNull()
   expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull()
@@ -339,9 +339,8 @@ test('the review skill grants the reviewer exactly the read-only git commands fo
   expect(await bash('git log main..abc1234 --oneline')).toBeNull()
   expect(await bash('git show abc1234')).toBeNull()
   expect(await bash('git merge-base main abc1234')).toBeNull()
-  expect(await bash('git diff main...abc1234 | sh')).toContain('may run only')
   expect(await bash('git diff main...abc1234 | head -5')).toBeNull() // a pipe between two built-in reads
-  expect(await bash('git push origin x')).toContain('may run only')
+  expect(await bash('git push origin x')).toContain('never pushes')
   expect(await bash('git diff')).toBeNull() // built in for a reviewer
   expect(await bash('git merge-base main x')).toBeNull() // read-only, so built in for a reader and the reviewer (from 1.0.12)
 })
@@ -359,9 +358,11 @@ test('the review grants its git commands as `git -C <worktree> ...`: the thread 
   expect(await bash(`git -C ${wt} show abc1234`)).toBeNull()
   expect(await bash(`git -C ${wt} merge-base main abc1234`)).toBeNull()
   // a grant is no grant for another checkout, and never carries a write or a redirect
-  expect(await bash('git -C /elsewhere diff main...abc1234')).toContain('may run only') // outside the allowed folders
-  expect(await bash(`git -C ${wt} push origin x`)).toContain('may run only')
-  expect(await bash(`git -C ${wt} merge-base main abc1234 > /tmp/x`)).toContain('may run only')
+  expect(await bash('git -C /elsewhere diff main...abc1234')).toBeNull() // the reviewer reads like a reader: any path
+  expect(await bash(`git -C ${wt} push origin x`)).toContain('never pushes')
+  expect(await bash(`git -C ${wt} merge-base main abc1234 > /tmp/x`)).toBeNull() // a temp redirect writes nothing in the project
+  expect(await bash(`git -C ${wt} merge-base main abc1234 > ${wt}/x`)).toContain('writes no file')
+  expect(await bash('git -C /elsewhere diff main...abc1234', 'lean-agent:auditor')).toContain('may run only') // the auditor stays on the read-only list
 })
 
 test('the subagent cap (config.json agents.cap) counts a thread\'s subagents per session; the reviewer passes and the second-opinion reader do not count', async () => {
@@ -425,12 +426,12 @@ test('built-in read-only git: the explorer runs ls-files / log without a grant; 
   expect(await ex('git log -3')).toBeNull()
   expect(await ex('rm x')).toContain('built-in')
   for (const c of ['git log --output=x', 'git log --out=x', 'git log -o x', 'git -c core.pager=sh log', 'git --exec-path=/x log', 'git ls-files > x', 'git diff --ext-diff', 'git log | sh', 'git log; rm x', 'git log $(id)', 'git log $HOME', 'GIT_PAGER=sh git log', 'git -C /etc log', 'git --config-env=a=b log', 'git push origin x'])
-    expect(await bash(c, 'lean-agent:reviewer'), c).toContain('may run only')
+    expect(await bash(c, 'lean-agent:auditor'), c).toContain('may run only')
   expect(await bash('git ls-files > x', 'lean-agent:auditor')).toContain('may run only')
   expect(await bash('git log --output=x', 'lean-agent:auditor')).toContain('may run only')
   expect(await bash('git -c core.pager=sh log', 'lean-agent:auditor')).toContain('may run only')
   expect(await bash('git log | sh', 'lean-agent:auditor')).toContain('may run only')
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reviewer', 'lean-agent:reviewer']) {
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor', 'lean-agent:auditor']) {
     expect(await bash('git show HEAD:file', t)).toBeNull()
     expect(await bash('git diff --stat main...HEAD', t)).toBeNull()
     expect(await bash('git status --short', t)).toBeNull()
@@ -438,11 +439,11 @@ test('built-in read-only git: the explorer runs ls-files / log without a grant; 
     expect(await bash('git -C /h/.lean-agent/worktrees/app/t1 log -2', t)).toBeNull()
     expect(await bash('git -C /r/sub log -2', t)).toContain('may run only') // the session cwd alone is no root
   }
-  expect(await bash('git diff --ext-diff', 'lean-agent:reviewer')).toContain('may run only')
+  expect(await bash('git diff --ext-diff', 'lean-agent:auditor')).toContain('may run only')
   for (const c of ['git log --{output=/tmp/x,}', 'git log {--output=/tmp/x,}', 'git diff {--ext-diff,}', 'git -C ~ log', 'git -C sub/../.. log', 'git -C a -C b log', 'git diff --ext x', 'git log --exec=x', 'git diff --no-index a b', 'git log --help', 'git log -h', 'git log --$"output=x"', 'git ls-files *'])
-    expect(await bash(c, 'lean-agent:reviewer'), c).toContain('may run only')
+    expect(await bash(c, 'lean-agent:auditor'), c).toContain('may run only')
   for (const c of ['git ls-files --exclude-standard', 'git ls-files -o', 'git log --oneline --grep=x', 'git log -Sdone', 'git rev-parse --git-dir', 'git --no-pager log -2', 'git log --output-indicator-new=+'])
-    expect(await bash(c, 'lean-agent:reviewer'), c).toBeNull()
+    expect(await bash(c, 'lean-agent:auditor'), c).toBeNull()
   for (const t of ['other:explorer', 'explorer', 'other:reader-haiku', 'reader-haiku'])
     expect(await bash('git log -3', t), t).toContain('may run only')
   expect(await bash('git log -3', 'lean-agent:worker-sonnet')).toBeNull() // a worker is unchanged
@@ -530,10 +531,10 @@ test('built-in search commands: rg, grep, find, ls, wc, head, tail, cat inside t
   const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1')
   const ok = ['rg foo src', "rg 'a|b' src", 'rg -n --glob "*.ts" foo /h/code/app/src', 'rg foo', 'grep -rn foo src', "grep -rn '/api/v1' src", 'grep -rn foo /h/code/app', 'find . -name "*.ts"', 'find /h/code/app -type f -name x',
     'ls -la src', 'ls /h/code/app', 'wc -l src/a.ts', 'head -20 src/a.ts', 'tail -n 5 src/a.ts', 'cat src/a.ts', 'rg foo src | head -5', 'git log --oneline | grep fix | wc -l', 'git ls-files src | rg ts', 'cat /h/.lean-agent/memory/notes.jsonl']
-  for (const t of ['lean-agent:auditor', 'lean-agent:reviewer', 'lean-agent:reviewer', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor', 'lean-agent:auditor', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['rg foo > out', 'rg foo >> out', 'cat a.ts > b', 'rg foo | sh', 'rg foo | tee x', 'rg foo || ls', 'ls; rm x', 'ls && rm x', 'rg foo &', 'cat < /etc/passwd', 'cat $(id)', 'cat `id`', 'cat "$HOME/x"', 'cat ~/x', 'cat {a,b}', 'rg foo ../../../../etc', 'cat /etc/passwd', 'ls /', 'ls ../../../..', 'rg -f /etc/passwd x', 'rg --file=/etc/passwd x', 'rg foo /etc', 'grep -r foo /h', 'cat /h/other/x',
     'find . -exec rm {} ;', 'find . -exec sh -c x ;', 'find . -execdir ls ;', 'find . -delete', 'find . -ok ls ;', 'find . -fprint x', 'find . -fprintf x y', 'find . -fls x', 'find . -fprint0 x', 'rg --pre cat foo', 'rg --pre=cat foo', 'rg -z foo', 'rg --search-zip foo', 'tail -f x', 'tail -F x', 'xargs ls', 'awk 1 x', 'env ls', 'sh -c ls', 'rg foo\nrm x', 'FOO=1 rg x']
-  for (const c of bad) expect(await as('lean-agent:reviewer')(c), c).toContain('may run only')
+  for (const c of bad) expect(await as('lean-agent:auditor')(c), c).toContain('may run only')
   for (const c of ['rg foo > out', 'cat /etc/passwd', 'python3 x.py']) expect(await as('lean-agent:auditor')(c), `auditor: ${c}`).toContain('may run only') // read-only, never runs the script
   // foreign, bare and worker types get no search built in (a worker is not restricted by it either)
   for (const t of ['other:explorer', 'explorer', 'reader-haiku', 'other:auditor', 'auditor']) expect(await as(t)('rg foo src'), t).toContain('may run only')
@@ -550,18 +551,18 @@ test('readers and the reviewer also run sed -n, stat, file, diff, jq, tree; ever
   const ok = ["sed -n 1,20p src/a.ts", "sed -n '5p' src/a.ts", "sed -n '/foo/,/bar/p' src/a.ts", "sed -n '$p' src/a.ts", "sed -n -e '1p' -e '3p' src/a.ts", "sed -nE 's/a(b)/\\1/p' src/a.ts", "sed -n 's|a|b|gp' src/a.ts", "sed -n '2,+3p;10q' src/a.ts", "sed -n '/x/!p' src/a.ts", "sed -n '/[0-9]/p' src/a.ts", "sed -n 's/[[:alpha:]]/x/p' src/a.ts", "rg foo src | sed -n 1,5p", "sed --quiet 3p src/a.ts",
     'stat src/a.ts', 'stat -c %s src/a.ts', 'file src/a.ts', 'file -b --mime-type src/a.ts', 'diff src/a.ts src/b.ts', 'diff -u src/a.ts /h/code/app/b.ts', 'diff -U 5 src/a.ts src/b.ts', 'diff -q -w src/a.ts src/b.ts',
     'jq . src/a.json', "jq -r '.a.b[] | select(.x > 1)' src/a.json", "jq -c '.[0]' src/a.json src/b.json", 'cat src/a.json | jq .', "jq -n '1+1'", 'tree', 'tree src', 'tree -L 2 -I node_modules src', 'tree -a -d /h/code/app', 'ls src | head -3 | wc -l', 'find src -name "*.ts" | wc -l']
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reviewer', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['find . -delete', 'find src -exec rm {} ;', 'find src -fprint out', 'sed -i s/a/b/ src/a.ts', "sed -i -n 1p src/a.ts", "sed -n 'w out' src/a.ts", "sed -n '1w out' src/a.ts", "sed -n 's/a/b/w out' src/a.ts", "sed -n 's/a/b/e' src/a.ts", "sed -n '1e ls' src/a.ts", "sed -n 'r /etc/passwd' src/a.ts", "sed -n 'R x' src/a.ts", "sed -n '1p;w out' src/a.ts", "sed -n '/x/{p;w out}' src/a.ts", "sed -n 'a hello' src/a.ts", "sed -n '1p' -f script.sed src/a.ts", "sed -n 's/[/]/x/p' src/a.ts", "sed -n 's/[[:alpha:]/]/;s/w /x/' src/a.ts", "sed -n '\\,x,p' src/a.ts", "sed 1p src/a.ts", "sed -n 1p /etc/passwd", "sed -n 1p ../../x", "sed -n s/a/b/ src/a.ts > out", 'sed -n 1p --in-place src/a.ts', 'sed -n -s -z 1p src/a.ts', "sed -n ''", 'sed -n',
     'stat /etc/passwd', 'stat -L src/a.ts', 'stat', 'file /etc/passwd', 'file -L src/a.ts', 'file -f list.txt', 'file', 'diff src/a.ts /etc/passwd', 'diff -r src /etc', 'diff src/a.ts', 'diff -X pats a b', 'diff --from-file=a b c', 'diff -l a b', 'diff -r a b', 'diff -N -u src other', 'diff src src/a.ts', 'diff src/a.ts src/missing.ts', 'stat -f /etc/shadow src/a.ts',
     'jq -f prog.jq src/a.json', 'jq --rawfile x /etc/passwd . src/a.json', 'jq --slurpfile x /etc/passwd . src/a.json', 'jq --arg a b . src/a.json', 'jq -n env', "jq -n '$ENV'", "jq -n 'env.HOME'", "jq 'import \"a\" as a; .' src/a.json", "jq -L /etc . x", 'jq . /etc/passwd', 'jq', 'jq -n --args . a b',
     'tree /etc', 'tree -o out', 'tree -l', 'tree --fromfile x', 'tree ../../..', 'tree > out',
     'ls src | tee out', 'cat src/a.ts | npm test', 'rg foo src | sed -n 1p > out', 'sed -n 1p src/a.ts | sh', 'npm test', 'cat src/a.ts && ls', 'ls || ls', 'ls ; ls', 'ls &', 'cat <<EOF', 'cat src/a.ts `id`', 'cat $(id)', 'ls $HOME']
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('may run only')
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('may run only')
   // not for the explorer, the auditor, a bare or foreign type: those get no sed / stat / file / diff / jq / tree
   for (const t of ['reader-haiku', 'other:reader-haiku']) for (const c of ['sed -n 1p src/a.ts', 'stat src/a.ts', 'jq . src/a.json', 'diff a b', 'tree', 'file a']) expect(await as(t)(c), `${t}: ${c}`).toContain('may run only')
   expect(await as('lean-agent:worker-sonnet')('sed -n 1p src/a.ts')).toBeNull() // workers are not restricted by it
   // a path outside the roots: refused whatever the command
-  const lean = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/other', 'lean-agent:reviewer', 'x1')
+  const lean = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/other', 'lean-agent:auditor', 'x1')
   for (const c of ['stat a', 'sed -n 1p a', 'tree', 'jq . a']) expect(await lean(c), c).toContain('may run only')
 })
 
@@ -570,7 +571,7 @@ test('a refusal names the refused program (first word only, no arguments), so th
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
   const thread = { kind: 'thread', id: 't1' } as any
   const as = (t: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/h/.lean-agent/worktrees/app/t1', t, 'x1') as Promise<string>
-  const r = as('lean-agent:reviewer')
+  const r = as('lean-agent:auditor')
   expect(await r('npm test --secret=abc123')).toContain('refused: npm (not a built-in read-only command)')
   expect(await r('npm test --secret=abc123')).not.toContain('abc123')
   expect(await r('cat src/a.ts | npm test')).toContain('refused: npm (not a built-in read-only command)') // the stage that failed
@@ -606,7 +607,7 @@ test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg wit
     'cat a.md | wc -l *.md', 'ls .gitignore*', "cat a.md | tr -d '\\n' | sort *.md", "sort '*.md'", // (a quoted * is a plain name)
     'rg foo', 'rg -n foo', 'rg foo | sort', 'grep foo', 'grep -rn foo', 'grep -c foo', 'rg -c foo 2>/dev/null',
     'sort a.md', 'sort -u a.md b.md', 'sort -rn -k2,2 a.md', 'sort -t, -k1 a.md', 'cat a.md | sort | uniq', 'uniq a.md', 'uniq -c a.md', 'cat a.md | uniq -d', 'sort *.md', 'cut -d, -f1 a.md', "cut -d ' ' -f 2- a.md", 'cat a.md | cut -c1-10', "cat a.md | tr -d '\\n'", 'cat a.md | tr a-z A-Z', "cat a.md | tr -s ' '", 'nl a.md', 'nl -ba a.md', 'nl *.md', 'cat a.md | nl -ba', 'rg -l foo src | sort | head -5', 'ls src/*.ts | wc -l']
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reviewer', 'lean-agent:reviewer']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor', 'lean-agent:auditor']) for (const c of ok) expect(await as(t)(c), `${t}: ${c}`).toBeNull()
   const bad = ['cat *.md > out', 'cat *.md >> out', 'rg foo 2>out', 'rg foo 2>/dev/nullx', 'rg foo 2>>/dev/null', 'rg foo >/dev/null', 'rg foo 2>&1', 'rg foo &>/dev/null', 'rg foo 2> /dev/null', 'cat a.md 3>/dev/null',
     'ls; ls', 'ls && ls', 'ls || ls', 'cat $(ls)', 'cat `ls`', 'cat "$(ls)"', 'cat ${HOME}/x', 'cat *.md; rm x', 'cat *.md && rm x', 'cat *.md &', 'cat < a.md',
     'cat /etc/*', 'cat /*', 'ls /h/*', 'cat /h/.ssh/*', 'cat ../*', 'cat src/../*', 'cat ../../etc/*', 'ls /h/code/*', 'cat /h/code/app/../*', 'cat /h/.lean-agent/../.ssh/*', 'cat lnk/*', 'cat lnk/esc*', 'cat l*/*', 'cat lnk/e*/.keep', 'cat */*', 'ls -d /h/.*', 'cat -*',
@@ -618,18 +619,18 @@ test('readers and the reviewer: globs inside the roots, 2>/dev/null, grep/rg wit
     "cat '[ab]'/*", 'cat "[ab]"/*', "cat '*'*", "cat a'?'*", // (a quoted glob character is literal to the shell, an unquoted one in the same word is not: the word is refused)
     'uniq a.md b.md', 'uniq /etc/passwd', 'uniq -c a.md out', 'cut -f1 /etc/passwd', 'tr', 'tr a b c', 'tr -d', 'tr a b /etc/passwd', 'tr a-z *', 'nl /etc/passwd', 'nl -h x --output=y a.md',
     'xargs ls', 'rg -l foo | xargs cat', 'cd src', 'cd /h && ls', 'awk 1 a.md', 'find . -name *.ts', 'sed -n 1p *.md', 'jq . *.json', 'stat *.md', 'diff *.md', 'git log *.ts', 'git -C /h/code/app diff -- *.ts', 'rg *.ts', 'rg foo -g *.ts src', 'grep -e *x src', 'rg -t * x']
-  for (const t of ['lean-agent:reviewer', 'lean-agent:reviewer']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('may run only')
+  for (const t of ['lean-agent:auditor', 'lean-agent:auditor']) for (const c of bad) expect(await as(t)(c), `${t}: ${c}`).toContain('may run only')
   // a relative glob whose match would read as a flag (-x.md) is refused; the same glob next to a plain name is fine, and so is a pattern that starts with a folder
-  expect(await as('lean-agent:reviewer', `${wt}/dash`)('cat *.md')).toContain('may run only')
-  expect(await as('lean-agent:reviewer', `${wt}/dash`)('cat y*.md')).toBeNull()
-  expect(await as('lean-agent:reviewer')('cat dash/*.md')).toBeNull()
+  expect(await as('lean-agent:auditor', `${wt}/dash`)('cat *.md')).toContain('may run only')
+  expect(await as('lean-agent:auditor', `${wt}/dash`)('cat y*.md')).toBeNull()
+  expect(await as('lean-agent:auditor')('cat dash/*.md')).toBeNull()
   // no path operand needs a cwd inside the roots; a cwd outside them refuses it, and so does a glob there
-  for (const cwd of ['/h', '/tmp', '/']) for (const c of ['rg foo', 'grep -rn foo', 'cat *.md', 'ls *', 'rg foo 2>/dev/null']) expect(await as('lean-agent:reviewer', cwd)(c), `${cwd}: ${c}`).toContain('may run only')
-  expect(await as('lean-agent:reviewer', '/h/code/app/src')('rg foo 2>/dev/null')).toBeNull()
-  expect(await as('lean-agent:reviewer', '/h/code/app/lib')('cat *.ts')).toBeNull()
+  for (const cwd of ['/h', '/tmp', '/']) for (const c of ['rg foo', 'grep -rn foo', 'cat *.md', 'ls *', 'rg foo 2>/dev/null']) expect(await as('lean-agent:auditor', cwd)(c), `${cwd}: ${c}`).toContain('may run only')
+  expect(await as('lean-agent:auditor', '/h/code/app/src')('rg foo 2>/dev/null')).toBeNull()
+  expect(await as('lean-agent:auditor', '/h/code/app/lib')('cat *.ts')).toBeNull()
   for (const t of ['reader-haiku', 'other:reader-haiku']) expect(await as(t)('cat *.md')).toContain('may run only')
   // the refusal says what is allowed, and what a worker's out-of-grant edit must do
-  expect(await as('lean-agent:reviewer')('cat *.md > out')).toContain('2>/dev/null')
+  expect(await as('lean-agent:auditor')('cat *.md > out')).toContain('2>/dev/null')
 })
 
 test('search commands refuse a relative path when the session cwd is unknown or root', async () => {
@@ -682,7 +683,7 @@ test('search: attached and clustered -e/-f, symlink-following flags, recursion w
   const h = fakeHost(null)
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
   const thread = { kind: 'thread', id: 't1' } as any
-  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reviewer', 'x1')
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:auditor', 'x1')
   const lean = at('/h/.lean-agent/worktrees/app/t1')
   for (const c of ['grep -rf /etc/passwd src', 'rg -nf/etc/shadow x', 'rg -nfpats x src', 'rg -L secret src', 'rg --follow secret src', 'grep -R x src', 'grep --dereference-recursive x src', 'find -L . -name x', 'find -H . -name x', 'find . -follow', "find . -exec ls '{}' ';'", "find . -execdir ls '{}' ';'", "find . -ok ls '{}' ';'", "find . -okdir ls '{}' ';'", 'tail --fo x', 'tail --ret x', 'tail --follow=name x'])
     expect(await lean(c), c).toContain('may run only')
@@ -705,7 +706,7 @@ test('search: separate-value options do not shift the pattern; rg --files; grep 
   h.files.set('/h/.ssh/id_rsa', 'secret')
   h.files.set('/h/.lean-agent/worktrees/app/t1/src/a.ts', 'x')
   const thread = { kind: 'thread', id: 't1' } as any
-  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reviewer', 'x1')
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:auditor', 'x1')
   const out = at('/h/.ssh')
   for (const c of ["rg -m 1 '/h/.lean-agent/|'", "rg --hidden -m 1 '/h/.lean-agent/|'", "rg -g '*.ts' '/h/.lean-agent/x'", "rg -t ts -A 2 '/h/code/app/'", "rg --max-count 1 '/h/.lean-agent/'", "grep -r -A 1 '/h/.lean-agent/|'", "grep -rn -m 1 '/h/code/app|'", 'rg --files /etc', 'rg --files /', 'grep --rec password', 'grep --directories=recurse x', 'grep --dir=recurse x', 'grep --fil /etc/passwd x', 'grep --exclude-from /etc/x y', 'find /h/.lean-agent -files0-from /etc/x', 'wc --files0-from=-', 'wc --files0-from=/etc/x'])
     expect(await out(c), c).toContain('may run only')
@@ -722,7 +723,7 @@ test('search: every flag must be on the command\'s own list (the reviewers\' byp
   const h = fakeHost(null)
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/h/code/app' } }))
   const thread = { kind: 'thread', id: 't1' } as any
-  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:reviewer', 'x1')
+  const at = (cwd: string) => (c: string) => run(h, thread, { tool: 'Bash', command: c }, cwd, 'lean-agent:auditor', 'x1')
   const app = at('/h/code/app/src')
   for (const c of ['rg -v -- -x /etc/shadow', 'grep -rv -- -x /etc', 'grep -rv - /etc', 'rg -v - /etc', 'grep -r --color pat /etc', 'grep -r -5f /etc/passwd src', 'grep /etc -rn5e pat', 'ls -RL .', 'ls -L .', 'ls -H .', 'ls --dereference .', 'ls -I x', 'tail -5f x', 'rg --ignore-file /etc/x pat', 'rg -f /etc/x pat', 'grep -f /etc/x pat', 'rg --type-add x:y pat', 'rg -z pat', 'find . -newer /etc/passwd', 'find . -name', 'wc -c --files0-from=x', 'head --foo x', 'cat -f x', 'grep -d recurse x', 'rg --pat x'])
     expect(await app(c), c).toContain('may run only')
@@ -779,4 +780,80 @@ test('a thread runs its own read-only git and ls in its registered worktrees and
     expect(await own(c), c).toBeNull()
   for (const c of [`git -C ${wt} diff --output=/x`, `git -C ${wt} log | sh`, `cat ${wt}/a.ts`, `ls /etc`])
     expect(await own(c), c).not.toBeNull()
+})
+
+test('1.0.22: the reviewer has the readers\' shell rule (reads that write nothing), the auditor stays on its list', async () => {
+  const h = setup()
+  let n = 0
+  const T = '/h/.lean-agent/threads/t1'
+  const rev = (command: string, t = 'lean-agent:reviewer') => run(h, thread, { tool: 'Bash', command }, '/r/app', t, `rv${++n}`)
+  for (const c of ['rg foo /r/app/src | head -5', 'rg -n foo /r/app/src 2>/dev/null', 'grep -rn "a|b" /r/app/src | sort | uniq -c', 'git -C /r/app log --oneline | head', 'git -C /r/app diff main...abc | wc -l', 'ls /r/app/src/*.ts', 'git -C /r/app grep foo', 'rg x /r/app > /tmp/out.txt', `rg x /r/app > ${T}/scratch/out.txt`, 'cat /r/app/a.ts | jq .'])
+    expect([c, await rev(c)]).toEqual([c, null])
+  for (const c of ['rg x /r/app > /r/app/out.txt', 'sed -i s/a/b/ /r/app/x', 'tee /r/app/x', 'rm /r/app/x', 'git -C /r/app commit -m x', 'git -C /r/app checkout main', 'cp /r/app/a /r/app/b'])
+    expect([c, typeof (await rev(c))]).toEqual([c, 'string'])
+  // the never-list holds for the reviewer too
+  expect(await rev('git push origin x')).toContain('never pushes')
+  expect(await rev('gh pr create --fill')).toContain('no forge write')
+  expect(await rev('gh pr create --fill')).toContain('[tried: gh pr]')
+  expect(await rev('claude plugin install x')).toContain('never changes permissions or settings')
+  expect(await rev('git tag v1')).toContain('tag')
+  expect(await rev('rg foo /r/app | head', 'lean-agent:auditor')).toBeNull() // the auditor: head after rg is allowed, a path outside the roots is not
+  expect(await rev('rg foo /elsewhere | head', 'lean-agent:auditor')).toContain('may run only')
+})
+
+test('1.0.22: a refusal says what was tried: kind of path and file pattern for lean state, program and subcommand for a forge write', async () => {
+  const h = setup()
+  let n = 0
+  const W = 'lean-agent:worker-haiku'
+  const edit = (tool: string, p: string) => run(h, thread, { tool, file_path: p }, '/r', W, `w${++n}`)
+  const bash = (c: string, t = W) => run(h, thread, { tool: 'Bash', command: c }, '/r', t, `w${++n}`)
+  const cfg = (await edit('Edit', '/h/.lean-agent/config.json')) ?? ''
+  expect(cfg).toContain('[tried: Edit lean state config.json]')
+  expect(cfg).toContain('use <thread folder>/scratch for notes and drafts')
+  expect(cfg).toContain('/h/.lean-agent/threads/t1/scratch')
+  expect(await edit('Write', '/h/.lean-agent/threads/t2/x.md')).toContain('[tried: Write lean state thread folder]')
+  expect(await edit('Write', '/h/.lean-agent/threads/t1/grants.json')).toContain('[tried: Write thread folder grants.json]')
+  expect(await edit('Edit', '/h/.lean-agent/app/reviews/abc.json')).toContain('[tried: Edit lean state reviews]')
+  expect(await edit('Write', '/h/.lean-agent/app/reports/r.md')).toContain('[tried: Write lean state reports]')
+  expect(await edit('Write', '/h/.lean-agent/state-9.jsonl')).toContain('[tried: Write lean state *.jsonl]')
+  expect(await bash('echo x > /h/.lean-agent/config.json')).toContain('[tried: Bash lean state config.json]')
+  expect(await bash('rm /h/.lean-agent/grants.json')).toContain('[tried: Bash lean state grants.json]')
+  expect(await bash('echo hi > /h/.lean-agent/threads/t2/n.md')).toContain('[tried: Bash thread folder thread folder]')
+  expect(await bash('rm /h/.lean-agent/threads/t2/n.md')).toContain('use <thread folder>/scratch')
+  expect(await bash('az pipelines run --name x')).toContain('[tried: az pipelines]')
+  expect(await bash('gh -R o/r pr merge 3')).toContain('[tried: gh pr]')
+  expect(await bash('gh api -X POST repos/o/r/issues')).toContain('[tried: gh api]')
+  for (const c of ['gh pr create --fill', 'az repos pr create']) expect(await bash(c)).not.toContain('/o/r')
+  expect(forgeTried('cd x && az devops invoke --area build')).toBe('az devops')
+  expect(forgeTried('foo bar')).toBe('foo')
+  expect(statePattern('/threads/t9/')).toBe('thread folder')
+  expect(statePattern('/approvals-t1.json')).toBe('approvals')
+  expect(statePattern('/secret-name')).toBe('other') // never the file's own name
+})
+
+test('1.0.22: a worker and a reader write under <thread folder>/scratch (and temp); reads of lean state are no change; the rest of the lean home stays refused', async () => {
+  const h = setup()
+  let n = 0
+  const T = '/h/.lean-agent/threads/t1'
+  const W = 'lean-agent:worker-haiku'
+  const worker = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/r', W, `w${++n}`)
+  const reader = (c: string) => run(h, thread, { tool: 'Bash', command: c }, '/r', 'lean-agent:reader-haiku', `r${++n}`)
+  const write = (p: string) => run(h, thread, { tool: 'Write', file_path: p }, '/r', W, `w${++n}`)
+  expect(await write(`${T}/scratch/notes.md`)).toBeNull()
+  expect(await write(`${T}/scratch/deep/draft.md`)).toBeNull()
+  expect(await write('/tmp/x.md')).toBeNull()
+  expect(await write('/h/.lean-agent/scratch/x.md')).toContain('own state') // another folder under the lean home
+  expect(await write('/h/.lean-agent/threads/t2/scratch/x.md')).toContain('own state') // another thread's scratch
+  for (const c of [`echo hi > ${T}/scratch/n.md`, `echo hi >> ${T}/scratch/n.md`, `cat ${T}/notes.md | sed -n 1,5p`, 'rg x /h/.lean-agent/threads/ 2>/dev/null', 'cat /h/.lean-agent/config.json | jq .', 'node -e "console.log(require(\'/h/.lean-agent/config.json\'))"', `rm ${T}/scratch/n.md`, 'cat ~/.lean-agent/threads/t1/scratch/a.md > /tmp/x'])
+    expect([c, await worker(c)]).toEqual([c, null])
+  for (const c of ['echo x > /h/.lean-agent/threads/t2/scratch/n.md', 'echo x > ~/.lean-agent/config.json', 'sed -i s/a/b/ /h/.lean-agent/config.json', 'cp /tmp/x /h/.lean-agent/projects.json', 'tee /h/.lean-agent/grants.json', `echo x > ${T}/scratch/../grants.json`, 'python3 -c "open(\'/h/.lean-agent/config.json\',\'w\').write(\'x\')"'])
+    expect([c, typeof (await worker(c))]).toEqual([c, 'string'])
+  // a reader's temp redirect: temp folders and its thread's scratch only
+  for (const c of [`rg x /r/app > ${T}/scratch/out.txt`, 'rg x /r/app > /tmp/out.txt'])
+    expect([c, await reader(c)]).toEqual([c, null])
+  for (const c of ['rg x /r/app > /h/.lean-agent/threads/t2/scratch/out.txt', `rg x /r/app > ${T}/notes.md`, `rg x /r/app > ${T}/scratch/../notes.md`])
+    expect([c, typeof (await reader(c))]).toEqual([c, 'string'])
+  expect(await reader(`rg x /r/app > ${T}/notes.md`)).toContain('only a temp folder or /h/.lean-agent/threads/t1/scratch may be written')
+  expect(readerWrite('rg x > /tmp/a', T + '/scratch')).toBeNull()
+  expect(readerWrite(`rg x > ${T}/scratch/a`)).toContain('writes no file') // no scratch known: only temp
 })

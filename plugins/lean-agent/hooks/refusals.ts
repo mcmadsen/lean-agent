@@ -7,10 +7,11 @@ import { homeDir, leanDir, readJsonl } from './state'
 import type { Host } from './state'
 import { readConfig } from './budget'
 import { serverOf } from './profile'
+import { triedOf } from './feedback'
 
 export const REPEAT_DEFAULT = 3
 export const DAYS_DEFAULT = 7
-type Row = { ts?: number; text?: string; agent?: string; src?: string; command?: string; thread?: string; kind?: string; role?: string; rule?: string; tool?: string; job?: string }
+type Row = { ts?: number; text?: string; agent?: string; src?: string; command?: string; thread?: string; kind?: string; role?: string; rule?: string; tool?: string; job?: string; what?: string }
 export type Pattern = { key: string; label: string; fix: string }
 export type Group = Pattern & { n: number; agents: string[] }
 
@@ -21,7 +22,14 @@ const dirOf = (p: string): string => {
 }
 
 // the shape of one refusal text -> its pattern. The texts are the guard's own (guard.ts); an unknown shape is its own pattern.
-export function patternOf(rawText: string, agent: string): Pattern {
+// `what` (the row's field, else the ` [tried: ...]` tag of the text): what was tried, so a pattern splits by it ("thread-orchestrate: az pipelines",
+// "Edit project", "lean state config.json"); the cmd: patterns already name the program
+export function patternOf(rawText: string, agent: string, what?: string): Pattern {
+  const p = basePattern(rawText, agent)
+  const w = what ?? triedOf(rawText)
+  return w && !p.key.startsWith('cmd:') ? { ...p, key: `${p.key}:${w}`, label: `${p.label} [${w}]` } : p
+}
+function basePattern(rawText: string, agent: string): Pattern {
   const text = rawText.replace(VERSION_TAIL, '').replace(/\s+/g, ' ').trim()
   const who = agent || 'session'
   let m = /^lean-agent: refused: (\S+) \(([^)]*)\); (\S+) may run only/.exec(text)
@@ -108,7 +116,7 @@ export async function groupRefusals(h: Host, days = DAYS_DEFAULT): Promise<{ gro
     if (!r || r.src === 'worker' || r.kind === 'missing-tool' || r.command !== undefined || typeof r.text !== 'string' || (typeof r.ts === 'number' && r.ts < since)) continue
     total++
     const agent = (r.agent ?? 'session').replace(/^lean-agent:/, '')
-    const p = patternOf(r.text, agent)
+    const p = patternOf(r.text, agent, typeof r.what === 'string' ? r.what : undefined)
     const g = groups.get(p.key)
     if (g) {
       g.n++

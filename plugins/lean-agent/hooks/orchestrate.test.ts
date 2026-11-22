@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide } from './guard'
-import { DESK_ROUTE, SPLIT, THREAD_STEP, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart } from './orchestrate'
+import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, tried, triedWords } from './orchestrate'
 import { capTo } from './cap'
 import { RUN_TIMEOUT_MS, runSummary, runText, summarize } from './runjob'
 import { preflightFor, preflightText } from './preflight'
@@ -18,8 +18,8 @@ const call = (ctx: any, e: any, c = C) => orchDecide(c, ctx, e)
 let seqN = 0 // a fresh brief each time: an identical brief is a retry (jobs.ts retryDenial)
 
 test('config: defaults, nested and flat keys, junk falls back, false switches the model off', () => {
-  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
-  const c = orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
+  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
+  const c =orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
   expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
   expect(orchConfig({ 'lean.orchestrate': false }).on).toBe(false)
   expect(orchConfig({ workers: { steps: 'x' }, threads: { workers: -1 } })).toEqual(C)
@@ -46,17 +46,63 @@ test('thread: its own Edit / Write on project files, greps, searches and other c
   orchReset()
   // lean-agent's own state is not a way round the model: worktrees (a worker's step), the settings, grants and review records
   for (const f of ['/h/.lean-agent/worktrees/app/src/a.ts', '/h/.lean-agent/config.json', '/h/.lean-agent/projects.json', '/h/.lean-agent/app/reviews/abc.json']) {
-    expect([f, call(th, { tool: 'Write', file_path: f })]).toEqual([f, THREAD_STEP])
-    expect([f, call(th, { tool: 'Grep', path: f })]).toEqual([f, THREAD_STEP])
+    expect([f, call(th, { tool: 'Write', file_path: f })]).toEqual([f, THREAD_STEP + tried(`Write ${f.includes('worktrees') ? 'worktree' : 'lean state'}`)])
+    expect([f, call(th, { tool: 'Grep', path: f })]).toEqual([f, THREAD_STEP + tried(`Grep ${f.includes('worktrees') ? 'worktree' : 'lean state'}`)])
   }
-  expect(call(th, { tool: 'Edit', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP)
-  expect(call(th, { tool: 'Write', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP)
-  expect(call(th, { tool: 'Write', file_path: '/h/.lean-agent/../x' })).toBe(THREAD_STEP)
-  expect(call(th, { tool: 'Grep', pattern: 'x' })).toBe(THREAD_STEP)
-  expect(call(th, { tool: 'Glob', pattern: '*.ts', path: '/r/app' })).toBe(THREAD_STEP)
+  const proj = { ...th, projects: ['/r/app'] }
+  expect(call(proj, { tool: 'Edit', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP + tried('Edit project'))
+  expect(call(th, { tool: 'Edit', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP + tried('Edit other'))
+  expect(call(proj, { tool: 'Write', file_path: '/r/app/src/a.ts' })).toBe(THREAD_STEP + tried('Write project'))
+  expect(call(th, { tool: 'Write', file_path: '/h/.lean-agent/../x' })).toBe(THREAD_STEP + tried('Write other'))
+  expect(call(proj, { tool: 'Grep', pattern: 'x' })).toBe(THREAD_STEP + tried('Grep project')) // no path: the session folder
+  expect(call(proj, { tool: 'Glob', pattern: '*.ts', path: '/r/app' })).toBe(THREAD_STEP + tried('Glob project'))
+  expect(call(proj, { tool: 'Read', file_path: '/r/app/src/a.ts' })).toContain(tried('Read project')) // (the path itself is never in the text)
+  expect(call(proj, { tool: 'Read', file_path: '/r/app/src/a.ts' })).not.toContain('a.ts')
   for (const command of ['npm test', 'sed -n 1,5p /r/app/a.ts', 'git diff', 'git diff src/a.ts', 'cat /r/app/a.ts', 'grep -rn foo src', 'ls', 'git status; rm -rf x', 'node x.js'])
     expect([command, typeof call(th, { tool: 'Bash', command })]).toEqual([command, 'string'])
   expect(call(th, { tool: 'Bash', command: 'npm test' })).toContain('lean_run')
+})
+
+test('thread: a Bash refusal says what was tried (program and subcommand only) and how to do it instead', () => {
+  const r = (command: string) => String(call(th, { tool: 'Bash', command }))
+  expect(r('npm test')).toContain(tried('npm test'))
+  expect(r('npm test')).toContain('lean_run')
+  expect(call(th, { tool: 'Bash', command: 'az pipelines run --name x' })).toBeNull() // az is judged by the other guards: allowed here
+  expect(r('git -C /r/app checkout main')).toContain(tried('git checkout')) // outside its own worktrees
+  expect(r('git -C /r/app checkout main')).toContain('git switch')
+  expect(r('cd /x && npm test')).toContain(tried('cd')) // (the folder is never named)
+  expect(r('cd /x && npm test')).toContain('never cd')
+  expect(r('make deploy')).toContain(tried('make')) // a make target is not recorded
+  expect(r('node x.js')).toContain(tried('node'))
+  expect(r('git -C /r/app checkout main')).not.toContain('/r/app') // (the folder is never named)
+  expect(triedWords(['git', '-C', '/r/app', 'stash', 'pop'])).toBe('git stash')
+  expect(triedWords(['/usr/bin/pytest', '-q'])).toBe('pytest')
+})
+
+test('thread: wider direct commands: read-only forge queries and piped filters, script listing, git work in its OWN worktrees, rm in its scratch folder', () => {
+  orchReset()
+  const ok = (command: string) => bashOk(th, command)
+  // forge reads and a filter pipe; filters read stdin only
+  for (const c of ['gh pr view 12 --json state', 'gh pr checks 12', 'az repos pr list --status active', 'az pipelines runs list --top 3 -o json | jq ".[0].status"', 'gh pr list --json number | head -5', 'git log --oneline | wc -l', 'az devops project show | grep -i name', 'gh run list | sort -u | uniq -c'])
+    expect([c, ok(c)]).toEqual([c, true])
+  // a filter with a file operand, an output file, or a first segment that is not allowed stays refused
+  for (const c of ['gh pr list | jq . /r/app/x.json', 'gh pr list | sort -o /r/app/out', 'npm test | head', 'cat /r/app/a.ts | head', 'gh pr list | grep -r foo', 'gh pr list | tee /r/app/x', 'gh pr list | jq -f /r/app/f.jq'])
+    expect([c, ok(c)]).toEqual([c, false])
+  // script listing, never a run
+  for (const c of ['npm run', 'pnpm run --list', 'yarn run', 'bun run', 'npm pkg get scripts']) expect([c, ok(c)]).toEqual([c, true])
+  for (const c of ['npm run build', 'npm test', 'pnpm install', 'yarn build', 'bun test', 'npm pkg set x=1']) expect([c, ok(c)]).toEqual([c, false])
+  // git in its own worktree: branch work, stash, fast-forward pull / merge, rebase onto a ref, cherry-pick; never in a project's main checkout, never with -c
+  const wt = '/h/.lean-agent/worktrees/app'
+  for (const c of [`git -C ${wt} checkout -b fix/x`, `git -C ${wt} checkout -b fix/x origin/main`, `git -C ${wt} switch main`, `git -C ${wt} stash`, `git -C ${wt} stash pop`, `git -C ${wt} stash push -u`, `git -C ${wt} fetch origin`, `git -C ${wt} pull --ff-only`, `git -C ${wt} pull --ff-only origin main`, `git -C ${wt} merge --ff-only origin/main`, `git -C ${wt} rebase origin/main`, `git -C ${wt} rebase --continue`, `git -C ${wt} cherry-pick abc123`, `git -C ${wt} cherry-pick -x abc123 def456`, `git -C ${wt} branch -m new`])
+    expect([c, ok(c)]).toEqual([c, true])
+  for (const c of ['git -C /r/app checkout -b fix/x', 'git -C /r/app stash', 'git -C /r/app pull --ff-only', `git -C ${wt} checkout main`, `git -C ${wt} checkout -- src/a.ts`, `git -C ${wt} pull`, `git -C ${wt} pull --rebase`, `git -C ${wt} merge origin/main`, `git -C ${wt} rebase -i main`, `git -C ${wt} rebase --exec x main`, `git -C ${wt} cherry-pick`, `git -c core.editor=x -C ${wt} rebase main`, `git -C ${wt} reset --hard`, `git -C ${wt} restore a.ts`, `git -C ${wt} clean -fd`, `git -C ${wt} checkout -b ../x`])
+    expect([c, ok(c)]).toEqual([c, false])
+  expect(bashOk({ ...th, cwd: wt }, 'git stash')).toBe(true) // no -C: the session folder is its own worktree
+  expect(bashOk({ ...th, cwd: '/r/app' }, 'git stash')).toBe(false)
+  // scratch: mkdir -p and rm inside the thread's own scratch folder only
+  for (const c of [`mkdir -p ${TDIR}/scratch/a`, `rm ${TDIR}/scratch/a.txt`, `rm -rf ${TDIR}/scratch/a`, `rm -f ${TDIR}/scratch/a ${TDIR}/scratch/b`]) expect([c, ok(c)]).toEqual([c, true])
+  for (const c of [`rm ${TDIR}/notes.md`, `rm -rf ${TDIR}`, `rm ${TDIR}/scratch/../notes.md`, 'rm -rf /r/app/x', `rm /h/.lean-agent/threads/t2/scratch/a`, 'rm -rf scratch', `rm ${TDIR}/scratch/a /r/app/x`, `rm -i ${TDIR}/scratch/a`, 'rm'])
+    expect([c, ok(c)]).toEqual([c, false])
 })
 
 test('thread: at most threads.directReads small direct reads per turn (<= 200 lines), lean home reads are free, a new turn resets', () => {
@@ -89,8 +135,11 @@ test('Agent: sonnet needs why-sonnet, opus is left to the approval, briefs are c
   expect(ag('lean-agent:worker-opus')).toBeNull() // the 1.0.12 approval judges it (guard.ts expensiveDenial)
   orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-opus' })
   expect(ag('lean-agent:reviewer', 'x'.repeat(5000))).toBeNull() // not a small worker: no brief cap here
-  expect(ag('lean-agent:worker-haiku', 'x'.repeat(1501))).toContain('1500')
-  expect(ag('lean-agent:worker-haiku', 'x'.repeat(1500))).toBeNull()
+  expect(ag('lean-agent:worker-haiku', 'x'.repeat(3001))).toContain('3000')
+  expect(ag('lean-agent:worker-haiku', 'x'.repeat(3001))).toContain('one step per job: the brief is 3001 chars, at most 3000 (workers.briefChars)')
+  expect(ag('lean-agent:worker-haiku', 'x'.repeat(2674))).toBeNull() // the longest brief of the field data (1502 .. 2674) now fits
+  orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' })
+  expect(ag('lean-agent:worker-haiku', 'x'.repeat(3000))).toBeNull()
   orchEnd(th, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku' })
   expect(call(worker, { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: 'x' })).toContain('never spawns')
   expect(call({ ...th, agentType: 'lean-agent:reader-sonnet', agentId: 'r1' }, { tool: 'Task' })).toContain('never spawns')
@@ -139,7 +188,7 @@ test('guard: the rules run inside decide; the desk refusal is the routing line, 
   expect(await run({ kind: 'desk' }, { tool: 'Edit', file_path: '/r/x' })).toBe(DESK_ROUTE)
   expect(await run({ kind: 'desk' }, { tool: 'Read', file_path: '/etc/passwd' })).toBe(DESK_ROUTE)
   expect(await run({ kind: 'desk' }, { tool: 'Read', file_path: '/h/.lean-agent/goals.json' })).toBeNull()
-  expect(await run({ kind: 'thread', id: 't1' }, { tool: 'Edit', file_path: '/r/app/a.ts' })).toBe(THREAD_STEP)
+  expect(await run({ kind: 'thread', id: 't1' }, { tool: 'Edit', file_path: '/r/app/a.ts' })).toBe(THREAD_STEP + tried('Edit other')) // (no registered project here)
   expect(await run({ kind: 'thread', id: 't1' }, { tool: 'Edit', file_path: '/h/.lean-agent/threads/t1/n.md' })).toBeNull()
   expect(await run({ kind: 'plain' }, { tool: 'Edit', file_path: '/r/app/a.ts' })).toBeNull()
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ lean: { orchestrate: false } }))
