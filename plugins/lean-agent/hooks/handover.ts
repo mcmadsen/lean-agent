@@ -5,6 +5,7 @@ import type { Host } from './state'
 import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
+import { retireText } from './forgewrite'
 import type { Inbox, Thread } from './threads'
 
 export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
@@ -107,7 +108,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
   const hist = reportHistory(recs, REPORT_BUDGET, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
-  const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX)
+  const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX).map(m => ({ ...m, text: retireText(m.text!) })) // (a forge write by script is retired, not passed on)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const now = await h.clock.now()
   const snap = await readSnapshot(h, home, t.id)

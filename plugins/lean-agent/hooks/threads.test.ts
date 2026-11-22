@@ -64,7 +64,7 @@ test('1.0.24 brief lint: a new / send text that asks for a forge write by script
   h.clock.t += 60_000
   const s = await call({ action: 'send', tN: 't1', text: 'then run gh api -X POST repos/o/r/issues/3/comments -f body=hi' })
   expect(s.text).toContain(line)
-  expect(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl')).toContain('kind: ado-pr-reply')
+  expect(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl')).toContain('action kind (ado-pr-reply')
   const ok = await call({ action: 'send', tN: 't1', text: 'run the tests and report' })
   expect(ok.text).not.toContain('forge write by script')
   expect(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl')!.split('forge write by script').length).toBe(2) // only the flagged send carries it

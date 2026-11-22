@@ -2,7 +2,9 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide } from './guard'
 import { ACTION_KINDS } from './deskactions'
-import { forgeRefusal, isForgeWrite, kindsLine } from './forgewrite'
+import { forgeRefusal, isForgeWrite, kindsLine, retiredAtLoad, staleMemoryCount } from './forgewrite'
+import { memorySection } from './extras'
+import { check, fix } from './doctor'
 import { orchConfig, orchDecide } from './orchestrate'
 import { ruleOf } from './refusals'
 
@@ -63,7 +65,36 @@ test('1.0.24: a thread\'s curl PATCH is refused with the action kinds (not the l
   expect(String(orchDecide(c, th, { tool: 'Bash', command: 'curl -sS https://example.org/x' }))).toContain('run tests and builds with lean_run')
 })
 
-test('1.0.24: a subagent\'s forge write by curl / az rest / gh api gets the same text; a gh pr create keeps the old subagent line', async () => {
+test('1.0.24: a remembered item that describes a forge write by script is retired at load (memory section and handover), counted, the others pass on; doctor shows the row and fix retires them with a backup', { timeoutMs: 20_000 }, async () => {
+  const h = fakeHost(null)
+  const old = `to set a PR thread to fixed: curl -X PATCH -H "Authorization: Bearer $(az account get-access-token --query accessToken -o tsv)" -d '{"status":"fixed"}' https://dev.azure.com/org-a/proj-a/_apis/git/repositories/repo-a/pullRequests/<pr>/threads/<id>`
+  const rows = [{ ts: 1, from: 't1', text: old }, { ts: 2, from: 't1', text: 'the build uses pnpm' }, { ts: 3, from: 't2', text: 'use gh pr comment 3 --body x for notes' }]
+  h.files.set('/h/.lean-agent/memory/notes.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app' }))
+  const before = retiredAtLoad()
+  const sec = String(await memorySection(h.host, { kind: 'thread', id: 't1' } as any))
+  expect(sec).toContain('- the build uses pnpm')
+  expect(sec).toContain('(retired: forge writes go through action kinds)')
+  expect(sec).not.toContain('curl')
+  expect(sec).not.toContain('Bearer')
+  expect(retiredAtLoad() - before).toBe(2)
+  expect(await staleMemoryCount(h.host)).toBe(2)
+  const rowsOut = (await check(h.host, '/plug')).join('\n')
+  expect(rowsOut).toContain('FIX  2 remembered items describe forge writes by script')
+  const fixed = (await fix(h.host, '/plug')).lines.join('\n')
+  expect(fixed).toContain('retired 2 that described a forge write by script')
+  const store = h.files.get('/h/.lean-agent/memory/notes.jsonl')!
+  expect(store).not.toContain('curl')
+  expect(store).toContain('the build uses pnpm')
+  expect(store.split('(retired: forge writes go through action kinds)').length).toBe(3)
+  const bak = [...h.files.keys()].find(k => k.startsWith('/h/.lean-agent/memory/notes.jsonl.bak-'))
+  expect(h.files.get(bak!)).toContain('curl -X PATCH') // the backup keeps the original
+  expect(h.files.get('/h/.lean-agent/logs/doctor.jsonl')).toContain('memory-retired')
+  expect(await staleMemoryCount(h.host)).toBe(0)
+  expect((await check(h.host, '/plug')).join('\n')).toContain('ok   0 remembered items describe forge writes by script')
+})
+
+test('1.0.24: a subagent\'s forge write by curl / az rest / gh api gets the same text; a gh pr create keeps the old subagent line', { timeoutMs: 20_000 }, async () => {
   const h = fakeHost(null)
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   const run = (command: string, agentType: string) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', agentType, agentId: 'a1' }, { tool: 'Bash', command })
@@ -75,4 +106,4 @@ test('1.0.24: a subagent\'s forge write by curl / az rest / gh api gets the same
     }
   }
   expect(String(await run('gh pr create --fill', 'lean-agent:worker-haiku'))).toContain('a subagent makes no forge write')
-}, { timeoutMs: 20_000 })
+})

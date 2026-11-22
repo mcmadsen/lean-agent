@@ -4,6 +4,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, thread
 import type { Host } from './state'
 import type { Role } from './role'
 import { deskState } from './delivery'
+import { retireText } from './forgewrite'
 
 // ---- memory (prompt.compose, session section) ----------------------------------------------------------------
 type Note = { ts?: number; from?: string; project?: string; type?: string; text: string }
@@ -11,7 +12,7 @@ export async function memorySection(h: Host, role: Role): Promise<string | null>
   if (role.kind !== 'thread') return null
   const home = await homeDir(h)
   const th = await readJson<{ project?: string }>(h, `${threadsDir(home)}/${role.id}/thread.json`, {})
-  const notes = (await readJsonl<Note>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(n => n && typeof n.text === 'string' && n.text.trim() && (!n.project || n.project === th.project))
+  const notes = (await readJsonl<Note>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(n => n && typeof n.text === 'string' && n.text.trim() && (!n.project || n.project === th.project)).map(n => ({ ...n, text: retireText(n.text) })) // (a forge write by script is retired, not passed on)
   if (!notes.length) return null
   let out = ''
   for (const n of notes.slice(-20).reverse()) {

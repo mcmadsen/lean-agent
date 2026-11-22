@@ -21,6 +21,7 @@ import { reportFailures } from './delivery'
 import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
 import { topRefusalsRow } from './refusals'
+import { retireMemory, staleMemoryCount } from './forgewrite'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -124,6 +125,7 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
     lines.push(`worktree registry: stale entries not pruned (${String((e as Error)?.message ?? e).slice(0, 100)})`)
   }
   lines.push(...(await removeStaleSessions(h).catch(() => [] as string[]))) // threadsessions.ts: claude rm of stale thread sessions, never forced
+  lines.push(await retireMemory(h).catch(e => `remembered items: not retired (${String((e as Error)?.message ?? e).slice(0, 100)})`)) // forgewrite.ts: notes that say to curl / az / gh a forge write
   return { lines }
 }
 
@@ -194,6 +196,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   out.push(...(await closedOwnerRows(h).catch(() => [] as string[]))) // worktreereg.ts: worktrees owned by closed threads (info; nothing is re-owned here)
   out.push(...(await threadSessionRows(h).catch(() => [] as string[]))) // threadsessions.ts: stale thread sessions, session names
   out.push((await topRefusalsRow(h).catch(() => null)) ?? 'ok   no guard refusal pattern repeats') // refusals.ts: the same refusal again and again is a missing grant or command
+  const staleMem = await staleMemoryCount(h).catch(() => 0) // forgewrite.ts: remembered items that describe a forge write by script (a thread gets "(retired ...)" instead)
+  row(staleMem === 0, `${staleMem} remembered items describe forge writes by script${staleMem ? ' (threads get a retired note instead; run fix to retire them in the store, a backup is kept)' : ''}`)
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'
