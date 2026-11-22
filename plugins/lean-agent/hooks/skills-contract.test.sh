@@ -154,6 +154,8 @@ grep -qF 'Never curl / az / gh a forge write' "$root/templates/thread.md" || fai
 grep -qF 'never curl / az / gh a forge write' "$here/thread/SKILL.md" || fail "the thread skill must say never curl / az / gh a forge write; request the action kind"
 grep -qF 'Never brief a thread to curl / az / gh a forge write' "$root/templates/front-desk.md" || fail "front-desk.md must say never brief a thread to curl / az / gh a forge write; name the action kind"
 grep -qF 'with a standing approval' "$root/templates/front-desk.md" || grep -qF 'With a standing approval' "$root/templates/front-desk.md" || fail "front-desk.md must say that with a standing approval the desk does not ask the user again"
+grep -qF '`restart` takes `text`' "$here/thread/SKILL.md" || fail "the thread skill must say restart takes text (new instructions go there)"
+grep -qF 'it takes `text`' "$root/templates/front-desk.md" || fail "front-desk.md must say restart takes text"
 grep -qF 'standing approvals' "$here/thread/SKILL.md" || fail "the thread skill must say action-list shows the standing approvals"
 # standing approval is model-proof: the grant is written in ONE place (deskactions.ts writeGrant, called by answerAction only: the pane press and the
 # human's answer to the desk question); no other source file touches the grant store; answerAction is called only by the pane and by bindAnswers

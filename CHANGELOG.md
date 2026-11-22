@@ -14,6 +14,9 @@
 ### Fixed
 - A remembered item that describes a forge write by script (saved memory from threads before the action kinds) is no longer passed on to a thread: its start prompt and handover show "(retired: forge writes go through action kinds)".
 - The desk's answer lookup no longer treats an inherited object property name as a choice label.
+- **The text given to `restart` never reached the new session.** `restart`, `reopen`, `start`, `wake` and `resume` now deliver a given `text` (alias `message`) to the session they start as the LAST part of its first prompt, after the handover, under "New instructions from the desk (newer than the handover above; they win where they differ):", and the task-first line points at it. The reply says "new session; your text (N chars) is its first instruction", or "text not delivered: <why>" (a start held for an approval, a closed thread, a running session) and the text stays queued, so the next start carries it.
+- `lean_thread` refuses a field the action does not use (it used to drop it silently), naming the field and the actions that use it; `text` and `message` together are refused.
+- The handover has a section "Since your last report": what the desk sent the thread after its last report (queued, or delivered to a session that has ended) and the results of the desk's actions for it, newest last, so facts from the desk are not lost at a restart.
 
 ## 1.0.23
 

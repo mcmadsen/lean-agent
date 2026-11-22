@@ -4,6 +4,7 @@ import { fakeHost } from './fake'
 import { STANDING_LABEL, actionListText, addActionRequest, answerAction, approveAction, bindAnswers, dropGrants, listActions, questionOf, resetActions, revokeGrant, runStanding, standingView } from './deskactions'
 import { threadTool } from './delivery'
 import { decide } from './guard'
+import { orchReset } from './orchestrate'
 import { resetLocks } from './threads'
 
 const TOKEN = 'SECRET-TOKEN-0123456789'
@@ -228,7 +229,8 @@ test('no tool creates a grant: no action kind, no report, no forged row, no stan
 })
 
 test('a session cannot write config.json (where the user\'s rule lives): a thread and a worker are refused', { timeoutMs: 20_000 }, async () => {
-  const h = fakeHost(null)
+  orchReset()
+  const h = fakeHost(null, { orchestrate: true }) // (the execution model is off in specs unless one opts in)
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   const run = (e: any, agentType?: string) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', agentType, agentId: agentType ? 'a1' : undefined }, e)
   const cfg = `${L}/config.json`

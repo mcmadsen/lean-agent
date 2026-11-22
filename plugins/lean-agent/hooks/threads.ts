@@ -14,7 +14,7 @@ import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
-import { buildHandover, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
+import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, stallConfig, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
 import { priceOf } from './budget'
@@ -62,7 +62,7 @@ export type Thread = {
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
   lastCheckpoint?: number // 1.0.6 only
 }
-export type Inbox = { ts: number; text: string; from?: string }
+export type Inbox = { ts: number; text: string; from?: string; instr?: boolean /* the text of a restart / reopen / start / wake / resume: the LAST part of the first prompt (handover.ts) */ }
 
 // ---- `claude agents --json [--all]` -------------------------------------------------------------------------
 // Fields used (Claude Code 2.1.x prints an array): sessionId, name, cwd, status ("idle" | "busy" | ...), startedAt (ms),
@@ -230,7 +230,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string }
+export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -761,6 +761,58 @@ async function profileAction(h: Host, home: string, i: Input): Promise<Out> {
   return { ok: true, text: await profileText(h, home, project) }
 }
 
+// the actions whose `text` (or `message`) is the first instruction of the session they start (queued first, delivered last in its first prompt)
+const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume'])
+
+// ---- the fields each action uses (the tool entry refuses the others: a dropped field is a lost instruction) ----------------------------------
+const TEXTY = ['text', 'message']
+const USES: Record<string, string[]> = {
+  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'keep', 'allowEdit', 'allowCmd', 'needs', 'reason'],
+  send: TEXTY,
+  wake: TEXTY,
+  close: [],
+  park: [],
+  reopen: [...TEXTY, 'model', 'effort', 'reason', 'needs'],
+  list: [],
+  resume: [...TEXTY, 'model', 'effort', 'reason'],
+  start: [...TEXTY, 'model', 'effort', 'reason', 'keep', 'needs'],
+  restart: [...TEXTY, 'model', 'effort', 'reason'],
+  projects: ['all'],
+  'project-add': ['project', 'path'],
+  'project-remove': ['project'],
+  'project-private': ['project', 'on', 'confirm'],
+  profile: ['project', 'on', 'mcp', 'plugins', 'fill'],
+  'goal-set': TEXTY,
+  'goal-clear': [],
+  'approve-push': ['sha', 'reason'],
+  push: ['sha', 'pr', 'reason'],
+  'action-list': [],
+  'approve-action': ['id'],
+  keep: ['on'],
+  find: TEXTY,
+  ask: TEXTY,
+  report: [],
+  dismiss: ['kind', 'notice'],
+}
+const FIELDS = new Set([...Object.values(USES).flat(), 'action', 'tN'])
+const ENGINE_KEYS = new Set(['tool', 'tool_use_id', 'toolUseId', 'tool_name', 'input'])
+// null = fine; else the refusal text. Only the TOOL ENTRY calls it (register.tsx): the desk's own timers call leanThread with internal fields.
+export function unusedField(e: Record<string, unknown>): string | null {
+  const action = typeof e.action === 'string' ? e.action : ''
+  const uses = USES[action]
+  if (!uses) return null // an unknown action is the tool's own refusal
+  for (const [k, v] of Object.entries(e)) {
+    if (k === 'action' || k === 'tN' || ENGINE_KEYS.has(k) || v === undefined || v === null || v === '' || (Array.isArray(v) && !v.length)) continue
+    if (uses.includes(k)) continue
+    if (!FIELDS.has(k)) return `lean_thread has no field "${k.slice(0, 40)}"; ${action} takes ${uses.length ? uses.join(', ') : 'only tN'}. Nothing was done`
+    const who = Object.entries(USES).filter(([, f]) => f.includes(k)).map(([a]) => a)
+    const hint = TEXTY.includes(k) ? `; to tell ${e.tN ?? 'a thread'} something, use send (or restart / reopen / start / wake / resume with ${k}: it is that session's first instruction)` : ''
+    return `${action} does not use the field "${k}" (it would be dropped): ${k} is used by ${who.join(', ')}${hint}. Nothing was done; call again without it`
+  }
+  if (e.text !== undefined && e.message !== undefined && e.text !== e.message && uses.includes('text')) return 'give the text as text or as message, not both (message is an alias of text). Nothing was done'
+  return null
+}
+
 // find, ask and report answer from the store by script (threadask.ts); `new` and `start` carry the plan-window warning above
 // window.holdAbove (windows.ts). Everything else is leanThreadCore.
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
@@ -770,6 +822,22 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       if (i.action === 'find') return await findText(h, home, i.text ?? '')
       if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
       return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!)
+    }
+    if (i.message !== undefined && i.text === undefined) i = { ...i, text: i.message } // `message` is an alias of `text`
+    // The text given to restart / reopen / start / wake / resume is the first instruction of the session that call starts: it is queued (flagged) before
+    // the action, so a start that is held or refused leaves it queued for the next one, and a fresh session gets it as the LAST part of its first
+    // prompt (handover.ts). The reply says which happened.
+    let carried: { ts: number; chars: number; id: string; home: string } | null = null
+    if (CARRY.has(i.action) && ID.test(i.tN ?? '') && typeof i.text === 'string' && i.text.trim()) {
+      const home = await homeDir(h)
+      const id = i.tN!
+      if (await load(h, home, id)) {
+        const text = i.text.trim()
+        const ts = await h.clock.now()
+        await serial(id, () => appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts, text, instr: true } satisfies Inbox))
+        carried = { ts, chars: text.length, id, home }
+        i = { ...i, text: undefined }
+      }
     }
     // brief lint (script, no refusal): a `new` / `send` text that asks for a forge write by script (curl / az / gh) cannot be carried out by
     // a thread. One warning line goes to the desk in the reply, and the same line is appended to the brief the thread receives.
@@ -782,6 +850,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     if (out.ok && (i.action === 'new' || i.action === 'start')) {
       const warn = await holdWarning(h, await homeDir(h))
       if (warn) out = { ...out, text: `${out.text}\n${warn}` }
+    }
+    if (carried) {
+      const left = (await unconsumed(h, carried.home, carried.id).catch(() => ({ msgs: [] as Inbox[] }))).msgs.some(m => m.instr && m.ts === carried!.ts)
+      const why = (data: unknown) => ((data as { pending?: boolean } | undefined)?.pending ? 'the call was held for the user\'s approval' : (out.text.split('\n')[0] ?? '').slice(0, 140))
+      out = { ...out, text: left ? `${out.text} · text not delivered: ${why(out.data)}; it is queued (${carried.chars} chars) and the next start carries it` : fresh(out) ? `${out.text} · new session; your text (${carried.chars} chars) is its first instruction` : `${out.text} · your text (${carried.chars} chars) was delivered to the session as its message` }
     }
     return lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
   } catch (e) {
@@ -942,7 +1015,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           const brief = (await h.fs.read(`${tpath(home, id)}/brief.md`).catch(() => t.title)) as string
           const u = await unconsumed(h, home, id)
           const msgs = u.msgs
-          const prompt = [brief.trim(), batchPrompt(msgs)].filter(Boolean).join('\n\n')
+          const prompt = [brief.trim(), msgs.some(m => m.instr) ? INSTR_LEAD : '', batchPrompt(msgs.filter(m => !m.instr)), instrBlock(msgs)].filter(Boolean).join('\n\n') // (the desk's own instructions last)
           const replaces = !!t.sid // a start that replaces an older session is a fresh start: it says what it costs
           const r = await startSession(h, home, t, prompt, i, installed, root)
           if (r.ok && msgs.length) {

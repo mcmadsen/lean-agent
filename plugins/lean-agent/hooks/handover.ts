@@ -91,8 +91,21 @@ export function waitingLead(recs: DeskRec[]): string | null {
   return `You were restarted at the context limit while WAITING for: ${last.ts}-${last.from}-${last.kind}: ${body}. If the answer is in the messages below, act on it. If not, do nothing: end your turn without a report and wait.`
 }
 
-export async function buildHandover(h: Host, home: string, t: Thread, why: string, queued: Inbox[], waiting = false): Promise<Handover> {
+// A text the desk gave to restart / reopen / start / wake / resume (threads.ts queues it flagged `instr`) is the LAST part of the first prompt, after
+// the handover, under this heading, and the task-first line points at it. It is never cut with the handover (it is added after the cap).
+export const INSTR_HEAD = 'New instructions from the desk (newer than the handover above; they win where they differ):'
+export const INSTR_EACH = 12_000
+export const INSTR_LEAD = 'New instructions from the desk are at the END of this prompt: read them first; they are newer than everything else here and win where they differ.'
+export const instrBlock = (msgs: Inbox[]): string => {
+  const m = msgs.filter(x => x.instr)
+  return m.length ? `${INSTR_HEAD}\n${m.map(x => (flat(x.text).length > INSTR_EACH ? `${flat(x.text).slice(0, INSTR_EACH)}\n…(cut at ${INSTR_EACH} characters; the full text is in your inbox.jsonl)` : flat(x.text))).join('\n\n')}` : ''
+}
+const SINCE_MAX = 20
+
+export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false): Promise<Handover> {
   const dir = `${threadsDir(home)}/${t.id}`
+  const queued = queuedAll.filter(m => !m.instr)
+  const instr = queuedAll.filter(m => m.instr)
   const text = async (p: string) => {
     const r = await h.fs.read(p).catch(() => '')
     return typeof r === 'string' ? r : ''
@@ -115,8 +128,14 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const pre = await preflightOf(h, home, t)
   const inbox = `${deskState(home)}/inbox.jsonl`
   const wait = waiting ? waitingLead(recs) : null // restarted at the limit while waiting: the open question is the lead, nothing to carry on with
+  // what the desk sent this thread after its last report (queued ones are in their own section): messages, also to a session that has ended, and the
+  // results of the actions the desk made for it (the desk's tell). Newest last: facts from the desk are never lost at a restart.
+  const lastReport = recs.length ? recs[recs.length - 1]!.ts : 0
+  const inQueue = new Set(queuedAll.map(m => `${m.ts}|${m.text}`))
+  const sinceRows = (await readJsonl<Inbox>(h, `${dir}/inbox.jsonl`)).filter(m => m && typeof m.text === 'string' && Number.isFinite(m.ts) && m.ts > lastReport && !inQueue.has(`${m.ts}|${m.text}`))
+  const since = sinceRows.slice(-SINCE_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n') + (sinceRows.length > SINCE_MAX ? `\n(${sinceRows.length - SINCE_MAX} older messages omitted: ${dir}/inbox.jsonl)` : '')
   const parts: Part[] = [
-    { name: 'lead', body: wait ?? resumeLead(taskLine(goal, brief, t.title)), mode: 'fixed' },
+    { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
     { name: 'check', body: wait ? '' : `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
     { name: 'brief', head: '## Brief', body: cut(brief, BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
@@ -127,11 +146,14 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
     { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },
+    { name: 'since', head: '## Since your last report (what the desk sent you and the results of its actions for you; newest last)', body: since, file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'queued', head: '## Messages from the desk that were queued for you', body: queued.length ? `${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
   ]
   const missing = [!goal && 'no goal (goal-set tN "<line>")', !notes && `no notes (${dir}/notes.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
   const sized = fitParts(parts, (await handoverTokens(h, home)) * 4)
-  return { prompt: cutPrompt(sized.map(partText).filter(Boolean).join('\n\n')), worktree: wt?.path, branch: wt?.branch, parts: sized, missing }
+  const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap
+  const base = cutPrompt(sized.map(partText).filter(Boolean).join('\n\n'))
+  return { prompt: tail ? `${base}\n\n${tail}` : base, worktree: wt?.path, branch: wt?.branch, parts: tail ? [...sized, { name: 'instructions', head: INSTR_HEAD, body: tail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : sized, missing }
 }
 
 // ---- the size budget -------------------------------------------------------------------------------------------------------------
@@ -144,7 +166,7 @@ export async function handoverTokens(h: Host, home: string): Promise<number> {
 
 export type Part = { name: string; head?: string; body: string; file?: string; mode: 'fixed' | 'head' | 'tail' | 'lines'; cut?: boolean }
 export const partText = (p: Part): string => (p.body ? (p.head ? `${p.head}\n${p.body}` : p.body) : '')
-const CUT_ORDER = ['remembered', 'notes', 'queued', 'reports', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
+const CUT_ORDER = ['remembered', 'notes', 'queued', 'reports', 'since', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
 const FLOOR = 300 // a section is never cut below this many characters
 const noteOf = (p: Part) => `\n…(cut to fit the handover budget: full text in ${p.file ?? 'its source'})`
 const total = (parts: Part[]) => parts.reduce((n, p) => n + (p.body ? partText(p).length + 2 : 0), 0)

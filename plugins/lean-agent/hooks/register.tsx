@@ -2,7 +2,7 @@ import type { Register } from 'claude-code'
 
 import { recordRunning, recordSid, resolveRole, roleReport } from './role'
 import type { Role } from './role'
-import { deskClaudeMd, leanThread, listAgents } from './threads'
+import { deskClaudeMd, leanThread, listAgents, unusedField } from './threads'
 import { limitFromUsage, limitTick, readLimit, sameReset, writeLimit } from './limits'
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
@@ -178,7 +178,8 @@ const SCHEMA = {
   properties: {
     action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
-    text: { type: 'string', description: 'new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
+    message: { type: 'string', description: 'alias of text (restart / reopen / start / wake / resume / send / new)' },
+    text: { type: 'string', description: 'restart / reopen / start / wake / resume: NEW INSTRUCTIONS and facts for the session this call starts: they are the last part of its first prompt, after the handover, and win where they differ (put them here, never in a separate send); new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     id: { type: 'string', description: 'approve-action: the request id from action-list (like a1700000000000-1), only after the USER chose Approve for exactly that request in AskUserQuestion (or pressed Approve in the pane)' },
@@ -1013,9 +1014,12 @@ export const register: Register = on => {
     const host = hostOf($)
     // a session reads its parent folders' CLAUDE.md BEFORE the mod runs: a stale guide above the threads is cleared before a start
     if (['new', 'start', 'reopen', 'resume', 'wake', 'send', 'restart'].includes(String(e.action))) await guardParents(host).catch(() => [])
+    const unused = unusedField(e) // a field the action does not use is refused by name, never dropped silently
+    if (unused) return { result: unused, isError: true } as any
     const out = await leanThread(host, $.plugin.root, e)
     await ensureGitHooks(host).catch(() => undefined)
-    if (out.ok && e.action === 'send' && typeof e.tN === 'string' && typeof e.text === 'string') await recordAnswer(host, e.tN, e.text).catch(() => undefined)
+    const sentText = typeof e.text === 'string' ? e.text : typeof e.message === 'string' ? e.message : ''
+    if (out.ok && e.action === 'send' && typeof e.tN === 'string' && sentText) await recordAnswer(host, e.tN, sentText).catch(() => undefined)
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
   })
 
