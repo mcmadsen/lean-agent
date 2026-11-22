@@ -198,8 +198,11 @@ engine plays only an audio file the plugin bundles, and lean-agent ships none (s
 used either).
 
 **Header, Dismiss, tips.** "lean-agent is not set up" and the Set up button show only while the setup itself is missing; other doctor
-findings read "Doctor: N findings (F fix, I info)". A blocked card has a two-press **Dismiss** (`lean_thread dismiss tN`): it records that
-you acknowledged that report; the notice and badge stay away until a newer blocked report. `/lean-agent:list` lists threads
+findings read "Doctor: N findings (F fix, I info)". Every Needs-you card (a question, a prompt wait, an approval, a blocked or stalled
+thread, a ready report, a model or write request, a script) has a two-press **Dismiss**, and every line at the top (budget alert, notice, doctor finding, plan window,
+the message of a pane action) a one-press one: it is logged in the history (who, when, what), hides that item until a newer one of its kind arrives (a
+newer question, prompt wait, blocked report; the next threshold or day; changed text), never answers a question, and the record stays. "Needs you (N)" and
+`lean_thread list` leave dismissed items out; "N dismissed" has a **show** toggle. `lean_thread dismiss tN`, `dismiss tN kind:<kind>` or `dismiss notice <id|all>` does the same on your word. `/lean-agent:list` lists threads
 (`/lean-agent:threads` is the old name). When you ask the desk for something a direct command does, it adds one line "Tip: do this directly
 with /lean-agent:review <pr>" (once per command per day, quiet for a week after you used the command; `config.json` `"tips": false` turns it off).
 

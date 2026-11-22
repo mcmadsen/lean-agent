@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Dismiss everywhere.** Every Needs-you card (a thread's question, "waits on a prompt in its own session", an approval, a blocked report, a stalled thread, a done report that needs you, a model or write request, a script, the desk's context or model warning) has a two-press Dismiss next to its other buttons; the lines at the top (budget alerts, notices, an automatic restart that gave up, the old-desk reminder, doctor findings, the plan-window line, the message of a pane action) have a one-press one. One dismissed-items store: a row in the thread's (or the desk's) `history.jsonl` with who, when and what; the item is hidden until a newer one of its kind arrives (newer question, new prompt wait, newer blocked report; the next budget threshold or day; changed finding text). The record behind it stays and a dismissed question is not answered. "N dismissed" with a **show** toggle brings them back for the view.
+- `lean_thread dismiss tN kind:<question|prompt|approval|blocked|stalled|restart|ready|model|action>` and `dismiss notice <id|all>` (the desk uses them only after you said so); the reply names what was hidden and that a newer one will show again. A thread whose automatic restart gave up now also leaves a pane line (`restart-tN` notice).
+
+### Changed
+- A budget alert is labelled `budget:` in amber, not `error:` in red; `error:` stays for real failures. "Needs you (N)" and `lean_thread list` do not count dismissed items (`list` ends with "Needs you: N (M dismissed ...)" when something waits). A stalled or stuck thread is now a Needs-you card too.
+- `lean_thread dismiss tN` no longer answers "not blocked" for other kinds: it dismisses the thread's current Needs-you item.
+
 ## 1.0.20
 
 ### Added

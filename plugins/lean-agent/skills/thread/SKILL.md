@@ -19,7 +19,7 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 | `keep` | `tN`, `on?` | keep mode: follow-ups to a done thread resume it until its context passes the limit; offer it only for many small follow-ups |
 | `list` | none | state, running / idle / stuck, queued, model, `ctx` size, agents |
 | `find` / `ask` / `report` | `text` / `tN` + `text` / `tN` | answered from the store with no model turn (or a small fresh one), never by waking an old session |
-| `dismiss` | `tN` | records that the user acknowledged tN's blocked report |
+| `dismiss` | `tN` [`kind`] or `notice` | only after the user said so: hides tN's current Needs-you item (or `kind`: question, prompt, approval, blocked, stalled, restart, ready, model, action), or a top line (`notice`: its id or `all`) until a newer one arrives; nothing is answered |
 | `goal-set` / `goal-clear` | `tN`, `text` | the thread's one-line goal (the chaser watches it) |
 | `profile` | `project`, `mcp?`, `plugins?`, `fill?`, `on?` | the project's MCP/plugin allow-list (outside it: deferred, not removed); `fill: true` learns it from usage; a PR thread gets `needs: ["azure-devops"]` |
 | `projects` / `project-add` / `project-remove` / `project-private` | `project`, `path?`, `on?` | registry; `projects all: true` includes private ones; turning private off needs the user's yes first (AskUserQuestion), then `confirm: true` |

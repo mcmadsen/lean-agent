@@ -9,6 +9,7 @@
 import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
+import { setNotice } from './notices'
 import { lastActivity, stallConfig, threadsConfig, truthOf } from './threadstate'
 import type { AgentRow, Out, Thread } from './threads'
 
@@ -78,11 +79,16 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     const r = await deps.restart(id, `Its previous session stalled: no tool call or report for ${mins(ms)} min${unreadText(truth.unread)}; restarted by script (threads.stallRestart).`)
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
       delete stalls[id] // a new session: the stall is over
+      await setNotice(h, `restart-${id}`, null)
       out.push({ id, text: `${base}: restarted it as a new session by script (threads.stallRestart is on)` })
     } else {
       rec.tries = (rec.tries ?? 0) + 1
       // (before the last try: retried at the next tick, the notice comes with the last one)
-      if (rec.tries >= MAX_STALL_TRIES) out.push({ id, text: `${base}: the automatic restart failed ${rec.tries} times (last reason: ${r.text.slice(0, 160)}); wake or restart it by hand` })
+      if (rec.tries >= MAX_STALL_TRIES) {
+        const text = `${base}: the automatic restart failed ${rec.tries} times (last reason: ${r.text.slice(0, 160)}); wake or restart it by hand`
+        out.push({ id, text })
+        await setNotice(h, `restart-${id}`, text) // a line at the top of the pane with a Dismiss (dismiss.ts kind restart)
+      }
     }
   }
   for (const id of Object.keys(stalls)) if (!ids.includes(id)) delete stalls[id]

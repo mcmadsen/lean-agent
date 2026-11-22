@@ -12,6 +12,7 @@
 import { appendJsonl, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
+import { setNotice } from './notices'
 import { logRefusal } from './feedback'
 import type { DeskRec } from './delivery'
 import { buildSnapshot, takeEdited, writeSnapshot } from './snapshot'
@@ -179,12 +180,17 @@ async function tickOnce(h: Host, deps: RestartDeps): Promise<Notice[]> {
     if (isWorking(row) && now - p.ts < grace) continue // idle first; after the grace minutes a session that still shows as working is restarted too (the stop refuses all its tool calls)
     const r = await deps.restart(id, `Its context was ${p.tokens} tokens (limit ${p.limit}): checkpointed at the end of its turn and restarted by script.`, isWorking(row))
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
+      await setNotice(h, `restart-${id}`, null) // an earlier give-up is over
       await writeJson(h, markerFile(home, id), { last: { at: now, oldSid: p.sid }, ...(mk.stopped ? { stopped: true } : {}) } satisfies Marker)
       out.push({ id, text: `${id}: context ${kTokens(p.tokens)} was over the limit ${kTokens(p.limit)}: restarted as a new session by script (state kept in state.json). ${costOf(r.text)}`.trim() })
     } else {
       const tries = (p.tries ?? 0) + 1
       await writeJson(h, markerFile(home, id), { ...mk, pending: tries >= MAX_TRIES ? undefined : { ...p, tries, lastTry: now } } satisfies Marker)
-      if (tries >= MAX_TRIES) out.push({ id, text: `${id}: automatic restart failed ${tries} times (last reason: ${r.text.slice(0, 160)}); it stays stopped at the context limit. Say "restart ${id}" and the desk starts it fresh from the handover.` })
+      if (tries >= MAX_TRIES) {
+        const text = `${id}: automatic restart failed ${tries} times (last reason: ${r.text.slice(0, 160)}); it stays stopped at the context limit. Say "restart ${id}" and the desk starts it fresh from the handover.`
+        out.push({ id, text })
+        await setNotice(h, `restart-${id}`, text) // a line at the top of the pane with a Dismiss (dismiss.ts kind restart)
+      }
     }
   }
   return out
