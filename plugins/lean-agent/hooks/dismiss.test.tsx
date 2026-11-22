@@ -108,7 +108,7 @@ test('the tool: dismiss tN hides its current item, tN kind: that one, notice hid
 test('the tool: dismiss notice <id|all> hides a line until its text changes; a budget alert is bound to the day', async () => {
   const h = world()
   thr(h, 't1')
-  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $21.71 today, over its $20.00 daily alert (sonnet/high). Ask what it is doing, or park it. (config budget.threadDaily)\n')
+  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $12.34 today, over its $10.00 daily alert (sonnet/high). Ask what it is doing, or park it. (config budget.threadDaily)\n')
   h.files.set(`${L}/notices/githooks.txt`, 'lean-agent: git hooks not installed\n')
   const v = await loadView(h.host)
   expect(v.notices.map(n => n.key).sort()).toEqual(['budget-t5', 'githooks'])
@@ -120,9 +120,9 @@ test('the tool: dismiss notice <id|all> hides a line until its text changes; a b
   const a = await loadView(h.host)
   expect(a.notices.map(n => n.key)).toEqual(['githooks'])
   expect(a.dismissedNotices.map(n => n.key)).toEqual(['budget-t5'])
-  expect(h.files.get(`${L}/notices/budget-t5.txt`)).toContain('$21.71') // the notice file stays
+  expect(h.files.get(`${L}/notices/budget-t5.txt`)).toContain('$12.34') // the notice file stays
   expect(h.files.get(`${L}/desk/history.jsonl`)).toContain('"what":"notice"') // the desk's history
-  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $30.00 today, over its $20.00 daily alert\n') // the next occurrence
+  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $30.00 today, over its $10.00 daily alert\n') // the next occurrence
   resetViewCache()
   expect((await loadView(h.host)).notices.map(n => n.key).sort()).toEqual(['budget-t5', 'githooks'])
   expect((await dismissAction(h.host, { notice: 'all' })).text).toContain('budget: t5')
@@ -148,7 +148,7 @@ test('the pane: each card has a two-press Dismiss that logs it; the count leaves
   const h = world(on, WAITING)
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   items(h)
-  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $21.71 today, over its $20.00 daily alert\n')
+  h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $12.34 today, over its $10.00 daily alert\n')
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Text', text: /Needs you \(5\)/ })).toBeTruthy()
   for (const k of ['t3-blocked', 't4-prompt', 't5-approval', 't7-question', 't8-blocked']) expect([k, !!(await ui.find({ type: 'Button', key: `dismiss-${k}` }))]).toEqual([k, true])
@@ -171,6 +171,6 @@ test('the pane: each card has a two-press Dismiss that logs it; the count leaves
   await ui.press({ key: 'notice-dismiss-budget-t5' }) // one press
   expect(await has(ui, /^budget: t5 has spent/)).toBe(false)
   expect(await has(ui, /^2 dismissed$/)).toBe(true)
-  expect(h.files.get(`${L}/notices/budget-t5.txt`)).toContain('$21.71')
+  expect(h.files.get(`${L}/notices/budget-t5.txt`)).toContain('$12.34')
   await ui.unmount()
 })

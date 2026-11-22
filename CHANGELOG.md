@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.21
 
 ### Added
 - **Dismiss everywhere.** Every Needs-you card (a thread's question, "waits on a prompt in its own session", an approval, a blocked report, a stalled thread, a done report that needs you, a model or write request, a script, the desk's context or model warning) has a two-press Dismiss next to its other buttons; the lines at the top (budget alerts, notices, an automatic restart that gave up, the old-desk reminder, doctor findings, the plan-window line, the message of a pane action) have a one-press one. One dismissed-items store: a row in the thread's (or the desk's) `history.jsonl` with who, when and what; the item is hidden until a newer one of its kind arrives (newer question, new prompt wait, newer blocked report; the next budget threshold or day; changed finding text). The record behind it stays and a dismissed question is not answered. "N dismissed" with a **show** toggle brings them back for the view.
