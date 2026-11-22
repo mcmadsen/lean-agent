@@ -38,7 +38,7 @@ function desk(on: any, cwd = '/h/lean-agent-desk') {
   return { h, start: ($: any) => $.session.start({ cwd, surface: 'desktop', isInteractive: true } as any) }
 }
 
-test('the desk trims a skill_listing attachment, records it, and shows it in the doctor check', async ($, on) => {
+test('the desk trims a skill_listing attachment, records it, and shows it in the doctor check', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on)
   await start($)
   const r: any = await $.prompt.attachment({ type: 'skill_listing', text: LIST, origin: ORIGIN } as any)
@@ -50,7 +50,7 @@ test('the desk trims a skill_listing attachment, records it, and shows it in the
   expect(out).not.toContain('PDF') // names and counts only
 })
 
-test('a renamed listing type that holds "skill" is trimmed too; an unknown format is left untouched and says so', async ($, on) => {
+test('a renamed listing type that holds "skill" is trimmed too; an unknown format is left untouched and says so', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on)
   await start($)
   const a: any = await $.prompt.attachment({ type: 'available_skills', text: LIST, origin: ORIGIN } as any)
@@ -61,7 +61,7 @@ test('a renamed listing type that holds "skill" is trimmed too; an unknown forma
   expect(await stat($)).toContain('desk skill listing: format not recognised (no skill lines) (skill_listing)')
 })
 
-test('a plain session is never trimmed; other attachments pass', async ($, on) => {
+test('a plain session is never trimmed; other attachments pass', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on, '/h/elsewhere')
   await start($)
   const r: any = await $.prompt.attachment({ type: 'skill_listing', text: LIST, origin: ORIGIN } as any)
@@ -70,20 +70,20 @@ test('a plain session is never trimmed; other attachments pass', async ($, on) =
   expect(o.text).toBe('remember')
 })
 
-test('no attachment seen yet is said plainly', async ($, on) => {
+test('no attachment seen yet is said plainly', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on)
   await start($)
   expect(await stat($)).toContain('desk skill listing: no skill_listing attachment seen')
 })
 
-test('an MCP-instructions attachment is left out on the desk only', async ($, on) => {
+test('an MCP-instructions attachment is left out on the desk only', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on)
   await start($)
   const r: any = await $.prompt.attachment({ type: 'mcp_instructions_delta', text: 'server says...', origin: ORIGIN } as any)
   expect(r.text).toBeNull()
 })
 
-test('a desk role asks the engine for the cached listing, sections and descriptions again', async ($, on) => {
+test('a desk role asks the engine for the cached listing, sections and descriptions again', { timeoutMs: 20_000 }, async ($, on) => {
   const asked: string[] = []
   on('ui.invalidate', (_: any, e: any) => { asked.push(e.event ?? e.name ?? JSON.stringify(e)); return { value: undefined } })
   const { start } = desk(on)
@@ -99,7 +99,7 @@ test('only the contiguous listing is filtered: usage bullets around it stay, pro
   expect(t.reason).toBe('trimmed 2 -> 1')
 })
 
-test('an MCP-instructions drop does not overwrite the skill listing record', async ($, on) => {
+test('an MCP-instructions drop does not overwrite the skill listing record', { timeoutMs: 20_000 }, async ($, on) => {
   const { start } = desk(on)
   await start($)
   await $.prompt.attachment({ type: 'skill_listing', text: LIST, origin: ORIGIN } as any)

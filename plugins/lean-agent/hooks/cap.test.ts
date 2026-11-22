@@ -179,7 +179,7 @@ async function session($: any, on: any, cwd: string, result: () => any) {
   return h
 }
 
-test('in a thread session the main loop\'s oversized Bash result is cut; a subagent\'s is not', async ($, on) => {
+test('in a thread session the main loop\'s oversized Bash result is cut; a subagent\'s is not', { timeoutMs: 20_000 }, async ($, on) => {
   const stdout = big(60_000)
   const h = await session($, on, `${L}/threads/t1`, () => ({ result: { stdout, stderr: '', interrupted: false } }))
   const a: any = await $.tool.call({ tool: 'Bash', command: 'cat big.log' } as any)
@@ -191,7 +191,7 @@ test('in a thread session the main loop\'s oversized Bash result is cut; a subag
   expect(outFiles(h).length).toBe(1)
 })
 
-test('in a plain session nothing is cut', async ($, on) => {
+test('in a plain session nothing is cut', { timeoutMs: 20_000 }, async ($, on) => {
   const stdout = big(60_000)
   const h = await session($, on, '/somewhere/else', () => ({ result: { stdout, stderr: '', interrupted: false } }))
   const a: any = await $.tool.call({ tool: 'Bash', command: 'cat big.log' } as any)

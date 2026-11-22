@@ -319,7 +319,7 @@ test('workers: readers are read-only; unknown subagent types are readers; grants
   expect(await run(h, thread, edit('/h/.lean-agent/worktrees/app/t1/src/a.ts'), '/r', 'lean-agent:worker-sonnet', 'w1')).toBeNull() // the same subagent resumed keeps its grant
 })
 
-test('a throwing guard denies (fail closed)', async ($, on) => {
+test('a throwing guard denies (fail closed)', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))

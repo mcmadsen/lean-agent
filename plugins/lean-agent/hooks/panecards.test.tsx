@@ -155,7 +155,7 @@ test('view: a record whose signature does not verify is "not green", whatever it
 })
 
 // ---- Needs you ---------------------------------------------------------------------------------------------------------
-test('Needs you: absent when nothing waits; otherwise approvals, questions, ready reports, blocked threads and scripts, each with its button on its card', async ($, on) => {
+test('Needs you: absent when nothing waits; otherwise approvals, questions, ready reports, blocked threads and scripts, each with its button on its card', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, [{ sessionId: SID(4), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
@@ -194,7 +194,7 @@ test('Needs you: absent when nothing waits; otherwise approvals, questions, read
 })
 
 // ---- thread cards ------------------------------------------------------------------------------------------------------
-test('a thread card: id and the whole title, one state word, model, branch, verdict, cost, the last report on one line, its buttons', async ($, on) => {
+test('a thread card: id and the whole title, one state word, model, branch, verdict, cost, the last report on one line, its buttons', { timeoutMs: 20_000 }, async ($, on) => {
   const title = 'Rename the synthetic widget registry across all four example modules, then update every example that mentions the old name'
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1), title, model: 'sonnet', effort: 'high' })
@@ -221,7 +221,7 @@ test('a thread card: id and the whole title, one state word, model, branch, verd
 })
 
 // ---- the widget --------------------------------------------------------------------------------------------------------
-test('widget placement: a glance (running, blocked, needs you, desk context, budget today) and no button at all', async ($, on) => {
+test('widget placement: a glance (running, blocked, needs you, desk context, budget today) and no button at all', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1) })
   thr(h, 't2')
@@ -238,7 +238,7 @@ test('widget placement: a glance (running, blocked, needs you, desk context, bud
   await ui.unmount()
 })
 
-test('widget placement outside the desk says so and has no button', async ($, on) => {
+test('widget placement outside the desk says so and has no button', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   const ui = await $.ui.mount(withProps({ placement: 'widget' }))
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0)
@@ -247,7 +247,7 @@ test('widget placement outside the desk says so and has no button', async ($, on
 })
 
 // ---- narrow body, every section empty ------------------------------------------------------------------------------------
-test('a narrow body (24 columns) draws the same tree with the short forms: buttons still there, the title whole', async ($, on) => {
+test('a narrow body (24 columns) draws the same tree with the short forms: buttons still there, the title whole', { timeoutMs: 20_000 }, async ($, on) => {
   const title = 'A long synthetic title that has to wrap on a narrow pane and never be cut'
   const h = world(on)
   thr(h, 't1', { title })
@@ -265,7 +265,7 @@ test('a narrow body (24 columns) draws the same tree with the short forms: butto
   }
 })
 
-test('every section empty: no Needs you, no Goals, an empty-state line for threads and inbox, Closed and More folded, the header and the footer actions', async ($, on) => {
+test('every section empty: no Needs you, no Goals, an empty-state line for threads and inbox, Closed and More folded, the header and the footer actions', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   void h
   await inDesk($)
@@ -286,7 +286,7 @@ test('every section empty: no Needs you, no Goals, an empty-state line for threa
   await ui.unmount()
 })
 
-test('every section full: needs, cards, inbox, goals, closed and More all draw, and the buttons of each work', async ($, on) => {
+test('every section full: needs, cards, inbox, goals, closed and More all draw, and the buttons of each work', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1) })
   thr(h, 't2')

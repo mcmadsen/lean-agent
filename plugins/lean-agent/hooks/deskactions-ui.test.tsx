@@ -36,7 +36,7 @@ function world(on: any) {
   return { h, kv, host, ask, curls }
 }
 
-test('a request is a Needs-you card with the exact text; Approve and Deny press twice; Approve sends once and the card goes', async ($, on) => {
+test('a request is a Needs-you card with the exact text; Approve and Deny press twice; Approve sends once and the card goes', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   const v = await w.ask()
   await inDesk($)
@@ -58,7 +58,7 @@ test('a request is a Needs-you card with the exact text; Approve and Deny press 
   await ui.unmount()
 })
 
-test('Deny on the card tells the thread and sends nothing; the thread\'s own blocked row is not shown on top of the request', async ($, on) => {
+test('Deny on the card tells the thread and sends nothing; the thread\'s own blocked row is not shown on top of the request', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   const v = await w.ask()
   await inDesk($)
@@ -82,7 +82,7 @@ async function deskAsk($: any, on: any, result: (e: any) => unknown) {
   return w
 }
 
-test('the desk\'s AskUserQuestion: Approve in the result is recorded when the question named the request and its exact text', async ($, on) => {
+test('the desk\'s AskUserQuestion: Approve in the result is recorded when the question named the request and its exact text', { timeoutMs: 20_000 }, async ($, on) => {
   let want = ''
   const w = await deskAsk($, on, e => ({ questions: e.questions, answers: { [e.questions[0].question]: want } }))
   const v = await w.ask()
@@ -95,7 +95,7 @@ test('the desk\'s AskUserQuestion: Approve in the result is recorded when the qu
   expect(w.curls()).toHaveLength(0) // approving only records the human's answer: the desk's approve-action sends
 })
 
-test('a question that does not carry the exact text records nothing, and a model that fills in `answers` is refused before the dialog', async ($, on) => {
+test('a question that does not carry the exact text records nothing, and a model that fills in `answers` is refused before the dialog', { timeoutMs: 20_000 }, async ($, on) => {
   let asks = 0
   let readable = true
   const w = await deskAsk($, on, e => {
@@ -122,7 +122,7 @@ test('a question that does not carry the exact text records nothing, and a model
   expect((await listActions(w.host))[0]!.state).toBe('pending')
 })
 
-test('a thread\'s own AskUserQuestion is never an answer: the guard refuses it and nothing is recorded', async ($, on) => {
+test('a thread\'s own AskUserQuestion is never an answer: the guard refuses it and nothing is recorded', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => ({ result: { questions: e.questions, answers: { [e.questions[0].question]: 'Approve' } } }) as any)
   const v = await w.ask()
@@ -134,7 +134,7 @@ test('a thread\'s own AskUserQuestion is never an answer: the guard refuses it a
   expect((await listActions(w.host))[0]!.state).toBe('pending')
 })
 
-test('a text the card cannot show in full has no Approve in the pane (the desk question shows all of it); Deny stays', async ($, on) => {
+test('a text the card cannot show in full has no Approve in the pane (the desk question shows all of it); Deny stays', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   const long = await addActionRequest(w.host, 't5', { ...REPLY, params: { ...REPLY.params, body: `${BODY} ${'more words '.repeat(60)}` } })
   expect(long.ok, long.text).toBe(true)

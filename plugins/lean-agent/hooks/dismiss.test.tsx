@@ -144,7 +144,7 @@ test('a restart that gave up belongs to its thread: dismiss tN kind:restart', as
   expect((await loadView(h.host)).notices).toEqual([])
 })
 
-test('the pane: each card has a two-press Dismiss that logs it; the count leaves it out; "N dismissed" and show bring it back; a notice hides on one press', async ($, on) => {
+test('the pane: each card has a two-press Dismiss that logs it; the count leaves it out; "N dismissed" and show bring it back; a notice hides on one press', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, WAITING)
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   items(h)

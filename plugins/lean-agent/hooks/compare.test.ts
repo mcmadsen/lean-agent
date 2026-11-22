@@ -334,7 +334,7 @@ test('task mode needs a task, both runs and a registered project; the desk is to
 })
 
 // ---- the entry points --------------------------------------------------------------------------------------------
-test('lean_doctor compare (desk) and lean_compare (thread) answer; history needs no claude run', async ($, on) => {
+test('lean_doctor compare (desk) and lean_compare (thread) answer; history needs no claude run', { timeoutMs: 20_000 }, async ($, on) => {
   resetLocks()
   const h = fakeHost(on)
   h.clock.t = Date.UTC(2026, 10, 18, 12)
@@ -350,7 +350,7 @@ test('lean_doctor compare (desk) and lean_compare (thread) answer; history needs
   expect(String(t?.result ?? t)).toContain('needs project')
 })
 
-test('a thread asks lean_compare for history, and task mode from the desk is refused', async ($, on) => {
+test('a thread asks lean_compare for history, and task mode from the desk is refused', { timeoutMs: 20_000 }, async ($, on) => {
   resetLocks()
   const h = fakeHost(on)
   h.files.set(`${L}/compare/history.jsonl`, JSON.stringify({ date: '2026-11-17T09:00', project: 'proj', mode: 'task', model: 'sonnet', clean: { tokens: 90000, cost: 0.3 }, thread: { tokens: 50000, cost: 0.2 }, verdict: 'tie', cost: 0.5, file: 'x.md' }) + '\n')

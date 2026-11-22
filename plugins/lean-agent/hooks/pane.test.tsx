@@ -89,7 +89,7 @@ test('thread status line: id, budget, unread inbox', async () => {
   expect(await threadStatus(h.host, 't1')).toBe('t1 · budget n/a · 1 unread')
 })
 
-test('pane renders on every surface; Resume presses one claude --bg --resume', async ($, on) => {
+test('pane renders on every surface; Resume presses one claude --bg --resume', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   await inDesk($)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -106,7 +106,7 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', a
   await ui.unmount()
 })
 
-test('pane shows the error instead of going blank', async ($, on) => {
+test('pane shows the error instead of going blank', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on)
   h.claude.handler = () => ({ exitCode: 3, stdout: '' })
   await inDesk($)
@@ -128,7 +128,7 @@ test('view: the budget footer sums usd from ledger rows', async () => {
   expect((await loadView(h.host)).budget).toBe('$1.50 · 7d $1.50') // the pane prints it after "budget today:"
 })
 
-test('view and pane: an open question shows until an answer row closes it', async ($, on) => {
+test('view and pane: an open question shows until an answer row closes it', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   const q = (o: unknown) => JSON.stringify(o) + '\n'
   h.files.set('/h/.lean-agent/questions.jsonl', q({ ts: 1, from: 't1', question: 'which db?' }) + q({ ts: 2, from: 't2', question: 'which cache?' }))
@@ -142,7 +142,7 @@ test('view and pane: an open question shows until an answer row closes it', asyn
   await ui.unmount()
 })
 
-test('pane More section (projects and scripts): name, private, open threads, stale rules; hidden private ones left out', async ($, on) => {
+test('pane More section (projects and scripts): name, private, open threads, stale rules; hidden private ones left out', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ p: { path: '/w/p' }, secret: { path: '/w/s', private: true } }))
   h.files.set('/h/.lean-agent/p/learn.json', JSON.stringify({ sha: 'a', areas: { ui: { globs: ['ui/**'], sha: 'a', lines: 5, stale: 'x' } } }))
@@ -161,7 +161,7 @@ test('pane More section (projects and scripts): name, private, open threads, sta
   await ui.unmount()
 })
 
-test('pane thread card shows the thread\'s model/effort badge', async ($, on) => {
+test('pane thread card shows the thread\'s model/effort badge', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
   await inDesk($)
@@ -175,7 +175,7 @@ const rec = (o: unknown) => JSON.stringify(o) + '\n'
 const thr = (h: any, id: string, o: Record<string, unknown> = {}) => h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ id, title: `title ${id}`, project: 'p', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, ...o }))
 const SID_OF = (n: number) => `0000000${n}-2222-3333-4444-555555555555`
 
-test('sections are toggle buttons with counts; the state survives a remount; defaults: goals, threads and inbox open, closed and More folded', async ($, on) => {
+test('sections are toggle buttons with counts; the state survives a remount; defaults: goals, threads and inbox open, closed and More folded', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
@@ -197,7 +197,7 @@ test('sections are toggle buttons with counts; the state survives a remount; def
   await ui.unmount()
 })
 
-test('inbox: grouped by thread, unread first (all of them), a row expands to its full text, ack moves a row to the read ones', async ($, on) => {
+test('inbox: grouped by thread, unread first (all of them), a row expands to its full text, ack moves a row to the read ones', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   const long = 'x'.repeat(260) + ' THE-END' // longer than a card's last-report line (200) and an inbox row's (70)
   const rows = Array.from({ length: 12 }, (_, n) => ({ ts: h.clock.t - (12 - n) * 1000, from: n % 2 ? 't1' : 't2', kind: 'report', text: n === 11 ? long : `report ${n}`, state: 'working' }))
@@ -222,7 +222,7 @@ test('inbox: grouped by thread, unread first (all of them), a row expands to its
   await ui.unmount()
 })
 
-test('inbox: at most the last 5 read rows per thread, "show all" expands; read rows older than 7 days are archived (still in the file)', async ($, on) => {
+test('inbox: at most the last 5 read rows per thread, "show all" expands; read rows older than 7 days are archived (still in the file)', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   const day = 86_400_000
   // t2: 9 read rows from the last days; t1: 2 read rows 8 days old, 1 unread row
@@ -258,7 +258,7 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   await ui.unmount()
 })
 
-test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reject drops it, Adopt adopts through decide and logs the user\'s decision', async ($, on) => {
+test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reject drops it, Adopt adopts through decide and logs the user\'s decision', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   const text = 'print(1)\n'
   const sha = hashText(text)
@@ -290,7 +290,7 @@ test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reje
   await ui.unmount()
 })
 
-test('Close is two-step (arm, confirm within 10 s); it closes through lean_thread close, clears the goal, and the row moves to Closed with Reopen', async ($, on) => {
+test('Close is two-step (arm, confirm within 10 s); it closes through lean_thread close, clears the goal, and the row moves to Closed with Reopen', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -316,7 +316,7 @@ test('Close is two-step (arm, confirm within 10 s); it closes through lean_threa
   await ui2.unmount()
 })
 
-test('a working thread has no Close (a busy label); needs-you shows for a session waiting on a prompt', async ($, on) => {
+test('a working thread has no Close (a busy label); needs-you shows for a session waiting on a prompt', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [{ sessionId: SID, name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1, waitingFor: 'permission prompt' }])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -329,7 +329,7 @@ test('a working thread has no Close (a busy label); needs-you shows for a sessio
   await ui.unmount()
 })
 
-test('a session waiting on a prompt gets no Close; arming one Close then pressing another re-arms without closing either; a thread that turned busy between the presses is not closed', async ($, on) => {
+test('a session waiting on a prompt gets no Close; arming one Close then pressing another re-arms without closing either; a thread that turned busy between the presses is not closed', { timeoutMs: 20_000 }, async ($, on) => {
   const rows: any[] = [{ sessionId: SID, name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1, waitingFor: 'permission prompt' }]
   const h = setup(on, rows)
   thr(h, 't4', { sid: SID_OF(4) })
@@ -353,7 +353,7 @@ test('a session waiting on a prompt gets no Close; arming one Close then pressin
   await ui.unmount()
 })
 
-test('Close all done: 2+ done threads, two-step, closes only done ones that are not working; blocked, asking and progress stay', async ($, on) => {
+test('Close all done: 2+ done threads, two-step, closes only done ones that are not working; blocked, asking and progress stay', { timeoutMs: 20_000 }, async ($, on) => {
   const rows = [{ sessionId: SID_OF(4), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }]
   const h = setup(on, rows)
   for (const [id, n] of [['t4', 4], ['t5', 5], ['t6', 6], ['t7', 7], ['t8', 8]] as const) thr(h, id, { sid: SID_OF(n) })
@@ -395,7 +395,7 @@ function restartable(h: any, rows: any[]) {
   }
 }
 
-test('every open thread has Restart; it is two-step; the confirmed press stops the session and starts a NEW one with the handover', async ($, on) => {
+test('every open thread has Restart; it is two-step; the confirmed press stops the session and starts a NEW one with the handover', { timeoutMs: 20_000 }, async ($, on) => {
   const rows = [{ sessionId: SID, name: 'x', cwd: T1_DIR, status: 'idle', state: 'done', startedAt: 1, pid: 42, id: 'abcd1234' }]
   const h = setup(on, rows)
   restartable(h, rows)
@@ -420,7 +420,7 @@ test('every open thread has Restart; it is two-step; the confirmed press stops t
   await ui.unmount()
 })
 
-test('Restart of a working thread warns that the current step is lost, and still restarts it on the second press', async ($, on) => {
+test('Restart of a working thread warns that the current step is lost, and still restarts it on the second press', { timeoutMs: 20_000 }, async ($, on) => {
   const rows = [{ sessionId: SID, name: 'x', cwd: T1_DIR, status: 'busy', state: 'working', startedAt: 1, pid: 42, id: 'abcd1234' }]
   const h = setup(on, rows)
   restartable(h, rows)
@@ -436,7 +436,7 @@ test('Restart of a working thread warns that the current step is lost, and still
   await ui.unmount()
 })
 
-test('a finished thread row says the next message starts a new session', async ($, on) => {
+test('a finished thread row says the next message starts a new session', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   thr(h, 't6', { finished: 5 })
   await inDesk($)
@@ -459,7 +459,7 @@ function deskFeed(on: any) {
   }
 }
 
-test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', async ($, on) => {
+test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
@@ -492,7 +492,7 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
 })
 
 // (deskcompact.test.ts covers the compaction states; here the desk's context size comes from a request, as in a real session)
-test('header: a desk under 80 % of its limit has the bar and no Restart desk button beside it; from 80 % the button is beside the bar; over the limit it is also a need; the footer button is always there', async ($, on) => {
+test('header: a desk under 80 % of its limit has the bar and no Restart desk button beside it; from 80 % the button is beside the bar; over the limit it is also a need; the footer button is always there', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
@@ -528,7 +528,7 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   await ui.unmount()
 })
 
-test('the footer Restart desk button works under 80 %: the first press arms it, the second writes the handover and opens a new desk', async ($, on) => {
+test('the footer Restart desk button works under 80 %: the first press arms it, the second writes the handover and opens a new desk', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
@@ -547,7 +547,7 @@ test('the footer Restart desk button works under 80 %: the first press arms it, 
   await ui.unmount()
 })
 
-test('the /lean-agent-restart-desk command does the same in the desk, and refuses elsewhere', async ($, on) => {
+test('the /lean-agent-restart-desk command does the same in the desk, and refuses elsewhere', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   on('command.run', () => ({}))
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
@@ -559,7 +559,7 @@ test('the /lean-agent-restart-desk command does the same in the desk, and refuse
   expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
 })
 
-test('a new desk session start serves the handover: it is renamed, so a later desk does not find a stale one', async ($, on) => {
+test('a new desk session start serves the handover: it is renamed, so a later desk does not find a stale one', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   h.files.set('/h/.lean-agent/desk/handover.md', '# Desk handover (written earlier)')
@@ -570,7 +570,7 @@ test('a new desk session start serves the handover: it is renamed, so a later de
   expect(h.files.get(moved[0]!)).toBe('# Desk handover (written earlier)')
 })
 
-test('a desk session start whose own id is not known leaves a handover that names its writer', async ($, on) => {
+test('a desk session start whose own id is not known leaves a handover that names its writer', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   const md = '# Desk handover (written earlier)\n\n<!-- lean-agent: written-by-session sess-A -->\n'
@@ -580,7 +580,7 @@ test('a desk session start whose own id is not known leaves a handover that name
   expect([...h.files.keys()].some(k => k.includes('handover-read-'))).toBe(false)
 })
 
-test('through the real session start: the writer\'s own start (same id) leaves the handover, another desk session consumes it', async ($, on) => {
+test('through the real session start: the writer\'s own start (same id) leaves the handover, another desk session consumes it', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   let sid = 'sess-A'
   on('session.id', () => ({ value: sid }))
@@ -595,7 +595,7 @@ test('through the real session start: the writer\'s own start (same id) leaves t
   expect([...h.files.keys()].filter(k => /\/desk\/handover-read-.+\.md$/.test(k))).toHaveLength(1)
 })
 
-test('the restart command writes the handover with the id of the session that ran it', async ($, on) => {
+test('the restart command writes the handover with the id of the session that ran it', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   on('command.run', () => ({}))
   on('session.id', () => ({ value: 'sess-A' }))

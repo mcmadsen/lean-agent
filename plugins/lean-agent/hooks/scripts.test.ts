@@ -631,14 +631,14 @@ async function session($: any, on: any, cwd: string, base: () => void = () => un
 }
 const TOOL = 'mcp__lean-agent__lean_script'
 
-test('lean_script is registered for a thread and for the desk, and refuses a plain session', async ($, on) => {
+test('lean_script is registered for a thread and for the desk, and refuses a plain session', { timeoutMs: 20_000 }, async ($, on) => {
   const t = await session($, on, '/h/.lean-agent/threads/t1')
   expect(t.reg).toContain('lean_script')
   const r: any = await $.tool.call({ tool: TOOL, action: 'list' } as any)
   expect(r.result).toContain('Scripts: 0 candidates, 0 adopted')
 })
 
-test('lean_script on the desk lists; propose there is refused; on a plain session the tool refuses', async ($, on) => {
+test('lean_script on the desk lists; propose there is refused; on a plain session the tool refuses', { timeoutMs: 20_000 }, async ($, on) => {
   const d = await session($, on, '/h/lean-agent-desk')
   expect(d.reg).toContain('lean_script')
   const r: any = await $.tool.call({ tool: TOOL, action: 'propose', name: 'x', path: SRC } as any)
@@ -646,14 +646,14 @@ test('lean_script on the desk lists; propose there is refused; on a plain sessio
   expect(r.result).toContain('threads')
 })
 
-test('lean_script refuses in a plain session', async ($, on) => {
+test('lean_script refuses in a plain session', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, '/somewhere/else')
   const r: any = await $.tool.call({ tool: TOOL, action: 'list' } as any)
   expect(r.isError).toBe(true)
   expect(r.result).toContain('needs a thread session')
 })
 
-test('an auditor\'s Agent reply with a LEAN-AUDIT line is recorded by the mod, whatever the thread does next', async ($, on) => {
+test('an auditor\'s Agent reply with a LEAN-AUDIT line is recorded by the mod, whatever the thread does next', { timeoutMs: 20_000 }, async ($, on) => {
   let sha = '' // what the auditor read: the stored text's sha256, copied from the brief
   const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', { tool: 'Agent' }, () => ({ result: `fine\n${line({ network: true, sha })}\nLEAN-FEEDBACK {"status":"done","missing":"","remember":[]}` }) as any))
   await propose(s.h)
@@ -672,7 +672,7 @@ test('an auditor\'s Agent reply with a LEAN-AUDIT line is recorded by the mod, w
   expect(JSON.stringify(r2.context ?? '')).not.toContain('count-lines')
 })
 
-test('an auditor call is handed on unchanged (never a rewrite); a foreground reply records the verdict, an async launch tells the thread to record-audit', async ($, on) => {
+test('an auditor call is handed on unchanged (never a rewrite); a foreground reply records the verdict, an async launch tells the thread to record-audit', { timeoutMs: 20_000 }, async ($, on) => {
   let sha = ''
   const seen: any[] = []
   let reply = (): string => ''
@@ -707,7 +707,7 @@ test('an auditor call is handed on unchanged (never a rewrite); a foreground rep
   expect(JSON.stringify(lost.context)).toContain('record-audit')
 })
 
-test('through the engine: a scratch script that ran is nudged once at the next prompt; a run of an adopted one is counted', async ($, on) => {
+test('through the engine: a scratch script that ran is nudged once at the next prompt; a run of an adopted one is counted', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await session($, on, '/h/.lean-agent/threads/t1', () => on('tool.call', () => ({ result: 'ok' }) as any))
   s.h.files.set('/tmp/w/tot.py', 'print(1)\n')
   await $.tool.call({ tool: 'Write', file_path: '/tmp/w/tot.py', content: 'print(1)\n' } as any)

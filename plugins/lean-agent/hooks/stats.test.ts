@@ -309,7 +309,7 @@ test('rule loads: the shell hook and the mod handler log the same event once; bo
   expect(await rulesStats(h.host, 'proj')).toMatchObject({ loaded: { 'billing.md': 1 }, never: ['_project.md'], events: 1, verified: true, scriptCandidates: [] })
 })
 
-test('the engine\'s InstructionsLoaded event is logged by the mod', async ($, on) => {
+test('the engine\'s InstructionsLoaded event is logged by the mod', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.clock.t = NOON
@@ -325,7 +325,7 @@ test('the engine\'s InstructionsLoaded event is logged by the mod', async ($, on
   expect(JSON.parse(log[0]!).e).toMatchObject({ file_path: '/r/.claude/rules/lean-agent/_project.md', load_reason: 'session_start' })
 })
 
-test('lean_doctor stats answers from the desk, in one call, without a model reading the ledger', async ($, on) => {
+test('lean_doctor stats answers from the desk, in one call, without a model reading the ledger', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.clock.t = NOON

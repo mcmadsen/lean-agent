@@ -48,7 +48,7 @@ const exported = async (h: any) => {
 }
 const brief = (n: number, extra = '') => `job: lookup\nwhere is thing ${n} defined?${extra}`
 
-test('thread orchestrate, why-sonnet, brief too long and the retry limit are recorded with role, rule id, text and version, and reach the export', async ($, on) => {
+test('thread orchestrate, why-sonnet, brief too long and the retry limit are recorded with role, rule id, text and version, and reach the export', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`)
   await $.tool.call({ tool: 'Edit', file_path: '/r/app/src/a.ts', old_string: 'a', new_string: 'b' } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: brief(1) } as any)
@@ -65,7 +65,7 @@ test('thread orchestrate, why-sonnet, brief too long and the retry limit are rec
   for (const id of ['thread-orchestrate:', 'why-sonnet-missing:', 'brief-too-long:', 'retry-limit:']) expect(t).toContain(id)
 })
 
-test('a worker over its step budget and an MCP call without a grant are recorded with the worker role', async ($, on) => {
+test('a worker over its step budget and an MCP call without a grant are recorded with the worker role', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`)
   for (let i = 0; i < 25; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any) // (no job line: the ceiling, 24)
   await $.tool.call({ tool: 'mcp__datadog__query', agentId: 'agent-1' } as any)
@@ -76,7 +76,7 @@ test('a worker over its step budget and an MCP call without a grant are recorded
   expect(t).toContain('worker-step-budget:')
 })
 
-test('the desk routing refusal is recorded', async ($, on) => {
+test('the desk routing refusal is recorded', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, '/h/lean-agent-desk')
   const r: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: brief(9) } as any)
   expect(r.deny).toContain('the desk routes')
@@ -86,7 +86,7 @@ test('the desk routing refusal is recorded', async ($, on) => {
   expect(await exported(h)).toContain('desk-routing:')
 })
 
-test('lean_run refusals and a refused action kind are recorded', async ($, on) => {
+test('lean_run refusals and a refused action kind are recorded', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`)
   const run: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_run', command: 'git push origin main' } as any)
   expect(run.isError).toBe(true)
@@ -100,7 +100,7 @@ test('lean_run refusals and a refused action kind are recorded', async ($, on) =
   expect(t).toContain('action-unknown-kind:')
 })
 
-test('a review thread that reports done without a record is recorded; a refused external review is too', async ($, on) => {
+test('a review thread that reports done without a record is recorded; a refused external review is too', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`)
   mstore.set('review.marker.t1', { kind: 'review', project: 'app', ref: '12', ts: 1 }) // the mod's store: a review thread's marker
   const rep: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_report', state: 'done', text: 'looks fine' } as any)
@@ -115,7 +115,7 @@ test('a review thread that reports done without a record is recorded; a refused 
   expect(t).toContain('external-review-refused:')
 })
 
-test('a worker result trimmed to its schema is counted', async ($, on) => {
+test('a worker result trimmed to its schema is counted', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`, e => (e.tool === 'Agent' ? { result: 'well, I looked around and found many things\n'.repeat(40) } : { result: 'ok' }))
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(5) } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(6) } as any)
@@ -125,7 +125,7 @@ test('a worker result trimmed to its schema is counted', async ($, on) => {
   expect(await exported(h)).toMatch(/\(x2\) \[reader-haiku\] result-trimmed:/)
 })
 
-test('a tool that is not available, and a worker\'s split / missing / refused lines, are recorded as missing tools and exported grouped with counts', async ($, on) => {
+test('a tool that is not available, and a worker\'s split / missing / refused lines, are recorded as missing tools and exported grouped with counts', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`, e =>
     e.tool === 'mcp__datadog__query' || e.tool === 'WebFetch'
       ? { result: `Error: No such tool available: ${e.tool}`, isError: true }

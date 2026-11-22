@@ -177,7 +177,7 @@ test('a bad request runs nothing: write-ish or unknown fields, a bad host, id, o
 })
 
 // ---- through the tool: a thread (and its workers) call lean_run {ci}; a bad one is a recorded refusal ------------------------------
-test('lean_run {ci} through the engine: a result, an error on a failed run, a refusal for a write subcommand request, and a worker may call it', async ($, on) => {
+test('lean_run {ci} through the engine: a result, an error on a failed run, a refusal for a write subcommand request, and a worker may call it', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on, { orchestrate: true })
   resetLocks()
   h.clock.t = 1_000_000

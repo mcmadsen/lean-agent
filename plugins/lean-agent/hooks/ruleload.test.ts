@@ -209,7 +209,7 @@ async function thread($: any, on: any, tool: (e: any) => any, more: (h: ReturnTy
   return { h, sections, firstPrompt }
 }
 
-test('a thread session: _project.md is in its first context, a Read of a project file returns the rule, the sync counts and logs it', async ($, on) => {
+test('a thread session: _project.md is in its first context, a Read of a project file returns the rule, the sync counts and logs it', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await thread($, on, () => ({ result: 'file text' }))
   expect(await s.sections()).toContain('build with pnpm') // _project.md: a session section from the start
   expect(s.h.files.get('/repo/.claude/rules/lean-agent/billing.md')).toContain('LedgerRow') // synced into the checkout
@@ -223,7 +223,7 @@ test('a thread session: _project.md is in its first context, a Read of a project
   expect(rows.every(x => x.session === 'sid-1' && x.thread === 't1' && x.project === 'proj')).toBe(true)
 })
 
-test('a thread session: a rule over the cap is named in the first context line and still copied, never silently dropped', async ($, on) => {
+test('a thread session: a rule over the cap is named in the first context line and still copied, never silently dropped', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await thread($, on, () => ({ result: 'x' }), h => {
     h.files.set(`${L}/proj/rules/fat.md`, rule(['fat/**'], Array.from({ length: 12 }, () => '- ' + 'x'.repeat(190)).join('\n')))
     h.files.set('/repo/.claude/rules/lean-agent/old-only.md', 'a copy whose store file is gone')

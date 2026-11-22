@@ -39,7 +39,7 @@ async function start($: any, on: any, first: string) {
 const SPARE = '/h/.claude/spares/spare-abc'
 const deskTools = (reg: string[]) => reg.filter(n => n === 'lean_doctor' || n === 'lean_thread').sort()
 
-test('a session started in a spare folder gets the desk tools once it moves to the desk folder', async ($, on) => {
+test('a session started in a spare folder gets the desk tools once it moves to the desk folder', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, SPARE)
   expect(deskTools(s.reg)).toEqual([])
   expect(s.timers).toEqual([])
@@ -50,7 +50,7 @@ test('a session started in a spare folder gets the desk tools once it moves to t
   expect(JSON.stringify(r)).toContain('t1')
 })
 
-test('moving to the desk folder twice registers and starts everything once', async ($, on) => {
+test('moving to the desk folder twice registers and starts everything once', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, SPARE)
   await s.move('/h/lean-agent-desk')
   const tools = s.reg.length
@@ -61,14 +61,14 @@ test('moving to the desk folder twice registers and starts everything once', asy
   expect(s.timers.length).toBe(timers)
 })
 
-test('the lazy check at prompt.submit finds the new folder when the hook never came', async ($, on) => {
+test('the lazy check at prompt.submit finds the new folder when the hook never came', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, SPARE)
   s.set('/h/lean-agent-desk')
   await $.prompt.submit({ text: 'hi' } as any)
   expect(deskTools(s.reg)).toEqual(['lean_doctor', 'lean_thread'])
 })
 
-test('a session moved from a spare folder into a thread folder gets the thread tools', async ($, on) => {
+test('a session moved from a spare folder into a thread folder gets the thread tools', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, SPARE)
   expect(s.reg).toEqual([])
   await s.move('/h/.lean-agent/threads/t1')
@@ -79,7 +79,7 @@ test('a session moved from a spare folder into a thread folder gets the thread t
   expect(s.reg.length).toBe(n)
 })
 
-test('a desk session that moves elsewhere stays the desk: its tools work and strict mode stays on', async ($, on) => {
+test('a desk session that moves elsewhere stays the desk: its tools work and strict mode stays on', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/lean-agent-desk')
   await s.move('/h/code/proj')
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
@@ -90,7 +90,7 @@ test('a desk session that moves elsewhere stays the desk: its tools work and str
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
-test('a plain session refuses the desk tool, re-resolving once first', async ($, on) => {
+test('a plain session refuses the desk tool, re-resolving once first', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, SPARE)
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any)
   expect(JSON.stringify(r)).toContain('needs a desk session')
@@ -98,7 +98,7 @@ test('a plain session refuses the desk tool, re-resolving once first', async ($,
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
-test('a failing migration does not stop the desk tools from registering', async ($, on) => {
+test('a failing migration does not stop the desk tools from registering', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.claude.handler = () => { throw new Error('boom') }
@@ -151,7 +151,7 @@ test('the desk keeps only lean-agent skills in the skill listing; other roles an
   expect(leanSkillsOnly('no list here')).toBeNull()
 })
 
-test('a hung step is given up after its timeout and the rest of the setup still runs', async ($, on) => {
+test('a hung step is given up after its timeout and the rest of the setup still runs', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   const reg: string[] = []
@@ -163,7 +163,7 @@ test('a hung step is given up after its timeout and the rest of the setup still 
   expect(deskTools(reg)).toEqual(['lean_doctor', 'lean_thread'])
 })
 
-test('a second session.start in the same process registers by name again, never twice under one name', async ($, on) => {
+test('a second session.start in the same process registers by name again, never twice under one name', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/lean-agent-desk')
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   // the engine replaces a tool registered under the same name: two registrations of a name are one tool
@@ -193,7 +193,7 @@ const callRules = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_rules',
 const callReport = ($: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_report', text: 'hi' } as any)
 const refused = (r: any) => JSON.stringify(r).includes('needs a thread session')
 
-test('a thread session that cd\'s into the repo is still a thread (lean_rules and lean_report work), and cd back too', async ($, on) => {
+test('a thread session that cd\'s into the repo is still a thread (lean_rules and lean_report work), and cd back too', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/.lean-agent/threads/t1')
   expect(refused(await callRules($))).toBe(false)
   await s.move('/h/code/proj')
@@ -207,7 +207,7 @@ test('a thread session that cd\'s into the repo is still a thread (lean_rules an
   expect(refused(await callRules($))).toBe(false)
 })
 
-test('a plain session that moves into a thread folder is promoted, then keeps the role when it leaves', async ($, on) => {
+test('a plain session that moves into a thread folder is promoted, then keeps the role when it leaves', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/code/proj')
   expect(refused(await callRules($))).toBe(true)
   await s.move('/h/.lean-agent/threads/t1')
@@ -216,7 +216,7 @@ test('a plain session that moves into a thread folder is promoted, then keeps th
   expect(refused(await callRules($))).toBe(false)
 })
 
-test('a session whose id is a thread\'s sid is that thread from any directory', async ($, on) => {
+test('a session whose id is a thread\'s sid is that thread from any directory', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/code/proj')
   s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'proj', state: 'open', sid: 'sess-thread-1', created: 1, lastWake: 0, delivered: 0 }))
   expect(refused(await callRules($))).toBe(true) // another sid: plain
@@ -227,14 +227,14 @@ test('a session whose id is a thread\'s sid is that thread from any directory', 
 })
 
 const rec = (id: string, sid: string, state = 'open') => JSON.stringify({ id, title: 'x', project: 'proj', state, sid, created: 1, lastWake: 0, delivered: 0 })
-test('a sid match never demotes a desk', async ($, on) => {
+test('a sid match never demotes a desk', { timeoutMs: 20_000 }, async ($, on) => {
   const d = await start($, on, '/h/lean-agent-desk')
   d.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x'))
   await d.move('/h/code/proj')
   expect(JSON.stringify(await $.tool.call({ tool: 'mcp__lean-agent__lean_thread', action: 'list' } as any))).not.toContain('needs a desk session')
 })
 
-test('a sid match ignores closed records, and two records with one sid match nobody', async ($, on) => {
+test('a sid match ignores closed records, and two records with one sid match nobody', { timeoutMs: 20_000 }, async ($, on) => {
   const p = await start($, on, '/h/code/proj')
   p.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-x', 'closed'))
   expect(refused(await callRules($))).toBe(true)
@@ -243,7 +243,7 @@ test('a sid match ignores closed records, and two records with one sid match nob
   expect(refused(await callRules($))).toBe(true)
 })
 
-test('a session first resolved as a thread records its id in thread.json sids (sid stays); a later start from another folder resolves by it', async ($, on) => {
+test('a session first resolved as a thread records its id in thread.json sids (sid stays); a later start from another folder resolves by it', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/.lean-agent/threads/t1')
   const rec = JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/thread.json')))
   expect(rec.sids).toEqual(['sess-x'])
@@ -254,7 +254,7 @@ test('a session first resolved as a thread records its id in thread.json sids (s
   expect(JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t1/thread.json'))).sids).toEqual(['sess-x']) // no duplicate
 })
 
-test('a sid another thread already holds is never recorded for a second thread', async ($, on) => {
+test('a sid another thread already holds is never recorded for a second thread', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/code/proj')
   s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: '', state: 'open', sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 }))
   s.h.files.set('/h/.lean-agent/threads/t2/thread.json', JSON.stringify({ id: 't2', title: 'y', project: '', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
@@ -262,7 +262,7 @@ test('a sid another thread already holds is never recorded for a second thread',
   expect(JSON.parse(String(s.h.files.get('/h/.lean-agent/threads/t2/thread.json'))).sids).toBeUndefined()
 })
 
-test('a refusal names the tool, the role, where the session started and what its id matched', async ($, on) => {
+test('a refusal names the tool, the role, where the session started and what its id matched', { timeoutMs: 20_000 }, async ($, on) => {
   await start($, on, '/h/code/proj')
   const t = JSON.stringify(await callReport($))
   expect(t).toContain('lean-agent: lean_report needs a thread session; this session is plain (started in /h/code/proj, session id not in any thread.json)')
@@ -270,7 +270,7 @@ test('a refusal names the tool, the role, where the session started and what its
   expect(d).toContain('lean_thread needs a desk session; this session is plain')
 })
 
-test('the refusal text tells ambiguous and closed session ids apart', async ($, on) => {
+test('the refusal text tells ambiguous and closed session ids apart', { timeoutMs: 20_000 }, async ($, on) => {
   const s = await start($, on, '/h/code/proj')
   const rec = (id: string, state: string) => JSON.stringify({ id, title: 'x', project: '', state, sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 })
   s.h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'closed'))

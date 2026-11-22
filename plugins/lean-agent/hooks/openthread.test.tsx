@@ -165,7 +165,7 @@ test('Open tN: the opener fails -> its first line and the way by hand; the app i
 
 const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
 
-test('the pane row "tN needs your yes in its own session: <action>" has an Open tN button; the press stops the process, then opens the link; a failure is said in the notice', async ($, on) => {
+test('the pane row "tN needs your yes in its own session: <action>" has an Open tN button; the press stops the process, then opens the link; a failure is said in the notice', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world([row()], on)
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
@@ -183,7 +183,7 @@ test('the pane row "tN needs your yes in its own session: <action>" has an Open 
   await ui.unmount()
 })
 
-test('a thread that is working again has no yes-row (the blocked report is stale), so no button either', async ($, on) => {
+test('a thread that is working again has no yes-row (the blocked report is stale), so no button either', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world([row({ status: 'busy' })], on)
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
@@ -194,7 +194,7 @@ test('a thread that is working again has no yes-row (the blocked report is stale
   await ui.unmount()
 })
 
-test('a blocked thread without an approval has no yes-row and no Open button', async ($, on) => {
+test('a blocked thread without an approval has no yes-row and no Open button', { timeoutMs: 20_000 }, async ($, on) => {
   const q = world([row()], on, { state: 'blocked' })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)

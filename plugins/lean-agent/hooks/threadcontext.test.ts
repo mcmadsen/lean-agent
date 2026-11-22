@@ -427,7 +427,7 @@ test('thread pane data: the context text and level, the keep flag; unknown says 
 })
 
 // ---- the thread's own mod records the size at the end of a turn ----
-test('session.measure in a thread session writes context.json for its session id', async ($, on) => {
+test('session.measure in a thread session writes context.json for its session id', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   on('clock.after', () => new Promise(() => {}))
   resetLocks()

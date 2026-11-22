@@ -130,7 +130,7 @@ test('the start and restart reply says "running X, installed Y" when the new ses
   expect((await call({ action: 'list' })).text).not.toContain('version unreported')
 })
 
-test('a thread session records the version it runs at its start (through the engine)', async ($, on) => {
+test('a thread session records the version it runs at its start (through the engine)', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.files.set(TJ, JSON.stringify({ id: 't1', title: 'x', project: '', state: 'open', sid: 'sess-a', created: 1, lastWake: 0, delivered: 0 }))

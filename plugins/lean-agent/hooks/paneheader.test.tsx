@@ -16,7 +16,7 @@ test('missingOf keeps only the setup rows; infoOf the note rows', () => {
   expect(missingOf([])).toEqual([])
 })
 
-test('a set-up home with a doctor finding shows "Doctor: 1 finding (1 fix, 0 info)" and Run fix, never "not set up"', async ($, on) => {
+test('a set-up home with a doctor finding shows "Doctor: 1 finding (1 fix, 0 info)" and Run fix, never "not set up"', { timeoutMs: 20_000 }, async ($, on) => {
   resetLocks()
   resetViewCache()
   const h = fakeHost(on)

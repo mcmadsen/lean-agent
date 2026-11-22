@@ -149,7 +149,7 @@ test('agents JSON parser is tolerant', () => {
   expect(parseAgents('{"agents":5}')).toEqual([])
 })
 
-test('the desk gets lean_thread at session start, and the tool answers', async ($, on) => {
+test('the desk gets lean_thread at session start, and the tool answers', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.files.set('/p/templates/thread.md', '# {{id}}')

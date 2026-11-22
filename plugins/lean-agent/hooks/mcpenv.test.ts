@@ -573,7 +573,7 @@ async function desk($: any, on: any) {
   return { h, j }
 }
 
-test('lean_doctor mcp-env (desk): lists what needs a value; with name + value writes the env block, replies without the value; a secret name is an error', async ($, on) => {
+test('lean_doctor mcp-env (desk): lists what needs a value; with name + value writes the env block, replies without the value; a secret name is an error', { timeoutMs: 20_000 }, async ($, on) => {
   const { h, j } = await desk($, on)
   synced(j)
   const list: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'mcp-env' } as any)

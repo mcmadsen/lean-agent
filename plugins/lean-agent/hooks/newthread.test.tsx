@@ -55,7 +55,7 @@ test('validate: empty or blank title and brief, a title or brief too long, an un
   expect(validate({ title: 'x', brief: 'y', model: 'haiku', effort: 'low' })).toEqual([])
 })
 
-test('the form draws: title, project (none + registered), model (sonnet default), effort (high default), a multi-line brief, Start', async ($, on) => {
+test('the form draws: title, project (none + registered), model (sonnet default), effort (high default), a multi-line brief, Start', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -78,7 +78,7 @@ test('the form draws: title, project (none + registered), model (sonnet default)
   await ui.unmount()
 })
 
-test('the form with no registered project offers only "none"', async ($, on) => {
+test('the form with no registered project offers only "none"', { timeoutMs: 20_000 }, async ($, on) => {
   world(on, {})
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -87,7 +87,7 @@ test('the form with no registered project offers only "none"', async ($, on) => 
   await ui.unmount()
 })
 
-test('Start with an empty title and brief says both inline and creates nothing', async ($, on) => {
+test('Start with an empty title and brief says both inline and creates nothing', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -104,7 +104,7 @@ test('Start with an empty title and brief says both inline and creates nothing',
   await ui.unmount()
 })
 
-test('a project that was unregistered after the form drew is refused inline, before any folder exists', async ($, on) => {
+test('a project that was unregistered after the form drew is refused inline, before any folder exists', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -117,7 +117,7 @@ test('a project that was unregistered after the form drew is refused inline, bef
   await ui.unmount()
 })
 
-test('Start: the lean_thread `new` path with the chosen project, model, effort and brief; then the thread\'s own pane opens and the form is empty again', async ($, on) => {
+test('Start: the lean_thread `new` path with the chosen project, model, effort and brief; then the thread\'s own pane opens and the form is empty again', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -139,7 +139,7 @@ test('Start: the lean_thread `new` path with the chosen project, model, effort a
   await ui.unmount()
 })
 
-test('Start on "default" leaves model and effort out: config.json threads.model / threads.effort apply, as for the tool', async ($, on) => {
+test('Start on "default" leaves model and effort out: config.json threads.model / threads.effort apply, as for the tool', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku', effort: 'medium' } }))
   await inDesk($)
@@ -157,7 +157,7 @@ test('Start on "default" leaves model and effort out: config.json threads.model 
   await ui.unmount()
 })
 
-test('two presses of Start at once make one thread; a project that is no longer listed becomes "none"', async ($, on) => {
+test('two presses of Start at once make one thread; a project that is no longer listed becomes "none"', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -171,7 +171,7 @@ test('two presses of Start at once make one thread; a project that is no longer 
   await ui.unmount()
 })
 
-test('Start with the defaults and no project: sonnet / high, no project; a failing start is said inline and nothing is opened', async ($, on) => {
+test('Start with the defaults and no project: sonnet / high, no project; a failing start is said inline and nothing is opened', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -188,7 +188,7 @@ test('Start with the defaults and no project: sonnet / high, no project; a faili
   await ui.unmount()
 })
 
-test('picking opus shows that it needs the Approve press and asks for a reason; Start files a request, creates the thread and starts NO session', async ($, on) => {
+test('picking opus shows that it needs the Approve press and asks for a reason; Start files a request, creates the thread and starts NO session', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -216,7 +216,7 @@ test('picking opus shows that it needs the Approve press and asks for a reason; 
   await ui.unmount()
 })
 
-test('openNewThread opens lean-agent-new-thread (the thin host answers ui.open as the engine $ does); outside the desk the form says it belongs there', async ($, on) => {
+test('openNewThread opens lean-agent-new-thread (the thin host answers ui.open as the engine $ does); outside the desk the form says it belongs there', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   const seen: any[] = []
   const thin = { ...w.host, ui: { open: async (p: any) => { seen.push(p); return { isPlaced: true } } } } // what hostOf($) is

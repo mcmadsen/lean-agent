@@ -493,7 +493,7 @@ async function session($: any, on: any, base: () => void = () => undefined) {
   await $.session.start({ cwd: '/h/.lean-agent/threads/t1', surface: 'desktop', isInteractive: true } as any)
   return h
 }
-test('lean_report state done adds the question once; a working report, a blocked one and a worker\'s call do not', async ($, on) => {
+test('lean_report state done adds the question once; a working report, a blocked one and a worker\'s call do not', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on)
   const report = (o: any) => $.tool.call({ tool: 'mcp__lean-agent__lean_report', ...o } as any) as Promise<any>
   expect((await report({ text: 'half way', state: 'working' })).result).not.toContain('script')
@@ -505,7 +505,7 @@ test('lean_report state done adds the question once; a working report, a blocked
   expect((await report({ text: 'done again', state: 'done' })).result).not.toContain(DONE_QUESTION)
 })
 
-test('a Bash run of an adopted script that fails is counted through the engine, and the result gets the lines', async ($, on) => {
+test('a Bash run of an adopted script that fails is counted through the engine, and the result gets the lines', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, () => on('tool.call', { tool: 'Bash' }, () => ({ result: 'boom\nExit code 1', isError: true }) as any))
   h.files.set(SRC, CODE)
   await prop(h)

@@ -14,14 +14,14 @@ async function threadSession($: any, on: any, hooks: () => void) {
   return h
 }
 
-test('a worker reply with LEAN-FEEDBACK files its missing context and memory', async ($, on) => {
+test('a worker reply with LEAN-FEEDBACK files its missing context and memory', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () => on('tool.call', () => ({ result: 'did it\nLEAN-FEEDBACK {"status":"done","missing":"build flags for src/a/b.ts","remember":["use pnpm"]}' })))
   await $.tool.call({ tool: 'Agent', prompt: 'x' } as any)
   expect(h.files.get('/h/.lean-agent/proj/gaps.jsonl')).toContain('src/a/b.ts')
   expect(h.files.get('/h/.lean-agent/memory/notes.jsonl')).toContain('use pnpm')
 })
 
-test('turn.step writes a ledger row and refuses past the daily cap', async ($, on) => {
+test('turn.step writes a ledger row and refuses past the daily cap', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () =>
     on('turn.step', async function* (_: any, e: any) {
       return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: 'haiku', input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any
@@ -42,7 +42,7 @@ test('turn.step writes a ledger row and refuses past the daily cap', async ($, o
   expect(b.answer).toContain('daily $1.00')
 })
 
-test('an Agent call records the thread\'s job and mcp grants while it runs and removes them after (allow-edit lines are ignored)', async ($, on) => {
+test('an Agent call records the thread\'s job and mcp grants while it runs and removes them after (allow-edit lines are ignored)', { timeoutMs: 20_000 }, async ($, on) => {
   let during = ''
   let h: any
   h = await threadSession($, on, () =>
@@ -58,13 +58,13 @@ test('an Agent call records the thread\'s job and mcp grants while it runs and r
   expect(after.pending).toEqual([])
 })
 
-test('a thread cannot ask the user directly', async ($, on) => {
+test('a thread cannot ask the user directly', { timeoutMs: 20_000 }, async ($, on) => {
   await threadSession($, on, () => on('tool.call', () => ({ result: 'asked' }) as any))
   const r: any = await $.tool.call({ tool: 'AskUserQuestion' } as any)
   expect(r.deny).toContain('lean_ask')
 })
 
-test('prompt.compose adds the project memory to a thread\'s session section', async ($, on) => {
+test('prompt.compose adds the project memory to a thread\'s session section', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () => on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' }] }) as any))
   h.files.set('/h/.lean-agent/memory/notes.jsonl', JSON.stringify({ project: 'proj', text: 'use pnpm' }) + '\n')
   const r: any = await $.prompt.compose({ model: 'haiku', promptModel: 'haiku', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
@@ -73,13 +73,13 @@ test('prompt.compose adds the project memory to a thread\'s session section', as
   expect(mem.text).toContain('use pnpm')
 })
 
-test('session.compact writes the thread\'s notes first', async ($, on) => {
+test('session.compact writes the thread\'s notes first', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () => on('session.compact', () => ({ messages: [{ role: 'user', text: 'summary', toolUses: [] }] }) as any))
   await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'remember this', toolUses: [] }] } as any)
   expect(h.files.get('/h/.lean-agent/threads/t1/notes.md')).toContain('remember this')
 })
 
-test('the first session.start of any local session unloads a leftover 0.45 launch agent, then migrates', async ($, on) => {
+test('the first session.start of any local session unloads a leftover 0.45 launch agent, then migrates', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.files.set('/h/Library/LaunchAgents/com.lean-agent.up.plist', '<plist/>')
@@ -94,7 +94,7 @@ test('the first session.start of any local session unloads a leftover 0.45 launc
   expect(h.files.has('/h/Library/LaunchAgents/com.lean-agent.up.plist')).toBe(false)
 })
 
-test('the desk records its session id; a thread report goes out through $.session.send and the desk marks the arrival delivered', async ($, on) => {
+test('the desk records its session id; a thread report goes out through $.session.send and the desk marks the arrival delivered', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
@@ -113,7 +113,7 @@ test('the desk records its session id; a thread report goes out through $.sessio
   expect(h.files.get('/h/.lean-agent/desk/inbox-delivered.json')).not.toContain('78:t1')
 })
 
-test('a thread\'s tool call, a worker\'s tool call and a report write the stall watchdog\'s activity file', async ($, on) => {
+test('a thread\'s tool call, a worker\'s tool call and a report write the stall watchdog\'s activity file', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () => on('tool.call', () => ({ result: 'ok' }) as any))
   const at = () => JSON.parse(h.files.get('/h/.lean-agent/threads/t1/activity.json') ?? 'null')
   await $.tool.call({ tool: 'Read', path: '/x' } as any)

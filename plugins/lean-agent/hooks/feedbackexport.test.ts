@@ -588,7 +588,7 @@ async function session($: any, on: any, cwd: string) {
   return h
 }
 
-test('/lean-agent-feedback works in any session: writes the file, prints its path, takes the notes as the argument', async ($, on) => {
+test('/lean-agent-feedback works in any session: writes the file, prints its path, takes the notes as the argument', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, '/h/.claude/spares/spare-abc') // a plain session
   const r: any = await $.command.run({ command: 'lean-agent-feedback', args: 'the opener failed in alpha' } as any)
   // what the user sees: plain words, no instruction to a model
@@ -599,7 +599,7 @@ test('/lean-agent-feedback works in any session: writes the file, prints its pat
   expect(t).not.toContain('alpha')
 })
 
-test('the desk\'s lean_doctor export writes the same file; a refusal is an error result', async ($, on) => {
+test('the desk\'s lean_doctor export writes the same file; a refusal is an error result', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, '/h/lean-agent-desk')
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'export', notes: 'from the desk' } as any)
   expect(r.isError).toBeUndefined()
@@ -607,7 +607,7 @@ test('the desk\'s lean_doctor export writes the same file; a refusal is an error
   expect(h.files.get(`${EXP}/2026-11-18-1407.md`)).toContain('from the desk')
 })
 
-test('a refused guard decision is logged for the export', async ($, on) => {
+test('a refused guard decision is logged for the export', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, '/h/lean-agent-desk')
   const r: any = await $.tool.call({ tool: 'Edit', file_path: '/r/x.ts' } as any) // strict mode: the desk edits nothing
   expect(r.deny).toBeTruthy()

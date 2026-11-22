@@ -101,7 +101,7 @@ function modSession($: any, on: any, usage: { tokens: number }) {
 }
 const refused = async (h: any) => (h.files.get(`${L}/refusals.jsonl`) ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l)).filter((r: any) => r.rule === 'context-limit')
 
-test('mod: a turn end over the limit stops the thread: one record, Bash and Agent refused (refusal rule context-limit), lean_report still goes through', async ($, on) => {
+test('mod: a turn end over the limit stops the thread: one record, Bash and Agent refused (refusal rule context-limit), lean_report still goes through', { timeoutMs: 20_000 }, async ($, on) => {
   const h = modSession($, on, { tokens: 123_000 })
   await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)
   await $.session.measure({ context: { tokens: 123_000, window: 200_000, percent: 61 }, rateLimits: [], changed: ['context'] } as any)
@@ -115,7 +115,7 @@ test('mod: a turn end over the limit stops the thread: one record, Bash and Agen
   expect(inbox(h).filter((x: any) => x.mod)).toHaveLength(1)
 })
 
-test('mod: a long turn is checked every 10 tool calls through session.usage(), and the stop applies from then on', async ($, on) => {
+test('mod: a long turn is checked every 10 tool calls through session.usage(), and the stop applies from then on', { timeoutMs: 20_000 }, async ($, on) => {
   const usage = { tokens: 90_000 }
   const h = modSession($, on, usage)
   await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)

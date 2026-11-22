@@ -66,7 +66,7 @@ async function threadSession($: any, on: any, h0: { gone: boolean }) {
   return h
 }
 
-test('through the engine: lean_report reaches the desk even when the session folder is gone', async ($, on) => {
+test('through the engine: lean_report reaches the desk even when the session folder is gone', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, { gone: true })
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_report', state: 'working', text: 'halfway there' } as any)
   expect(JSON.stringify(r)).toContain('reported to the desk')

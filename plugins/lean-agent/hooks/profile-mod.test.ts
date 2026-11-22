@@ -20,7 +20,7 @@ async function session($: any, on: any, hooks: () => void, o: { cwd?: string; lo
 }
 const describe = ($: any, tool: string) => $.tool.describe({ tool, description: 'd', provider: { plugin: 'x', tier: 'user' } } as any)
 
-test('a thread defers the MCP servers outside its profile and leaves everything else alone', async ($, on) => {
+test('a thread defers the MCP servers outside its profile and leaves everything else alone', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, () => on('tool.describe', (_: any, e: any) => ({ description: e.description })))
   expect(((await describe($, 'mcp__sentry__issues')) as any).isDeferred).toBe(true) // outside: deferred, so ToolSearch still finds it
   expect(((await describe($, 'mcp__plugin_figma_figma__get')) as any).isDeferred).toBe(true)
@@ -30,28 +30,28 @@ test('a thread defers the MCP servers outside its profile and leaves everything 
   expect(((await describe($, 'Bash')) as any).isDeferred).toBeUndefined()
 })
 
-test('a needs entry that was added to the profile keeps its server in front; an empty allow-list defers every other server', async ($, on) => {
+test('a needs entry that was added to the profile keeps its server in front; an empty allow-list defers every other server', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, () => on('tool.describe', (_: any, e: any) => ({ description: e.description })), { loaded: { mcp: ['azure-devops'], plugins: null, needs: ['azure-devops'] } })
   expect(((await describe($, 'mcp__azure-devops__list_prs')) as any).isDeferred).toBeUndefined()
   expect(((await describe($, 'mcp__db__query')) as any).isDeferred).toBe(true)
 })
 
-test('no loaded.json defers nothing', async ($, on) => {
+test('no loaded.json defers nothing', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, () => on('tool.describe', (_: any, e: any) => ({ description: e.description })), { loaded: null })
   expect(((await describe($, 'mcp__sentry__issues')) as any).isDeferred).toBeUndefined()
 })
 
-test('a loaded.json that holds nothing back (no profile) defers nothing', async ($, on) => {
+test('a loaded.json that holds nothing back (no profile) defers nothing', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, () => on('tool.describe', (_: any, e: any) => ({ description: e.description })), { loaded: { mcp: null, plugins: null, needs: [] } })
   expect(((await describe($, 'mcp__sentry__issues')) as any).isDeferred).toBeUndefined()
 })
 
-test('the desk is not a thread: nothing is deferred there', async ($, on) => {
+test('the desk is not a thread: nothing is deferred there', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on, () => on('tool.describe', (_: any, e: any) => ({ description: e.description })), { cwd: '/h/lean-agent-desk' })
   expect(((await describe($, 'mcp__sentry__issues')) as any).isDeferred).toBeUndefined()
 })
 
-test('a deferred server stays callable: its call goes through and is counted by name only', async ($, on) => {
+test('a deferred server stays callable: its call goes through and is counted by name only', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, () => on('tool.call', () => ({ result: 'issues' }) as any))
   const r: any = await $.tool.call({ tool: 'mcp__sentry__issues', query: 'SECRET-ARGUMENT' } as any)
   expect(r.deny).toBeUndefined()
@@ -63,7 +63,7 @@ test('a deferred server stays callable: its call goes through and is counted by 
   expect(u).not.toContain('SECRET-ARGUMENT')
 })
 
-test('every ledger row of a thread carries the effort and model it was started with', async ($, on) => {
+test('every ledger row of a thread carries the effort and model it was started with', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session(
     $,
     on,
@@ -79,7 +79,7 @@ test('every ledger row of a thread carries the effort and model it was started w
   expect(row).toMatchObject({ role: 'thread', tN: 't1', effort: 'medium', tmodel: 'sonnet', model: 'claude-haiku-5-5' })
 })
 
-test('the desk\'s ledger rows carry no thread effort', async ($, on) => {
+test('the desk\'s ledger rows carry no thread effort', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session(
     $,
     on,

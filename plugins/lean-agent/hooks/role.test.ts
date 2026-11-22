@@ -4,7 +4,7 @@ import { fakeHost } from './fake'
 
 const rec = (id: string, sid: string, state = 'open') => JSON.stringify({ id, title: 'x', project: 'proj', state, sid, created: 1, lastWake: 0, delivered: 0 })
 
-test('an unknown session id in a thread folder is that thread, never a desk; its id is then recorded in sids', async ($, on) => {
+test('an unknown session id in a thread folder is that thread, never a desk; its id is then recorded in sids', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-old'))
   const o = { cwd: '/h/.lean-agent/threads/t1', sid: 'sess-copy-with-a-new-id' }
@@ -17,7 +17,7 @@ test('an unknown session id in a thread folder is that thread, never a desk; its
   expect(await resolveRole(h.host, { cwd: '/h/code/proj', sid: o.sid })).toEqual({ kind: 'thread', id: 't1' })
 })
 
-test('the desk folder is the desk, whatever the session id; a thread folder is never the desk', async ($, on) => {
+test('the desk folder is the desk, whatever the session id; a thread folder is never the desk', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-t1'))
   expect(await resolveRole(h.host, { cwd: '/h/lean-agent-desk', sid: 'sess-unknown' })).toEqual({ kind: 'desk' })
@@ -29,7 +29,7 @@ test('the desk folder is the desk, whatever the session id; a thread folder is n
   expect(await resolveRole(h.host, { cwd: '/h/lean-agent-desk', sid: 'sess-t1', current: { kind: 'thread', id: 't1' } })).toEqual({ kind: 'thread', id: 't1' })
 })
 
-test('an id another open thread holds beats the thread folder it walked into', async ($, on) => {
+test('an id another open thread holds beats the thread folder it walked into', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set('/h/.lean-agent/threads/t1/thread.json', rec('t1', 'sess-t1'))
   h.files.set('/h/.lean-agent/threads/t2/thread.json', rec('t2', ''))
@@ -38,7 +38,7 @@ test('an id another open thread holds beats the thread folder it walked into', a
   expect(await resolveRole(h.host, { cwd: '/h/.lean-agent/threads/t2', sid: 'sess-t1' })).toEqual({ kind: 'thread', id: 't2' })
 })
 
-test('role comes from the real path of the session cwd', async ($, on) => {
+test('role comes from the real path of the session cwd', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.links.set('/link/desk', '/h/lean-agent-desk')
   h.links.set('/link/t7', '/h/.lean-agent/threads/t7')

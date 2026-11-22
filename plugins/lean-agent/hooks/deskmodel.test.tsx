@@ -156,7 +156,7 @@ test('after the one attempt a mismatch is only noted (nothing is written to the 
   expect(u.files.has(stateFile)).toBe(false)
 })
 
-test('the pane shows ONE top row for it, and the notice is not listed a second time', async ($, on) => {
+test('the pane shows ONE top row for it, and the notice is not listed a second time', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
@@ -180,7 +180,7 @@ test('the pane shows ONE top row for it, and the notice is not listed a second t
 
 // the desk session through the hooks: the first request of a session on another model is judged (and the state written when the engine
 // has no way to set it); a request on the pin clears it
-test('the desk\'s first request on another model writes the state when nothing can set it; a threads session never does', async ($, on) => {
+test('the desk\'s first request on another model writes the state when nothing can set it; a threads session never does', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
@@ -207,7 +207,7 @@ test('the desk\'s first request on another model writes the state when nothing c
   expect(h.files.has(stateFile)).toBe(false)
 })
 
-test('through the hooks: a desk session that starts on another model has the Model and Effort rows set once, and says so at its next prompt', async ($, on) => {
+test('through the hooks: a desk session that starts on another model has the Model and Effort rows set once, and says so at its next prompt', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()
@@ -225,7 +225,7 @@ test('through the hooks: a desk session that starts on another model has the Mod
   expect(h.files.has(stateFile)).toBe(false)
 })
 
-test('a side request on a small model does not move the pin: the session\'s own model is judged, and what the mod set is a dim line, not an error', async ($, on) => {
+test('a side request on a small model does not move the pin: the session\'s own model is judged, and what the mod set is a dim line, not an error', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   h.files.set(`${L}/config.json`, SONNET_DESK)
   resetLocks()

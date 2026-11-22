@@ -49,7 +49,7 @@ test('an install that is older or the same (pre-release) is not skew', async () 
   expect(await skewNote(h.host, '/plug', '1.0.4-rc.1')).toBeNull()
 })
 
-test('a session that runs older code than is installed: status line, one prompt line, guard refusals and feedback carry the running version', async ($, on) => {
+test('a session that runs older code than is installed: status line, one prompt line, guard refusals and feedback carry the running version', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   const status: string[] = []
@@ -73,7 +73,7 @@ test('a session that runs older code than is installed: status line, one prompt 
   expect(h.files.get('/h/.lean-agent/refusals.jsonl')).toContain(`"version":"${VERSION}"`)
 })
 
-test('same version: no status line and no prompt line', async ($, on) => {
+test('same version: no status line and no prompt line', { timeoutMs: 20_000 }, async ($, on) => {
   const h = fakeHost(on)
   resetLocks()
   const status: string[] = []

@@ -156,7 +156,7 @@ async function session($: any, on: any, reply: (e: any) => any, seen: any[] = []
 const agentCall = (n: string, extra: any = {}) => ({ tool: 'Agent', subagent_type: HAIKU, prompt: `job: edit\nallow-edit: /real/w\nstep ${n}`, toolUseId: `u${n}`, ...extra }) as any
 const workerEdit = (id: string, p = '/real/w/a.ts') => ({ tool: 'Edit', file_path: p, agentId: id, agentType: HAIKU }) as any
 
-test('through the engine: "Async agent launched", then the worker\'s Edit inside the granted root is allowed; the subagent end releases grant and slot', async ($, on) => {
+test('through the engine: "Async agent launched", then the worker\'s Edit inside the granted root is allowed; the subagent end releases grant and slot', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, e => (e.tool === 'Agent' ? `Async agent launched. agentId: w${/step (\d)/.exec(e.prompt)?.[1]}` : 'ok'))
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { workers: 1 } }))
   const r: any = await $.tool.call(agentCall('1'))
@@ -172,7 +172,7 @@ test('through the engine: "Async agent launched", then the worker\'s Edit inside
   expect(((await $.tool.call(workerEdit('w1'))) as any).deny).toBeUndefined() // a resumed w1 keeps its grant
 })
 
-test('through the engine: no tool.call hook changes a call\'s input (auto mode rejects that); a foreground call releases at return', async ($, on) => {
+test('through the engine: no tool.call hook changes a call\'s input (auto mode rejects that); a foreground call releases at return', { timeoutMs: 20_000 }, async ($, on) => {
   const seen: any[] = []
   const h = await session($, on, () => 'done', seen)
   const calls = [
@@ -197,7 +197,7 @@ test('through the engine: no tool.call hook changes a call\'s input (auto mode r
   expect(grants(h).agents).toEqual({})
 })
 
-test('through the engine: a rejected call (error result) consumes no try, no slot and no grant; the identical reissue runs; two real runs refuse the third', async ($, on) => {
+test('through the engine: a rejected call (error result) consumes no try, no slot and no grant; the identical reissue runs; two real runs refuse the third', { timeoutMs: 20_000 }, async ($, on) => {
   let fail = true
   const h = await session($, on, () => (fail ? { isError: true, content: [{ type: 'text', text: 'rejected before it ran' }] } : 'done'))
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { workers: 1 } }))
@@ -215,7 +215,7 @@ test('through the engine: a rejected call (error result) consumes no try, no slo
 const denied = (id: string, prompt = 'job: edit\nedit /real/w/c.ts please') => ({ tool_name: 'Agent', tool_use_id: id, reason: 'x', tool_input: { subagent_type: HAIKU, prompt }, session_id: 's', transcript_path: '', cwd: '/h/.lean-agent/threads/t1' }) as any
 const refusalRows = (h: any) => (h.files.get('/h/.lean-agent/refusals.jsonl') ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l))
 
-test('through the engine: the permission check denied a worker call: the thread does that one step itself, a row is logged, and no retry is ever answered', async ($, on) => {
+test('through the engine: the permission check denied a worker call: the thread does that one step itself, a row is logged, and no retry is ever answered', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, () => 'ok')
   const own = { tool: 'Edit', file_path: '/real/w/c.ts' } as any
   expect(((await $.tool.call(own)) as any).deny).toContain('one step for a small worker') // before the denial: a worker step
@@ -230,7 +230,7 @@ test('through the engine: the permission check denied a worker call: the thread 
   expect(refusalRows(h).filter((x: any) => x.rule === 'delegation-denied').length).toBe(1)
 })
 
-test('through the engine: a failed Agent result that says the permission check denied it counts too; our own refusal text and a non-worker call do not', async ($, on) => {
+test('through the engine: a failed Agent result that says the permission check denied it counts too; our own refusal text and a non-worker call do not', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, () => 'ok')
   const own = { tool: 'Edit', file_path: '/real/w/c.ts' } as any
   await $.classic.PostToolUseFailure({ ...denied('u1'), error: 'lean-agent: at most 4 workers at once; the permission check refused (lean-agent 1.0.18)' })

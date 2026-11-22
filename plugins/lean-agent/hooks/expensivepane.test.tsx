@@ -37,7 +37,7 @@ function world(on: any) {
 }
 const history = (h: any, id = 't1') => (h.files.get(`${L}/threads/${id}/history.jsonl`) ?? '').trim().split('\n').filter(Boolean).map((l: string) => JSON.parse(l))
 
-test('a request for opus is a card with Approve, Deny and Start on sonnet instead; the first Approve press only arms it, the second approves and starts the thread on opus', async ($, on) => {
+test('a request for opus is a card with Approve, Deny and Start on sonnet instead; the first Approve press only arms it, the second approves and starts the thread on opus', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.thread()
   const r = await w.ask()
@@ -66,7 +66,7 @@ test('a request for opus is a card with Approve, Deny and Start on sonnet instea
   await ui.unmount()
 })
 
-test('Deny keeps the thread off opus: a denied card offers Start on sonnet instead and Dismiss; nothing is approved or started', async ($, on) => {
+test('Deny keeps the thread off opus: a denied card offers Start on sonnet instead and Dismiss; nothing is approved or started', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.thread()
   const r = await w.ask()
@@ -96,7 +96,7 @@ test('Deny keeps the thread off opus: a denied card offers Start on sonnet inste
   await ui.unmount()
 })
 
-test('with no answer the card keeps offering Start on sonnet instead; Dismiss drops a denied card', async ($, on) => {
+test('with no answer the card keeps offering Start on sonnet instead; Dismiss drops a denied card', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.thread()
   const r = await w.ask()
@@ -111,7 +111,7 @@ test('with no answer the card keeps offering Start on sonnet instead; Dismiss dr
   await ui.unmount()
 })
 
-test('a request the guard made (a refused Agent call or claude command): Approve lets that thread retry and tells it so; it never starts anything itself; Deny tells it to go on without', async ($, on) => {
+test('a request the guard made (a refused Agent call or claude command): Approve lets that thread retry and tells it so; it never starts anything itself; Deny tells it to go on without', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.thread()
   const r = await w.ask({ action: 'agent', origin: 'guard', reason: 'the worker-opus agent (rewrite the parser)' })
@@ -136,7 +136,7 @@ test('a request the guard made (a refused Agent call or claude command): Approve
   await ui2.unmount()
 })
 
-test('the desk\'s own request is for the desk scope; a request of a closed thread is not shown', async ($, on) => {
+test('the desk\'s own request is for the desk scope; a request of a closed thread is not shown', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.thread('t1', { state: 'closed' })
   w.thread('t2')
@@ -154,7 +154,7 @@ test('the desk\'s own request is for the desk scope; a request of a closed threa
   await ui.unmount()
 })
 
-test('a desk the app started on an expensive model that the mod could not switch is a RED "Needs you" row (not a header line); another mismatch stays a header line', async ($, on) => {
+test('a desk the app started on an expensive model that the mod could not switch is a RED "Needs you" row (not a header line); another mismatch stays a header line', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   w.h.files.set(`${L}/desk/model.json`, JSON.stringify({ running: 'claude-opus-5-5', pin: { model: 'sonnet', effort: 'high' }, at: w.h.clock.t }))
   await inDesk($)

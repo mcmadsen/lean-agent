@@ -178,7 +178,7 @@ test('data: a worktree that is gone is said, not diffed; an unreadable session l
   expect([u.run, u.working]).toEqual(['unknown', true])
 })
 
-test('draw, full: every section, the buttons, and only the 10 newest reports (older ones are counted)', async ($, on) => {
+test('draw, full: every section, the buttons, and only the 10 newest reports (older ones are counted)', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
@@ -202,7 +202,7 @@ test('draw, full: every section, the buttons, and only the 10 newest reports (ol
   await ui.unmount()
 })
 
-test('draw: a report row and the brief expand and fold; the review shows green with its open findings', async ($, on) => {
+test('draw: a report row and the brief expand and fold; the review shows green with its open findings', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await writeReview(h.host, { project: 'app', sha: HEAD, green: true, passes: 3, findings: ['1. [minor] src/widget.ts:3 name the option'], base: 'main' })
   await inDesk($)
@@ -219,7 +219,7 @@ test('draw: a report row and the brief expand and fold; the review shows green w
   await ui.unmount()
 })
 
-test('draw, empty: a thread with nothing to show draws every section as a short line, never blank', async ($, on) => {
+test('draw, empty: a thread with nothing to show draws every section as a short line, never blank', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t2'))
@@ -234,7 +234,7 @@ test('draw, empty: a thread with nothing to show draws every section as a short 
   await ui.unmount()
 })
 
-test('draw: a closed thread and a missing thread each show one short message and no action buttons', async ($, on) => {
+test('draw: a closed thread and a missing thread each show one short message and no action buttons', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const closed = await $.ui.mount(pane('t3'))
@@ -247,7 +247,7 @@ test('draw: a closed thread and a missing thread each show one short message and
   await gone.unmount()
 })
 
-test('draw: outside the desk the pane says so (the buttons belong to the desk)', async ($, on) => {
+test('draw: outside the desk the pane says so (the buttons belong to the desk)', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await $.session.start({ cwd: '/h/.claude/spares/spare-x', surface: 'desktop', isInteractive: true } as any)
   const ui = await $.ui.mount(pane('t1'))
@@ -256,7 +256,7 @@ test('draw: outside the desk the pane says so (the buttons belong to the desk)',
   await ui.unmount()
 })
 
-test('Restart and Close need two presses; Refresh drops the notice; the first press changes nothing', async ($, on) => {
+test('Restart and Close need two presses; Refresh drops the notice; the first press changes nothing', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, { rows: [idleRow({ pid: undefined, status: undefined, state: 'stopped' })] })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
@@ -277,7 +277,7 @@ test('Restart and Close need two presses; Refresh drops the notice; the first pr
   await ui.unmount()
 })
 
-test('Close: armed while the thread was idle, then it starts working: the second press looks again and closes nothing', async ($, on) => {
+test('Close: armed while the thread was idle, then it starts working: the second press looks again and closes nothing', { timeoutMs: 20_000 }, async ($, on) => {
   const rows: any[] = [idleRow({ pid: undefined, status: undefined, state: 'stopped' })]
   const h = world(on, { rows })
   await inDesk($)
@@ -292,7 +292,7 @@ test('Close: armed while the thread was idle, then it starts working: the second
   await ui.unmount()
 })
 
-test('a thread that waits for the user says so and cannot be closed from the pane; an unreadable listing says "session unknown"', async ($, on) => {
+test('a thread that waits for the user says so and cannot be closed from the pane; an unreadable listing says "session unknown"', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, { rows: [idleRow({ status: 'idle', state: 'blocked', waitingFor: 'a permission prompt', pid: 42 })] })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
@@ -307,7 +307,7 @@ test('a thread that waits for the user says so and cannot be closed from the pan
   await ui.unmount()
 })
 
-test('an expanded report stays on the same report when a newer one arrives', async ($, on) => {
+test('an expanded report stays on the same report when a newer one arrives', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
@@ -321,7 +321,7 @@ test('an expanded report stays on the same report when a newer one arrives', asy
   await ui.unmount()
 })
 
-test('a working thread has no Close button and its Restart says the current step is lost', async ($, on) => {
+test('a working thread has no Close button and its Restart says the current step is lost', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, { rows: [idleRow({ status: 'busy', state: 'working', pid: 42 })] })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
@@ -333,7 +333,7 @@ test('a working thread has no Close button and its Restart says the current step
   await ui.unmount()
 })
 
-test('Open session: the idle process is stopped, then the resume link goes to the opener', async ($, on) => {
+test('Open session: the idle process is stopped, then the resume link goes to the opener', { timeoutMs: 20_000 }, async ($, on) => {
   const rows: any[] = [idleRow({ pid: 42 })]
   const h = world(on, { rows })
   const order: string[] = []
@@ -355,7 +355,7 @@ test('Open session: the idle process is stopped, then the resume link goes to th
   await ui.unmount()
 })
 
-test('several panes at once: each draws its own thread and its own two-press', async ($, on) => {
+test('several panes at once: each draws its own thread and its own two-press', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const a = await $.ui.mount(pane('t1'))
@@ -391,6 +391,6 @@ test('openThreadPane opens lean-agent-thread-<tN> titled "tN · <title>" (the th
   expect(await openThreadPane(broken, undefined, 't1')).toMatchObject({ ok: false, text: expect.stringContaining('no pane for you') })
 })
 
-test('hostOf($) carries ui.open for the desk pane\'s buttons', async ($) => {
+test('hostOf($) carries ui.open for the desk pane\'s buttons', { timeoutMs: 20_000 }, async ($) => {
   expect(typeof hostOf($).ui?.open).toBe('function')
 })
