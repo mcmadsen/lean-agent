@@ -2,18 +2,41 @@
 // small step for a haiku worker. Enforced here by the guard (guard.ts calls orchDecide), not by text a model has to remember.
 // Pure rules over a call plus a little in-memory state (per-turn direct reads, workers in flight, per-worker step counts).
 import { plainPipeline } from './shell'
-import { jobOf, retryDenial, retryRan, retryReset, stepBudget } from './jobs'
+import { jobOf, retryDenial, retryRan, retryReset, stepBudget, stepNote } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 
 export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
-export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string }
+export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[] } // projects: the registered projects' folders (only to name a path's kind in a refusal record)
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
 export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (workers may read and edit) / lean-agent:reader-haiku (set the Agent parameter run_in_background to the boolean false; a worker that still starts in the background is fine: wait for its result notification, do not poll or duplicate the job)'
 export const SPLIT = 'return what you have; the thread splits the rest'
-export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 1500, steps: 15, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
+export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
+
+// What was tried, for the refusal record (never a path, never an argument): ` [tried: Edit project]`, ` [tried: az pipelines]`. feedback.ts takes it out
+// of the text into the row's `what`, refusals.ts groups by it. A path is named by its KIND only.
+export const tried = (what: string): string => ` [tried: ${what}]`
+const SUBCMD_TOOLS = new Set(['git', 'npm', 'pnpm', 'yarn', 'bun', 'az', 'gh', 'docker', 'dotnet', 'cargo', 'go', 'kubectl', 'pip', 'pip3', 'npx', 'poetry', 'terraform', 'helm'])
+export function triedWords(w: string[]): string {
+  let i = 0
+  const prog = (w[0] ?? '').split('/').pop()!.replace(/[^A-Za-z0-9_.+-]/g, '').slice(0, 30) || '?'
+  if (prog === 'git') for (i = 1; i < w.length; i++) { if (w[i] === '-C' || w[i] === '-c') i++; else if (!w[i]!.startsWith('-')) break }
+  else i = 1
+  const sub = SUBCMD_TOOLS.has(prog) ? w[i] : undefined
+  return sub && /^[a-z][a-z0-9-]{0,24}$/.test(sub) ? `${prog} ${sub}` : prog
+}
+export type PathKind = 'worktree' | 'project' | 'lean state' | 'thread folder' | 'other'
+export function pathKind(ctx: OCtx, p: string): PathKind {
+  const abs = normPath(p || '.', ctx.cwd)
+  const lean = `${ctx.home}/.lean-agent`
+  if (ctx.threadDir && under(abs, ctx.threadDir)) return 'thread folder'
+  if (under(abs, `${lean}/worktrees`)) return 'worktree'
+  if (under(abs, lean)) return 'lean state'
+  if ((ctx.projects ?? []).some(r => under(abs, r))) return 'project'
+  return 'other'
+}
 export const DIRECT_READ_LINES = 200
 
 // a key of config.json: nested (`threads: { directReads }`) or flat (`"threads.directReads"`)
@@ -82,6 +105,13 @@ export async function loadOrch(h: Host): Promise<OrchConfig> {
 const reads = new Map<string, number>() // thread key -> direct reads this turn
 const inflight = new Map<string, number>() // thread key -> workers running
 const steps = new Map<string, number>() // worker id -> tool calls so far
+const notes = new Map<string, string>() // worker id -> the "N tool calls left" line its next tool result carries
+// the line for the result of the worker's call that was just allowed (said once per call, then gone)
+export function takeStepNote(workerKey: string): string | null {
+  const n = notes.get(workerKey) ?? null
+  notes.delete(workerKey)
+  return n
+}
 const slots = new Map<string, { key: string; at: number }>() // subagent id -> the thread whose worker slot it holds (a background worker outlives its Agent call)
 const stopped = new Set<string>() // subagents that ended before their launch result was seen
 const MAX_TRACKED = 500
@@ -90,6 +120,7 @@ export function orchReset(): void {
   reads.clear()
   inflight.clear()
   steps.clear()
+  notes.clear()
   slots.clear()
   stopped.clear()
   denied.clear()
@@ -122,9 +153,54 @@ const inLean = (ctx: OCtx, p: string) => {
 
 const GIT_OK = new Set(['status', 'log', 'add', 'commit', 'worktree', 'branch', 'rev-parse', 'remote', 'push', 'fetch', 'switch', 'show', 'diff'])
 const DIFF_OK = /^--(stat|shortstat|numstat|name-only|name-status)(=.*)?$/
-const OTHER_CLI = new Set(['lean-agent', 'claude', 'gh', 'az']) // the other guards judge these
+const OTHER_CLI = new Set(['lean-agent', 'claude', 'gh', 'az']) // the other guards judge these (gh / az: reads and the thread's own forge work; a subagent's forge write is refused in guard.ts)
 const LIST = new Set(['ls', 'cat', 'head', 'tail', 'wc', 'find', 'mkdir'])
 const SEARCH = new Set(['grep', 'rg'])
+const PKG = new Set(['npm', 'pnpm', 'yarn', 'bun'])
+const REFNAME = /^[\w./@^~+-]+$/
+// text filters at the end of a pipeline (`gh pr list --json number | jq ...`): they read stdin only (no file operand, no flag that reads or writes a file)
+const FILTER_FLAGS = /^(-[inFEvcwxoq]+|--(ignore-case|fixed-strings|extended-regexp|invert-match|count|only-matching))$/ // (grep / rg: never -r, -f, -d)
+function filterOk(w: string[]): boolean {
+  const c = w[0]!
+  const args = w.slice(1)
+  if (c === 'tr') return args.length >= 1 && !args.some(a => a.startsWith('-') && a !== '-d' && a !== '-s')
+  if (['head', 'tail', 'wc', 'uniq', 'cut', 'sort', 'nl'].includes(c)) {
+    if (args.some(a => /^(-o|--output|-f$|--files0|-T|--temporary|--compress|--random-source|-S$|-m$)/.test(a) && !(c === 'cut' && /^-f/.test(a)))) return false
+    return args.every(a => /^-[\w,.:;|=/-]*$/.test(a) || /^\d+$/.test(a)) // flags with attached values, `-n 5`; never a file name
+  }
+  if (c === 'jq') {
+    if (args.some(a => /^(-f|--from-file|--rawfile|--slurpfile|-L|--args|--jsonargs|--arg|--argjson)/.test(a))) return false
+    const pos = args.filter(a => !/^-[a-zA-Z]+$/.test(a))
+    return pos.length === 1
+  }
+  if (c === 'grep' || c === 'rg') {
+    const flags = args.filter(a => a.startsWith('-'))
+    return flags.every(a => FILTER_FLAGS.test(a)) && args.filter(a => !a.startsWith('-')).length === 1
+  }
+  return false
+}
+// the folder a git command works in: its -C (the last one), else the session folder; null when it carries -c (a config override can run programs)
+function gitDir(ctx: OCtx, w: string[]): string | null {
+  let dir = ctx.cwd ?? '/'
+  for (let i = 1; i < w.length && w[i]!.startsWith('-'); i++) {
+    if (w[i] === '-c') return null
+    if (w[i] === '-C') { dir = normPath(w[i + 1] ?? '', dir); i++ }
+  }
+  return dir
+}
+// a thread's own git work in its OWN worktrees (not a project's main checkout), never a push: checkout -b, stash, pull / merge --ff-only, rebase onto a ref, cherry-pick
+function gitOwnWork(ctx: OCtx, w: string[], sub: string, rest: string[]): boolean {
+  const dir = gitDir(ctx, w)
+  if (!dir || !under(dir, `${ctx.home}/.lean-agent/worktrees`)) return false
+  const ref = (a?: string) => !!a && REFNAME.test(a) && !a.startsWith('-')
+  if (sub === 'checkout') return (rest[0] === '-b' || rest[0] === '-B') && ref(rest[1]) && !rest[1]!.includes('..') && rest.length <= 3 && (rest.length === 2 || ref(rest[2]))
+  if (sub === 'stash') return rest.every((a, i) => (i === 0 ? /^(push|pop|apply|list|show|drop|save|-u|-k|--include-untracked|--keep-index|-m)$/.test(a) : !a.startsWith('-') || /^(-u|-k|-m|--|--include-untracked|--keep-index|--staged|-p)$/.test(a)))
+  if (sub === 'pull') return rest.includes('--ff-only') && rest.every(a => /^(--ff-only|--no-edit|--no-tags|--prune|-q|--quiet)$/.test(a) || ref(a))
+  if (sub === 'merge') return (rest.includes('--ff-only') && rest.every(a => /^(--ff-only|--no-edit)$/.test(a) || ref(a))) || (rest.length === 1 && rest[0] === '--abort')
+  if (sub === 'rebase') return (rest.length === 1 && /^--(continue|abort|skip)$/.test(rest[0]!)) || (rest.length === 1 && ref(rest[0])) // `git rebase <its base>`, never -i / --exec
+  if (sub === 'cherry-pick') return rest.length >= 1 && rest.every(a => /^(-x|-n|--no-commit|--continue|--abort|--skip|--quit)$/.test(a) || ref(a))
+  return false
+}
 
 function gitSub(w: string[]): { sub: string; rest: string[] } | null {
   let i = 1
@@ -137,31 +213,51 @@ function gitSub(w: string[]): { sub: string; rest: string[] } | null {
   return i < w.length ? { sub: w[i]!, rest: w.slice(i + 1) } : null
 }
 
-function bashSegOk(ctx: OCtx, w: string[]): boolean {
+function bashSegOk(ctx: OCtx, w: string[], piped = false): boolean {
   const c = w[0]
   if (!c) return false
   if (OTHER_CLI.has(c)) return true
   if (c === 'git') {
     const g = gitSub(w)
-    if (!g || !GIT_OK.has(g.sub)) return false
-    return g.sub !== 'diff' || g.rest.some(a => DIFF_OK.test(a))
+    if (!g) return false
+    if (GIT_OK.has(g.sub)) return g.sub !== 'diff' || g.rest.some(a => DIFF_OK.test(a))
+    return gitOwnWork(ctx, w, g.sub, g.rest)
   }
   if (c === 'echo' || c === 'pwd') return true
+  // script listing (never a run): `npm run`, `pnpm run --list`, `npm pkg get scripts`
+  if (PKG.has(c)) return ((w[1] === 'run' || w[1] === 'run-script') && w.slice(2).every(a => /^(--list|-l)$/.test(a))) || (c === 'npm' && w.slice(1).join(' ') === 'pkg get scripts')
+  if (piped && filterOk(w)) return true
   const operands = w.slice(1).filter(a => !a.startsWith('-'))
+  // `rm` of files inside the thread's own scratch folder (mkdir -p there is a LIST command)
+  if (c === 'rm') return !!ctx.threadDir && w.slice(1).every(a => /^-[rRf]+$/.test(a) || (a.startsWith('/') && under(normPath(a), `${ctx.threadDir}/scratch`))) && operands.length >= 1
   if (SEARCH.has(c)) return operands.length >= 2 && operands.slice(1).every(a => a.startsWith('/') && inLean(ctx, a))
   if (LIST.has(c)) return operands.length >= 1 && operands.every(a => a.startsWith('/') && inLean(ctx, a))
   return false
 }
 
-export function bashOk(ctx: OCtx, command: string): boolean {
+// the words of the first segment the thread may not run itself (null: all of them are allowed); a command the scanner calls complex is named by its first words
+export function bashBad(ctx: OCtx, command: string): string[] | null {
   const parts = command.split(/\s*&&\s*/).filter(p => p.trim())
-  if (!parts.length) return false
+  if (!parts.length) return ['?']
   for (const p of parts) {
     const segs = plainPipeline(p.trim())
-    if (!segs || !segs.length || !segs.every(w => bashSegOk(ctx, w))) return false
+    if (!segs || !segs.length) return p.trim().split(/\s+/).slice(0, 4)
+    for (let i = 0; i < segs.length; i++) if (!bashSegOk(ctx, segs[i]!, i > 0)) return segs[i]!
   }
-  return true
+  return null
 }
+export const bashOk = (ctx: OCtx, command: string): boolean => bashBad(ctx, command) === null
+
+// what to do instead, at most 12 words (after the general refusal)
+const TEST_RUNNERS = /^(npm|pnpm|yarn|bun|npx|pytest|make|cargo|dotnet|go|tsc|vitest|jest|mvn|gradle)$/
+function bashInstead(w: string[]): string {
+  const prog = w[0] ?? ''
+  if (prog === 'git') return '; git writes only inside your own worktree; a checkout of a branch is git switch'
+  if (TEST_RUNNERS.test(prog)) return '; tests and builds: lean_run; scripts: npm run lists them'
+  if (prog === 'cd') return '; never cd: name absolute paths or git -C <dir>'
+  return ''
+}
+const BASH_STEP = 'run tests and builds with lean_run, or give the step to lean-agent:worker-haiku / lean-agent:reader-haiku'
 
 // ---- the rules -------------------------------------------------------------------------------------------------------------
 function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
@@ -191,25 +287,28 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (isAgentTool(e)) return agentCallDenial(c, ctx, e)
   if (t === 'Edit' || t === 'Write' || t === 'NotebookEdit') {
     const f = String(e.file_path ?? e.notebook_path ?? '')
-    return f && (inLean(ctx, f) || deniedEdit(ctx, e)) ? null : THREAD_STEP
+    return f && (inLean(ctx, f) || deniedEdit(ctx, e)) ? null : THREAD_STEP + tried(`${t} ${pathKind(ctx, f)}`)
   }
   if (t === 'Read') {
     const f = String(e.file_path ?? '')
     if (f && inLean(ctx, f)) return null
     const lim = Number(e.limit)
     if (f && deniedEdit(ctx, e) && Number.isFinite(lim) && lim >= 1 && lim <= DIRECT_READ_LINES) return null // a small read of a path the denied call named: not counted
-    if (!Number.isFinite(lim) || lim < 1 || lim > DIRECT_READ_LINES) return `${THREAD_STEP}; a direct read needs limit <= ${DIRECT_READ_LINES}`
+    if (!Number.isFinite(lim) || lim < 1 || lim > DIRECT_READ_LINES) return `${THREAD_STEP}; a direct read needs limit <= ${DIRECT_READ_LINES}${tried(`Read ${pathKind(ctx, f)}`)}`
     const k = key(ctx)
     const n = reads.get(k) ?? 0
-    if (n >= c.directReads) return `${THREAD_STEP} (${c.directReads} direct reads per turn used)`
+    if (n >= c.directReads) return `${THREAD_STEP} (${c.directReads} direct reads per turn used)${tried(`Read ${pathKind(ctx, f)}`)}`
     reads.set(k, n + 1)
     return null
   }
   if (t === 'Grep' || t === 'Glob') {
     const p = String(e.path ?? '')
-    return p && (inLean(ctx, p) || deniedEdit(ctx, e)) ? null : THREAD_STEP
+    return p && (inLean(ctx, p) || deniedEdit(ctx, e)) ? null : THREAD_STEP + tried(`${t} ${pathKind(ctx, p || ctx.cwd || '/')}`)
   }
-  if (t === 'Bash') return bashOk(ctx, String(e.command ?? '')) ? null : 'run tests and builds with lean_run, or give the step to lean-agent:worker-haiku / lean-agent:reader-haiku'
+  if (t === 'Bash') {
+    const bad = bashBad(ctx, String(e.command ?? ''))
+    return bad ? BASH_STEP + bashInstead(bad) + tried(triedWords(bad)) : null
+  }
   return null
 }
 
@@ -220,6 +319,9 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (!steps.has(k) && steps.size >= MAX_TRACKED) steps.delete(steps.keys().next().value as string)
   steps.set(k, n)
   const budget = stepBudget(ctx.job, c.steps, c.stepsByJob)
+  const note = n <= budget ? stepNote(n, budget) : null // 75% of the budget used: the result of THIS call carries the line (takeStepNote)
+  if (note) notes.set(k, note)
+  else notes.delete(k)
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
@@ -267,6 +369,7 @@ export function launchOf(r: any, text: string): { async: boolean; agentId?: stri
 // the subagent ended (classic.SubagentStop): its slot and its step count are released
 export function orchAgentEnd(agentId: string): void {
   steps.delete(agentId)
+  notes.delete(agentId)
   if (slots.has(agentId)) freeSlot(agentId)
   else {
     if (stopped.size >= MAX_TRACKED) stopped.delete(stopped.values().next().value as string)

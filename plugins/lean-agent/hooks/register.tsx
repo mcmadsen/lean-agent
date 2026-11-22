@@ -51,7 +51,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint } from './orchestrate'
+import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -1261,6 +1261,11 @@ export const register: Register = on => {
       } catch {
         /* rules are optional: the tool result goes through unchanged */
       }
+    }
+    // a small worker at 75% of its step budget: its next tool result says how many calls are left (orchestrate.ts takeStepNote)
+    if (e.agentId && r?.deny === undefined && isSmall(atype)) {
+      const left = takeStepNote(e.agentId)
+      if (left) r = { ...r, context: [...(r?.context ?? []), left] }
     }
     // (below, for the main loop only: the queued messages / reports)
     if (e.agentId || r?.deny !== undefined) return r
