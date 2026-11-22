@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.22
 
 ### Added
 - **Resolve a PR thread through the desk.** New action kind `ado-pr-thread-status` {org, project, repo, pr, thread, status} (active, fixed, wontFix, closed, byDesign, pending; `PATCH .../threads/<id>?api-version=7.1`, rendered "set thread 7 of PR 42 to fixed") and an optional `status` on `ado-pr-reply`: one request, one approval; the mod posts the reply, then sets the status only if the reply worked, and the result says what happened to each. `gh-pr-thread-resolve` {repo, pr, thread} is the GitHub twin (`gh api graphql` `resolveReviewThread`, argv only). Same model-proof flow: signed request, exact rendering hashed, the human's Approve, the token on stdin only.
