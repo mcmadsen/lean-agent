@@ -45,10 +45,14 @@ export type FbCtx = { thread?: string; project?: string; agent?: string; version
 // mod itself saw (register.tsx, every denied tool call: text, agent type, tool, thread, running version); "worker" is a refusal a
 // worker REPORTED in its LEAN-FEEDBACK (the command and the text it quotes). The feedback export counts the guard rows as the
 // refusals and takes the worker rows for the `refused` texts, so one refusal is never counted twice.
-export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string; role?: string; rule?: string; kind?: 'refusal' | 'missing-tool'; server?: string; job?: string }
+// `what`: WHAT was tried, taken from the ` [tried: ...]` tag the guard's text ends with (orchestrate.ts tried(): a program and subcommand, or a
+// tool and the KIND of a path, never an argument or a path) so the next export groups refusals by it.
+export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string; role?: string; rule?: string; kind?: 'refusal' | 'missing-tool'; server?: string; job?: string; what?: string }
+export const triedOf = (text: string): string | undefined => /\[tried: ([^\]\n]{1,60})\]/.exec(String(text ?? ''))?.[1]?.trim() || undefined
 export async function appendRefusal(h: Host, row: RefusalRow): Promise<void> {
   const home = await homeDir(h)
-  const clean = Object.fromEntries(Object.entries({ ts: await h.clock.now(), ...row, text: String(row.text ?? '').slice(0, 300), agent: row.agent?.replace(/^lean-agent:/, '') }).filter(([, v]) => v !== undefined))
+  const what = row.what ?? triedOf(row.text) // (before the text is cut: the tag may sit at its end)
+  const clean = Object.fromEntries(Object.entries({ ts: await h.clock.now(), ...row, text: String(row.text ?? '').slice(0, 300), agent: row.agent?.replace(/^lean-agent:/, ''), what }).filter(([, v]) => v !== undefined))
   await appendJsonl(h, `${leanDir(home)}/refusals.jsonl`, clean)
 }
 

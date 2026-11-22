@@ -1,12 +1,12 @@
 // Guards for `tool.call` (design 2.6): strict mode for the desk, push gate and private projects everywhere,
 // read-only and --allow-edit grants for worker subagents. `decide` answers a deny text or null (allow).
 // register.tsx wraps it fail-closed: a throwing guard denies.
-import { homeDir, leanDir, readJson, realPath, threadsDir, writeJson } from './state'
+import { homeDir, leanDir, mkdirp, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
 import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
-import { DESK_ROUTE, isSmall, loadOrch, orchDecide } from './orchestrate'
+import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { jobOf } from './jobs'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -844,15 +844,16 @@ async function threadReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
 }
 // ---- what a subagent may do: read and edit, with a short never-list ------------------------------------------------------------
 // Workers (worker-*) edit anywhere the engine's own permission check allows, and run any shell command; readers (reader-*, explorer) read
-// anything and run any shell command that writes nothing outside a temp folder. The reviewer and the auditor stay on the read-only command
-// list (their verdicts must be trustworthy). Never, for any of them: git push / tags / releases, a forge write (gh / az), a change of
-// permissions or settings, lean-agent's own state under the lean home. `allow-edit:` / `allow-cmd:` lines in a brief are accepted and ignored.
+// anything and run any shell command that writes nothing outside a temp folder or the calling thread's `scratch/` (the reviewer has the same
+// rule since 1.0.22). The auditor stays on the read-only command list (its verdict must be trustworthy). Never, for any of them: git push /
+// tags / releases, a forge write (gh / az), a change of permissions or settings, lean-agent's own state under the lean home (except that scratch). `allow-edit:` / `allow-cmd:` lines in a brief are accepted and ignored.
 const GIT_TAG = /\bgit\b[^;&|\n]*\btag\b[ \t]*([^;&|\n]*)/g
 const TAG_LIST = /^(-l\b|--list\b|-n\b|--contains\b|--points-at\b|--merged\b|--no-merged\b|--sort\b|$)/
 const SETTINGS_CMD = /\bclaude\s+(config|mcp|plugin|permissions|settings|login|logout|setup-token)\b|(^|[\s/'"])(\.claude\/settings(\.local)?\.json|managed-settings\.json)/
 const SETTINGS_PATH = /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)managed-settings\.json$/
 const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr|stdout)$|\$\{?TMPDIR\}?\/|[^\0]*\/\.claude\/jobs\/[^/]+\/tmp\/|[^\0]*\/\.lean-agent\/tmp\/)/
-const tempFile = (w: string): boolean => TEMP_OK.test(w) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
+// `scratch`: the calling thread's own `<thread folder>/scratch` (the one place under the lean home a subagent may write notes and drafts)
+const tempFile = (w: string, scratch?: string): boolean => (TEMP_OK.test(w) || (!!scratch && w.startsWith(`${scratch}/`))) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
 // the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
 export function redirectTargets(c: string): string[] {
   const out: string[] = []
@@ -885,34 +886,73 @@ export function redirectTargets(c: string): string[] {
 const UNQUOTED = (c: string) => c.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''")
 const CMD_AT = (names: string) => new RegExp(`(?:^|[;&|(\\n])\\s*(?:sudo\\s+|env\\s+)?(?:${names})\\b`)
 const WRITING_PROGS = CMD_AT('rm|mv|cp|touch|truncate|dd|ln|install|rsync|patch')
-const WRITING_GIT = CMD_AT('git(?:\\s+-C\\s+\\S+)?\\s+(?:commit|add|checkout|switch|reset|restore|stash|merge|rebase|cherry-pick|apply|clean|rm|mv|am|pull|revert)')
+const WRITING_GIT = CMD_AT('git(?:\\s+-C\\s+\\S+)?\\s+(?:commit|add|checkout|switch|reset|restore|stash|merge|rebase|cherry-pick|apply|clean|rm|mv|am|pull|revert)(?![\\w-])') // (not merge-base, rm-xyz ...)
 // a reader's shell command that would write a file (it has no Edit / Write tool: the shell is its only way to)
-export function readerWrite(c: string): string | null {
-  const bad = redirectTargets(c).find(w => !tempFile(w))
+export function readerWrite(c: string, scratch?: string): string | null {
+  const bad = redirectTargets(c).find(w => !tempFile(w, scratch))
   const u = UNQUOTED(c)
-  if (bad !== undefined) return `lean-agent: a reader writes no file (redirect to ${bad.slice(0, 80) || 'a command'}); only a temp folder may be written, or give the step to a worker`
-  if (/\btee\b/.test(u) && /\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(u) && !tempFile(/\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(c)?.[1]?.replace(/^['"]|['"]$/g, '') ?? '')) return 'lean-agent: a reader writes no file (tee); only a temp folder may be written, or give the step to a worker'
+  if (bad !== undefined) return `lean-agent: a reader writes no file (redirect to ${bad.slice(0, 80) || 'a command'}); only a temp folder${scratch ? ` or ${scratch}` : ''} may be written, or give the step to a worker`
+  if (/\btee\b/.test(u) && /\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(u) && !tempFile(/\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(c)?.[1]?.replace(/^['"]|['"]$/g, '') ?? '', scratch)) return 'lean-agent: a reader writes no file (tee); only a temp folder may be written, or give the step to a worker'
   if (/\b(sed|perl)\b[^;&|\n]*\s(-[a-zA-Z]*i\S*|--in-place\S*)(\s|$)/.test(u) || WRITING_PROGS.test(u) || WRITING_GIT.test(u)) return 'lean-agent: a reader changes nothing in the project (no rm / mv / cp / touch / sed -i / git write); give the step to a worker'
   return null
+}
+// the program and subcommand of the outward command a refusal is about (`gh pr`, `az pipelines`, `git remote`), never an argument
+const OUTWARD = /(?:^|[\s;&|(])(gh|az|lean-agent|git|curl|wget|npm|docker)\s+(?:(?:-R|--repo|-C|--org|--organization|--project|--subscription)\s+\S+\s+|-\S+\s+)*([a-z][a-z0-9-]*)/g
+export function forgeTried(c: string): string {
+  const all = [...c.matchAll(OUTWARD)]
+  const m = all.find(x => x[1] === 'gh' || x[1] === 'az') ?? all[0]
+  return m ? `${m[1]} ${m[2]}` : progName(c.trim().split(/\s+/)[0])
 }
 // the never-list of every subagent's shell
 async function neverDenial($: Host, c: string): Promise<string | null> {
   const a = analyze(c)
   if (a.push || PUSH.test(c)) return 'lean-agent: a subagent never pushes; report to the thread (the desk pushes after the review)'
-  if (a.write) return 'lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread'
+  if (a.write) return `lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread${tried(forgeTried(c))}`
   for (const m of c.matchAll(GIT_TAG)) if (!TAG_LIST.test(m[1]!.trim())) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
   if (SETTINGS_CMD.test(c)) return 'lean-agent: a subagent never changes permissions or settings'
   return null
 }
 // a worker's shell command that names lean-agent's protected state and writes (a redirect, or a program that can)
-async function leanStateShell($: Host, c: string): Promise<boolean> {
+// Returns the kind of file the command names (statePattern, never a path) or null. A read of lean state is no change: only a redirect to a
+// file that is not temp or scratch, a program that writes (rm, mv, cp, tee ..., sed -i, an interpreter that says write) counts. The calling
+// thread's own scratch folder is not lean state for this rule.
+const SHELL_WRITERS = /\b(rm|mv|cp|tee|truncate|dd|ln|install|rsync|touch)\b/
+const INTERP_WRITES = /\b(python3?|node|ruby|perl)\b/
+async function leanStateShell($: Host, c: string, own?: string): Promise<string | null> {
   const home = await homeDir($)
-  const names = c.includes(leanDir(home)) || /(~|\$HOME|\$\{HOME\})\/\.lean-agent\b/.test(c)
-  if (!names || !/(config\.json|projects\.json|grants|approvals|\/reviews\b|\/threads\/)/.test(c)) return false
-  return redirectTargets(c).length > 0 || /\b(rm|mv|cp|tee|truncate|dd|ln|install|rsync|sed|perl|python3?|node|ruby)\b/.test(UNQUOTED(c))
+  const lean = leanDir(home)
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const alts = [esc(lean), '~/\\.lean-agent', '\\$HOME/\\.lean-agent', '\\$\\{HOME\\}/\\.lean-agent'].join('|')
+  const scratch = own ? `${lean}/threads/${own}/scratch` : ''
+  // (a path that climbs out of scratch with `..` is not scratch)
+  const c2 = own ? c.replace(new RegExp(`(?:${alts})/threads/${esc(own)}/scratch(?![\\w.-])([^\\s;&|<>"']*)`, 'g'), (all, rest: string) => (rest.includes('..') ? all : '')) : c
+  const names = c2.includes(lean) || /(~|\$HOME|\$\{HOME\})\/\.lean-agent\b/.test(c2)
+  const m = names ? /(config\.json|projects\.json|grants[\w.-]*|approvals[\w.-]*|\/reviews\b|\/threads\/)/.exec(c2) : null
+  if (!m) return null
+  const u = UNQUOTED(c2)
+  const writes =
+    redirectTargets(c2).some(w => !tempFile(w, scratch) && (/\.lean-agent\b/.test(w) || /^[~$]/.test(w) || !w.startsWith('/'))) ||
+    SHELL_WRITERS.test(u) ||
+    /\b(sed|perl)\b[^;&|\n]*\s(-[a-zA-Z]*i\S*|--in-place\S*)(\s|$)/.test(u) ||
+    (INTERP_WRITES.test(u) && /(write|unlink|rename|remove|rmtree|open\([^)]*['"][wa]|appendFile|>\s)/i.test(c2))
+  return writes ? statePattern(m[1]!.startsWith('/') ? m[1]! : `/${m[1]}`) : null
+}
+// the file-name pattern of lean state a refusal is about: a known name (config.json, projects.json, grants.json, approvals), reviews, reports,
+// thread folder (another thread's), else the extension (`*.jsonl`) or `other`. Never a path, never a file's own name outside the known ones.
+export function statePattern(rel: string): string {
+  const base = rel.split('/').filter(Boolean).pop() ?? ''
+  if (/^(config|projects)\.json$/.test(base)) return base
+  if (/^grants/.test(base)) return 'grants.json'
+  if (/^approvals/.test(base) || /\/approvals/.test(rel)) return 'approvals'
+  if (/\/reviews(\/|$)/.test(rel)) return 'reviews'
+  if (/\/reports?(\/|$)/.test(rel)) return 'reports'
+  if (/^\/threads(\/|$)/.test(rel)) return 'thread folder'
+  const ext = /\.([A-Za-z0-9]{1,8})$/.exec(base)?.[1]
+  return ext ? `*.${ext}` : 'other'
 }
 // lean-agent's own state under the lean home: refused for a worker's edit (and a shell write); worktrees and the thread's own folder are not
-async function leanStateDenial($: Host, ctx: Ctx, abs: string): Promise<string | null> {
+const scratchHint = (lean: string, own: string) => `use <thread folder>/scratch for notes and drafts${own ? ` (${lean}/threads/${own}/scratch)` : ''}`
+async function leanStateDenial($: Host, ctx: Ctx, abs: string, tool = 'Edit'): Promise<string | null> {
   const home = await homeDir($)
   const own = ctx.role.kind === 'thread' ? ctx.role.id : ''
   for (const lean of new Set([norm(leanDir(home)), norm(await realPath($, leanDir(home)))])) {
@@ -921,7 +961,8 @@ async function leanStateDenial($: Host, ctx: Ctx, abs: string): Promise<string |
     if (/^\/worktrees\//.test(rel)) return null
     const th = /^\/threads\/([^/]+)\/(.*)$/.exec(rel)
     if (th && own && th[1] === own && !/^(grants\.json$|approvals|reviews(\/|$))/.test(th[2]!)) return null
-    return `lean-agent: ${abs} is lean-agent's own state (settings, grants, approvals, review records, other threads): a worker never edits it; report it to the thread`
+    const mine = !!th && !!own && th[1] === own
+    return `lean-agent: ${abs} is lean-agent's own state (settings, grants, approvals, review records, other threads): a worker never edits it; ${scratchHint(lean, own)}; report the rest to the thread${tried(`${tool} ${mine ? 'thread folder' : 'lean state'} ${statePattern(rel)}`)}`
   }
   return null
 }
@@ -932,16 +973,21 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
   if (e.tool === 'AskUserQuestion') return 'lean-agent: a subagent never asks the user; report the question to the thread'
   // MCP is opt-in per job: a lean-agent subagent reaches a server only when the brief says `allow-mcp: <server>` (read-only tools)
   if (isMcpTool(e.tool) && !isOwn(serverOf(e.tool)) && (t === 'unresolved' || LEAN_TYPE.test(t))) return mcpDecision(await grantFor($, ctx), e.tool)
-  const wideReader = /^(reader-|explorer$)/.test(ownName(t) ?? '')
+  const wideReader = /^(reader-|explorer$|reviewer$)/.test(ownName(t) ?? '') // (the reviewer has the readers' shell rule since 1.0.22; the auditor stays on the read-only list)
   if (e.tool === 'Bash' && (isWorker(t) || wideReader)) {
     const c = String(e.command ?? '')
     const never = await neverDenial($, c)
     if (never) return never
+    const ownId = ctx.role.kind === 'thread' ? ctx.role.id : ''
+    const lean = leanDir(await homeDir($))
+    const scratch = ownId ? `${lean}/threads/${ownId}/scratch` : undefined // the one place under the lean home a subagent writes notes and drafts, created on demand
+    if (scratch && c.includes(scratch)) await mkdirp($, scratch).catch(() => undefined)
     if (isWorker(t)) {
-      if (await leanStateShell($, c)) return 'lean-agent: a worker never changes lean-agent\'s own state (settings, grants, approvals, review records, threads); report it to the thread'
+      const pat = await leanStateShell($, c, ownId)
+      if (pat) return `lean-agent: a worker never changes lean-agent's own state (settings, grants, approvals, review records, threads); ${scratchHint(lean, ownId)}; report the rest to the thread${tried(`Bash ${pat === 'thread folder' ? 'thread folder' : 'lean state'} ${pat}`)}`
       return null
     }
-    return readerWrite(c)
+    return readerWrite(c, scratch)
   }
   if (isReader(t)) {
     if (edits) return t === 'unresolved' ? 'lean-agent: agent type unresolved, so it is a reader (read-only); report this with the debug log line "agent fields"' : `lean-agent: ${t} is read-only`
@@ -960,7 +1006,7 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     if (!raw) return 'lean-agent: edit without a path'
     const p = await resolve($, raw, ctx.cwd)
     if (SETTINGS_PATH.test(p)) return `lean-agent: ${p} holds permissions or settings: a worker never edits it; report it to the thread`
-    return await leanStateDenial($, ctx, p)
+    return await leanStateDenial($, ctx, p, String(e.tool))
   }
   return null
 }
@@ -1089,7 +1135,10 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if (orch.on && !ownGit) {
     const home = await homeDir($)
     const job = ctx.agentId && isSmall(ctx.agentType) ? (await grantFor($, ctx)).job : undefined // the job type of the brief this worker was started with
-    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined }, e)
+    const own = ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId // (the project folders only name a refused path's kind in the record: threads' own calls)
+    const projs = own ? await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {}) : {}
+    const projects = Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/')).map(norm)
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects }, e)
     if (o) return o
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {

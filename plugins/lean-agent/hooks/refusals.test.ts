@@ -2,7 +2,8 @@
 // row that appears when one repeats, and the grants named up front. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { groupRefusals, patternOf, refusalsText, topRefusalsRow } from './refusals'
+import { groupRefusals, patternOf, refusalsText, ruleOf, topRefusalsRow } from './refusals'
+import { triedOf } from './feedback'
 import { GRANTS_MAX, grantsBlock, leanThread, resetLocks } from './threads'
 import { check } from './doctor'
 import { logRefusal } from './feedbackexport'
@@ -35,6 +36,30 @@ test('a refusal text becomes a pattern with a one-line fix: the program and the 
   expect(patternOf('something new that nobody has seen', 'session').fix).toContain('read the refusal text')
   // the version tail never splits a pattern
   expect(patternOf(REFUSED('cd', 'x'), 'reviewer').key).toBe(patternOf(REFUSED('cd', 'x').replace('1.0.14', '1.0.9'), 'reviewer').key)
+})
+
+test('1.0.22: a refusal text ending in [tried: ...] is recorded with `what` and grouped by it (a program and subcommand, or a tool and a path kind)', async () => {
+  const h = fakeHost(null)
+  const ORCH = (w: string) => `run tests and builds with lean_run, or give the step to lean-agent:worker-haiku / lean-agent:reader-haiku [tried: ${w}] (lean-agent 1.0.22)`
+  const STEP = (w: string) => `one step for a small worker: lean-agent:worker-haiku (workers may read and edit) / lean-agent:reader-haiku (set the Agent parameter run_in_background to the boolean false; a worker that still starts in the background is fine: wait for its result notification, do not poll or duplicate the job) [tried: ${w}]`
+  for (const [w, n] of [['az pipelines', 3], ['npm test', 2], ['git checkout', 1]] as const) for (let k = 0; k < n; k++) await logRefusal(h.host, { role: 'thread', rule: 'thread-orchestrate', text: ORCH(w), tool: 'Bash', thread: 't3', version: '1.0.22' })
+  for (let k = 0; k < 2; k++) await logRefusal(h.host, { role: 'thread', rule: 'thread-orchestrate', text: STEP('Edit project'), tool: 'Edit', thread: 't3', version: '1.0.22' })
+  await logRefusal(h.host, { role: 'thread', rule: 'thread-orchestrate', text: STEP('Read lean state'), tool: 'Read', thread: 't3', version: '1.0.22' })
+  const raw = (h.files.get(`${L}/refusals.jsonl`) as string).trim().split('\n').map(l => JSON.parse(l))
+  expect(raw.map(r => r.what)).toEqual(['az pipelines', 'az pipelines', 'az pipelines', 'npm test', 'npm test', 'git checkout', 'Edit project', 'Edit project', 'Read lean state'])
+  expect(raw[0].text.length).toBeLessThanOrEqual(300)
+  const g = await groupRefusals(h.host, 7)
+  expect(g.groups.map(x => x.n)).toEqual([3, 2, 2, 1, 1])
+  expect(g.groups[0]!.key).toBe('thread-orchestrate:session:az pipelines')
+  expect(g.groups[0]!.label).toContain('[az pipelines]')
+  expect(g.groups.map(x => x.key.split(':')[0])).toEqual(Array(5).fill('thread-orchestrate'))
+  const own = patternOf('lean-agent: x is lean-agent\'s own state (settings): a worker never edits it [tried: Edit lean state config.json]', 'worker-haiku')
+  expect(own.key.startsWith('other:worker-haiku:')).toBe(true)
+  expect(own.key.endsWith(':Edit lean state config.json')).toBe(true)
+  expect(patternOf(ORCH('npm test'), 'session', 'override').key).toBe('thread-orchestrate:session:override')
+  expect(ruleOf(ORCH('az pipelines'))).toBe('thread-orchestrate')
+  expect(triedOf('no tag here')).toBeUndefined()
+  expect(triedOf('x [tried: git checkout] (lean-agent 1.0.22)')).toBe('git checkout')
 })
 
 test('lean_doctor refusals groups the guard rows by pattern with counts, most frequent first; worker rows and old rows are left out', async () => {

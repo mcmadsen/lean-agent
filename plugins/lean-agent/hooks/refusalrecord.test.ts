@@ -52,13 +52,13 @@ test('thread orchestrate, why-sonnet, brief too long and the retry limit are rec
   const h = await session($, on, `${L}/threads/t1`)
   await $.tool.call({ tool: 'Edit', file_path: '/r/app/src/a.ts', old_string: 'a', new_string: 'b' } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-sonnet', prompt: brief(1) } as any)
-  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: brief(2, 'x'.repeat(1600)) } as any)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: brief(2, 'x'.repeat(3100)) } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(3) } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(3) } as any)
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:reader-haiku', prompt: brief(3, '\nwhy-sonnet: the first answer lacked the file') } as any) // a changed brief is a new job
   const got = (await rows(h)).filter(r => r.kind === 'refusal' && r.rule !== 'result-trimmed') // (an answer that is not in the job schema is counted too: below)
   expect(got.map(r => r.rule)).toEqual(['thread-orchestrate', 'why-sonnet-missing', 'brief-too-long', 'retry-limit'])
-  expect(got[0]).toMatchObject({ role: 'thread', src: 'guard', tool: 'Edit', thread: 't1' })
+  expect(got[0]).toMatchObject({ role: 'thread', src: 'guard', tool: 'Edit', thread: 't1', what: 'Edit project' }) // what was tried: the tool and the kind of its path
   expect(typeof got[0].version).toBe('string') // the running version
   const t = await exported(h)
   expect(t).toContain('## Guard refusals since the last export')
@@ -67,7 +67,7 @@ test('thread orchestrate, why-sonnet, brief too long and the retry limit are rec
 
 test('a worker over its step budget and an MCP call without a grant are recorded with the worker role', async ($, on) => {
   const h = await session($, on, `${L}/threads/t1`)
-  for (let i = 0; i < 16; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any)
+  for (let i = 0; i < 25; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any) // (no job line: the ceiling, 24)
   await $.tool.call({ tool: 'mcp__datadog__query', agentId: 'agent-1' } as any)
   const got = (await rows(h)).filter(r => r.kind === 'refusal')
   expect(got.map(r => r.rule)).toContain('worker-step-budget')
