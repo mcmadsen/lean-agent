@@ -237,11 +237,13 @@ export type ActionView = { id: string; thread: string; kind: ActionKind; why: st
 // ---- standing approval: ONLY a status change carries it (never text) ------------------------------------------------------------------------
 // The kinds and statuses that can be covered: a thread status to fixed / closed / active, a GitHub review thread resolved. Never a reply, a comment, a
 // work item update or any other status; a batch is covered only when EVERY item is one of these and covered.
-export const STANDING_KINDS: ActionKind[] = ['ado-pr-thread-status', 'gh-pr-thread-resolve']
+// Only the Azure DevOps status change: its PR is part of the write's URL, so the scope a grant names is the scope that is written. A GitHub
+// review-thread resolve carries only the thread's node id (the PR it names cannot be checked from the request), so it is always asked.
+export const STANDING_KINDS: ActionKind[] = ['ado-pr-thread-status']
 export const STANDING_STATUSES = ['fixed', 'closed', 'active']
 export const STANDING_TTL_MS = 24 * 60 * 60 * 1000
 export const STANDING_LABEL = 'Approve, and allow status changes on this PR for 24 h'
-export const standingEligible = (kind: ActionKind, p: Params): boolean => kind === 'gh-pr-thread-resolve' || (kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status)))
+export const standingEligible = (kind: ActionKind, p: Params): boolean => kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status))
 
 const REQUESTS = 'action.requests'
 const answerKey = (id: string) => `action.answer.${id}`

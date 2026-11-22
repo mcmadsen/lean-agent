@@ -66,7 +66,7 @@ test('the third choice exists only for a status change (never for text); it is a
   expect(questionOf(await ask(s, 'ado-pr-thread-status', { ...STATUS, thread: 8, status: 'wontFix' }, 't6')).options).toHaveLength(3) // not a low-risk status
   expect(questionOf(await ask(s, 'ado-pr-reply', REPLY)).options).toHaveLength(3)
   expect(questionOf(await ask(s, 'ado-pr-reply', { ...REPLY, thread: 9, status: 'fixed' })).options).toHaveLength(3) // a reply carries text, even with a status
-  expect(questionOf(await ask(s, 'gh-pr-thread-resolve', RESOLVE, 't6')).options).toHaveLength(4)
+  expect(questionOf(await ask(s, 'gh-pr-thread-resolve', RESOLVE, 't6')).options).toHaveLength(3) // its PR cannot be checked from the request: always asked
   expect((await standingView(s.host)).grants).toEqual([])
   expect((await human(s, v, 'Approve')).join(' ')).not.toContain('allowed status changes') // plain Approve: no grant
   expect((await standingView(s.host)).grants).toEqual([])
@@ -117,16 +117,18 @@ test('with a grant, a status change of the same thread on the same PR is sent at
   expect(s.writers()).toHaveLength(3)
 })
 
-test('the pane\'s third press is the same human answer; a GitHub review thread resolve is covered the same way', { timeoutMs: 20_000 }, async () => {
+test('the pane\'s third press is the same human answer; a GitHub review thread resolve never carries a standing approval', { timeoutMs: 20_000 }, async () => {
   const s = setup()
-  const v = await ask(s, 'gh-pr-thread-resolve', RESOLVE)
+  const v = await ask(s, 'ado-pr-thread-status', STATUS)
   expect((await answerAction(s.host, v.id, 'approve', 'pane', s.tell, true)).ok).toBe(true)
   expect((await approveAction(s.host, v.id, s.tell)).ok).toBe(true)
-  const r = await tryNow(s, 'gh-pr-thread-resolve', { ...RESOLVE, thread: 'PRRT_kwDOZzYyXx9' })
-  expect(r?.sent).toBe(true)
-  expect(r?.line).toBe('sent under your standing approval: resolve review thread PRRT_kwDOZzYyXx9 of PR acme/shop-api#42')
-  expect(await tryNow(s, 'gh-pr-thread-resolve', { ...RESOLVE, pr: 43, thread: 'PRRT_kwDOQqWwEe5' })).toBeNull() // another PR
   expect(history(s)).toContain('"by":"user, in the pane"')
+  expect((await standingView(s.host)).grants).toHaveLength(1)
+  const g = await ask(s, 'gh-pr-thread-resolve', RESOLVE)
+  const refused = await answerAction(s.host, g.id, 'approve', 'pane', s.tell, true)
+  expect(refused.ok).toBe(false)
+  expect(refused.text).toContain('cannot carry a standing approval')
+  expect(await tryNow(s, 'gh-pr-thread-resolve', { ...RESOLVE, thread: 'PRRT_kwDOZzYyXx9' })).toBeNull()
 })
 
 test('a grant covers only its thread, its PR, its kinds and statuses; text is never covered; a batch only when EVERY item is', { timeoutMs: 20_000 }, async () => {
