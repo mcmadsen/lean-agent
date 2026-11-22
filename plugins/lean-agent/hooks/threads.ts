@@ -25,6 +25,7 @@ import type { Loaded } from './profile'
 import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
 import { dismissAction } from './dismiss'
+import { loadView } from './view'
 import { threadToolsArgv } from './orchestrate'
 import { threadSpendLine } from './stats'
 import { baseLine, readBase } from './base'
@@ -227,7 +228,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean }
+export type Input = { action: string; tN?: string; text?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -723,7 +724,11 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
-  return { ok: true, text, data: out }
+  // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
+  const nv = out.length ? await loadView(h).catch(() => null) : null
+  const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
+  const need = nv && (nv.needs.length || nd) ? `\nNeeds you: ${nv.needs.length}${nd ? ` (${nd} dismissed, hidden until a newer one arrives)` : ''}` : ''
+  return { ok: true, text: text + need, data: out }
 }
 
 // the desk's `profile`: show a project's profile with what its threads used; mcp / plugins set the lists (a list left out stays as it is);
@@ -786,7 +791,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     }
     const installed = await pluginVersion(h, root)
     if (i.action === 'new') return await newOrReview(h, root, i, x => create(h, root, home, x, installed)) // review: {..} starts a kind-review thread (reviewkind.ts)
-    if (i.action === 'dismiss') return await dismissAction(h, i) // the user acknowledged tN's blocked report (dismiss.ts)
+    if (i.action === 'dismiss') return await dismissAction(h, i) // the user hid an item of the pane (dismiss.ts): tN, tN kind, or notice
     const id = i.tN ?? ''
     if (!ID.test(id)) return err(`${i.action} needs tN (like t3)`)
     return await serial(id, async () => {

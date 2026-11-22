@@ -8,6 +8,9 @@ import { OVER_PCT, READ_SHOWN, ackRows, loadView, resetViewCache, stateOf, threa
 import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './panestate'
 import type { GoalTone, NeedRow, ThreadRow, View } from './view'
 import { leanThread } from './threads'
+import { homeDir } from './state'
+import { dismissedKeys, dkey, recordDismiss } from './dismissstore'
+import type { DItem } from './dismissstore'
 import { fmtUntil } from './limits'
 import { scriptTool } from './scripts'
 import { hostOf } from './host'
@@ -177,8 +180,37 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const notes = chk?.notes ?? []
     // "lean-agent is not set up" only when the setup itself is missing; everything else the doctor found is a finding (fix vs info)
     const missing = missingOf(problems)
-    const fixes = [...problems.filter(p => !missing.includes(p)), ...notes]
-    const info = chk?.info ?? []
+    const fixes0 = [...problems.filter(p => !missing.includes(p)), ...notes]
+    const info0 = chk?.info ?? []
+    // Dismiss on a line at the top (a notice, a doctor finding, the plan-window line): one press, nothing was decided by it. The line is hidden
+    // until its text changes (a doctor finding), the next threshold or the next day (a budget or plan-window alert). `show` brings them back.
+    const homeP = await homeDir(host)
+    const goneDesk = await dismissedKeys(host, homeP, ['desk']).catch(() => new Set<string>())
+    const showHidden = (await readUi($)).rows.dismissed === true
+    const isGone = (i: DItem) => goneDesk.has(dkey(i))
+    const docId = (m: string): DItem => ({ thread: 'desk', kind: 'notice', id: `doctor:${m}` })
+    const fixes = showHidden ? fixes0 : fixes0.filter(m => !isGone(docId(m)))
+    const info = showHidden ? info0 : info0.filter(m => !isGone(docId(m)))
+    const dismissLine = (items: DItem[]) => async () => {
+      try {
+        for (const i of items) await recordDismiss(host, homeP, i, i.id.slice(i.id.indexOf(':') + 1))
+      } catch (err) {
+        notice = lastError = `dismiss failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`
+      }
+      resetViewCache()
+      $.ui.invalidate('ui.render')
+    }
+    const clearNotice = async () => {
+      notice = ''
+      lastError = ''
+      $.ui.invalidate('ui.render')
+    }
+    // the plan-window line is an alert only from 80 %: dismissed until a window crosses the next level or the day ends
+    const winLevels = (v?.window ?? '').match(/\d+(?=%)/g)?.map(p => (Number(p) >= 90 ? 90 : Number(p) >= 80 ? 80 : 0)) ?? []
+    const winId: DItem = { thread: 'desk', kind: 'notice', id: `window:${new Date(now).toISOString().slice(0, 10)}:${winLevels.join(',')}` }
+    const winAlert = winLevels.some(l => l > 0)
+    const winGone = winAlert && isGone(winId)
+    const localHidden = fixes0.filter(m => isGone(docId(m))).length + info0.filter(m => isGone(docId(m))).length + (winGone ? 1 : 0)
     // one press at a time; a press that finds a run in flight does nothing
     const setupPress = (label: string, f: () => Promise<{ ok: boolean; text: string } | void>) => async () => {
       if (busy) {
@@ -254,7 +286,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const doctorRows =
       nFindings > 0 ? (
         <Box flexDirection="column">
-          <Text bold color={fixes.length ? 'yellow' : undefined}>{`Doctor: ${nFindings} finding${nFindings === 1 ? '' : 's'} (${fixes.length} fix, ${info.length} info)`}</Text>
+          <Box flexWrap="wrap" columnGap={1}>
+            <Text bold color={fixes.length ? 'yellow' : undefined}>{`Doctor: ${nFindings} finding${nFindings === 1 ? '' : 's'} (${fixes.length} fix, ${info.length} info)`}</Text>
+            <Button key="doctor-dismiss" label="Dismiss" onPress={dismissLine([...fixes, ...info].filter(m => !isGone(docId(m))).map(docId))} />
+          </Box>
           {fixes.map((m, i) => (
             <Text key={`df-${i}`} color="red">
               {m}
@@ -380,13 +415,17 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       tell()
     }
     const closeOne = (id: string) => twoStep(`close:${id}`, () => closeIds([id]))
-    // Dismiss on a blocked card: the user acknowledged that report (dismiss.ts); the card and badge go until a NEWER blocked report arrives
-    const dismissBlocked = (id: string) =>
-      twoStep(`dismiss:${id}`, async () => {
-        const r = await leanThread(host, $.plugin.root, { action: 'dismiss', tN: id })
+    // Dismiss on a Needs-you card (two presses): the user acknowledged THIS item (dismissstore.ts: who/when/what in the history, nobody is told);
+    // the card goes until a NEWER item of its kind arrives, the record behind it stays. One mechanism for every kind of card.
+    const dismissCard = (n: NeedRow) =>
+      twoStep(`dismiss:${n.key}`, async () => {
+        try {
+          await recordDismiss(host, await homeDir(host), n.dk!, n.text)
+          notice = `dismissed: ${short(n.text, 100)} (a newer one will show again)`
+        } catch (err) {
+          notice = lastError = `dismiss failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`
+        }
         resetViewCache()
-        notice = short(r.text, 200)
-        if (!r.ok) lastError = notice
         tell()
       })
     // Restart: the session is stopped (a working one too) and a NEW one starts with the handover (threads.ts action restart)
@@ -568,8 +607,24 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // ---- Needs you: one card per thing that waits for the user, its button on the same card ----
     const needs = v?.needs ?? []
     const restartLabel = confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'
-    const needCard = (n: NeedRow) => {
-      const tone = n.kind === 'blocked' || n.kind === 'deskmodel' ? 'error' : 'warning'
+    // "N dismissed" and its "show" toggle: the dismissed items are not counted above; show brings them back into this view (dim, no buttons)
+    const dismissedRows = v?.dismissed ?? []
+    const dismissedN = dismissedRows.length + (v?.dismissedNotices.length ?? 0) + localHidden
+    const dismissLine_ =
+      dismissedN > 0 ? (
+        <Box key="dismissed-line" flexWrap="wrap" columnGap={1}>
+          <Text dimColor>{`${dismissedN} dismissed`}</Text>
+          <Button key="dismissed-toggle" plain label={showHidden ? 'hide' : 'show'} onPress={toggleRow('dismissed')} />
+        </Box>
+      ) : null
+    const needCard = (n: NeedRow, hidden = false) => {
+      if (hidden)
+        return (
+          <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+            <Text dimColor wrap="wrap">{`${n.text} (dismissed: a newer one will show again)`}</Text>
+          </Box>
+        )
+      const tone = n.kind === 'blocked' || n.kind === 'deskmodel' || n.kind === 'stalled' ? 'error' : 'warning'
       const t = n.thread ? v?.threads.find(x => x.id === n.thread) : undefined
       const w = n.script
       const mr = n.request
@@ -582,7 +637,6 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box flexWrap="wrap" columnGap={1}>
             {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
             {(n.kind === 'question' || n.kind === 'push' || n.kind === 'blocked') && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
-            {n.kind === 'blocked' && !!n.thread && n.key.startsWith('blocked:') && <Button key={`dismiss-${n.thread}`} label={confirming(ui, `dismiss:${n.thread}`, now2) ? `Confirm dismiss ${n.thread}` : 'Dismiss'} onPress={dismissBlocked(n.thread)} />}
             {!!w && <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />}
             {!!w && <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />}
             {n.kind === 'context' && <Button key="restart-desk-top" label={restartLabel} onPress={restartDeskPress} />}
@@ -594,6 +648,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!ar && !(ar.state === 'pending' && ar.text.length > 400) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
             {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
             {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
+            {n.kind === 'stalled' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
+            {!!n.dk && !(mr && mr.state === 'denied') && <Button key={`dismiss-${n.dk.thread}-${n.dk.kind}${['model', 'action', 'script'].includes(n.dk.kind) ? `-${n.dk.id.split(':')[0]}` : ''}`} label={confirming(ui, `dismiss:${n.key}`, now2) ? `Confirm dismiss ${n.thread ?? 'it'}` : 'Dismiss'} onPress={dismissCard(n)} />}
           </Box>
         </Box>
       )
@@ -602,9 +658,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       needs.length > 0 ? (
         <Box flexDirection="column">
           <Text bold color="warning">{`Needs you (${needs.length})`}</Text>
-          {needs.map(needCard)}
+          {needs.map(n => needCard(n))}
+          {showHidden && dismissedRows.map(n => needCard(n, true))}
+          {dismissLine_}
         </Box>
-      ) : null
+      ) : (
+        <Box flexDirection="column">
+          {showHidden && dismissedRows.map(n => needCard(n, true))}
+          {dismissLine_}
+        </Box>
+      )
 
     // ---- a thread card: id and full title; one-word state with model, branch, review verdict and cost; the last report in one line; buttons ----
     const threadCard = (t: ThreadRow) => {
@@ -674,7 +737,12 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
           </Text>
         </Box>
-        {!!v?.window && <Text dimColor>{v.window}</Text>}
+        {!!v?.window && (!winGone || showHidden) && (
+          <Box flexWrap="wrap" columnGap={1}>
+            <Text dimColor={!winAlert} color={winAlert ? 'warning' : undefined}>{v.window}</Text>
+            {winAlert && !winGone && <Button key="window-dismiss" label="Dismiss" onPress={dismissLine([winId])} />}
+          </Box>
+        )}
         {/* the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick, at the top */}
         {!!v?.deskModel && !v.deskModelRed && <Text color="yellow">{v.deskModel}</Text>}
         {showSetNote && <Text dimColor>{setNote}</Text>}
@@ -697,12 +765,30 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {header}
         {missing.length > 0 ? problemRows : doctorRows}
         {mcpBlock}
-        {!!notice && !errors.includes(notice) && <Text color="yellow">{notice}</Text>}
+        {!!notice && !errors.includes(notice) && (
+          <Box flexWrap="wrap" columnGap={1}>
+            <Text color="yellow">{notice}</Text>
+            <Button key="notice-dismiss" label="Dismiss" onPress={clearNotice} />
+          </Box>
+        )}
         {errors.map((m, i) => (
           <Text key={`err-${i}`} color="red">
             error: {m}
           </Text>
         ))}
+        {/* the notice files (notices.ts): a budget alert is amber and not an error; the rest stay red. Each hides on one press */}
+        {(showHidden ? [...(v?.notices ?? []), ...(v?.dismissedNotices ?? [])] : (v?.notices ?? [])).map(nt => {
+          const hid = !!v?.dismissedNotices.includes(nt)
+          return (
+            <Box key={`nt-${nt.key}`} flexWrap="wrap" columnGap={1}>
+              <Text color={hid ? undefined : nt.budget ? 'warning' : 'red'} dimColor={hid} wrap="wrap">
+                {nt.budget ? nt.text : `error: ${nt.text}`}
+                {hid ? ' (dismissed)' : ''}
+              </Text>
+              {!hid && <Button key={`notice-dismiss-${nt.key}`} label="Dismiss" onPress={dismissLine([nt.dk])} />}
+            </Box>
+          )
+        })}
         {needsBlock}
         <Box flexWrap="wrap" columnGap={1}>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}

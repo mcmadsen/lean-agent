@@ -5,7 +5,8 @@ import { approvalOf, deskState, unconsumed } from './delivery'
 import { liveApproval } from './approvals'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
-import { peekNotice, readNotices } from './notices'
+import { peekNotice, readNoticeRows, readNotices } from './notices'
+import { dayOf } from './ledger'
 import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
@@ -41,7 +42,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string }
+export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -52,12 +53,15 @@ import type { Waiting } from './scripts'
 // model: a request for an expensive model (Approve / Deny, expensive.ts); deskmodel: the desk runs an expensive model and the mod could not
 // switch it (red)
 // action: a thread's request for the desk to send a typed remote write (deskactions.ts): Approve / Deny presses in the pane, or the desk's question
-export type NeedKind = 'approval' | 'question' | 'push' | 'blocked' | 'script' | 'context' | 'model' | 'deskmodel' | 'action'
-export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting; request?: ModelRequest; action?: ActionView }
+// dk: what Dismiss records and the view hides by (dismissstore.ts); every card has one
+export type NeedKind = 'approval' | 'question' | 'push' | 'blocked' | 'script' | 'context' | 'model' | 'deskmodel' | 'action' | 'stalled'
+export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting; request?: ModelRequest; action?: ActionView; dk?: DItem }
 // one thread's inbox: unread rows first, then at most READ_SHOWN read ones (`read` holds every read row that is not archived)
+// a line at the top of the pane that comes from a notice file (budget alert, restart that gave up, old-desk reminder, ...); budget: an alert, not an error
+export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean }
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -141,7 +145,8 @@ export function groupInbox(answers: AnswerRow[], now: number, titles: Map<string
 }
 
 import { STALE_MS } from './chaser'
-import { dismissedTs } from './dismiss'
+import { dismissedKeys, dismissedTs, dkey } from './dismissstore'
+import type { DItem } from './dismissstore'
 export { STALE_MS }
 const ID = /^t\d+$/
 
@@ -176,7 +181,7 @@ async function paneAck(h: Host, home: string): Promise<PaneAck> {
 }
 
 export async function loadView(h: Host): Promise<View> {
-  const v: View = { window: '', scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [], modelRequests: [] }
+  const v: View = { window: '', scripts: { candidates: 0, adopted: 0, needsUpdate: 0, waiting: [] }, projects: [], goals: [], answers: [], inbox: [], archived: 0, needs: [], openQuestions: [], unread: 0, total: 0, threads: [], closed: [], budget: 'n/a', spend: null, desk: { context: 0, limit: 0, model: '', effort: '', note: '' }, errors: [], dismissed: [], notices: [], dismissedNotices: [], modelRequests: [] }
   const guard = async (what: string, f: () => Promise<void>) => {
     try {
       await f()
@@ -307,6 +312,8 @@ export async function loadView(h: Host): Promise<View> {
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
       const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', isStuck(truth.word) ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       const apv = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
+      const isBlocked = !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv)
+      const dts = isBlocked ? await dismissedTs(h, home, t.id) : 0
       const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
       v.threads.push({
         ...(cv && cv.tokens !== undefined ? { ctx: cv.text, ctxLevel: cv.level } : {}), // (an unknown size says nothing on the card)
@@ -335,8 +342,10 @@ export async function loadView(h: Host): Promise<View> {
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
         asking: asking.has(t.id) || lr?.kind === 'ask',
-        blocked: !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv) && !((await dismissedTs(h, home, t.id)) >= lr.ts), // not once its approval ended: it carried on; not once the user dismissed THIS report (a newer blocked one shows again)
+        ...(isBlocked ? (dts >= lr!.ts ? { blocked: false, blockedDismissed: true } : { blocked: true }) : { blocked: false }), // not once its approval ended: it carried on; not once the user dismissed THIS report (a newer blocked one shows again)
         needsYou: !!ag?.needsYou && !paused,
+        ...(ag?.needsYou && !paused ? { waitId: `${t.sid}:${ag.agent.waitingFor || ag.agent.state}` } : {}),
+        ...(isStuck(truth.word) && agentsOk && t.state === 'open' && t.sid ? { stallId: String(t.lastWake) } : {}),
         ...(apv ? { approval: apv } : {}),
         ...(paused ? { pausedUntil: paused.resetAt } : {}),
         ...(typeof t.finished === 'number' && t.finished > 0 ? { finished: true } : {}), // reported done and was stopped: the next message starts a new session
@@ -387,11 +396,27 @@ export async function loadView(h: Host): Promise<View> {
   // what the mod set is information, not an error: a dim line at the top, not a red one (and not counted in a thread's status line)
   const setNote = await peekNotice(h, NOTICE_SET)
   if (setNote) v.deskModelSet = setNote
-  v.errors.push(...(await readNotices(h)).filter(n => n !== deskModelNote && n !== setNote))
+  const day = dayOf(now)
+  const allNotices: NoticeRow[] = (await readNoticeRows(h)).filter(n => n.text !== deskModelNote && n.text !== setNote).map(n => ({ key: n.key, text: n.text, dk: noticeDk(n.key, n.text, day), ...(BUDGET_KEY.test(n.key) ? { budget: true } : {}) }))
   // the inbox by thread, read rows older than a week hidden (they stay in inbox.jsonl)
   v.inbox = groupInbox(v.answers, now, new Map([...v.closed, ...v.threads].map(t => [t.id, t.title] as const))).groups
-  v.needs = needsOf(v)
+  // the user's Dismiss (dismissstore.ts): the card goes from `needs` (and from every count) until a newer item of its kind has another id
+  const all = needsOf(v)
+  const gone = await dismissedKeys(h, home, ['desk', ...v.threads.map(t => t.id), ...all.map(n => n.dk?.thread ?? ''), ...allNotices.map(n => n.dk.thread)].filter(Boolean)).catch(() => new Set<string>())
+  v.needs = all.filter(n => !(n.dk && gone.has(dkey(n.dk))))
+  v.dismissed = all.filter(n => n.dk && gone.has(dkey(n.dk)))
+  v.notices = allNotices.filter(n => !gone.has(dkey(n.dk)))
+  v.dismissedNotices = allNotices.filter(n => gone.has(dkey(n.dk)))
   return v
+}
+
+// a notice's dismiss identity: a restart that gave up belongs to its thread; a budget alert is also bound to the day (the next day's is a new one);
+// the text is the rest (a new threshold or a changed finding has other text, so it shows again)
+const BUDGET_KEY = /^budget/
+const noticeDk = (key: string, text: string, day: string): DItem => {
+  const m = /^restart-(t\d+)$/.exec(key)
+  if (m) return { thread: m[1]!, kind: 'restart', id: text }
+  return { thread: 'desk', kind: key === 'old-desk' ? 'olddesk' : 'notice', id: `${key}${BUDGET_KEY.test(key) ? `@${day}` : ''}:${text}` }
 }
 
 // what waits for the user, in the order the pane draws it: approvals, questions, ready reports, blocked threads, scripts, the desk's size
@@ -399,7 +424,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   const out: NeedRow[] = []
   const title = (id: string) => v.threads.find(t => t.id === id)?.title ?? ''
   // the desk itself runs an expensive model that the mod could not switch away from: first, red
-  if (v.deskModelRed) out.push({ key: `deskmodel:${v.deskModelRed.slice(0, 80)}`, kind: 'deskmodel', text: v.deskModelRed, notify: true })
+  if (v.deskModelRed) out.push({ key: `deskmodel:${v.deskModelRed.slice(0, 80)}`, kind: 'deskmodel', text: v.deskModelRed, notify: true, dk: { thread: 'desk', kind: 'deskmodel', id: v.deskModelRed.slice(0, 80) } })
   // a request for an expensive model: the user's Approve is the only way it runs (expensive.ts); a denied one stays until dismissed
   for (const r of v.modelRequests ?? []) {
     const what = `${r.model}${r.effort ? `/${r.effort}` : ''}`
@@ -410,24 +435,25 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
         : r.origin === 'tool'
           ? `${who} asks to run on ${what} (${r.family} is not sonnet or haiku, so it needs your approval): ${flat(r.reason).slice(0, 200)}`
           : `${who} was refused ${r.family} and reported blocked: ${flat(r.reason).slice(0, 200)}. Approve it to let ${who} go on, or deny it.`
-    out.push({ key: `model:${r.id}:${r.state}`, kind: 'model', ...(r.thread !== 'desk' ? { thread: r.thread } : {}), text, notify: r.state === 'pending', request: r })
+    out.push({ key: `model:${r.id}:${r.state}`, kind: 'model', ...(r.thread !== 'desk' ? { thread: r.thread } : {}), text, notify: r.state === 'pending', request: r, dk: { thread: r.thread, kind: 'model', id: `${r.id}:${r.state}` } })
   }
   // a thread's request for a remote write: the exact text is on the card; the thread's own "blocked" row is not shown on top of it
   const asking = new Set((v.actionRequests ?? []).map(r => r.thread))
   for (const r of v.actionRequests ?? []) {
     const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : `${r.thread} wants to ${r.headline}: ${r.text.length > 400 ? `${r.text.slice(0, 399)}… (${r.text.length} characters: the pane shows only the start, so it is approved in the desk's question, which shows all of it)` : r.text}`
-    out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text, notify: r.state === 'pending', action: r })
+    out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text, notify: r.state === 'pending', action: r, dk: { thread: r.thread, kind: 'action', id: `${r.id}:${r.state}` } })
   }
-  for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true })
-  for (const q of v.openQuestions) out.push({ key: `ask:${q.q}`, kind: 'question', thread: q.from, text: `${q.from ?? 'desk'} asks: ${flat(q.question ?? '')}`, notify: true })
-  for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true })
+  for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true, dk: { thread: t.id, kind: 'approval', id: String(t.recTs) } })
+  for (const q of v.openQuestions) out.push({ key: `ask:${q.q}`, kind: 'question', thread: q.from, text: `${q.from ?? 'desk'} asks: ${flat(q.question ?? '')}`, notify: true, dk: { thread: q.from ?? 'desk', kind: 'question', id: String(q.q) } })
+  for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true, dk: { thread: t.id, kind: 'ready', id: String(t.recTs) } })
   for (const t of v.threads) {
     if (t.approval || asking.has(t.id) || t.run === 'parked' || t.pausedUntil) continue
-    if (t.needsYou) out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true })
-    else if (t.blocked) out.push({ key: `blocked:${t.id}:${t.recTs}`, kind: 'blocked', thread: t.id, text: `${t.id} is blocked: ${t.lastReport.slice(0, 160)}`, notify: true })
+    if (t.needsYou) out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
+    else if (t.blocked || t.blockedDismissed) out.push({ key: `blocked:${t.id}:${t.recTs}`, kind: 'blocked', thread: t.id, text: `${t.id} is blocked: ${t.lastReport.slice(0, 160)}`, notify: true, dk: { thread: t.id, kind: 'blocked', id: String(t.recTs) } })
+    else if (t.stallId !== undefined) out.push({ key: `stalled:${t.id}:${t.stallId}`, kind: 'stalled', thread: t.id, text: `${t.id} is ${t.live}: ${t.liveNote || 'no progress'}`, notify: false, dk: { thread: t.id, kind: 'stalled', id: t.stallId } })
   }
-  for (const w of v.scripts.waiting.slice(0, 8)) out.push({ key: `script:${w.name}:${w.update ?? ''}`, kind: 'script', text: `${w.name}${w.update ? ` ${w.update}` : ''} (${w.project}) waits for you: ${flat(w.why).slice(0, 80)}`, notify: false, script: w })
-  if (v.desk.limit > 0 && (v.desk.context >= v.desk.limit || v.desk.note)) out.push({ key: 'context', kind: 'context', text: v.desk.note || `desk context ${Math.round(v.desk.context / 1000)}k is over its limit (${Math.round(v.desk.limit / 1000)}k)`, notify: false })
+  for (const w of v.scripts.waiting.slice(0, 8)) out.push({ key: `script:${w.name}:${w.update ?? ''}`, kind: 'script', text: `${w.name}${w.update ? ` ${w.update}` : ''} (${w.project}) waits for you: ${flat(w.why).slice(0, 80)}`, notify: false, script: w, dk: { thread: 'desk', kind: 'script', id: `${w.name}:${w.update ?? ''}:${w.sha.slice(0, 12)}` } })
+  if (v.desk.limit > 0 && (v.desk.context >= v.desk.limit || v.desk.note)) out.push({ key: 'context', kind: 'context', text: v.desk.note || `desk context ${Math.round(v.desk.context / 1000)}k is over its limit (${Math.round(v.desk.limit / 1000)}k)`, notify: false, dk: { thread: 'desk', kind: 'context', id: v.desk.note || 'over' } })
   return out
 }
 

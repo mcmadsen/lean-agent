@@ -42,6 +42,22 @@ export async function peekNotice(h: Host, key: string): Promise<string | null> {
   }
 }
 
+// every notice with its id (the file name without .txt), for the pane's Dismiss
+export async function readNoticeRows(h: Host): Promise<{ key: string; text: string }[]> {
+  try {
+    const d = dirOf(await homeDir(h))
+    const out: { key: string; text: string }[] = []
+    for (const e of await h.fs.list(d).catch(() => [])) {
+      if (e.kind === 'dir' || !e.name.endsWith('.txt')) continue
+      const t = await h.fs.read(`${d}/${e.name}`).catch(() => '')
+      if (typeof t === 'string' && t.trim()) out.push({ key: e.name.slice(0, -4), text: t.trim() })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 export async function readNotices(h: Host): Promise<string[]> {
   try {
     const d = dirOf(await homeDir(h))

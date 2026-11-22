@@ -197,6 +197,8 @@ const SCHEMA = {
     fill: { type: 'boolean', description: 'profile: add the servers and plugins the project\'s threads actually used' },
     all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },
     confirm: { type: 'boolean', description: 'project-private off: only after the user agreed' },
+    kind: { type: 'string', description: 'dismiss tN: which of its Needs-you items to hide: question | prompt | approval | blocked | stalled | restart | ready | model | action (without it: its current item). Only after the USER said to dismiss it' },
+    notice: { type: 'string', description: 'dismiss: hide a line at the top of the pane instead: its id (the notice file name, like budget-t5 or budget-daily) or all. Only after the USER said to' },
   },
   required: ['action'],
 }
