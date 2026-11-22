@@ -146,11 +146,11 @@ grep -qF '`action-list`' "$here/thread/SKILL.md" || fail "the thread skill must 
 grep -qF 'workers may read and edit' "$here/thread/SKILL.md" || fail "the thread skill must say workers may read and edit (no grant lines)"
 grep -qF 'Workers may read and edit' "$root/templates/front-desk.md" || fail "front-desk.md must say workers may read and edit (no grant lines)"
 grep -qF '`refusals`' "$here/doctor/SKILL.md" || fail "the doctor skill must list the refusals action"
-for k in ado-pr-reply ado-pr-comment ado-workitem-comment ado-workitem-update gh-pr-comment; do
+for k in ado-pr-reply ado-pr-thread-status ado-pr-comment ado-workitem-comment ado-workitem-update gh-pr-comment gh-pr-thread-resolve batch; do
   grep -qF "$k" "$root/templates/thread.md" || fail "thread.md lacks the action kind $k"
   grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
 done
-[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "5" ] || fail "the action table (PARAM_KEYS) must hold exactly five kinds"
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "8" ] || fail "the action table (PARAM_KEYS) must hold exactly eight kinds"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)

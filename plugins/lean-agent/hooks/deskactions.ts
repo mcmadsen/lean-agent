@@ -3,7 +3,7 @@
 // Why: Claude Code's own permission check (or the auto-mode classifier) denies a thread's remote write (a PR comment, a work item update),
 // and no hook can carry a desk yes past that verdict (see the changelog of 1.0.14). So the pattern that already works for pushes is used:
 // the thread asks, the user decides in the desk, and the mod itself runs the approved write (argv, never a shell, never a model, never the
-// thread's Bash). No model ever bypasses a permission check, and nothing but the five kinds below can be asked for.
+// thread's Bash). No model ever bypasses a permission check, and nothing but the kinds below can be asked for (a `batch` of up to 10 of them for one PR or work item is one request, one approval).
 //
 // The flow, and what makes it model-proof:
 //   1. The thread calls `lean_report` with `action: {kind, params, why}`. `addActionRequest` checks it against the fixed table (an unknown
@@ -34,39 +34,52 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'gh-pr-comment'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'gh-pr-comment' | 'gh-pr-thread-resolve' | 'batch'
+export const BATCH_MAX = 10
+// the thread statuses a PR thread may be set to: what the thread says -> the REST value of PATCH .../threads/<id>
+export const THREAD_STATUS: Record<string, string> = { active: 'active', fixed: 'fixed', wontfix: 'wontFix', closed: 'closed', bydesign: 'byDesign', pending: 'pending' }
+export const STATUS_NAMES = Object.values(THREAD_STATUS).join(', ')
 export const ACTION_KINDS: Record<ActionKind, string> = {
-  'ado-pr-reply': 'org, project, repo, pr, thread, body',
+  'ado-pr-reply': `org, project, repo, pr, thread, body, optional status (${STATUS_NAMES}: the desk then sets the thread's status, after the reply)`,
+  'ado-pr-thread-status': `org, project, repo, pr, thread, status (${STATUS_NAMES})`,
   'ado-pr-comment': 'org, project, repo, pr, body',
   'ado-workitem-comment': 'org, project, id, body',
   'ado-workitem-update': 'org, project, id, fields (state, assignedTo, tags, title; strings)',
   'gh-pr-comment': 'repo (owner/name), pr, body',
+  'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
+  batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item); one approval covers the list, run in order, stopped at the first failure`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
-  'ado-pr-reply': ['org', 'project', 'repo', 'pr', 'thread', 'body'],
+  'ado-pr-reply': ['org', 'project', 'repo', 'pr', 'thread', 'body', 'status'],
+  'ado-pr-thread-status': ['org', 'project', 'repo', 'pr', 'thread', 'status'],
   'ado-pr-comment': ['org', 'project', 'repo', 'pr', 'body'],
   'ado-workitem-comment': ['org', 'project', 'id', 'body'],
   'ado-workitem-update': ['org', 'project', 'id', 'fields'],
   'gh-pr-comment': ['repo', 'pr', 'body'],
+  'gh-pr-thread-resolve': ['repo', 'pr', 'thread'],
+  'batch': ['items'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
 export const kindsText = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => `${k} {${p}}`).join('; ')
 export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assignedTo: 'System.AssignedTo', tags: 'System.Tags', title: 'System.Title' }
 
 // what is sent: tool 'azure' = curl with a bearer token, 'github' = gh api
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string }
+// `steps` (a batch, or a reply with a status): the writes the mod makes in order, flat, each with its tag ("1", "2 reply", "2 status"); the hash covers all of them
+export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[] }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/ // control, zero-width and bidi characters: what the user reads is what is sent
 const NAME = /^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,99}$/
 const GH_REPO = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\/[A-Za-z0-9._-]{1,100}$/
+const GH_THREAD = /^[A-Za-z0-9_=-]{8,100}$/
 const enc = encodeURIComponent
 const refuse = (text: string): Checked => ({ ok: false, text })
 const hex = (b: Uint8Array): string => Array.from(b, x => x.toString(16).padStart(2, '0')).join('')
 export const hashOf = (s: string): string => hex(sha256(new TextEncoder().encode(s)))
 // the text the hash covers: everything that decides what is sent and where
-export const renderingOf = (p: Pick<Plan, 'method' | 'url' | 'contentType' | 'body'>): string => `${p.method} ${p.url}\n${p.contentType}\n${p.body}`
+export const renderingOf = (p: Pick<Plan, 'method' | 'url' | 'contentType' | 'body' | 'steps'>): string =>
+  p.steps ? p.steps.map((s, i) => `#${i + 1}/${p.steps!.length}\n${renderingOf(s)}`).join('\n---\n') : `${p.method} ${p.url}\n${p.contentType}\n${p.body}`
 
 const int = (v: unknown): number | null => {
   const n = typeof v === 'string' && /^\d{1,9}$/.test(v.trim()) ? Number(v.trim()) : v
@@ -79,6 +92,7 @@ export function checkAction(a: unknown): Checked {
   const kind = typeof x?.kind === 'string' ? x.kind.trim() : ''
   if (!x || !isKind(kind)) return refuse(`action kind ${kind ? `"${kind.slice(0, 40)}" ` : ''}is not one the desk can send for a thread. The kinds: ${kindsText()}. Anything else (a push, a merge, a delete, a settings change, any command) is not asked for this way`)
   const k = kind
+  if (k === 'batch') return checkBatch(x)
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
   if (!p) return refuse(`action ${k} needs params {${ACTION_KINDS[k]}}`)
   for (const key of Object.keys(p)) if (!PARAM_KEYS[k].includes(key)) return refuse(`action ${k}: unknown param "${key.slice(0, 30)}" (params: ${ACTION_KINDS[k]})`)
@@ -112,6 +126,18 @@ export function checkAction(a: unknown): Checked {
     params.body = body
     return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: `https://api.github.com/repos/${repo}/issues/${pr}/comments`, contentType: 'application/json', body: json({ body }), headline: `comment on GitHub PR ${repo}#${pr}`, text: body } }
   }
+  if (k === 'gh-pr-thread-resolve') {
+    const repo = typeof p.repo === 'string' ? p.repo.trim() : ''
+    const pr = num('pr')
+    const thread = typeof p.thread === 'string' ? p.thread.trim() : ''
+    if (!GH_REPO.test(repo) || pr === null || !GH_THREAD.test(thread)) return bad('repo must be owner/name, pr a number and thread the review thread node id (like PRRT_...)')
+    params.repo = repo
+    params.pr = pr
+    params.thread = thread
+    const text = `resolve review thread ${thread} of PR ${repo}#${pr}`
+    const query = 'mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }'
+    return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: 'https://api.github.com/graphql', contentType: 'application/json', body: json({ query, variables: { id: thread } }), headline: `resolve a review thread on GitHub PR ${repo}#${pr}`, text } }
+  }
   const az = azure()
   if (!az) return bad('org and project are required names')
   if (k === 'ado-workitem-comment' || k === 'ado-workitem-update') {
@@ -142,21 +168,63 @@ export function checkAction(a: unknown): Checked {
   }
   const repo = name('repo')
   const pr = num('pr')
-  const body = bodyOf()
+  const body = k === 'ado-pr-thread-status' ? '' : bodyOf()
   if (!repo || pr === null || body === null) return bad('repo must be a repository name, pr a number and body text')
   params.repo = repo
   params.pr = pr
   const where = `${az.org}/${az.project}/${repo}`
   const prs = `${az.base}/_apis/git/repositories/${enc(repo)}/pullRequests/${pr}`
-  if (k === 'ado-pr-reply') {
+  if (k === 'ado-pr-reply' || k === 'ado-pr-thread-status') {
     const thread = num('thread')
     if (thread === null) return bad('thread must be a PR thread number')
     params.thread = thread
+    const raw = typeof p.status === 'string' ? p.status.trim().toLowerCase() : p.status === undefined ? '' : null
+    const status = raw ? THREAD_STATUS[raw] : undefined
+    if (raw === null || (raw && !status) || (k === 'ado-pr-thread-status' && !status)) return bad(`status must be one of ${STATUS_NAMES}`)
+    if (status) params.status = status
+    const setStatus: Plan | null = status ? { tool: 'azure', method: 'PATCH', url: `${prs}/threads/${thread}?api-version=7.1`, contentType: 'application/json', body: json({ status }), headline: `set thread ${thread} of PR ${pr} to ${status} (${where})`, text: `set thread ${thread} of PR ${pr} to ${status}`, tag: 'status' } : null
+    if (k === 'ado-pr-thread-status') return { ok: true, kind: k, params, plan: setStatus! }
     params.body = body
-    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads/${thread}/comments?api-version=7.1`, contentType: 'application/json', body: json({ content: body, parentCommentId: 1, commentType: 1 }), headline: `reply to PR thread ${thread} on PR ${pr} (${where})`, text: body } }
+    const reply: Plan = { tool: 'azure', method: 'POST', url: `${prs}/threads/${thread}/comments?api-version=7.1`, contentType: 'application/json', body: json({ content: body, parentCommentId: 1, commentType: 1 }), headline: `reply to PR thread ${thread} on PR ${pr} (${where})`, text: body, tag: 'reply' }
+    if (!setStatus) return { ok: true, kind: k, params, plan: reply }
+    const steps = [reply, setStatus]
+    return { ok: true, kind: k, params, plan: { ...reply, url: steps.map(s => s.url).join(' ; '), headline: `reply to PR thread ${thread} on PR ${pr} and then set the thread to ${status} (${where})`, text: `${body}\n\nthen set the thread to ${status}`, tag: undefined, steps } }
   }
   params.body = body
   return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads?api-version=7.1`, contentType: 'application/json', body: json({ comments: [{ parentCommentId: 0, content: body, commentType: 1 }], status: 1 }), headline: `post a new comment on PR ${pr} (${where})`, text: body } }
+}
+
+// a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
+const targetOf = (kind: ActionKind, p: Params): string =>
+  kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
+function checkBatch(x: Record<string, unknown>): Checked {
+  const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
+  if (p) for (const key of Object.keys(p)) if (key !== 'items') return refuse(`action batch: unknown param "${key.slice(0, 30)}" (the batch takes items)`)
+  const items = Array.isArray(x.items) ? x.items : p && Array.isArray(p.items) ? p.items : null
+  if (!items || !items.length) return refuse(`action batch needs items: [{kind, params}, ...] (1 to ${BATCH_MAX}, of the other kinds: ${kindsText()})`)
+  if (items.length > BATCH_MAX) return refuse(`action batch holds at most ${BATCH_MAX} items (got ${items.length}): split it in two requests`)
+  const checked: Extract<Checked, { ok: true }>[] = []
+  for (const [i, it] of items.entries()) {
+    const kind = it && typeof it === 'object' ? (it as { kind?: unknown }).kind : undefined
+    if (kind === 'batch') return refuse(`batch item ${i + 1}: a batch cannot hold a batch`)
+    const c = checkAction(it)
+    if (!c.ok) return refuse(`batch item ${i + 1}: ${c.text}`)
+    checked.push(c)
+  }
+  const target = targetOf(checked[0]!.kind, checked[0]!.params)
+  for (const [i, c] of checked.entries()) {
+    const t = targetOf(c.kind, c.params)
+    if (t !== target) return refuse(`batch item ${i + 1} is for another target (${t}; item 1 is ${target}): one batch is for ONE PR or ONE work item, make a second request`)
+  }
+  const steps: Plan[] = checked.flatMap((c, i) => (c.plan.steps ?? [c.plan]).map(s => ({ ...s, tag: c.plan.steps ? `${i + 1} ${s.tag}` : `${i + 1}` })))
+  const n = checked.length
+  const text = checked.map((c, i) => `${i + 1}/${n} ${c.plan.headline}\n${c.plan.text}\n→ ${(c.plan.steps ?? [c.plan]).map(s => `${s.method} ${s.url}`).join(' ; ')}`).join('\n\n')
+  return {
+    ok: true,
+    kind: 'batch',
+    params: { items: checked.map(c => ({ kind: c.kind, params: c.params })) },
+    plan: { ...steps[0]!, url: steps.map(s => s.url).join(' ; '), headline: `do ${n} write${n === 1 ? '' : 's'} on ${target}, in this order`, text, tag: undefined, steps },
+  }
 }
 
 // ---- the stored request ---------------------------------------------------------------------------------------------------------------
@@ -164,7 +232,7 @@ export type ActionRequest = { id: string; thread: string; kind: ActionKind; para
 type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane'; ts: number; sig: string }
 export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired'
 // a request as the desk and the pane see it (never carries a signature)
-export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState }
+export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */ }
 
 const REQUESTS = 'action.requests'
 const answerKey = (id: string) => `action.answer.${id}`
@@ -223,7 +291,7 @@ const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0,
 export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<ActionView | null> {
   const plan = await sound(h, r)
   if (!plan) return null
-  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now) }
+  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}) }
 }
 // the requests that are not finished (the desk's list and the pane): pending, approved but not sent yet, and expired ones until they are told
 export async function listActions(h: Host, all = false): Promise<ActionView[]> {
@@ -239,11 +307,11 @@ export async function listActions(h: Host, all = false): Promise<ActionView[]> {
 // ---- what the user is asked, word for word -----------------------------------------------------------------------------------------------
 export const OPTION_LABELS = ['Approve', 'Deny', 'Edit first'] as const
 export const checkCode = (hash: string): string => hash.slice(0, 12)
-export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'>): { question: string; options: { label: string; description: string }[] } {
+export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number }): { question: string; options: { label: string; description: string }[] } {
   return {
     question: `${v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${v.text}\n---\nTarget: ${v.target}\nSend exactly this?`,
     options: [
-      { label: 'Approve', description: 'the desk sends exactly this text, once' },
+      { label: 'Approve', description: v.writes && v.writes > 1 ? `the desk sends exactly these ${v.writes} writes, in this order, once; it stops at the first failure` : 'the desk sends exactly this text, once' },
       { label: 'Deny', description: `${v.thread} is told it was denied and goes on without it` },
       { label: 'Edit first', description: `nothing is sent; tell ${v.thread} what to change, it sends a NEW request` },
     ],
@@ -359,6 +427,7 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
   if (plan.tool === 'github') {
     const r = await h.process.run(['gh', 'api', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', plan.url.replace('https://api.github.com/', ''), '--input', '-'], { stdin: plan.body, timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
     if (r.exitCode !== 0) return { ok: false, text: `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
+    if (plan.url.endsWith('/graphql')) return /"isResolved"\s*:\s*true/.test(r.stdout) ? { ok: true, text: 'thread resolved' } : { ok: false, text: `GitHub answered but the thread is not reported resolved: ${oneLine(r.stdout, 200)}` }
     return { ok: true, text: resultOf(r.stdout, 'html_url') }
   }
   const tok = await azureToken(h)
@@ -374,6 +443,40 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
     return UNKNOWN_EXIT.has(r.exitCode) ? { ok: false, unknown: true, text: `the connection broke after the request may have been sent (${why}): outcome unknown, check the target before asking again` } : { ok: false, text: `Azure DevOps refused or could not be reached: ${why}` }
   }
   return { ok: true, text: scrub(resultOf(r.stdout, 'url')) }
+}
+// a batch or a reply with a status: the writes in order, stopped at the first failure, each reported (done / failed with the reason / not run)
+type Ran = { sent: Sent; progress: boolean }
+async function runSteps(h: Host, plan: Plan): Promise<Ran> {
+  const steps = plan.steps!
+  const parts: string[] = []
+  let stopped = false
+  let progress = false
+  let unknown = false
+  for (const s of steps) {
+    const tag = s.tag ?? '?'
+    if (stopped) {
+      parts.push(`${tag}: not run`)
+      continue
+    }
+    let one: Sent
+    try {
+      one = await send(h, s)
+    } catch (e) {
+      one = { ok: false, unknown: true, text: `sending failed after it may have started: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
+    }
+    if (one.ok) {
+      progress = true
+      parts.push(`${tag}: done (${one.text})`)
+    } else {
+      stopped = true
+      if (one.unknown) {
+        progress = true
+        unknown = true
+      }
+      parts.push(`${tag}: ${one.unknown ? 'outcome unknown' : 'failed'} (${one.text})`)
+    }
+  }
+  return { sent: { ok: !stopped, ...(unknown ? { unknown: true } : {}), text: parts.join('; ') }, progress }
 }
 const resultOf = (out: string, urlField: string): string => {
   try {
@@ -412,6 +515,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   if (!claim.ok) return claim
   const { r, plan } = claim
   let sent: Sent
+  let progress = false // a composite request that already wrote something is never retried as a whole (it would write twice)
   try {
     // the used mark is written BEFORE the send (a crash mid-send never allows a second one); only a definite failure clears it again
     await h.store.set(usedKey(id), await h.clock.now())
@@ -421,18 +525,28 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   }
   try {
     // the check right before sending: what goes out is exactly what the user saw
-    sent = hashOf(renderingOf(plan)) === r.hash ? await send(h, plan) : { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
+    if (hashOf(renderingOf(plan)) !== r.hash) sent = { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
+    else if (plan.steps) {
+      const ran = await runSteps(h, plan)
+      sent = ran.sent
+      progress = ran.progress
+    } else sent = await send(h, plan)
   } catch (e) {
     sent = { ok: false, unknown: true, text: `sending failed after it may have started: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
   }
   try {
-    if (!sent.ok && !sent.unknown) await h.store.set(usedKey(id), null) // a definite failure that sent nothing is the only retry
+    if (!sent.ok && !sent.unknown && !progress) await h.store.set(usedKey(id), null) // a definite failure that sent nothing is the only retry
   } finally {
     inflight.delete(id)
   }
   await logHistory(h, r.thread, { kind: sent.ok ? 'action-sent' : sent.unknown ? 'action-unknown' : 'action-failed', id, action: r.kind, hash: checkCode(r.hash), target: plan.url, result: sent.text.slice(0, 300) })
   if (sent.ok && tell) await tell(r.thread, `The user approved your request ${id} and the desk sent it (${r.kind}): ${sent.text}. Carry on.`).catch(() => undefined)
   if (sent.unknown && tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved and sent, but the outcome is unknown (${sent.text}). Check the target before asking again.`).catch(() => undefined)
+  if (progress && !sent.ok && !sent.unknown) {
+    // some writes went out, one failed, the rest did not run: the request is used (never repeated whole); the thread asks for the rest as a NEW request
+    if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but only partly done: ${sent.text}. Nothing is repeated: make a NEW request for what did not run, if it is still needed.`).catch(() => undefined)
+    return { ok: false, text: `partly done: ${sent.text}. The request is marked used (never repeated whole); ${r.thread} was told to ask again for the rest` }
+  }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
   return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused for its 2 h: try again, or tell ${r.thread}` }
 }
