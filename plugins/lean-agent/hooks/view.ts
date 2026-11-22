@@ -18,8 +18,8 @@ import type { AgentRow, Thread } from './threads'
 import { deskChoice } from './models'
 import { isExpensiveModel, listRequests } from './expensive'
 import type { ModelRequest } from './expensive'
-import { listActions } from './deskactions'
-import type { ActionView } from './deskactions'
+import { listActions, standingView } from './deskactions'
+import type { ActionView, StandingView } from './deskactions'
 import { contextSize, deskNote, deskTokens } from './deskcompact'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
@@ -62,7 +62,7 @@ export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: stri
 export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean }
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[]; standing?: StandingView /* active grants and recent standing sends (deskactions.ts) */ }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -394,6 +394,11 @@ export async function loadView(h: Host): Promise<View> {
   await guard('action requests', async () => {
     const open = new Set(v.threads.map(t => t.id))
     v.actionRequests = (await listActions(h)).filter(r => open.has(r.thread))
+  })
+  // the user's standing approvals: the lines "sent under your standing approval: ..." and their Revoke buttons
+  await guard('standing approvals', async () => {
+    const s = await standingView(h)
+    v.standing = { ...s, grants: s.grants.filter(g => v.threads.some(t => t.id === g.thread)) }
   })
   // the header chip (the pinned model and effort, or what it really runs when that is another) and the context bar
   // (the model lookup is guarded on its own: the size, the limit and the "cannot compact" note, with its Restart desk button, never depend on it)

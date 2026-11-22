@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Standing approval for status changes.** A request of kind `ado-pr-thread-status` (fixed, closed, active) or `gh-pr-thread-resolve` can be allowed once for a PR: the card and the desk's question have a third choice, "Approve, and allow status changes on this PR for 24 h" (two presses in the pane); the mod stores a signed grant (thread, org / project / repo / pr, kinds, statuses, 24 h or until the thread closes) and logs it. Or the user writes a rule in `config.json`: `actions.standing: [{project, kinds, statuses}]` (sessions cannot write that file; a spec checks the guard). A covered request is sent by the mod at once by the same executor, reported to the thread, shown in the pane as "sent under your standing approval: ..." with a Revoke button, and never for anything that carries text; a batch only when every item is covered. `lean_thread action-list` shows the active grants.
+- A brief lint: `lean_thread new` / `send` text that asks for a forge write by script (curl, wget, `az rest`, `az repos|boards ...`, `gh api` with a write method, `gh pr comment|review|edit`) gets one warning line in the reply and the same line in the brief the thread receives.
+- `lean_doctor` row "N remembered items describe forge writes by script"; `lean_doctor fix` retires them in the store (a backup file is kept, the doctor log records it).
+
+### Changed
+- A refused forge write (a thread's or a subagent's) now says what to do: "forge writes go through the desk: lean_report with action {kind: ...}; the user approves, the mod sends it. Reads: lean_run ci, or a reader." The kinds come from the action table; the refusal record's rule id is `forge-write`. A subagent's curl / wget / `az rest` write to Azure DevOps or GitHub is refused too.
+- The thread guide, the thread skill and the desk guide name the action kinds: never curl / az / gh a forge write; a reply can carry `status` (one approval for reply + resolve); several writes for one PR are one `batch`; never brief a thread to curl a forge write.
+
+### Fixed
+- A remembered item that describes a forge write by script (saved memory from threads before the action kinds) is no longer passed on to a thread: its start prompt and handover show "(retired: forge writes go through action kinds)".
+- The desk's answer lookup no longer treats an inherited object property name as a choice label.
+
 ## 1.0.23
 
 ### Fixed

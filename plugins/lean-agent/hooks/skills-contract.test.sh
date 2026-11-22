@@ -153,6 +153,16 @@ done
 grep -qF 'Never curl / az / gh a forge write' "$root/templates/thread.md" || fail "thread.md must say a thread never curls / az / gh a forge write and requests the action kind"
 grep -qF 'never curl / az / gh a forge write' "$here/thread/SKILL.md" || fail "the thread skill must say never curl / az / gh a forge write; request the action kind"
 grep -qF 'Never brief a thread to curl / az / gh a forge write' "$root/templates/front-desk.md" || fail "front-desk.md must say never brief a thread to curl / az / gh a forge write; name the action kind"
+grep -qF 'with a standing approval' "$root/templates/front-desk.md" || grep -qF 'With a standing approval' "$root/templates/front-desk.md" || fail "front-desk.md must say that with a standing approval the desk does not ask the user again"
+grep -qF 'standing approvals' "$here/thread/SKILL.md" || fail "the thread skill must say action-list shows the standing approvals"
+# standing approval is model-proof: the grant is written in ONE place (deskactions.ts writeGrant, called by answerAction only: the pane press and the
+# human's answer to the desk question); no other source file touches the grant store; answerAction is called only by the pane and by bindAnswers
+[ "$(grep -c 'writeGrant(' "$root/hooks/deskactions.ts")" = "2" ] || fail "writeGrant must be defined once and called once (by answerAction) in deskactions.ts"
+[ "$(grep -n 'writeGrant(' "$root/hooks/deskactions.ts" | grep -vc 'async function writeGrant\|await writeGrant(h, r, now)')" = "0" ] || fail "writeGrant must be called only from answerAction"
+users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | tr '\n' ' ')
+[ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
+callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
+[ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
 [ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "8" ] || fail "the action table (PARAM_KEYS) must hold exactly eight kinds"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)

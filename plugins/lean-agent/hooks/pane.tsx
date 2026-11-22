@@ -26,7 +26,7 @@ import { denyRequest, grantModelApproval, removeRequest } from './expensive'
 import type { ModelRequest } from './expensive'
 // answerAction is called from here and from the desk's AskUserQuestion hook (bindAnswers) and from nowhere else: only the user's press or the
 // user's answer to the desk's question approves a thread's remote write (deskactions.ts)
-import { answerAction, approveAction } from './deskactions'
+import { STANDING_LABEL, answerAction, approveAction, revokeGrant } from './deskactions'
 import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
@@ -523,6 +523,27 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         sayModel(out.text, !out.ok)
         tell()
       })
+    // the third choice (a status change only): the same human decision, and the mod stores the signed grant (deskactions.ts, inside answerAction only)
+    const approveWriteStanding = (a: ActionView) =>
+      twoStep(`action:standing:${a.id}`, async () => {
+        resetViewCache()
+        const said = await answerAction(host, a.id, 'approve', 'pane', tellAction, true)
+        if (!said.ok) {
+          sayModel(said.text, true)
+          return tell()
+        }
+        const out = await approveAction(host, a.id, tellAction)
+        resetViewCache()
+        sayModel(`${out.text}; status changes on this PR are allowed for 24 h (Revoke in the pane)`, !out.ok)
+        tell()
+      })
+    const revokeStanding = (grant: string) => async () => {
+      resetViewCache()
+      const out = await revokeGrant(host, grant)
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    }
     const denyWrite = (a: ActionView) =>
       twoStep(`action:deny:${a.id}`, async () => {
         resetViewCache()
@@ -646,6 +667,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
             {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!ar && !(ar.state === 'pending' && ar.text.length > 400) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
+            {!!ar && ar.state === 'pending' && !!ar.standing && !(ar.text.length > 400) && <Button key={`action-standing-${ar.id}`} label={confirming(ui, `action:standing:${ar.id}`, now2) ? `Confirm: send, and allow status changes on this PR for 24 h` : STANDING_LABEL} onPress={approveWriteStanding(ar)} />}
             {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
             {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {n.kind === 'stalled' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
@@ -654,6 +676,26 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
       )
     }
+    // ---- the user's standing approvals (deskactions.ts): what the mod sent under one, and the grants still active, each with a Revoke button ----
+    const stand = v?.standing
+    const sentGrants = new Set((stand?.sent ?? []).map(s => s.grant).filter(Boolean))
+    const standingBlock =
+      stand && (stand.sent.length > 0 || stand.grants.length > 0) ? (
+        <Box key="standing-approvals" flexDirection="column">
+          {stand.sent.map(s => (
+            <Box key={`std-sent-${s.ts}-${s.thread}`} flexWrap="wrap" columnGap={1}>
+              <Text wrap="wrap">{`${s.thread}: ${s.text}`}</Text>
+              {!!s.grant && <Button key={`std-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={revokeStanding(s.grant)} />}
+            </Box>
+          ))}
+          {stand.grants.filter(g => !sentGrants.has(g.id)).map(g => (
+            <Box key={`std-grant-${g.id}`} flexWrap="wrap" columnGap={1}>
+              <Text dimColor wrap="wrap">{`${g.thread}: standing approval for status changes on ${g.scope.replace(/^(Azure DevOps|GitHub) /, '')} until ${new Date(g.exp).toISOString().slice(11, 16)} UTC`}</Text>
+              <Button key={`std-revoke-${g.id}`} label="Revoke" onPress={revokeStanding(g.id)} />
+            </Box>
+          ))}
+        </Box>
+      ) : null
     const needsBlock =
       needs.length > 0 ? (
         <Box flexDirection="column">
@@ -792,6 +834,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           )
         })}
         {needsBlock}
+        {standingBlock}
         <Box flexWrap="wrap" columnGap={1}>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}
           {doneThreads.length >= 2 && closable.length > 0 && (

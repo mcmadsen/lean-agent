@@ -14,7 +14,7 @@ import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
 import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 import { notePending } from './approvals'
-import { ACTION_KINDS, addActionRequest } from './deskactions'
+import { ACTION_KINDS, addActionRequest, runStanding } from './deskactions'
 import { logRefusal } from './feedback'
 import { missingOutputs, notDoneText } from './donecheck'
 
@@ -447,6 +447,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       // an `action` is a typed remote write for the DESK to send after the user's yes (deskactions.ts): checked against the fixed table first,
       // so a bad kind or param refuses the whole call (nothing is reported) and the thread fixes it
       let action: DeskAction | undefined
+      let standing = '' // set when a standing approval sent the request: the report is a progress note, not a block
+      let standingFail = ''
       if (i.action !== undefined) {
         if (str(i.state) !== 'blocked') return { ok: false, text: 'lean_report action needs state blocked (you wait for the user\'s yes, given at the desk)' }
         const made = await addActionRequest(h, id, i.action)
@@ -454,10 +456,19 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
           await logRefusal(h, { role: 'thread', rule: /^action kind /.test(made.text) ? 'action-unknown-kind' : 'action-refused', text: made.text.slice(0, 200), tool: 'lean_report', thread: id })
           return { ok: false, text: `lean_report action refused: ${made.text}` }
         }
-        action = { id: made.request!.id, kind: made.request!.kind, headline: made.request!.headline }
+        // the user's standing approval (a grant from the card / the question, or a rule in config.json) that covers EVERY write of the request: the
+        // mod sends it at once (deskactions.ts runStanding) and nothing is left for the user to answer
+        const std = await runStanding(h, made.request!.id).catch(() => null)
+        if (std?.sent) standing = std.line
+        else {
+          if (std) standingFail = std.line
+          action = { id: made.request!.id, kind: made.request!.kind, headline: made.request!.headline }
+        }
       }
       const approval = !action && str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
-      const rec = { ts, from: id, kind: 'report', text: str(i.text), state: str(i.state) || 'working', ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
+      const rText = standing ? `${str(i.text)}\n(${standing})` : str(i.text)
+      const rState = standing ? 'working' : str(i.state) || 'working'
+      const rec = { ts, from: id, kind: 'report', text: rText, state: rState, ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
       const failed = await writeReport(h, home, rec)
       if (failed) {
         await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
@@ -467,9 +478,9 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
-      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: str(i.state) || 'working', text: str(i.text), ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true)
+      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: rState, text: rText, ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true)
       const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
-      const waits = action ? ` Request ${action.id} (${action.headline}) waits for the user's yes at the desk. Stop and wait: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
+      const waits = standing ? ` ${standing}: nothing waits for the user, carry on.` : action ? `${standingFail ? ` ${standingFail}.` : ''} Request ${action.id} (${action.headline}) waits for the user's yes at the desk. Stop and wait: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
       const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
       return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : `${base}${waits ? (base.endsWith('.') ? '' : '.') + waits : ''}` }
     }

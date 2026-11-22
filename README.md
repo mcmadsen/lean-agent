@@ -268,8 +268,29 @@ no model ever bypasses a permission check, and no hook carries a decision.
 Not run live: the answer is read from the engine's typed `AskUserQuestion` result (`{questions, answers, response?, annotations?}`, as
 `next(e)` of a `tool.call` hook resolves it; the 1.0.14 note that `classic.PostToolUse` carries `tool_response.answers` is the same
 data); the specs drive a stand-in for that tool beneath the plugin. If a real session's result turns out not to carry the answers, the
-desk says so ("could not be read by the mod") and the pane's Approve / Deny on the card is the human's decision instead. Not covered: a
-PR thread's *status* change (fixed / closed) after a reply is outside the five kinds and stays a manual step.
+desk says so ("could not be read by the mod") and the pane's Approve / Deny on the card is the human's decision instead.
+
+#### Standing approval for status changes (never for text)
+
+"Ask nothing of me" for the low-risk writes: only `ado-pr-thread-status` (status fixed, closed or active) and `gh-pr-thread-resolve`, never a
+reply, a comment, a work item update or any kind that carries text. Two ways, and both are the user's own act:
+
+- **From the card.** A Needs-you card of such a request (and the desk's question) has a third choice, "Approve, and allow status changes on
+  this PR for 24 h" (two presses in the pane). The mod sends this request and stores a signed grant {thread, org / project / repo / pr (or
+  the GitHub repo and pr), kinds, statuses, expiry}: valid 24 h or until the thread closes, for that thread and that PR only, logged in the
+  thread's `history.jsonl` (`standing-grant`). A tool cannot create one: no action kind, report or message writes the grant store, and a
+  spec (in `skills-contract.test.sh`) keeps the writer to the human's answer (the pane press, or the answer to the desk's question as the
+  tool result carries it).
+- **A rule you write by hand** in `~/.lean-agent/config.json` (sessions cannot write that file; the guard refuses it):
+  `"actions": { "standing": [{ "project": "Shop App", "kinds": ["ado-pr-thread-status"], "statuses": ["fixed"] }] }`. `project` is the
+  Azure DevOps project (for `gh-pr-thread-resolve`: the repo, `owner/name` or the name, or the lean-agent project of the thread). The rule
+  is not bound to a thread or a PR. Only fixed, closed and active can be named.
+
+With a grant or a rule, a request of those kinds is executed by the mod at once, by the same executor as an approved request (signature,
+hash re-check, token on stdin), reported to the thread in the `lean_report` reply, and shown in the pane as "sent under your standing
+approval: set thread 7 of PR 42 to fixed" with a **Revoke** button for a grant (a rule is removed by editing `config.json`). A `batch` is
+covered only when EVERY item is covered; one reply or comment in it, another PR, another thread (for a grant) or another status and the
+user is asked as usual. `lean_thread action-list` shows the active grants and the number of rules; the desk does not ask again.
 
 Avoidable blocks: `lean_doctor refusals` groups the guard's recorded refusals by pattern with a count and a one-line fix, and the
 doctor shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). Every refusal of the execution model
@@ -885,6 +906,11 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   update the plain non-secret values are moved into the `env` block (the doctor names them), commands and secrets stay in the file.
 
 ## Troubleshooting
+
+- **A thread's `curl` / `az` / `gh` was refused with "forge writes go through the desk"** (refusal rule `forge-write`): a thread never makes a forge write
+  by script; it asks with `lean_report` and `action: {kind, params}` (`ado-pr-reply` with an optional `status`, `ado-pr-thread-status`, ... `batch`), the user
+  approves, the mod sends it. A brief or a remembered note that says to curl a status change is stale: `lean_thread new` / `send` flags such a brief, a thread's
+  start prompt shows such a remembered item as "(retired: forge writes go through action kinds)", and `lean_doctor` counts them (`fix` retires them in the store, with a backup).
 
 - **Restarting the desk starts it on opus again**: the pane header and `lean_doctor check` say why ("pin applied at start", "the app chose it, the pin could not be applied: <reason>", or "you chose it by hand ... (kept for this session)"). A model the app applies before your first prompt is never taken for your choice and the pin is applied; if it cannot be, a red row says what failed, then pick Sonnet in the model menu. `lean_doctor fix` tries the pin again.
 

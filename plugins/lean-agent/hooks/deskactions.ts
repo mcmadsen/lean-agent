@@ -21,7 +21,7 @@
 //
 // Never grantable this way: pushes, tags, releases (the push gate), merges, deletes, permission or settings changes, anything outside the
 // table. The token of Azure DevOps goes to curl on STDIN only (a curl config), never in an argument list, a log or an output.
-import { appendJsonl, homeDir, threadsDir } from './state'
+import { appendJsonl, homeDir, leanDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
@@ -229,10 +229,19 @@ function checkBatch(x: Record<string, unknown>): Checked {
 
 // ---- the stored request ---------------------------------------------------------------------------------------------------------------
 export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string }
-type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane'; ts: number; sig: string }
+type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string }
 export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired'
 // a request as the desk and the pane see it (never carries a signature)
-export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */ }
+export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */ }
+
+// ---- standing approval: ONLY a status change carries it (never text) ------------------------------------------------------------------------
+// The kinds and statuses that can be covered: a thread status to fixed / closed / active, a GitHub review thread resolved. Never a reply, a comment, a
+// work item update or any other status; a batch is covered only when EVERY item is one of these and covered.
+export const STANDING_KINDS: ActionKind[] = ['ado-pr-thread-status', 'gh-pr-thread-resolve']
+export const STANDING_STATUSES = ['fixed', 'closed', 'active']
+export const STANDING_TTL_MS = 24 * 60 * 60 * 1000
+export const STANDING_LABEL = 'Approve, and allow status changes on this PR for 24 h'
+export const standingEligible = (kind: ActionKind, p: Params): boolean => kind === 'gh-pr-thread-resolve' || (kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status)))
 
 const REQUESTS = 'action.requests'
 const answerKey = (id: string) => `action.answer.${id}`
@@ -291,7 +300,7 @@ const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0,
 export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<ActionView | null> {
   const plan = await sound(h, r)
   if (!plan) return null
-  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}) }
+  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}) }
 }
 // the requests that are not finished (the desk's list and the pane): pending, approved but not sent yet, and expired ones until they are told
 export async function listActions(h: Host, all = false): Promise<ActionView[]> {
@@ -307,13 +316,15 @@ export async function listActions(h: Host, all = false): Promise<ActionView[]> {
 // ---- what the user is asked, word for word -----------------------------------------------------------------------------------------------
 export const OPTION_LABELS = ['Approve', 'Deny', 'Edit first'] as const
 export const checkCode = (hash: string): string => hash.slice(0, 12)
-export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number }): { question: string; options: { label: string; description: string }[] } {
+export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean }): { question: string; options: { label: string; description: string }[] } {
+  const standing = v.standing ? [{ label: STANDING_LABEL, description: `the desk sends exactly this text, once; and ${v.thread}'s later status changes on this PR (fixed, closed, active) are sent without asking, for 24 h or until it closes (never a reply or any text)` }] : []
   return {
     question: `${v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${v.text}\n---\nTarget: ${v.target}\nSend exactly this?`,
     options: [
       { label: 'Approve', description: v.writes && v.writes > 1 ? `the desk sends exactly these ${v.writes} writes, in this order, once; it stops at the first failure` : 'the desk sends exactly this text, once' },
       { label: 'Deny', description: `${v.thread} is told it was denied and goes on without it` },
       { label: 'Edit first', description: `nothing is sent; tell ${v.thread} what to change, it sends a NEW request` },
+      ...standing,
     ],
   }
 }
@@ -360,7 +371,7 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
 
 // ---- the human's answer ---------------------------------------------------------------------------------------------------------------------
 // ONLY bindAnswers (the desk's AskUserQuestion result) and answerAction (the pane's press) write an answer. First answer wins.
-export async function answerAction(h: Host, id: string, answer: 'approve' | 'deny' | 'edit', by: 'ask' | 'pane', tell?: Tell): Promise<{ ok: boolean; text: string }> {
+export async function answerAction(h: Host, id: string, answer: 'approve' | 'deny' | 'edit', by: 'ask' | 'pane', tell?: Tell, standing = false): Promise<{ ok: boolean; text: string }> {
   const rec = await exclusive(async () => {
     const r = (await rows(h)).find(x => x.id === id)
     if (!r) return { ok: false as const, text: `no request ${id}` }
@@ -368,20 +379,23 @@ export async function answerAction(h: Host, id: string, answer: 'approve' | 'den
     if (!(await sound(h, r))) return { ok: false as const, text: `request ${id} does not verify (not signed by this mod, or its text changed): refused` }
     const st = await stateOf(h, r, now)
     if (st !== 'pending') return { ok: false as const, text: `request ${id} is ${st}: no answer recorded` }
+    if (standing && (answer !== 'approve' || !standingEligible(r.kind, r.params))) return { ok: false as const, text: `request ${id} cannot carry a standing approval (only a thread status change to fixed, closed or active, or resolving a GitHub review thread): no answer recorded` }
     const base = { id: r.id, hash: r.hash, answer, by, ts: now }
     const sig = await macOf(h, answerText(base), true)
     if (!sig) return { ok: false as const, text: 'no key to sign the answer with' }
     await h.store.set(answerKey(r.id), { ...base, sig } satisfies Answer)
+    if (standing && !(await writeGrant(h, r, now))) return { ok: true as const, r, noGrant: true }
     return { ok: true as const, r }
   })
   if (!rec.ok) return rec
   const { r } = rec
   await logHistory(h, r.thread, { kind: `action-${answer}`, id, action: r.kind, hash: checkCode(r.hash), by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk' })
+  if (standing && !('noGrant' in rec)) await logHistory(h, r.thread, { kind: 'standing-grant', id, action: r.kind, scope: targetOf(r.kind, r.params), statuses: r.kind === 'gh-pr-thread-resolve' ? undefined : STANDING_STATUSES, by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk', hours: 24 })
   if (answer === 'deny' && tell) await tell(r.thread, `The user denied your request ${id} (${r.kind}): nothing was sent. Denied: report blocked if you cannot go on, or continue without it. Do not send the same text again.`).catch(() => undefined)
-  return { ok: true, text: answer === 'approve' ? `the user approved ${id}: call lean_thread approve-action ${id} to send it` : answer === 'deny' ? `the user denied ${id}; ${r.thread} was told` : `the user wants to edit ${id} first: nothing is sent; ask what to change, then tell ${r.thread} (send) to make a NEW request with the changed text` }
+  return { ok: true, text: answer === 'approve' ? `the user approved ${id}${standing ? ` and allowed status changes of ${r.thread} on this PR for 24 h (or until it closes)` : ''}: call lean_thread approve-action ${id} to send it` : answer === 'deny' ? `the user denied ${id}; ${r.thread} was told` : `the user wants to edit ${id} first: nothing is sent; ask what to change, then tell ${r.thread} (send) to make a NEW request with the changed text` }
 }
 
-const LABEL: Record<string, 'approve' | 'deny' | 'edit'> = { Approve: 'approve', Deny: 'deny', 'Edit first': 'edit' }
+const LABEL: Record<string, 'approve' | 'deny' | 'edit' | 'approve-standing'> = { Approve: 'approve', Deny: 'deny', 'Edit first': 'edit', [STANDING_LABEL]: 'approve-standing' }
 type Q = { question?: unknown; options?: unknown }
 // The desk's AskUserQuestion, after the user answered it: `questions` is what was asked, `answers` the tool result's (question text -> the
 // label chosen). An answer is recorded only for a question that names exactly ONE pending request, with its id, its check code and its exact
@@ -402,7 +416,7 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
       continue
     }
     const a = typeof given[text] === 'string' ? (given[text] as string).trim() : ''
-    const answer = LABEL[a]
+    const answer = Object.prototype.hasOwnProperty.call(LABEL, a) ? LABEL[a] : undefined
     if (!answer) continue // free text, no choice: nothing is decided by it
     const v = await viewOf(h, r, now)
     // the question must be the canonical one (questionOf): the desk model may not frame the text or the options differently
@@ -413,10 +427,152 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
       notes.push(`the answer to the question about ${r.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`)
       continue
     }
-    const o = await answerAction(h, r.id, answer, 'ask', tell)
+    const o = await answerAction(h, r.id, answer === 'approve-standing' ? 'approve' : answer, 'ask', tell, answer === 'approve-standing') // (the third choice exists only in the canonical question of an eligible request, checked above)
     notes.push(o.text)
   }
   return notes
+}
+
+// ---- standing approval: the grant and the user's own rule ---------------------------------------------------------------------------------------
+// A GRANT is signed (the mod's key) and written by writeGrant, which only answerAction calls: the pane's third press, or the third choice of the
+// desk's question as the human answered it (bindAnswers reads the tool result). No lean_report, lean_thread action or message creates one, and
+// writeGrant is not exported (a spec reads the sources to keep it so). A RULE is what the user wrote by hand in config.json `actions.standing`
+// (a session cannot write that file: the guard refuses it). With either, a request of the two status kinds is sent by the mod at once, by the
+// SAME executor (approveAction: signature, hash re-check, token on stdin). A batch is covered only when EVERY item is.
+type Grant = { id: string; thread: string; scope: string; kinds: ActionKind[]; statuses: string[]; ts: number; exp: number; sig: string }
+type SentRec = { ts: number; thread: string; text: string; grant?: string }
+const GRANTS = 'action.grants'
+const SENT = 'action.standing.sent'
+const SENT_SHOWN_MS = 30 * 60 * 1000
+const grantText = (g: Omit<Grant, 'sig'>) => `desk-standing\n${g.id}\n${g.thread}\n${g.scope}\n${g.kinds.join(',')}\n${g.statuses.join(',')}\n${g.ts}\n${g.exp}`
+let gseq = 0
+
+// the grants that verify and have not expired (a forged or edited row is not a grant)
+async function grantRows(h: Host, now: number): Promise<Grant[]> {
+  const v = await h.store.get(GRANTS).catch(() => null)
+  const out: Grant[] = []
+  for (const g of Array.isArray(v) ? v : []) {
+    if (!g || typeof g.id !== 'string' || !threadOk(g.thread) || typeof g.scope !== 'string' || !Array.isArray(g.kinds) || !Array.isArray(g.statuses) || !Number.isFinite(g.ts) || !Number.isFinite(g.exp) || typeof g.sig !== 'string' || now > g.exp) continue
+    if (![...g.kinds, ...g.statuses].every(x => typeof x === 'string')) continue
+    const want = await macOf(h, grantText(g), false)
+    if (want && want.length === g.sig.length && want === g.sig) out.push(g)
+  }
+  return out
+}
+async function writeGrant(h: Host, r: ActionRequest, now: number): Promise<boolean> {
+  const scope = targetOf(r.kind, r.params)
+  const base = { id: `g${now}-${++gseq}`, thread: r.thread, scope, kinds: [r.kind], statuses: r.kind === 'gh-pr-thread-resolve' ? [] : [...STANDING_STATUSES], ts: now, exp: now + STANDING_TTL_MS }
+  const sig = await macOf(h, grantText(base), true)
+  if (!sig) return false
+  const all = (await grantRows(h, now)).filter(g => !(g.thread === r.thread && g.scope === scope && g.kinds.join() === base.kinds.join()))
+  await h.store.set(GRANTS, [...all, { ...base, sig }].slice(-20))
+  return true
+}
+
+type Rule = { project: string; kinds: ActionKind[]; statuses: string[] }
+async function configRules(h: Host): Promise<Rule[]> {
+  const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
+  const raw = cfg && typeof cfg === 'object' ? (cfg.actions?.standing ?? cfg['actions.standing']) : null
+  const rules: Rule[] = []
+  for (const x of Array.isArray(raw) ? raw : []) {
+    if (!x || typeof x !== 'object' || typeof x.project !== 'string' || !x.project.trim() || !Array.isArray(x.kinds)) continue
+    const kinds = x.kinds.filter((k: unknown): k is ActionKind => typeof k === 'string' && (STANDING_KINDS as string[]).includes(k))
+    const statuses = (Array.isArray(x.statuses) ? x.statuses : []).map((s: unknown) => String(s).toLowerCase()).filter((s: string) => STANDING_STATUSES.includes(s))
+    if (kinds.length) rules.push({ project: x.project.trim().toLowerCase(), kinds, statuses })
+  }
+  return rules
+}
+
+export type Cover = { label: string; grant?: string }
+// does a grant or a rule of the user cover EVERY write of this request? null: no (the user is asked as usual)
+export async function standingCover(h: Host, thread: string, kind: ActionKind, params: Params): Promise<Cover | null> {
+  const items: { kind: unknown; params: Params }[] | null = kind !== 'batch' ? [{ kind, params }] : Array.isArray(params.items) && params.items.length ? (params.items as { kind: unknown; params: Params }[]) : null
+  if (!items) return null
+  const now = await h.clock.now()
+  const grants = (await grantRows(h, now)).filter(g => g.thread === thread)
+  const rules = await configRules(h)
+  const tp = (await readJson<{ project?: unknown }>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, {}).catch(() => ({}) as { project?: unknown })).project
+  const tproject = typeof tp === 'string' ? tp.toLowerCase() : ''
+  let label = ''
+  let grant: string | undefined
+  for (const it of items) {
+    const k = it?.kind
+    const p = it?.params && typeof it.params === 'object' ? it.params : {}
+    if (!isKind(k) || !STANDING_KINDS.includes(k) || !standingEligible(k, p)) return null // a reply, a comment, any other status: always asked
+    const scope = targetOf(k, p)
+    const g = grants.find(x => x.scope === scope && x.kinds.includes(k) && (k === 'gh-pr-thread-resolve' || x.statuses.includes(String(p.status))))
+    if (g) {
+      grant = grant ?? g.id
+      label = label || `grant ${g.id}`
+      continue
+    }
+    const named = k === 'gh-pr-thread-resolve' ? [String(p.repo ?? '').toLowerCase(), String(p.repo ?? '').toLowerCase().split('/')[1] ?? ''] : [String(p.project ?? '').toLowerCase()]
+    const rule = rules.find(x => x.kinds.includes(k) && (named.includes(x.project) || tproject === x.project) && (k === 'gh-pr-thread-resolve' || x.statuses.includes(String(p.status))))
+    if (!rule) return null
+    label = label || 'your config.json rule'
+  }
+  return { label, ...(grant ? { grant } : {}) }
+}
+
+// a request that was just made: when the user's standing approval covers it, the mod answers (signed, by 'standing') and sends it at once.
+// Returns null when it is not covered (the user is asked), else whether it went out and the line for the thread and the pane.
+export async function runStanding(h: Host, id: string): Promise<{ sent: boolean; line: string } | null> {
+  const r = (await rows(h)).find(x => x.id === id)
+  if (!r) return null
+  const plan = await sound(h, r)
+  if (!plan) return null
+  const cover = await standingCover(h, r.thread, r.kind, r.params)
+  if (!cover) return null
+  const now = await h.clock.now()
+  const claimed = await exclusive(async () => {
+    if ((await stateOf(h, r, now)) !== 'pending') return false
+    const base = { id, hash: r.hash, answer: 'approve' as const, by: 'standing' as const, ts: now }
+    const sig = await macOf(h, answerText(base), true)
+    if (!sig) return false
+    await h.store.set(answerKey(id), { ...base, sig } satisfies Answer)
+    return true
+  })
+  if (!claimed) return null
+  await logHistory(h, r.thread, { kind: 'action-approve', id, action: r.kind, hash: checkCode(r.hash), by: `standing approval (${cover.label})` })
+  const out = await approveAction(h, id)
+  const what = (plan.steps ?? [plan]).map(s => s.text).join('; ')
+  if (!out.ok) return { sent: false, line: `sent under your standing approval FAILED: ${out.text}` }
+  const line = `sent under your standing approval: ${what}`
+  const prev = await h.store.get(SENT).catch(() => null)
+  await h.store.set(SENT, [...(Array.isArray(prev) ? prev : []), { ts: now, thread: r.thread, text: line, ...(cover.grant ? { grant: cover.grant } : {}) } satisfies SentRec].slice(-10))
+  await logHistory(h, r.thread, { kind: 'standing-sent', id, action: r.kind, by: cover.label, result: what.slice(0, 300) })
+  return { sent: true, line }
+}
+
+// what the pane and `action-list` show: the active grants, and the recent standing sends (each with its grant while that is still active)
+export type StandingView = { grants: { id: string; thread: string; scope: string; statuses: string[]; exp: number }[]; sent: { ts: number; thread: string; text: string; grant?: string }[]; rules: number }
+export async function standingView(h: Host): Promise<StandingView> {
+  const now = await h.clock.now()
+  const grants = await grantRows(h, now)
+  const active = new Set(grants.map(g => g.id))
+  const sentRaw = await h.store.get(SENT).catch(() => null)
+  const sent = (Array.isArray(sentRaw) ? (sentRaw as SentRec[]) : []).filter(s => s && typeof s.text === 'string' && Number.isFinite(s.ts) && now - s.ts <= SENT_SHOWN_MS).map(s => ({ ts: s.ts, thread: String(s.thread), text: s.text, ...(s.grant && active.has(s.grant) ? { grant: s.grant } : {}) }))
+  return { grants: grants.map(g => ({ id: g.id, thread: g.thread, scope: g.scope, statuses: g.statuses, exp: g.exp })), sent, rules: (await configRules(h)).length }
+}
+// revoking only ever takes power away: the pane's Revoke button
+export async function revokeGrant(h: Host, id: string): Promise<{ ok: boolean; text: string }> {
+  const g = await exclusive(async () => {
+    const all = await grantRows(h, await h.clock.now())
+    const hit = all.find(x => x.id === id)
+    if (!hit) return null
+    await h.store.set(GRANTS, all.filter(x => x.id !== id))
+    return hit
+  })
+  if (!g) return { ok: false, text: `no active standing approval ${id}` }
+  await logHistory(h, g.thread, { kind: 'standing-revoked', id, scope: g.scope, by: 'user, in the pane' })
+  return { ok: true, text: `revoked the standing approval for ${g.thread} on ${g.scope}: its status changes are asked again` }
+}
+// a thread that closed keeps no standing approval
+export async function dropGrants(h: Host, thread: string): Promise<void> {
+  await exclusive(async () => {
+    const all = await grantRows(h, await h.clock.now())
+    if (all.some(g => g.thread === thread)) await h.store.set(GRANTS, all.filter(g => g.thread !== thread))
+  })
 }
 
 // ---- the desk sends ---------------------------------------------------------------------------------------------------------------------------
@@ -576,13 +732,15 @@ export async function actionListText(h: Host, tell?: Tell): Promise<string> {
     }
   }
   const list = await listActions(h)
-  if (!list.length) return 'no request waits for the user'
-  return list
+  const st = await standingView(h).catch(() => null)
+  const stand = st && (st.grants.length || st.rules) ? `\nstanding approvals (a request they cover is sent by the mod at once: do not ask the user again):${st.grants.map(g => `\n  ${g.id} · ${g.thread} · ${g.scope} · status changes (${g.statuses.join(', ') || 'resolve'}) · until ${new Date(g.exp).toISOString().slice(0, 16).replace('T', ' ')} UTC (or the thread closes); the user revokes it in the pane`).join('')}${st.rules ? `\n  ${st.rules} rule${st.rules === 1 ? '' : 's'} in config.json actions.standing (written by the user)` : ''}` : ''
+  if (!list.length) return `no request waits for the user${stand}`
+  return `${list
     .map(v => {
       const head = `${v.id} · ${v.thread} · ${v.kind} · ${v.state}${v.why ? ` · why: ${cut(v.why, 160)}` : ''}`
       if (v.state === 'approved') return `${head}\n  the user approved it: call lean_thread approve-action ${v.id}`
       const q = questionOf(v)
       return `${head}\n  AskUserQuestion, question (paste it exactly): ${JSON.stringify(q.question)}\n  options (exactly these labels): ${q.options.map(o => `${o.label}: ${o.description}`).join(' | ')}`
     })
-    .join('\n')
+    .join('\n')}${stand}`
 }

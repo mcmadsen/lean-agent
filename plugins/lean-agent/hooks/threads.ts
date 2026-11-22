@@ -9,7 +9,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
-import { actionListText, approveAction, dropActions } from './deskactions'
+import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
@@ -980,6 +980,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           t.state = 'closed'
           await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
           await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
+          await dropGrants(h, id).catch(() => undefined) // and its standing approvals end with it
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null
