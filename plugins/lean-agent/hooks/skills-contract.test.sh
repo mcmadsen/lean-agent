@@ -150,6 +150,9 @@ for k in ado-pr-reply ado-pr-thread-status ado-pr-comment ado-workitem-comment a
   grep -qF "$k" "$root/templates/thread.md" || fail "thread.md lacks the action kind $k"
   grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
 done
+grep -qF 'Never curl / az / gh a forge write' "$root/templates/thread.md" || fail "thread.md must say a thread never curls / az / gh a forge write and requests the action kind"
+grep -qF 'never curl / az / gh a forge write' "$here/thread/SKILL.md" || fail "the thread skill must say never curl / az / gh a forge write; request the action kind"
+grep -qF 'Never brief a thread to curl / az / gh a forge write' "$root/templates/front-desk.md" || fail "front-desk.md must say never brief a thread to curl / az / gh a forge write; name the action kind"
 [ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "8" ] || fail "the action table (PARAM_KEYS) must hold exactly eight kinds"
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
