@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.23
 
 ### Fixed
 - **A restarted desk stayed on opus.** The model the app applies when a session starts (its default or last-used model) can arrive as a `command` / `picker` switch; 1.0.20 took that for "the person chose it by hand" and switched the pin off for the session. Now a switch counts as by hand only after the session's first prompt and only with source `command` / `picker`; anything before is the app's choice and the pin (sonnet / high, config `desk` wins) is applied at session start and again at the first prompt, before the turn runs. A by-hand choice is kept for that session only and forgotten by the next one. A pin that cannot be applied is a red "Needs you" row that names what failed ("the Model row refused: ...", "the session is still on opus after the Model row was set") and says to pick Sonnet in the model menu.
