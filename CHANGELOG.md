@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.24
 
 ### Added
 - **Standing approval for status changes.** A request of kind `ado-pr-thread-status` (fixed, closed, active) can be allowed once for a PR (a GitHub `gh-pr-thread-resolve` is always asked: its PR cannot be checked from the request): the card and the desk's question have a third choice, "Approve, and allow status changes on this PR for 24 h" (two presses in the pane); the mod stores a signed grant (thread, org / project / repo / pr, kinds, statuses, 24 h or until the thread closes) and logs it. Or the user writes a rule in `config.json`: `actions.standing: [{project, kinds, statuses}]` (sessions cannot write that file; a spec checks the guard). A covered request is sent by the mod at once by the same executor, reported to the thread, shown in the pane as "sent under your standing approval: ..." with a Revoke button, and never for anything that carries text; a batch only when every item is covered. `lean_thread action-list` shows the active grants.
