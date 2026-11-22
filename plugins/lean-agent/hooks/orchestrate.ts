@@ -5,6 +5,7 @@ import { plainPipeline } from './shell'
 import { jobOf, retryDenial, retryRan, retryReset, stepBudget, stepNote } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
+import { forgeRefusal, isForgeWrite } from './forgewrite'
 
 export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
 export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[] } // projects: the registered projects' folders (only to name a path's kind in a refusal record)
@@ -307,6 +308,7 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   }
   if (t === 'Bash') {
     const bad = bashBad(ctx, String(e.command ?? ''))
+    if (bad && isForgeWrite(String(e.command ?? ''))) return forgeRefusal() + tried(triedWords(bad)) // a forge write: say what to do instead (the action kinds)
     return bad ? BASH_STEP + bashInstead(bad) + tried(triedWords(bad)) : null
   }
   return null

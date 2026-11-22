@@ -7,6 +7,7 @@ import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyFo
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
+import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { jobOf } from './jobs'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -907,6 +908,7 @@ export function forgeTried(c: string): string {
 async function neverDenial($: Host, c: string): Promise<string | null> {
   const a = analyze(c)
   if (a.push || PUSH.test(c)) return 'lean-agent: a subagent never pushes; report to the thread (the desk pushes after the review)'
+  if (isForgeWrite(c)) return forgeRefusal() + tried(forgeTried(c))
   if (a.write) return `lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread${tried(forgeTried(c))}`
   for (const m of c.matchAll(GIT_TAG)) if (!TAG_LIST.test(m[1]!.trim())) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
   if (SETTINGS_CMD.test(c)) return 'lean-agent: a subagent never changes permissions or settings'
