@@ -22,7 +22,7 @@ import { chase } from './chaser'
 import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
 import { bounded, setupFix, setupText } from './setup'
-import { checkDeskModel, decideSwitch, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
+import { checkDeskModel, decideSwitch, deskModelStatus, forgetUserChoice, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
 import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
 import { isExpensiveModel } from './expensive'
 import type { Engine } from './deskmodel'
@@ -83,12 +83,14 @@ let lastRelay = 0
 let deskModelTried = false // the desk's model / effort pin is applied at most once per session (deskmodel.ts)
 let deskModelSeen = '' // the model last judged: a check runs again only when it changes
 let switchState = newSwitchState() // this session's PreModelSwitch decisions (deskmodel.ts decideSwitch)
+let promptSeen = false // the desk session's first user prompt has been checked: a model switch from then on can be the person's own
 let modSession = String(Date.now()) // a session key when the engine gave no session id
 const deskSession = () => lastSid || modSession
 export const resetModState = () => {
   deskModelTried = false
   deskModelSeen = ''
   switchState = newSwitchState()
+  promptSeen = false
   modSession = String(Date.now())
   notified = 0
   busySince = 0
@@ -677,7 +679,7 @@ async function deskModelCheck($: any, fromRequest = '', again = false): Promise<
     if (!apply && running === deskModelSeen) return
     deskModelTried = true
     deskModelSeen = running
-    const r = await checkDeskModel(host, engineOf($), running, apply, deskSession())
+    const r = await checkDeskModel(host, engineOf($), running, apply, deskSession(), again ? 'prompt' : 'start')
     if (r.text && !r.repeat) pending.push(`[lean-agent] ${r.text}`) // said once per session; the pane notice carries the count
   } catch {
     /* a model check that fails changes nothing */
@@ -747,7 +749,11 @@ export const register: Register = on => {
       })
     }
     // the desk's model and effort pin, when the session's model is already known (else the first request does it)
-    if (role.kind === 'desk') await deskModelCheck($)
+    if (role.kind === 'desk') {
+      promptSeen = false
+      await forgetUserChoice(host, deskSession()).catch(() => undefined) // a by-hand choice is kept for one session, never across a restart
+      await deskModelCheck($)
+    }
     // once per plugin version (desk): learned rules past a size cap, and the 0.45 `rules: off` key nothing reads
     if (role.kind === 'desk') {
       await soft($, 'rules check', async () => {
@@ -790,7 +796,7 @@ export const register: Register = on => {
     const r: any = await next(e)
     if (role.kind !== 'desk') return r
     const host = hostOf($)
-    const d = decideSwitch(e, await deskChoice(host, await homeDir(host)), switchState, isExpensiveModel)
+    const d = decideSwitch(e, await deskChoice(host, await homeDir(host)), switchState, isExpensiveModel, promptSeen)
     if (d.user) await noteUserChoice(host, d.user, deskSession())
     if (d.user) switchState.user = d.user
     if (!d.decision) return r
@@ -1084,7 +1090,10 @@ export const register: Register = on => {
       if (e.action === 'fix') {
         const o = await setupFix(host, $.plugin.root)
         dropSetupCheck()
-        return { result: setupText(o, true) } as any
+        // the session's own model too: the pin goes back when it runs another and no by-hand choice is on record for this session
+        await deskModelCheck($, '', true)
+        const live = await deskModelStatus(host).catch(() => null)
+        return { result: setupText(o, true) + (live ? `\ndesk session model: ${live.text}` : '') } as any
       }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
@@ -1326,7 +1335,10 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
     await redetect($)
-    if (role.kind === 'desk') await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
+    if (role.kind === 'desk') {
+      await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
+      promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session
+    }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
       let more: string | null = null

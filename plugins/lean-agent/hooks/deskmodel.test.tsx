@@ -79,7 +79,7 @@ test('the DEFAULT desk pin is sonnet / high (the 1.0.10 opus pin is reverted): a
   const none = engine([effortRow()])
   const r2 = await checkDeskModel(u.host, none.engine, OPUS, true)
   expect(r2.kind).toBe('unsettable')
-  expect(r2.text).toBe("the desk runs claude-opus-5-5; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)")
+  expect(r2.text).toBe("the desk runs claude-opus-5-5; the pin could not be applied (no model row); pick Sonnet in the app's model menu (lean-agent pins sonnet / high)")
   expect(notice(u, 'desk-model')).toContain('pick Sonnet in the app')
   const ok = world(null)
   const same = engine([modelRow({ value: 'sonnet' }), effortRow({ value: 'high' })])
@@ -127,7 +127,8 @@ test('when the engine cannot set it (no row, locked, denied, throws, no option o
     expect(a.why.join(';'), name).toMatch(why)
     const r = await checkDeskModel(h.host, e.engine, OPUS, true)
     expect(r.kind, name).toBe('unsettable')
-    expect(r.text, name).toBe("the desk runs claude-opus-5-5; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)")
+    expect(r.text, name).toMatch(/^the desk runs claude-opus-5-5; the pin could not be applied \(.+\); pick Sonnet in the app's model menu \(lean-agent pins sonnet \/ high\)$/)
+    expect(r.text, name).toMatch(why) // what failed is named
     expect(await readDeskModel(h.host), name).toMatchObject({ running: OPUS, pin: PIN })
     expect(notice(h, 'desk-model'), name).toContain('pick Sonnet in the app')
     expect(h.files.has(`${L}/notices/desk-model-set.txt`), name).toBe(false)
@@ -284,7 +285,7 @@ test('doctor: spend on the model the app started the desk on is an info note, no
   expect(await deskLine(h)).toContain('the app chose another model') // no record yet: still FIX
   const e = engine([modelRow(), effortRow()], { models: ['claude-sonnet-5-5'] })
   expect((await checkDeskModel(h.host, e.engine, OPUS, true)).kind).toBe('set')
-  expect(JSON.parse(h.files.get(`${L}/desk/model-set.json`)!)).toEqual({ from: OPUS, to: 'sonnet', at: NOON, count: 1 })
+  expect(JSON.parse(h.files.get(`${L}/desk/model-set.json`)!)).toEqual({ from: OPUS, to: 'sonnet', at: NOON, count: 1, how: 'start' })
   expect(await deskLine(h)).toBeUndefined() // not a FIX row any more
   expect((await modelRows(h.host)).info).toEqual([note])
   expect((await modelRows(h.host)).fix).toEqual([])
@@ -378,27 +379,29 @@ test('a model the person chose by hand is not put back in that session', async (
 test('PreModelSwitch: the app\'s expensive model is asked once, then refused; /model and the picker are never touched; our own switch is ignored', () => {
   const st = newSwitchState()
   const ev = (source: string, to = OPUS) => ({ from_model: 'claude-sonnet-5-5', to_model: to, source })
-  expect(decideSwitch(ev('command'), sonnetPin, st, isExp)).toEqual({ user: OPUS }) // /model opus: the person's, stands
-  expect(decideSwitch(ev('picker'), sonnetPin, st, isExp)).toEqual({ user: OPUS })
-  expect(decideSwitch(ev('sdk', 'claude-sonnet-5-5'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // the pin itself
-  expect(decideSwitch(ev('sdk', 'claude-haiku-5-5'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // not expensive
-  expect(decideSwitch(ev('auto'), sonnetPin, newSwitchState(), isExp)).toEqual({}) // a fallback is not ours to block
-  expect(decideSwitch(ev('resume'), sonnetPin, newSwitchState(), isExp)).toEqual({})
+  expect(decideSwitch(ev('command'), sonnetPin, st, isExp, true)).toEqual({ user: OPUS }) // /model opus: the person's, stands
+  expect(decideSwitch(ev('picker'), sonnetPin, st, isExp, true)).toEqual({ user: OPUS })
+  expect(decideSwitch(ev('picker'), sonnetPin, newSwitchState(), isExp, false)).toEqual({}) // before the first prompt: the app's own, not by hand
+  expect(decideSwitch(ev('command'), sonnetPin, newSwitchState(), isExp, false)).toEqual({})
+  expect(decideSwitch(ev('sdk', 'claude-sonnet-5-5'), sonnetPin, newSwitchState(), isExp, true)).toEqual({}) // the pin itself
+  expect(decideSwitch(ev('sdk', 'claude-haiku-5-5'), sonnetPin, newSwitchState(), isExp, true)).toEqual({}) // not expensive
+  expect(decideSwitch(ev('auto'), sonnetPin, newSwitchState(), isExp, true)).toEqual({}) // a fallback is not ours to block
+  expect(decideSwitch(ev('resume'), sonnetPin, newSwitchState(), isExp, true)).toEqual({})
   const app = newSwitchState()
-  const a = decideSwitch(ev('sdk'), sonnetPin, app, isExp)
+  const a = decideSwitch(ev('sdk'), sonnetPin, app, isExp, true)
   expect(a.decision).toBe('ask')
   expect(a.reason).toContain('/model opus')
-  const b = decideSwitch(ev('sdk'), sonnetPin, app, isExp)
+  const b = decideSwitch(ev('sdk'), sonnetPin, app, isExp, true)
   expect(b.decision).toBe('deny')
   expect(b.reason).toContain('/model opus')
   expect(app.denied).toBe(1)
   // the person said yes to the question (the switch ran): it stands for the session
   noteSwitched(ev('sdk'), app)
-  expect(decideSwitch(ev('sdk'), sonnetPin, app, isExp)).toEqual({})
+  expect(decideSwitch(ev('sdk'), sonnetPin, app, isExp, true)).toEqual({})
   // a model the person chose by hand earlier in the session stands too
   const hand = newSwitchState()
   hand.user = OPUS
-  expect(decideSwitch(ev('sdk'), sonnetPin, hand, isExp)).toEqual({})
+  expect(decideSwitch(ev('sdk'), sonnetPin, hand, isExp, true)).toEqual({})
   expect(selfSwitching()).toBe(false)
 })
 
@@ -424,4 +427,94 @@ test('a refused app choice counts into the same one-line tally and the record sa
   const rows = await modelRows(h.host)
   expect(rows.info.join('\n')).toContain('the app chose opus twice this session; lean-agent set sonnet each time')
   expect(rows.info.join('\n')).toContain('cannot tell the app\'s choice from its model menu')
+})
+
+// ---- 1.0.23: the app's own model at start is not "by hand"; the state in words -----------------------------------------------------
+import { deskModelStatus, forgetUserChoice } from './deskmodel'
+
+// a desk session on a scripted engine: `model` is what $.session.model() says; a Model row write moves it to sonnet
+async function liveDesk($: any, on: any, o: { startModel: string; sid?: () => string; setThrows?: boolean }) {
+  const h = fakeHost(on)
+  h.files.set(`${L}/config.json`, SONNET_DESK)
+  resetLocks()
+  resetViewCache()
+  const sets: any[] = []
+  const st = { model: o.startModel }
+  on('session.model', () => ({ value: st.model }) as any)
+  on('session.id', () => ({ value: o.sid ? o.sid() : 'S1' }) as any)
+  on('config.list', () => ({ value: [modelRow(), effortRow({ value: 'high' })] }) as any)
+  on('config.set', (_: any, e: any) => { sets.push({ key: e.key, value: e.value }); if (o.setThrows) throw new Error('set refused'); if (e.key === 'model') st.model = 'claude-sonnet-5-5'; return { value: e.value } as any })
+  on('classic.PreModelSwitch', () => ({}) as any)
+  on('prompt.submit', (_: any, e: any) => e)
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  return { h, sets, st }
+}
+const appSwitch = ($: any, source: string, to = OPUS) => $.classic.PreModelSwitch({ from_model: 'claude-sonnet-5-5', to_model: to, source } as any)
+
+test('a switch to opus (source picker) BEFORE the first prompt is the app\'s choice, not by hand: the pin is applied at the first prompt, before the turn', { timeoutMs: 20_000 }, async ($, on) => {
+  const { h, sets, st } = await liveDesk($, on, { startModel: 'claude-sonnet-5-5' })
+  expect(sets).toEqual([]) // on the pin at start
+  st.model = OPUS
+  await appSwitch($, 'picker') // the app applying its last-used model, whatever source it carries
+  expect((await readDeskSwitch(h.host))?.user).toBeUndefined()
+  await $.prompt.submit({ text: 'hi' } as any)
+  expect(sets).toEqual([{ key: 'model', value: 'sonnet' }])
+  expect(st.model).toBe('claude-sonnet-5-5')
+  expect((await deskModelStatus(h.host))?.text).toBe('sonnet / high (pin applied at the first prompt)')
+})
+
+test('the same switch AFTER a prompt is by hand: kept for the session, said in words; a new session forgets it and applies the pin', { timeoutMs: 20_000 }, async ($, on) => {
+  let sid = 'S1'
+  const { h, sets, st } = await liveDesk($, on, { startModel: 'claude-sonnet-5-5', sid: () => sid })
+  await $.prompt.submit({ text: 'first' } as any)
+  st.model = OPUS
+  h.clock.t = Date.UTC(2026, 10, 18, 10, 2)
+  await appSwitch($, 'command')
+  await $.prompt.submit({ text: 'second' } as any)
+  expect(sets).toEqual([]) // not put back
+  const d = new Date(h.clock.t)
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  expect((await deskModelStatus(h.host))?.text).toBe(`opus: you chose it by hand at ${hhmm} (kept for this session)`)
+  // a restart: the new session starts on opus again (the app's last-used model) and the pin is applied at its start
+  sid = 'S2'
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  expect((await readDeskSwitch(h.host))?.user).toBeUndefined()
+  expect(sets).toEqual([{ key: 'model', value: 'sonnet' }])
+  expect((await deskModelStatus(h.host))?.text).toBe('sonnet / high (pin applied at start)')
+})
+
+test('forgetUserChoice keeps the choice of the SAME session and drops another one\'s', async () => {
+  const h = world()
+  await noteUserChoice(h.host, OPUS, 's1')
+  await forgetUserChoice(h.host, 's1')
+  expect((await readDeskSwitch(h.host))?.user).toBe(OPUS)
+  await forgetUserChoice(h.host, 's2')
+  expect((await readDeskSwitch(h.host))?.user).toBeUndefined()
+})
+
+test('a pin that cannot be applied is a red row that says what failed and what to click; the status line says the same in words; doctor shows FIX', async () => {
+  const h = world()
+  const e = engine([modelRow(), effortRow({ value: 'high' })], { throws: true, models: [OPUS] })
+  const r = await checkDeskModel(h.host, e.engine, OPUS, true, 's1')
+  expect(r.kind).toBe('unsettable')
+  expect(r.text).toBe("the desk runs claude-opus-5-5; the pin could not be applied (model: boom); pick Sonnet in the app's model menu (lean-agent pins sonnet / high)")
+  expect((await deskModelStatus(h.host))).toEqual({ text: 'opus: the app chose it, the pin could not be applied: model: boom', bad: true })
+  const l = await check(h.host, '/p')
+  expect(l.some(x => x.startsWith('FIX ') && x.includes('desk session model: opus: the app chose it, the pin could not be applied: model: boom'))).toBe(true)
+  // set went through but the session stayed on opus
+  const h2 = world()
+  const e2 = engine([modelRow(), effortRow({ value: 'high' })], { models: [OPUS] })
+  const r2 = await checkDeskModel(h2.host, e2.engine, OPUS, true, 's1')
+  expect(r2.text).toContain('the session is still on claude-opus-5-5 after the Model row was set')
+})
+
+test('the status line for a pin applied at start, and nothing for a desk with no record', async () => {
+  const h = world()
+  expect(await deskModelStatus(h.host)).toBeNull()
+  const e = engine([modelRow(), effortRow({ value: 'high' })], { models: ['claude-sonnet-5-5'] })
+  await checkDeskModel(h.host, e.engine, OPUS, true, 's1', 'start')
+  expect((await deskModelStatus(h.host))?.text).toBe('sonnet / high (pin applied at start)')
 })

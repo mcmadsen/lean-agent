@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **A restarted desk stayed on opus.** The model the app applies when a session starts (its default or last-used model) can arrive as a `command` / `picker` switch; 1.0.20 took that for "the person chose it by hand" and switched the pin off for the session. Now a switch counts as by hand only after the session's first prompt and only with source `command` / `picker`; anything before is the app's choice and the pin (sonnet / high, config `desk` wins) is applied at session start and again at the first prompt, before the turn runs. A by-hand choice is kept for that session only and forgotten by the next one. A pin that cannot be applied is a red "Needs you" row that names what failed ("the Model row refused: ...", "the session is still on opus after the Model row was set") and says to pick Sonnet in the model menu.
+- The pane header and the `lean_doctor` desk row say which case applies: "sonnet / high (pin applied at start)", "opus: the app chose it, the pin could not be applied: <reason>", "opus: you chose it by hand at 10:02 (kept for this session)"; `lean_doctor fix` puts the pin back when no by-hand choice is on record. The desk's `claude://code/new` link still carries only `folder`: the engine's link builder knows no model or effort parameter.
+
 ## 1.0.22
 
 ### Added

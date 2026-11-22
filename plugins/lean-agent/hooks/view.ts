@@ -7,7 +7,7 @@ import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
 import { peekNotice, readNoticeRows, readNotices } from './notices'
 import { dayOf } from './ledger'
-import { NOTICE_SET, deskModelText, readDeskModel } from './deskmodel'
+import { NOTICE_SET, deskModelStatus, deskModelText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
@@ -62,7 +62,7 @@ export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: stri
 export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean }
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[] }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -377,6 +377,12 @@ export async function loadView(h: Host): Promise<View> {
       deskModelNote = v.deskModel
       deskRuns = m.running
       if (isExpensiveModel(m.running)) v.deskModelRed = v.deskModel // an expensive desk the mod could not switch: a red row in "Needs you", not a header line
+    }
+    const st = await deskModelStatus(h)
+    if (st) v.deskModelStatus = st.text
+    if (!m) {
+      const sw = await readDeskSwitch(h)
+      if (sw?.user) deskRuns = sw.user // chosen by hand: the chip says what it runs, not the pin
     }
   })
   // requests for an expensive model (a thread's own `lean_thread` call, the guard's refusal, a review): Approve / Deny in "Needs you"

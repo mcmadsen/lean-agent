@@ -886,6 +886,8 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
 
 ## Troubleshooting
 
+- **Restarting the desk starts it on opus again**: the pane header and `lean_doctor check` say why ("pin applied at start", "the app chose it, the pin could not be applied: <reason>", or "you chose it by hand ... (kept for this session)"). A model the app applies before your first prompt is never taken for your choice and the pin is applied; if it cannot be, a red row says what failed, then pick Sonnet in the model menu. `lean_doctor fix` tries the pin again.
+
 - **An MCP server says `ENOTFOUND not-setup` (or another placeholder host)**: it needs a variable the desk does not have, see
   "MCP servers that need a variable". `lean_doctor check` names it; ask the desk to set it.
 

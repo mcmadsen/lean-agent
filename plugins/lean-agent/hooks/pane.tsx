@@ -746,6 +746,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {/* the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick, at the top */}
         {!!v?.deskModel && !v.deskModelRed && <Text color="yellow">{v.deskModel}</Text>}
         {showSetNote && <Text dimColor>{setNote}</Text>}
+        {/* which case applies, in words (pin applied at start / the app chose it and the pin could not be applied / you chose it by hand); the red row carries the failure */}
+        {!!v?.deskModelStatus && !v.deskModel && !showSetNote && <Text dimColor>{v.deskModelStatus}</Text>}
         {ctx > 0 && limit > 0 ? (
           <Box flexWrap="wrap" columnGap={1}>
             <Progress key="ctx" label="desk context" value={ctx} max={limit} valueText={`${kTokens(ctx)} of ${kTokens(limit)}`} color={barColor} />

@@ -7,6 +7,7 @@ import { withFolderLock } from './folderlock'
 import { DESK_DEFAULT, deskChoice, deskModelConfigured, hasAdditionalDirectory, mergeAdditionalDirectory, mergeModelSettings, readModelSettings } from './models'
 import { mergeDeskSettingsFile } from './leantools'
 import { setNotice } from './notices'
+import { deskModelStatus } from './deskmodel'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { SKEW_CAUSE, compareVersions, installedVersion, running, runsText, skewText, skewedThreads } from './skew'
@@ -159,6 +160,9 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const same = have?.model === want.model && have?.effort === want.effort
   const exists = await h.fs.exists(`${deskDir(home)}/.claude/settings.json`)
   row(same, same ? `desk model ${want.model} / effort ${want.effort}` : exists && have === null ? 'desk .claude/settings.json does not parse: fix the file by hand' : `desk model is ${have?.model ?? 'not set'} / effort ${have?.effort ?? 'not set'}, want ${want.model} / ${want.effort}${typeof have?.model === 'string' && have.model && have.model !== want.model ? ((await deskModelConfigured(h, home)) ? ' (config.json desk)' : have.model === 'opus' && have.effort === 'high' ? ' (1.0.10 and 1.0.11 pinned opus: doctor fix replaces it with sonnet)' : ' (doctor fix updates it)') : ''}`)
+  // what the live desk session runs and why (the pin applied at start, the app's choice the pin could not replace, a by-hand choice kept for the session)
+  const live = await deskModelStatus(h).catch(() => null)
+  if (live) row(!live.bad, `desk session model: ${live.text}${live.bad ? '; lean_doctor fix tries the pin again' : ''}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason
