@@ -189,8 +189,8 @@ test('lean_run {ci} through the engine: a result, an error on a failed run, a re
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('agent.list', () => ({ value: [] }))
-  on('ui.status', () => ({ value: null }))
-  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  ;(on as any)('ui.status', () => ({ value: null }))
+  ;(on as any)('clock.every', () => ({ value: { cancel: () => {} } }))
   await $.session.start({ cwd: `${L}/threads/t1`, surface: 'desktop', isInteractive: true } as any)
   const call = (extra: Record<string, unknown>) => $.tool.call({ tool: 'mcp__lean-agent__lean_run', ...extra } as any) as Promise<any>
   const good: any = await call({ ci: { ...ADO, id: 201, waitMinutes: 0 } })

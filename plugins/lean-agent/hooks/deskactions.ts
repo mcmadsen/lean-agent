@@ -325,7 +325,7 @@ const logHistory = async (h: Host, thread: string, rec: Record<string, unknown>)
 export type Tell = (thread: string, text: string) => Promise<void>
 
 // ---- a thread asks ---------------------------------------------------------------------------------------------------------------------------
-export async function addActionRequest(h: Host, thread: string, a: { kind?: unknown; params?: unknown; why?: unknown }): Promise<{ ok: boolean; text: string; request?: ActionView }> {
+export async function addActionRequest(h: Host, thread: string, a: { kind?: unknown; params?: unknown; items?: unknown; why?: unknown }): Promise<{ ok: boolean; text: string; request?: ActionView }> {
   if (!threadOk(thread)) return { ok: false, text: 'an action request comes from a thread (tN)' }
   const c = checkAction(a)
   if (!c.ok) return { ok: false, text: c.text }

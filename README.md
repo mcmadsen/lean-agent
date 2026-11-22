@@ -227,10 +227,24 @@ in the thread's own session). So it asks, and the desk's mod performs the write 
 no model ever bypasses a permission check, and no hook carries a decision.
 
 1. The thread calls `lean_report` (state blocked) with `action: {kind, params, why}`. The kinds are a fixed table
-   (`hooks/deskactions.ts`), nothing else: `ado-pr-reply` {org, project, repo, pr, thread, body}, `ado-pr-comment` {org, project, repo,
-   pr, body}, `ado-workitem-comment` {org, project, id, body}, `ado-workitem-update` {org, project, id, fields: state, assignedTo, tags,
-   title; strings}, `gh-pr-comment` {repo (owner/name), pr, body}. An unknown kind or param is refused with the list; pushes, merges,
-   deletes and settings changes are not in it.
+   (`hooks/deskactions.ts`), nothing else: `ado-pr-reply` {org, project, repo, pr, thread, body, status?}, `ado-pr-thread-status` {org,
+   project, repo, pr, thread, status}, `ado-pr-comment` {org, project, repo, pr, body}, `ado-workitem-comment` {org, project, id, body},
+   `ado-workitem-update` {org, project, id, fields: state, assignedTo, tags, title; strings}, `gh-pr-comment` {repo (owner/name), pr,
+   body}, `gh-pr-thread-resolve` {repo, pr, thread (the review thread's node id)} and `batch` {items} (below). An unknown kind or param
+   is refused with the list; pushes, merges, deletes and settings changes are not in it.
+   - **Thread status.** `status` is one of active, fixed, wontFix, closed, byDesign, pending (case-insensitive; sent as the REST value in
+     `PATCH .../pullRequests/<pr>/threads/<thread>?api-version=7.1`). `ado-pr-thread-status` sets it alone and is rendered "set thread 7
+     of PR 42 to fixed". An optional `status` on `ado-pr-reply` is the same ONE request and ONE approval: the card shows the text AND
+     "then set the thread to fixed"; the mod posts the reply, then sets the status, and only if the reply worked. The result says what
+     happened to each ("reply: done; status: failed (...)"); a reply that fails sends nothing and the request stays retryable, a status
+     that fails after the reply leaves the request used (the reply is never posted twice) and the thread asks again for the status.
+     `gh-pr-thread-resolve` is the GitHub twin (`gh api graphql`, the `resolveReviewThread` mutation, argv only).
+   - **One approval for several writes.** `action: {kind: "batch", items: [{kind, params}, ...]}` holds up to 10 items of the kinds above
+     for ONE target (the same org, project, repo and pr, or the same work item, or the same GitHub repo and pr; a second target, a
+     nested batch or an eleventh item is refused). The question and the card list every item, numbered `1/3 ...` in order, with its exact
+     text; the check code hashes all renderings, so one Approve covers exactly that list. The mod runs them in order, stops at the first
+     failure and reports each ("1: done; 2: failed (HTTP 409); 3: not run"). Deny, Edit first, expiry and the hash check work as for one
+     write; once any write went out the request is never repeated whole.
 2. The mod stores the request in its own store, signed (HMAC with the review key, like the push approval): id, thread, kind, params, the
    exact rendering (method, URL, body) and the sha256 of it. The pane's "Needs you" shows "t5 wants to reply to PR thread 7 on PR 42
    (org/project/repo): <the exact text>" with **Approve** / **Deny** (two presses each), and the desk's inbox line says what to do.
@@ -320,6 +334,13 @@ All work goes to small workers; the guard enforces it (hooks/orchestrate.ts), no
 - Small workers and the reviewer passes do not count against a user `agents.cap`.
 - `lean_run` runs a test / build command with its output in `~/.lean-agent/runs/<ts>.log` and returns the exit code, the failing test
   names and the last 40 lines; a thread never reads the stream. Other Bash for a thread (tests, builds, sed, node…) is refused.
+- `lean_run {ci: {...}}` is a read-only CI check that waits INSIDE the tool (a thread and its workers may call it; no model turn per
+  check): `{host: "ado", org, project, id | ids | branch, waitMinutes}` runs `az pipelines runs show --id <n> --org ... --project ...`
+  (`runs list --branch` without an id); `{host: "github", repo, id | ids | pr | branch, waitMinutes}` runs `gh run view <id> --json
+  status,conclusion,jobs,...`, `gh pr checks` or `gh run list --branch`. argv only, from a fixed table of read-only subcommands (a write
+  subcommand or a write flag is refused before anything runs). It polls every 45 s until every run finished or `waitMinutes` (0-30,
+  default 10) is over and returns ONE line per run: id, status / result, the failed stage / job / step / test names when the JSON has
+  them, the URL; or "still running after N min". A failed run is an error result; a timeout is not.
 - `hooks/preflight.ts` (`preflightText`) computes a fresh start's facts by script: branch, HEAD, `git status --short`, diff stat, last
   report line, open tasks, PR / work-item reference.
 - `lean_doctor context [session]` measures a session from its transcript by script: tokens added by tool and result size, the ten

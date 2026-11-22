@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Resolve a PR thread through the desk.** New action kind `ado-pr-thread-status` {org, project, repo, pr, thread, status} (active, fixed, wontFix, closed, byDesign, pending; `PATCH .../threads/<id>?api-version=7.1`, rendered "set thread 7 of PR 42 to fixed") and an optional `status` on `ado-pr-reply`: one request, one approval; the mod posts the reply, then sets the status only if the reply worked, and the result says what happened to each. `gh-pr-thread-resolve` {repo, pr, thread} is the GitHub twin (`gh api graphql` `resolveReviewThread`, argv only). Same model-proof flow: signed request, exact rendering hashed, the human's Approve, the token on stdin only.
+- **One approval for several writes.** `action: {kind: "batch", items: [...]}`: up to 10 items of the allowed kinds for ONE PR or work item. The question and the card list every item numbered, in order; the hash covers all renderings; one Approve covers exactly that list; the mod runs them in order, stops at the first failure and reports each item (done / failed with the reason / not run). A second target, a nested batch or more than 10 items is refused. The thread guide and the thread skill got the one line for it.
+- **CI status by script.** `lean_run {ci: {host: "ado" | "github", ...}}` is a read-only CI check that waits inside the tool (a thread and its workers may call it): `az pipelines runs show` / `runs list --branch`, `gh run view` / `gh run list` / `gh pr checks`, argv only from a fixed read-only table, polled every 45 s for up to `waitMinutes` (0-30, default 10). One compact line per run (id, status, result, failed stage / job / test names, URL) or "still running after N min".
+
 ## 1.0.21
 
 ### Added
