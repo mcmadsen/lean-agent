@@ -2,7 +2,8 @@
 // desk's timer restarts by script once the session has been idle 20 s. Synthetic ids, names and paths only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { stopRecordText } from './contextstop'
+import { isRestarting, stopRecordText } from './contextstop'
+import { stateOf } from './view'
 import { IDLE_MS, MIN_GAP_MS, autoRestartTick, stopGraceMs, threadTurnEnd, workLeft } from './autorestart'
 import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
@@ -300,4 +301,83 @@ test('desk tick: a session that keeps taking turns over the limit is still resta
   h.files.set(`${T1}/context.json`, JSON.stringify({ tokens: 130_000, at: 1_100_000, sid: S1 }))
   h.clock.t = 1_200_000
   expect(await autoRestartTick(h.host, { agents: rows('working'), restart: async () => ok })).toHaveLength(1)
+})
+
+// ---- 1.0.22: a hard-stopped thread is always restarted (except after done); a message never queues behind a hard-stopped session ----
+const QUESTION = 'Use postgres or sqlite for the cache?'
+const promptOf = (h: any) => {
+  const s = h.claudeCalls().filter((x: string[]) => x[0] === '--bg')
+  return s.length ? (s[s.length - 1]![s[s.length - 1]!.length - 1] as string) : ''
+}
+
+test('stopped while waiting (last report blocked / a question): marker, restart by the tick, a prompt that names the open question, the question stays open', async () => {
+  for (const last of [{ kind: 'ask', text: QUESTION, options: ['postgres', 'sqlite'] }, { kind: 'report', state: 'blocked', text: QUESTION }]) {
+    const { h } = setup()
+    h.files.set(INBOX, rec({ ts: 500, from: 't1', ...last }))
+    expect((await end(h, { since: 400 })).action).toBe('none') // no second record: the question is the open one
+    expect(marker(h).pending).toMatchObject({ sid: S1, tokens: 205_000 })
+    expect(JSON.parse(h.files.get(`${T1}/contextstop.json`)!).waiting).toBe(true)
+    expect(inbox(h)).toHaveLength(1)
+    const deps = { agents: rows(), restart: (id: string, why: string, force: boolean) => leanThread(h.host, ROOT, { action: 'auto-restart', tN: id, reason: why, force }) }
+    h.clock.t = 1_000_000 + IDLE_MS + 1
+    expect(await autoRestartTick(h.host, deps)).toHaveLength(1)
+    expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).sid).toBe(NEW)
+    const p = promptOf(h)
+    expect(p).toContain(`You were restarted at the context limit while WAITING for: 500-t1-${last.kind}: ${QUESTION}`)
+    expect(p).toContain('If not, do nothing: end your turn without a report and wait.')
+    expect(p).not.toContain('Resume the work now')
+    expect(inbox(h)).toHaveLength(1) // not asked again, not dropped
+    expect(inbox(h)[0]).toMatchObject({ ts: 500, from: 't1', text: QUESTION })
+  }
+})
+
+test('stopped after done: no restart marker (its next message starts a fresh session, as before)', async () => {
+  const { h } = setup()
+  h.files.set(INBOX, rec({ ts: 500, from: 't1', kind: 'report', state: 'done', text: 'all done' }))
+  expect((await end(h, { since: 400 })).action).toBe('none')
+  expect(marker(h).pending).toBeUndefined()
+  expect(JSON.parse(h.files.get(`${T1}/contextstop.json`)!).waiting).toBeUndefined()
+  expect(await autoRestartTick(h.host, { agents: rows(), restart: async () => ok })).toEqual([])
+})
+
+test('send to a hard-stopped session that still shows working: a fresh session with the message at once, no queueing', async () => {
+  const { h, st } = setup({ row: { status: 'busy', state: 'working' } })
+  await end(h)
+  const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'sqlite, please' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 was at its context limit: started a new session with your message')
+  expect(h.claudeCalls().filter(x => x[0] === 'stop')).toHaveLength(1)
+  expect(h.claudeCalls().filter(x => x[0] === '--bg')).toHaveLength(1)
+  expect(promptOf(h)).toContain('sqlite, please')
+  expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).sid).toBe(NEW)
+  expect(st.rows[0]!.pid).toBe(0)
+})
+
+test('an approval result (a send from the desk) to a thread stopped while waiting: fresh session with the answer under the waiting prompt', async () => {
+  const { h } = setup({ row: { status: 'busy', state: 'blocked' } })
+  h.files.set(INBOX, rec({ ts: 500, from: 't1', kind: 'report', state: 'blocked', text: QUESTION, approval: 'git push origin fix-1' }))
+  await end(h, { since: 400 })
+  const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'approved: push of abc1234 is allowed' })
+  expect(r.text).toContain('was at its context limit: started a new session with your message')
+  const p = promptOf(h)
+  expect(p).toContain('WAITING for: 500-t1-report')
+  expect(p).toContain('approved: push of abc1234 is allowed')
+})
+
+test('a send to a session that is NOT hard-stopped still queues behind a working one', async () => {
+  const { h } = setup({ row: { status: 'busy', state: 'working' } })
+  const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'hello' })
+  expect(r.text).toContain('is running')
+  expect(h.claudeCalls().filter(x => x[0] === '--bg')).toHaveLength(0)
+})
+
+test('pane word: a hard-stopped thread with a pending restart is "restarting" (amber); after a give-up or the restart it is not', async () => {
+  const { h } = setup()
+  await end(h)
+  const t = JSON.parse(h.files.get(`${T1}/thread.json`)!)
+  expect(await isRestarting(h.host, '/h', t)).toBe(true)
+  expect(stateOf({ run: 'idle', restarting: true, needsYou: true, blocked: true } as any)).toEqual({ word: 'restarting', color: 'warning' })
+  h.files.set(MARK, JSON.stringify({})) // the tick gave up (5 tries): the marker's pending is dropped
+  expect(await isRestarting(h.host, '/h', t)).toBe(false)
+  expect(stateOf({ run: 'idle', blocked: true } as any).color).toBe('error')
 })

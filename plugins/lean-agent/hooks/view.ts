@@ -26,6 +26,7 @@ import type { Review } from './reviews'
 import { slugOk } from './rules'
 import { agentsText } from './guard'
 import { ctxOf, threadLimits } from './threadcontext'
+import { RESTARTING_TEXT, isRestarting } from './contextstop'
 import type { Level } from './threadcontext'
 
 export type GoalTone = 'working' | 'waiting' | 'stuck' | 'quiet'
@@ -42,7 +43,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
+export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -69,10 +70,11 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'restarting' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
+  if (t.restarting) return { word: 'restarting', color: 'warning' } // never a red state that asks the user to act: the mod restarts it
   if (t.needsYou) return { word: 'waiting', color: 'warning' }
   if (t.approval) return { word: 'approval', color: 'warning' }
   if (t.blocked) return { word: 'blocked', color: 'error' }
@@ -315,8 +317,11 @@ export async function loadView(h: Host): Promise<View> {
       const isBlocked = !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv)
       const dts = isBlocked ? await dismissedTs(h, home, t.id) : 0
       const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
+      // hard-stopped at the context limit and the mod will restart it (its marker is pending: a give-up drops it): "restarting", amber, nothing for the user to do
+      const restarting = await isRestarting(h, home, t).catch(() => false)
       v.threads.push({
-        ...(cv && cv.tokens !== undefined ? { ctx: cv.text, ctxLevel: cv.level } : {}), // (an unknown size says nothing on the card)
+        ...(restarting ? { restarting: true } : {}),
+        ...(cv && cv.tokens !== undefined ? (restarting ? { ctx: `${cv.text} · ${RESTARTING_TEXT}`, ctxLevel: 'warn' as Level } : { ctx: cv.text, ctxLevel: cv.level }) : {}), // (an unknown size says nothing on the card)
         ...(t.keep === true ? { keep: true } : {}),
         ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
         unread: truth.unread,

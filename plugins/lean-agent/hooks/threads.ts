@@ -13,6 +13,7 @@ import { actionListText, approveAction, dropActions } from './deskactions'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
+import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { buildHandover, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, stallConfig, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
@@ -558,7 +559,8 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
     const stopped = await stopAlive(h, t, '', 'started fresh', { own: tpath(home, t.id), ...(restart ? { force: true } : {}), ...(limit ? { limit: true } : {}) })
     if (stopped) return stopped
   }
-  const ho = await buildHandover(h, home, t, why, u.msgs)
+  const waiting = (await hardStopped(h, home, t))?.waiting === true // restarted at the context limit while it waited: the prompt names the open question
+  const ho = await buildHandover(h, home, t, why, u.msgs, waiting)
   const r = await startSession(h, home, t, ho.prompt, given, installed, root)
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo
@@ -615,6 +617,13 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   const now = await h.clock.now()
   const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
   const limited = !!opts.limit && isLimitRow(row)
+  // A hard-stopped session (contextstop.ts: every tool call refused) can do nothing with a message, so one never queues behind it, whatever the
+  // session shows (working, blocked, idle): the same forced stop as the pane's restart, then a fresh session with the message in its first prompt.
+  const hs = !opts.limit && !t.finished && row && liveOf(row) !== 'gone' ? await hardStopped(h, home, t) : null
+  if (hs) {
+    const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', `Its context was ${hs.tokens} tokens (limit ${hs.limit}) and the session was stopped there; this message starts a new session with the handover.`, {}, true)
+    return fresh(r) ? { ...r, text: `${t.id} was at its context limit: started a new session with ${msgs.length ? 'your message' : 'the handover'} (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
+  }
   if (truth.word === 'running' && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
   if (!msgs.length && !opts.force && truth.word !== 'idle' && !isStuck(truth.word)) return { ok: true, text: `${t.id}: nothing queued` }
   // A stuck session that is still WORKING (one long tool call, a subagent wait: it reads nothing meanwhile) is replaced only by an
@@ -720,8 +729,10 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     // a live session that never said which code it runs, a minute after its start: older than the report feature (the stale-plugin case)
     const unreported = t.state === 'open' && !!t.sid && !ran && !!rows.find(a => a.sid === t.sid) && t.lastWake > 0 && (await h.clock.now()) - t.lastWake > 60_000
     const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
-    const cv = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
+    const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
+    const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
+    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
