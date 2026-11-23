@@ -48,7 +48,10 @@ async function consumedN(h: Host, home: string, id: string): Promise<number> {
 }
 
 export async function markConsumed(h: Host, home: string, id: string, n: number): Promise<void> {
-  if (n > (await consumedN(h, home, id))) await writeJson(h, `${tdir(home, id)}/consumed.json`, { n } satisfies Consumed)
+  if (n > (await consumedN(h, home, id))) {
+    await writeJson(h, `${tdir(home, id)}/consumed.json`, { n } satisfies Consumed)
+    await writeJson(h, `${tdir(home, id)}/delivered-at.json`, { at: await h.clock.now() }).catch(() => undefined) // when the desk last delivered anything (sendhold.ts)
+  }
 }
 
 // Lines the session has not seen yet, with the count to mark once they are handed over.

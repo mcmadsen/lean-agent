@@ -107,6 +107,7 @@ export async function deliverToThread(h: Host, home: string, t: Thread, row: Age
     await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind, again: true })
     return { delivered: false, text: `direct send to ${t.id} failed (${String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
   }
+  await writeJson(h, `${threadsDir(home)}/${t.id}/delivered-at.json`, { at: now }).catch(() => undefined) // when the desk last delivered anything (sendhold.ts)
   if (o.kind !== 'fyi') {
     await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind })
     await answered(h, home, t.id)

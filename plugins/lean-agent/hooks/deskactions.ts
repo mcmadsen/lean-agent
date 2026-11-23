@@ -26,6 +26,7 @@ import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
 import { azureToken, oneLine } from './prhost'
+import { holdCovered } from './sendhold'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -525,6 +526,7 @@ export async function runStanding(h: Host, id: string): Promise<{ sent: boolean;
   if (!plan) return null
   const cover = await standingCover(h, r.thread, r.kind, r.params)
   if (!cover) return null
+  const held = await holdCovered(h, r, plan, cover.label); if (held) return held // sendhold.ts: not unseen, not against a newer instruction
   const now = await h.clock.now()
   const claimed = await exclusive(async () => {
     if ((await stateOf(h, r, now)) !== 'pending') return false
@@ -549,11 +551,12 @@ export async function runStanding(h: Host, id: string): Promise<{ sent: boolean;
 // the user's WRITTEN instruction covers this request (deskwrites.ts decided): the mod records its own signed answer (by 'standing') and sends it through
 // the SAME executor (approveAction: signature, hash re-check, token on stdin). `before` runs inside the claim (the grant's write count is taken there,
 // and may refuse). Returns null when the request is no longer pending or `before` refused; else whether it went out.
-export async function claimAndSend(h: Host, id: string, label: string, before?: (r: ActionRequest, plan: Plan) => Promise<boolean>): Promise<{ sent: boolean; text: string; plan: Plan; r: ActionRequest } | null> {
+export async function claimAndSend(h: Host, id: string, label: string, before?: (r: ActionRequest, plan: Plan) => Promise<boolean>): Promise<{ sent: boolean; text: string; plan: Plan; r: ActionRequest; held?: { sent: boolean; line: string } } | null> {
   const r = (await rows(h)).find(x => x.id === id)
   if (!r) return null
   const plan = await sound(h, r)
   if (!plan) return null
+  const held = await holdCovered(h, r, plan, label); if (held) return { sent: false, text: held.line, plan, r, held } // sendhold.ts: not unseen, not against a newer instruction
   const now = await h.clock.now()
   const claimed = await exclusive(async () => {
     if ((await stateOf(h, r, now)) !== 'pending') return false

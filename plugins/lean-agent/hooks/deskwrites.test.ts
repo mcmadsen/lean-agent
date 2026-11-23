@@ -23,7 +23,8 @@ function setup(verify: 'same' | 'other' = 'same') {
   const h = fakeHost(null)
   resetLocks()
   resetActions()
-  for (const t of ['t5', 't6']) h.files.set(`${L}/threads/${t}/thread.json`, JSON.stringify({ id: t, title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  for (const t of ['t5', 't6']) h.files.set(`${L}/threads/${t}/thread.json`, JSON.stringify({ id: t, title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 9e12, delivered: 0 })) // (lastWake far ahead: no prompt counts as newer than the last delivery, sendhold.ts)
+  h.files.set(`${L}/config.json`, JSON.stringify({ actions: { holdSeconds: 0 } })) // (no hold window: sendhold.test.ts has its own specs)
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'https://dev.azure.com/acme/Shop%20App/_git/shop-api\n' } : { exitCode: 1, stdout: '' })
   h.exec.handler = argv => {
@@ -140,7 +141,7 @@ test('a reply inside the grant is sent at once: the pane line carries the exact 
 
 test('the cap: writes beyond config actions.maxWritesPerGrant are asked again (a reply with a status counts two)', { timeoutMs: 20_000 }, async () => {
   const s = setup()
-  s.h.files.set(`${L}/config.json`, JSON.stringify({ actions: { maxWritesPerGrant: 3 } }))
+  s.h.files.set(`${L}/config.json`, JSON.stringify({ actions: { maxWritesPerGrant: 3, holdSeconds: 0 } }))
   await grantOn(s)
   expect((await writesView(s.host)).grants[0]!.cap).toBe(3)
   expect((await go(s, 'ado-pr-reply', { ...REPLY, status: 'fixed' }))?.sent).toBe(true) // 2

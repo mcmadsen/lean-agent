@@ -17,6 +17,8 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 | `start` | `tN`, `model?`, `effort?`, `reason?`, `needs?`, `keep?` | starts a thread that has no session yet |
 | `park` / `close` / `reopen` | `tN` | `close` stops a finished session, clears the goal, never deletes the folder; `reopen` of a closed thread starts a NEW session with a handover |
 | `keep` | `tN`, `on?` | keep mode: follow-ups to a done thread resume it until its context passes the limit; offer it only for many small follow-ups |
+| `keep-going` | `tN`, `on?` | when the user says "keep going / no asks": the mod continues the thread by script at every turn end that is not done, blocked or a question (also `keepGoing: true` on `new` / `start`) |
+| `action-cancel` | `id` | cancels a covered reply that waits in its 30 s hold window (the pane has Send now / Cancel) |
 | `list` | none | state, running / idle / stuck, queued, model, `ctx` size, agents |
 | `find` / `ask` / `report` | `text` / `tN` + `text` / `tN` | answered from the store with no model turn (or a small fresh one), never by waking an old session |
 | `dismiss` | `tN` [`kind`] or `notice` | only after the user said so: hides tN's current Needs-you item (or `kind`: question, prompt, approval, blocked, stalled, restart, ready, model, action), or a top line (`notice`: its id or `all`) until a newer one arrives; nothing is answered |

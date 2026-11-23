@@ -1,5 +1,5 @@
 // Stall watchdog (1.0.20; field: a thread showed "running" for about 3 hours with no report while 3 desk messages sat unread, nothing flagged it).
-// A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 20), or whose queued
+// A thread whose session is alive and working but made no tool call and no report for `threads.stallMinutes` (default 10 since 1.0.28; 5 for a keep-going thread; a stalled thread at 80% of its context limit is restarted at once), or whose queued
 // messages stayed unread that long, is "stalled" (threadstate.ts truthOf: red in the pane and in `lean_thread list`, which names the last
 // activity time). The thread's own hooks write <thread folder>/activity.json (a tool call of the thread or of one of its workers, a report,
 // a prompt), so a thread that waits on a background worker which is still working is NOT stalled: the worker's tool calls count.
@@ -10,9 +10,12 @@ import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
 import { setNotice } from './notices'
-import { lastActivity, readWaiting, stallConfig, threadsConfig, truthOf } from './threadstate'
+import { lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
+import { haltedSince } from './continuepending'
+import { kTokens, readContext, threadLimits } from './threadcontext'
 import type { AgentRow, Out, Thread } from './threads'
 
+export const CAP_SHARE = 0.8 // a stalled thread at this share of the context limit is restarted at once
 export const MAX_STALL_TRIES = 3 // a failed stall restart: tried at most this often per stall, then ONE notice
 export type StallRec = { since: number; idleSince: number; unread: number; tries?: number }
 export type Stalls = Record<string, StallRec>
@@ -56,10 +59,13 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
   for (const id of ids) {
     const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
     const now = await h.clock.now()
-    const truth =
+    let truth =
       t && t.state === 'open' && t.sid && !t.finished
-        ? truthOf({ threadState: t.state, row: rows.find(a => a.sid === t.sid), queued: (await unconsumed(h, home, id)).msgs, now, stuckMinutes, stallMinutes: cfg.minutes, activityAt: await lastActivity(h, home, id, t.lastWake), waitingSince: (await readWaiting(h, home, id))?.since ?? null })
+        ? truthOf({ threadState: t.state, row: rows.find(a => a.sid === t.sid), queued: (await unconsumed(h, home, id)).msgs, now, stuckMinutes, stallMinutes: stallFor(cfg.minutes, t), activityAt: await lastActivity(h, home, id, t.lastWake), waitingSince: (await readWaiting(h, home, id))?.since ?? null })
         : null
+    // a thread that keeps stopping after "next:" (continuepending.ts gave up continuing it) is in the stall state even while its session is idle
+    const halted = truth && (truth.word === 'idle' || truth.word === 'running' || truth.word === 'stuck') ? await haltedSince(h, home, id) : null
+    if (truth && halted) truth = { ...truth, word: 'stalled', stalledMs: Math.max(0, now - halted) }
     if (!truth || truth.word !== 'stalled') {
       delete stalls[id] // not (or no longer) stalled: the next stall gets its own notice
       continue
@@ -71,16 +77,25 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     rec.idleSince = now - ms
     stalls[id] = rec
     const base = stallText(id, ms, truth.unread)
-    if (!cfg.restart) {
-      if (fresh) out.push({ id, text: `${base}: wake or restart it` })
+    // at 80% of the context limit a stalled thread is restarted at once (1.0.28; field: stalled at 112k of 120k, flagged only after 20 minutes)
+    const ctx = t ? await readContext(h, home, t) : null
+    const limit = (await threadLimits(h)).limit
+    const nearCap = !!ctx && ctx.tokens >= limit * CAP_SHARE
+    if (!cfg.restart && !nearCap) {
+      if (fresh && !halted) out.push({ id, text: `${base}: wake or restart it` })
       continue
     }
     if ((rec.tries ?? 0) >= MAX_STALL_TRIES) continue // gave up for this stall (the notice was sent)
-    const r = await deps.restart(id, `Its previous session stalled: no tool call or report for ${mins(ms)} min${unreadText(truth.unread)}; restarted by script (threads.stallRestart).`)
+    const again = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null) // the moment it acts: never a parked or closed thread
+    if (!again || again.state !== 'open') {
+      delete stalls[id]
+      continue
+    }
+    const r = await deps.restart(id, nearCap ? `Its previous session stalled at ${ctx!.tokens} tokens (limit ${limit}): no tool call or report for ${mins(ms)} min; restarted by script with the handover.` : `Its previous session stalled: no tool call or report for ${mins(ms)} min${unreadText(truth.unread)}; restarted by script (threads.stallRestart).`)
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
       delete stalls[id] // a new session: the stall is over
       await setNotice(h, `restart-${id}`, null)
-      out.push({ id, text: `${base}: restarted it as a new session by script (threads.stallRestart is on)` })
+      out.push({ id, text: nearCap ? `${id} stalled at ${kTokens(ctx!.tokens)} of ${kTokens(limit)}: restarted` : `${base}: restarted it as a new session by script (threads.stallRestart is on)` })
     } else {
       rec.tries = (rec.tries ?? 0) + 1
       // (before the last try: retried at the next tick, the notice comes with the last one)

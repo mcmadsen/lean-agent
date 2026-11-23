@@ -9,9 +9,10 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
-import { bindAnswers, resetActions } from './deskactions'
+import { bindAnswers, resetActions, runStanding } from './deskactions'
+import { holdLines, holdsTick } from './sendhold'
 import { recordHumanPrompt } from './humanprompts'
-import { revokeByWords } from './deskwrites'
+import { revokeByWords, runGranted } from './deskwrites'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
@@ -187,7 +188,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -209,8 +210,9 @@ const SCHEMA = {
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'default sonnet. Never choose opus yourself: only when the user asked, with a reason' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
-    on: { type: 'boolean', description: 'project-private, keep: true or false; profile: false removes the profile' },
+    on: { type: 'boolean', description: 'project-private, keep, keep-going: true or false; profile: false removes the profile' },
     keep: { type: 'boolean', description: 'new/start: keep mode (follow-ups resume the session until its context passes the limit)' },
+    keepGoing: { type: 'boolean', description: 'new/start: the standing order "keep going, no asks"' },
     allowEdit: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     allowCmd: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs beyond its project profile' },
@@ -550,7 +552,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -579,6 +581,14 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-continue-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a covered reply held for actions.holdSeconds (sendhold.ts): sent when its window ends or the user pressed Send now; a thread that is no longer open sends nothing
+      every($, 5_000, 'desk', async host2 => {
+        const notes = await holdsTick(host2, { run: async id => (await runStanding(host2, id)) ?? (await runGranted(host2, id)), tell: (thread, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-hold-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -1539,6 +1549,8 @@ export const register: Register = on => {
         more = await takeReports(host)
         const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts
         if (stalled) more = more ? `${more}\n${stalled}` : stalled
+        const held = await holdLines(host).catch(() => null) // a covered reply waiting in its hold window (the exact text), a send held by a newer instruction (sendhold.ts)
+        if (held) more = more ? `${more}\n${held}` : held
         const lim = limitLineOnce() // the desk reached its limit: its reply starts with one line saying so, once (deskcompact.ts)
         if (lim) more = more ? `${more}\n${lim}` : lim
         const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks

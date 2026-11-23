@@ -36,14 +36,14 @@ const deps = (state: { rows: any[]; restarts: string[]; result?: any }) => ({ ag
 
 test('truthOf: working + no activity for stallMinutes (or an old unread message) is stalled; a worker\'s activity, a prompt for the user and an idle session are not', () => {
   const base = { threadState: 'open', queued: [] as { ts: number }[], now: T0 }
-  expect(STALL_MINUTES).toBe(20)
+  expect(STALL_MINUTES).toBe(10)
   const s = truthOf({ ...base, row: row(), activityAt: T0 - 25 * MIN })
   expect(s.word).toBe('stalled')
   expect(s.text).toMatch(/^stalled: no tool call or report for 25 min \(last activity \d\d:\d\d\)$/)
-  expect(truthOf({ ...base, row: row(), activityAt: T0 - 19 * MIN }).word).toBe('running') // a worker's tool call a minute ago moved activityAt
+  expect(truthOf({ ...base, row: row(), activityAt: T0 - 9 * MIN }).word).toBe('running') // a worker's tool call a minute ago moved activityAt
   expect(truthOf({ ...base, row: row(), activityAt: null }).word).toBe('running') // unknown: no claim
   expect(truthOf({ ...base, row: row(), activityAt: T0 - 5 * MIN, queued: [{ ts: T0 - 21 * MIN }, { ts: T0 - 2 * MIN }] }).word).toBe('stalled') // unread older than that
-  expect(truthOf({ ...base, row: row(), activityAt: T0 - 5 * MIN, queued: [{ ts: T0 - 15 * MIN }] }).word).toBe('stuck') // stuckMinutes (10) still applies first
+  expect(truthOf({ ...base, row: row(), activityAt: T0 - 5 * MIN, queued: [{ ts: T0 - 15 * MIN }], stallMinutes: 20 }).word).toBe('stuck') // stuckMinutes (10) still applies first
   expect(truthOf({ ...base, row: row({ waitingFor: 'permission' }), activityAt: T0 - 90 * MIN }).word).toBe('running') // the user's to answer
   expect(truthOf({ ...base, row: row({ status: 'idle', state: 'idle' }), activityAt: T0 - 90 * MIN }).word).toBe('idle')
   expect(truthOf({ ...base, row: row(), activityAt: T0 - 30 * MIN, stallMinutes: 45 }).word).toBe('running') // config
@@ -51,9 +51,9 @@ test('truthOf: working + no activity for stallMinutes (or an old unread message)
 })
 
 test('threads.stallMinutes / stallRestart config', async () => {
-  expect(await stallConfig(setup().host, '/h')).toEqual({ minutes: 20, restart: false })
+  expect(await stallConfig(setup().host, '/h')).toEqual({ minutes: 10, restart: false })
   expect(await stallConfig(setup({ config: { threads: { stallMinutes: 5, stallRestart: true } } }).host, '/h')).toEqual({ minutes: 5, restart: true })
-  expect(await stallConfig(setup({ config: { threads: { stallMinutes: -1, stallRestart: 'yes' } } }).host, '/h')).toEqual({ minutes: 20, restart: false })
+  expect(await stallConfig(setup({ config: { threads: { stallMinutes: -1, stallRestart: 'yes' } } }).host, '/h')).toEqual({ minutes: 10, restart: false })
 })
 
 test('touchActivity writes the thread\'s own file, at most every 5 s (a report always)', async () => {

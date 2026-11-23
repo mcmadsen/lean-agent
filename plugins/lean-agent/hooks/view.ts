@@ -14,7 +14,7 @@ import { NOTICE_SET, deskModelStatus, deskModelText, readDeskModel, readDeskSwit
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stallFor, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
@@ -22,6 +22,8 @@ import { deskChoice } from './models'
 import { isExpensiveModel, listRequests } from './expensive'
 import type { ModelRequest } from './expensive'
 import { listActions, standingView } from './deskactions'
+import { holdsView } from './sendhold'
+import type { Held } from './sendhold'
 import type { ActionView, StandingView } from './deskactions'
 import { writesView } from './deskwrites'
 import type { WritesView } from './deskwrites'
@@ -48,7 +50,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
+export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; keepGoing?: boolean /* the standing order "keep going" (continuepending.ts) */; approval?: string; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -67,7 +69,7 @@ export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: stri
 export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean }
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
 export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
-export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[]; standing?: StandingView /* active grants and recent standing sends (deskactions.ts) */; writes?: WritesView /* the user's written approvals and what was sent under them (deskwrites.ts) */; selfEdit?: SelfEditView /* the threads the user let edit their worktree themselves (selfedit.ts) */ }
+export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[]; standing?: StandingView /* active grants and recent standing sends (deskactions.ts) */; holds?: Held[] /* covered replies in their hold window (sendhold.ts) */; writes?: WritesView /* the user's written approvals and what was sent under them (deskwrites.ts) */; selfEdit?: SelfEditView /* the threads the user let edit their worktree themselves (selfedit.ts) */ }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
@@ -314,7 +316,7 @@ export async function loadView(h: Host): Promise<View> {
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
       const queued = (await unconsumed(h, home, t.id)).msgs
-      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null })
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes: stallFor(stallMinutes, t), activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
@@ -334,6 +336,7 @@ export async function loadView(h: Host): Promise<View> {
         ...(restarting ? { restarting: true } : {}),
         ...(cv && cv.tokens !== undefined ? (restarting ? { ctx: `${cv.text} · ${RESTARTING_TEXT}`, ctxLevel: 'warn' as Level } : { ctx: cv.text, ctxLevel: cv.level }) : {}), // (an unknown size says nothing on the card)
         ...(t.keep === true ? { keep: true } : {}),
+        ...(t.keepGoing === true ? { keepGoing: true } : {}),
         ...(agentsOk && t.sid ? { live: truth.word } : {}), // (no listing, or no session yet: nothing is claimed)
         unread: truth.unread,
         ...(liveNote ? { liveNote } : {}),
@@ -411,6 +414,10 @@ export async function loadView(h: Host): Promise<View> {
   await guard('standing approvals', async () => {
     const s = await standingView(h)
     v.standing = { ...s, grants: s.grants.filter(g => v.threads.some(t => t.id === g.thread)) }
+  })
+  // covered replies waiting in their hold window (sendhold.ts): the exact text, the countdown, Send now / Cancel
+  await guard('held sends', async () => {
+    v.holds = (await holdsView(h)).filter(x => v.threads.some(t => t.id === x.thread))
   })
   // the user's written approvals (deskwrites.ts): the instruction a grant rests on, the writes sent under it, each with a Revoke button
   await guard('written approvals', async () => {

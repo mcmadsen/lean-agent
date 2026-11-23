@@ -35,10 +35,12 @@ export async function threadsConfig(h: Host, home: string): Promise<ThreadsConfi
   return { stuckMinutes: Number.isFinite(m) && m > 0 ? m : STUCK_MINUTES, removeOld: cfg?.threads?.removeOld !== false }
 }
 
-// ---- stall watchdog (1.0.20): config threads.stallMinutes (default 20), threads.stallRestart (default false) -------------------------------
+// ---- stall watchdog (1.0.20): config threads.stallMinutes (default 10 since 1.0.28), threads.stallRestart (default false) -------------------------------
 // The thread's own hooks record its last activity (a tool call of the thread or of one of its workers, a report, a start or a message
 // handed over) in <thread folder>/activity.json; the desk reads it. A worker that still runs keeps the thread alive through its own tool calls.
-export const STALL_MINUTES = 20
+export const STALL_MINUTES = 10 // (1.0.28: was 20; a thread at 80% of its context limit is restarted at once instead, stall.ts)
+export const KEEPGOING_STALL_MINUTES = 5 // a thread under the keep-going standing order (continuepending.ts) is flagged this early
+export const stallFor = (minutes: number, t: { keepGoing?: unknown } | null | undefined): number => (t?.keepGoing === true ? Math.min(minutes, KEEPGOING_STALL_MINUTES) : minutes)
 export async function stallConfig(h: Host, home: string): Promise<{ minutes: number; restart: boolean }> {
   const cfg = await readJson<{ threads?: { stallMinutes?: unknown; stallRestart?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
   const m = Number(cfg?.threads?.stallMinutes)
