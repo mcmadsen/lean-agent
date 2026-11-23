@@ -22,6 +22,8 @@ const delivery = readFileSync(`${here}/delivery.ts`, 'utf8')
 const block = delivery.slice(delivery.indexOf('export const THREAD_TOOLS'), delivery.indexOf('export async function threadTool'))
 for (const m of block.matchAll(/name: '(lean_[a-z_]+)'/g)) toolRoles[m[1]] = ['thread']
 for (const m of readFileSync(`${here}/register.tsx`, 'utf8').matchAll(/^const (?:TOOL|DOCTOR) = '(lean_[a-z_]+)'/gm)) toolRoles[m[1]] = ['desk']
+// lean_run (register.tsx `const RUN`) is a thread tool: the thread and its workers call it, the desk never
+for (const m of readFileSync(`${here}/register.tsx`, 'utf8').matchAll(/^const RUN = '(lean_[a-z_]+)'/gm)) toolRoles[m[1]] = ['thread']
 // lean_script is registered for the desk and for threads (register.tsx registers SCRIPT_SPEC in both role setups)
 const scriptTool = /export const SCRIPT_TOOL = '(lean_[a-z_]+)'/.exec(readFileSync(`${here}/scripts.ts`, 'utf8'))?.[1]
 if (scriptTool) toolRoles[scriptTool] = ['desk', 'thread']

@@ -12,6 +12,7 @@ import { analyze } from './shell'
 const th = { kind: 'thread', home: '/h', threadDir: '/h/.lean-agent/threads/t1', cwd: '/r/app' } as const
 const ADO = 'https://dev.azure.com/org-a/proj-a/_apis/git/repositories/repo-a/pullRequests/42/threads?api-version=7.1'
 const GH = 'https://api.github.com/repos/o/r/pulls/3/comments'
+const Q = `"${ADO}"` // (quoted, as a real command has it: an unquoted `?` is a glob, and the scanner calls such a command complex)
 
 const READS = [
   'az repos pr show --id 42 --org https://dev.azure.com/org-a --output json',
@@ -32,9 +33,9 @@ const READS = [
   'az pipelines list',
   'az devops invoke --area git --resource pullRequestThreads --route-parameters project=proj-a repositoryId=repo-a pullRequestId=42',
   'az devops invoke --area git --resource pullRequestThreads --http-method GET --route-parameters pullRequestId=42',
-  `az rest --method get --url ${ADO}`,
-  `az rest --method GET --url ${ADO}`,
-  `az rest --url ${ADO}`,
+  `az rest --method get --url ${Q}`,
+  `az rest --method GET --url ${Q}`,
+  `az rest --url ${Q}`,
   'az account show',
   'az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798',
   'gh pr view 3',
@@ -53,18 +54,18 @@ const READS = [
   'gh api -X GET repos/o/r/pulls/3',
   "gh api graphql -f query='query { viewer { login } }'",
   "gh api graphql -f query='{ viewer { login } }'",
-  `curl -sS ${ADO}`,
-  `curl -sS -f -H @- ${ADO}`,
-  `curl -X GET ${ADO}`,
-  `curl -sS -o /tmp/threads.json ${ADO}`,
+  `curl -sS ${Q}`,
+  `curl -sS -f -H @- ${Q}`,
+  `curl -X GET ${Q}`,
+  `curl -sS -o /tmp/threads.json ${Q}`,
   `wget -qO- ${GH}`,
   `wget -O /tmp/c.json ${GH}`,
 ]
 const WRITES = [
   `curl -X PATCH -H "Authorization: Bearer $T" -d '{"status":"fixed"}' "${ADO}"`,
-  `curl -sS -d x=y ${ADO}`,
-  `curl -sS --data-binary @b.json ${ADO}`,
-  `az rest --method patch --url ${ADO} --body '{}'`,
+  `curl -sS -d x=y ${Q}`,
+  `curl -sS --data-binary @b.json ${Q}`,
+  `az rest --method patch --url ${Q} --body '{}'`,
   'az devops invoke --area git --resource pullRequestThreads --http-method PATCH --in-file b.json',
   'az devops invoke --area git --resource pullRequestThreads --in-file b.json',
   'az repos pr create --title x',
@@ -94,12 +95,12 @@ test('1.0.26: the allow-list passes every read form, in the word check and the w
 test('1.0.26: a thread runs the read forms itself; a curl outside the list says the forge-read text, a write keeps the write text', () => {
   const c = orchConfig({})
   for (const cmd of READS) expect([cmd, orchDecide(c, th, { tool: 'Bash', command: cmd })]).toEqual([cmd, null])
-  const own = `curl -sS -o /h/.lean-agent/threads/t1/scratch/t.json ${ADO}`
+  const own = `curl -sS -o /h/.lean-agent/threads/t1/scratch/t.json ${Q}`
   expect(orchDecide(c, th, { tool: 'Bash', command: own })).toBeNull()
-  const out = String(orchDecide(c, th, { tool: 'Bash', command: `curl -sS -o /home/x/t.json ${ADO}` }))
+  const out = String(orchDecide(c, th, { tool: 'Bash', command: `curl -sS -o /home/x/t.json ${Q}` }))
   expect(out).toContain('read it with lean_run get (forge reads by the mod), or one of: az repos pr show, az devops invoke (GET), gh pr view, gh api (GET)')
   expect(ruleOf(out)).toBe('forge-read')
-  const w = String(orchDecide(c, th, { tool: 'Bash', command: `curl -sS -d x=y ${ADO}` }))
+  const w = String(orchDecide(c, th, { tool: 'Bash', command: `curl -sS -d x=y ${Q}` }))
   expect(w.startsWith('forge writes go through the desk')).toBe(true)
   expect(ruleOf(w)).toBe('forge-write')
 })
@@ -116,8 +117,8 @@ test('1.0.26: a reader, a worker and the reviewer run the read forms; every writ
       expect([agent, cmd, r.startsWith('forge writes go through the desk') || r.includes('a subagent makes no forge write')]).toEqual([agent, cmd, true])
     }
   }
-  const outside = String(await run(`curl -sS -o /home/x/t.json ${ADO}`, 'lean-agent:reader-haiku'))
+  const outside = String(await run(`curl -sS -o /home/x/t.json ${Q}`, 'lean-agent:reader-haiku'))
   expect(outside).toContain('read it with lean_run get')
   expect(ruleOf(outside)).toBe('forge-read')
-  expect(String(await run(`az rest --method get --body '{}' --url ${ADO}`, 'lean-agent:worker-haiku'))).toContain('a subagent makes no forge write')
+  expect(String(await run(`az rest --method get --body '{}' --url ${Q}`, 'lean-agent:worker-haiku'))).toContain('a subagent makes no forge write')
 })
