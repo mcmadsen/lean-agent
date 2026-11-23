@@ -8,6 +8,7 @@ import { threadTool } from './delivery'
 
 const L = '/h/.lean-agent'
 const SID = '11111111-2222-3333-4444-555555555555'
+const FREE = 'free context 80k (limit 120k, base ~40k assumed)' // the start reply states it (briefsize.ts); no fixed base is recorded in these specs
 const ROOT = '/p'
 
 function setup() {
@@ -215,7 +216,7 @@ test('new without a profile is unchanged: no enabledPlugins, no suffix; loaded.j
   const { h, call } = setup()
   plugins(h)
   const r = await call({ action: 'new', title: 'a', text: 'brief', project: 'app' })
-  expect(r.text).toBe(`t1 started (${SID}) · sonnet/high`) // model/effort only: no profile, no loaded suffix
+  expect(r.text).toBe(`t1 started (${SID}) · sonnet/high · ${FREE}`) // model/effort and the free context only: no profile, no loaded suffix
   expect(JSON.parse(h.files.get(`${L}/threads/t1/.claude/settings.json`)!).enabledPlugins).toBeUndefined()
   expect(await readLoaded(h.host, '/h', 't1')).toEqual({ mcp: null, plugins: null, needs: [] })
   expect(JSON.parse(h.files.get(`${L}/threads/t1/usage.json`)!)).toEqual({ mcp: {}, skills: {} })
@@ -223,7 +224,7 @@ test('new without a profile is unchanged: no enabledPlugins, no suffix; loaded.j
   expect((await call({ action: 'list' })).text).not.toContain('mcp:')
   // needs without a profile are kept but change nothing
   const n = await call({ action: 'new', title: 'b', project: 'app', needs: ['azure-devops'] })
-  expect(n.text).toBe(`t2 started (${SID}) · sonnet/high`)
+  expect(n.text).toBe(`t2 started (${SID}) · sonnet/high · ${FREE}`)
   expect(JSON.parse(h.files.get(`${L}/threads/t2/thread.json`)!).needs).toEqual(['azure-devops'])
 })
 
@@ -232,7 +233,7 @@ test('new with a profile and needs: plugins off in the thread settings, the load
   plugins(h)
   profile(h, 'app', { mcp: ['db'], plugins: ['keep'] })
   const r = await call({ action: 'new', title: 'pr', text: 'brief', project: 'app', needs: ['azure-devops'] })
-  expect(r.text).toBe(`t1 started (${SID}) · sonnet/high · mcp: db,azure-devops · plugins: keep,azure-devops`) // one line: model/effort, then the loaded set
+  expect(r.text).toBe(`t1 started (${SID}) · sonnet/high · ${FREE} · mcp: db,azure-devops · plugins: keep,azure-devops`) // one line: model/effort, the free context, then the loaded set
   const s = JSON.parse(h.files.get(`${L}/threads/t1/.claude/settings.json`)!)
   expect(s.enabledPlugins).toEqual({ 'skillsonly@mk': false }) // not lean-agent, not figma (it brings a server), not keep
   expect(s.model).toBe('sonnet') // the other keys stay
@@ -241,7 +242,7 @@ test('new with a profile and needs: plugins off in the thread settings, the load
   expect((await call({ action: 'list' })).text).toContain('· mcp: db,azure-devops · plugins: keep,azure-devops')
   // another project without a profile in the same session is untouched
   const o = await call({ action: 'new', title: 'o', project: 'other' })
-  expect(o.text).toBe(`t2 started (${SID}) · sonnet/high`)
+  expect(o.text).toBe(`t2 started (${SID}) · sonnet/high · ${FREE}`)
   // the argv gained nothing: no --strict-mcp-config, no --mcp-config (the profile works through settings and the mod)
   const argv = h.claudeCalls().find(a => a[0] === '--bg')!
   expect(argv.some(a => a.startsWith('--strict-mcp') || a === '--mcp-config')).toBe(false)

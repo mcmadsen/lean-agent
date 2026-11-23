@@ -1,11 +1,13 @@
 ---
 name: rules-pr
-description: Turn what lean-agent learned about a project into a DRAFT pull request that improves the project's own CLAUDE.md files and .claude/rules, so the whole team benefits and the always-loaded text shrinks. Run in a thread, never the desk. Use for "propose a rules PR for <project>", "upstream the learned rules", "optimise the project's Claude files", or after such a PR merged (step 8).
+description: Turn learned project rules into a DRAFT pull request on the project's own CLAUDE.md files and .claude/rules. Run in a thread. Use for "propose a rules PR for <project>", "upstream the learned rules", or after such a PR merged.
 argument-hint: <project> [--min-sessions N] [--min-days N]
 roles: desk, thread
 ---
 
 # Rules PR
+
+(thread only) `lean_rules` is deferred in a thread session: load it first with ToolSearch (`select:mcp__lean-agent__lean_rules`).
 
 ## Desk
 

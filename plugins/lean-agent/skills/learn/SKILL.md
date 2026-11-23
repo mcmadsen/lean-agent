@@ -7,6 +7,8 @@ roles: thread
 
 # Learn project rules
 
+`lean_rules` and `lean_profile` are deferred in a thread session: load them first with ToolSearch (`select:mcp__lean-agent__lean_rules,mcp__lean-agent__lean_profile`).
+
 Run in a thread whose checkout is the project. Rules are written to `~/.lean-agent/<project>/rules/` (the source of
 truth) and COPIED into the checkout by the `lean_rules` tool; never write into `<repo>/.claude/rules/` yourself and
 never symlink (symlinked rule folders do not load).

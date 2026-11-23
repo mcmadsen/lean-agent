@@ -55,10 +55,10 @@ async function preparedLevel(h: Host, project: string, sha: string): Promise<Lev
 
 // The two arguments this file adds to the lean_review tool's inputSchema (delivery.ts spreads them into its properties)
 export const REVIEW_EXTRA_PROPS = {
-  level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (the default: ONE cheap sonnet pass on correctness, behaviour and reuse at an intermediate checkpoint; it never records green) or full (the strict review the push gate needs: every pass, two runs for a high-risk diff; ask for it only before "ready to push")' },
-  ref: { type: 'string', description: 'prepare: review SOMEONE ELSE\'s work: a PR number or URL, a branch or a sha of the project\'s origin, read read-only into a scratch repository (never the user\'s tree); base optional. Record it with mode: "external"' },
-  mode: { type: 'string', enum: ['external'], description: 'record: external = the review of a ref prepare read (ref): the record is NOT green and never counts for the push gate' },
-  worktree: { type: 'string', description: 'prepare, record (the same one on both sides): absolute path of a registered worktree of the project to review (default: the calling thread\'s own registered worktree, else the project\'s path)' },
+  level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (default: one cheap pass, never green) or full (the strict review the push gate needs; only before "ready to push")' },
+  ref: { type: 'string', description: 'prepare: review someone else\'s work (PR number or URL, branch or sha), read-only; record it with mode "external"' },
+  mode: { type: 'string', enum: ['external'], description: 'record: the review of a ref (never green, never for the push gate)' },
+  worktree: { type: 'string', description: 'prepare, record: absolute path of a registered worktree to review (default: this thread\'s own)' },
 }
 
 // The checkout a review reads: the calling thread's own registered worktree of this project (its HEAD is the work under review), else the

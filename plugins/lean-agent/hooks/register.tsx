@@ -7,7 +7,7 @@ import { limitFromUsage, limitTick, readLimit, sameReset, writeLimit } from './l
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
-import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
 import { recordHumanPrompt } from './humanprompts'
@@ -31,7 +31,7 @@ import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
-import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
+import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteCarried, noteSection, offeredTo, skillsCarried, skillsSeen, trimListing } from './skilltrim'
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
@@ -53,7 +53,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
+import { isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeSliceNote, takeStepNote } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
 import { runGet } from './forgeget'
@@ -67,8 +67,11 @@ import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
-import { noteBase } from './base'
+import { attachParts, noteBase } from './base'
+import { partsOf, recordParts } from './ctxparts'
+import { takeWarn, warnedAlready } from './scratchnotes'
 import { threadToolsArgv } from './orchestrate'
+import { ANSWER_RULE, answersEnd, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
@@ -171,42 +174,42 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); "probe" or "probe tN": a few one-word haiku calls (about 5 cents) that switch MCP, skills, other plugins and your user CLAUDE.md off one at a time and name the biggest part of the base; context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
-const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool (a script polls every 45 s, no model turn per check; a worker may call it). {host: "ado", org, project, id | ids (run numbers, at most 10) | branch, waitMinutes} or {host: "github", repo (owner/name), id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10). Returns one compact line per run: id, status, result, failed stage/job/test names, URL; or "still running after N min"', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only, forge hosts only; the Azure token never reaches a shell; a thread and its workers may call it). {host: "ado", org, project, path (a REST path under the project, e.g. git/repositories/<repo>/pullRequests/<n>/threads), query?} or {host: "github", path (e.g. repos/<owner>/<repo>/pulls/<n>/comments), query?}; select = dotted field paths to keep (["value.id", "value.status"]) so a status check returns a few lines. Shortcut: {host: "ado", org, project, repo, pr, threads: true} = one line per PR thread: id, status, the first comment\'s first 80 characters', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the failing test names and the last 40 lines. Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
-    tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
-    message: { type: 'string', description: 'alias of text (restart / reopen / start / wake / resume / send / new)' },
-    text: { type: 'string', description: 'restart / reopen / start / wake / resume: NEW INSTRUCTIONS and facts for the session this call starts: they are the last part of its first prompt, after the handover, and win where they differ (put them here, never in a separate send); new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
+    tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
+    message: { type: 'string', description: 'alias of text' },
+    text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
     title: { type: 'string', description: 'new: short title' },
-    project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
-    id: { type: 'string', description: 'approve-action: the request id from action-list (like a1700000000000-1), only after the USER chose Approve for exactly that request in AskUserQuestion (or pressed Approve in the pane)' },
-    target: { type: 'object', description: 'allow-writes (tN + this): the PR or work item the USER named in their own typed words: exactly one of pr (number or URL) or workitem (id). The mod makes the grant only when a recorded prompt of the user, not older than 24 h, names it and asks for the work (fix / resolve / answer ... the comments); else it refuses and you ask with AskUserQuestion. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
-    kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: optional narrower list; a PR: reply, status, comment (default all three); a work item: comment, update' },
-    sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
-    reason: { type: 'string', description: 'approve-push: why, in a few words. new/start/reopen/restart/resume with an expensive model (opus): why sonnet is not enough (required; the thread does NOT start, the request waits in the pane for the user\'s Approve)' },
-    review: { type: 'object', description: 'new: start a REVIEW thread (it runs lean-agent:review at level full and cannot report done without a lean_review record): exactly one of pr (number or URL), branch or sha, plus base (optional); needs project; sonnet/high by default (haiku is raised to sonnet)', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
-    pr: { type: 'object', description: 'push: open a pull request after the push succeeded (gh pr create, or az repos pr create for an Azure DevOps remote, from the thread\'s worktree)', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string', description: 'default: the repo\'s default branch' }, draft: { type: 'boolean' } }, required: ['title'] },
-    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'new/start/reopen/restart: default sonnet. Never choose opus yourself: only when the user asked for it, with a reason; it still needs the user\'s Approve press in the pane' },
+    project: { type: 'string', description: 'new, project-*: a registered project' },
+    id: { type: 'string', description: 'approve-action: the id from action-list, only after the USER chose Approve for exactly that request' },
+    target: { type: 'object', description: 'allow-writes: the PR (number or URL) or work item (id) the USER named in their own words; the mod refuses without their recorded words. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
+    kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment; work item: comment, update)' },
+    sha: { type: 'string', description: 'approve-push, push: the full sha the user approved, naming this sha and branch' },
+    reason: { type: 'string', description: 'approve-push: why. An expensive model (opus): why sonnet is not enough (required; the request waits for the user\'s Approve)' },
+    review: { type: 'object', description: 'new: start a review thread: exactly one of pr, branch, sha (+ base); needs project', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
+    pr: { type: 'object', description: 'push: open a pull request after the push', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } }, required: ['title'] },
+    model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'default sonnet. Never choose opus yourself: only when the user asked, with a reason' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
-    on: { type: 'boolean', description: 'project-private: true or false; profile: false removes the project profile; keep: true or false (without it keep only says what is set)' },
-    keep: { type: 'boolean', description: 'new/start: keep mode, off by default: after a done report follow-up messages RESUME the same session until its context passes the limit (threadTokens), instead of starting a new one' },
-    allowEdit: { type: 'array', items: { type: 'string' }, description: 'new: accepted and ignored (workers may read and edit without a grant)' },
-    allowCmd: { type: 'array', items: { type: 'string' }, description: 'new: accepted and ignored (readers need no command grant)' },
-    needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs on top of its project profile (e.g. ["azure-devops"]); this thread only. Everything else stays deferred' },
-    mcp: { type: 'array', items: { type: 'string' }, description: 'profile: the MCP servers the project loads (allow-list; others are deferred, still found by ToolSearch)' },
-    plugins: { type: 'array', items: { type: 'string' }, description: 'profile: the plugins the project loads (allow-list; skill-only plugins outside it are off)' },
-    fill: { type: 'boolean', description: 'profile: add the servers and plugins the project\'s threads actually used' },
-    all: { type: 'boolean', description: 'projects: include private ones hidden by the private switch' },
+    on: { type: 'boolean', description: 'project-private, keep: true or false; profile: false removes the profile' },
+    keep: { type: 'boolean', description: 'new/start: keep mode (follow-ups resume the session until its context passes the limit)' },
+    allowEdit: { type: 'array', items: { type: 'string' }, description: 'ignored' },
+    allowCmd: { type: 'array', items: { type: 'string' }, description: 'ignored' },
+    needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs beyond its project profile' },
+    mcp: { type: 'array', items: { type: 'string' }, description: 'profile: MCP servers the project loads' },
+    plugins: { type: 'array', items: { type: 'string' }, description: 'profile: plugins the project loads' },
+    fill: { type: 'boolean', description: 'profile: add what the threads used' },
+    all: { type: 'boolean', description: 'projects: include private ones' },
     confirm: { type: 'boolean', description: 'project-private off: only after the user agreed' },
-    kind: { type: 'string', description: 'dismiss tN: which of its Needs-you items to hide: question | prompt | approval | blocked | stalled | restart | ready | model | action (without it: its current item). Only after the USER said to dismiss it' },
-    notice: { type: 'string', description: 'dismiss: hide a line at the top of the pane instead: its id (the notice file name, like budget-t5 or budget-daily) or all. Only after the USER said to' },
+    kind: { type: 'string', description: 'dismiss tN: the Needs-you item (question | prompt | approval | blocked | stalled | restart | ready | model | action); only after the USER said to' },
+    notice: { type: 'string', description: 'dismiss: a top-of-pane notice id, or all; only after the USER said to' },
   },
   required: ['action'],
 }
@@ -296,7 +299,46 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
 // A thread's turn end, by script (no model turn): the context size record, the plan-window snapshot, the state snapshot and, over the
 // context limit with work left, the checkpoint the desk's timer restarts from (autorestart.ts). Observes only; every failure is silent.
 // No engine call of its own (session.measure hands it the figures it already read): turn.complete uses the last measured size.
-async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string): Promise<void> {
+// The context breakdown of a turn end (ctxparts.ts): `full` (the token-count API per tool and memory file) once per session at its first turn end,
+// `summary` (local estimates, no request) at every later one; recorded in the thread's folder. A failed full count is tried once more.
+// The warn line (scratchnotes.ts): the current size is the engine's own figure (`$.session.usage()` costs nothing), asked until the line was said.
+async function warnNote($: any, host: Host): Promise<string | null> {
+  try {
+    if (role.kind !== 'thread' || stopped) return null
+    const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+    if (!sid || warnedAlready(sid)) return null
+    const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
+    return takeWarn(sid, Number.isFinite(u) ? u : lastTokens, await threadLimits(host))
+  } catch {
+    return null
+  }
+}
+const partsTries = new Map<string, number>()
+const partsFull = new Set<string>()
+async function noteParts($: any, host: Host, id: string, sid: string): Promise<void> {
+  try {
+    if (!sid) return
+    const first = !partsFull.has(sid) && (partsTries.get(sid) ?? 0) < 2
+    if (first) partsTries.set(sid, (partsTries.get(sid) ?? 0) + 1)
+    const ask = async (d: 'full' | 'summary') => partsOf((await bounded($, Promise.resolve($.session.usage({ breakdown: d })), 'session.usage breakdown', 20_000).catch(() => null))?.context?.breakdown, d === 'full')
+    let p = first ? await ask('full') : null
+    if (p) { if (partsFull.size >= 200) partsFull.clear(); partsFull.add(sid) }
+    p ??= await ask('summary')
+    if (!p) return
+    // the engine counts every skill it has; the model reads the listing the mod rewrote: the fixed part uses what was really carried
+    // (the Messages row is the real total minus the estimates, so it grows by the same amount)
+    const read = skillsCarried()
+    if (read > 0 && p.skills > read) {
+      const d = p.skills - read
+      p = { ...p, skills: read, fixed: p.fixed - d, messages: p.messages + d, skillsEngine: p.skills }
+    }
+    await recordParts(host, id, sid, { parts: p })
+    if (p.full) await attachParts(host, id, p) // the start reply's "fixed base" reads it from base.json
+  } catch {
+    /* no breakdown: the first request stays "first request" */
+  }
+}
+async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>): Promise<void> {
   try {
     const tokens = typeof tokensIn === 'number' && Number.isFinite(tokensIn) ? tokensIn : null
     const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
@@ -304,6 +346,7 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string)
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
+    if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
   }
@@ -461,8 +504,8 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
   if (newRole.kind === 'thread') {
     const tid = newRole.id
     await step('thread tools', async () => {
-      // (lean_profile is used once per learn run: behind ToolSearch, so it adds nothing to a thread's first turn)
-      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: t.name === 'lean_profile' })
+      // (lean_profile, lean_rules, lean_compare and lean_worktree are used in one kind of run only: behind ToolSearch, so they add nothing to a thread's first turn)
+      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: DEFERRED_THREAD_TOOLS.has(t.name) })
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
       await registerOnce($, { ...RUN_SPEC, isDeferred: false } as any)
     })
@@ -484,13 +527,13 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once; approval in advance: when the user\'s own words name a PR or work item and ask for the work, allow-writes (tN, target {pr | workitem}, kinds?) lets the mod send that thread\'s writes on that target without asking (refused unless the user\'s recorded words carry it), revoke-writes (tN or id) takes it back. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor: check (read-only report), fix (desk folder, login opener, trust), migrate (0.45 state -> 1.0, closes old threads; idempotent), stats (spend by model/role/agent/thread, caps, rule loads, feedback: computed here, never read the ledger yourself), compare (what a session costs at start: clean vs thread vs desk, from a few one-turn runs; project required; mode history lists saved reports), export (write ONE anonymised feedback file, print its path; never posts), mcp-env (an MCP server needs a variable such as a site: with name + a NON-secret value it writes the env block of ~/.claude/settings.json so every session gets it; secret-looking names are refused; without them it lists the servers that need one), dismiss-old-desk (ends the reminder to archive the desk that Restart desk replaced, once the user says they did or do not care).',
+        description: 'lean-agent doctor (the doctor skill): check (read-only), fix, migrate, stats (computed here, never read the ledger yourself), compare, export (one anonymised feedback file; never posts), mcp-env (a NON-secret variable of an MCP server), dismiss-old-desk, refusals, context, overhead, handover.',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -714,11 +757,22 @@ const DENIAL_TEXT = /(denied|blocked|refused|rejected)\b[^.\n]{0,80}\b(permissio
 async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string): Promise<void> {
   if (role.kind !== 'thread' || e?.agent_id || e?.agentId) return
   const input = e?.tool_input
-  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !/^(lean-agent:)?worker-/.test(String(input.subagent_type ?? ''))) return
+  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object') return
+  const stype = String(input.subagent_type ?? '')
+  const isWorker = /^(lean-agent:)?worker-/.test(stype)
+  const isReader = /^(lean-agent:)?reader-/.test(stype) || (isWorker && jobOf(input.prompt) === 'lookup') // a lookup is read-only whoever does it
+  if (!isWorker && !isReader) return
   const id = String(e?.tool_use_id ?? '')
   if (id && deniedSeen.has(id)) return
   if (id) { if (deniedSeen.size >= 200) deniedSeen.clear(); deniedSeen.add(id) }
   const host = hostOf($)
+  if (isReader) {
+    // a denied reader is no reason to read everything oneself (orchestrate.ts): the engine's reason category, ONE retry with a narrower brief, then slices
+    const category = readerCategory(via === 'PermissionDenied' ? e?.reason : e?.error)
+    noteReaderDenied(`${threadsDir(await homeDir(host))}/${role.id}`, category)
+    await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the reader call (${via}): ${category}`, agent: stype, tool: String(e.tool_name), thread: role.id, version: VERSION })
+    return
+  }
   const roots: string[] = []
   for (const r of pathsOf(input.prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
   const key = `${threadsDir(await homeDir(host))}/${role.id}`
@@ -782,12 +836,39 @@ export const register: Register = on => {
     const id = typeof e?.agent_id === 'string' ? e.agent_id : typeof e?.agentId === 'string' ? e.agentId : ''
     if (id && role.kind === 'thread') {
       const host = hostOf($)
+      // a long final answer: sent back ONCE to write its findings to the file and answer with the path (answers.ts); the subagent goes on,
+      // so nothing is released yet. A second long answer is let through and counted.
+      try {
+        const type = String(e?.agent_type ?? e?.agentType ?? '')
+        const dir = `${threadsDir(await homeDir(host))}/${role.id}`
+        const v = stopAnswer(dir, id, type, e?.last_assistant_message ?? e?.result, await loadAnswerChars(host))
+        if (v?.block) return { ...(await next(e)), block: v.block } as any
+        if (v?.tooLong) await logRefusal(host, { role: 'worker', rule: ANSWER_RULE, text: `${ANSWER_RULE}: a second answer of ${v.tooLong.chars} characters, let through`, agent: type, tool: 'SubagentStop', thread: role.id, version: VERSION })
+      } catch {
+        /* the stop goes through as before */
+      }
+      answersEnd(id)
       orchAgentEnd(id)
       // a worker that ended after the context limit stopped the thread: its result goes into the snapshot's pending list (by script, never acted on)
       if (stopped && typeof (e?.last_assistant_message ?? e?.result) === 'string') await notePending(host, role.id, stopped.sid, { agent: String(e?.agent_type ?? id), text: String(e.last_assistant_message ?? e.result) }).catch(() => false)
       await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
     }
     return next(e)
+  }).catch(($, e: any, next) => next(e))
+
+  // a subagent started: the thread's folder names the file its findings go to (answers.ts). The Agent call's input is never changed; the
+  // engine's SubagentStart answer carries the line as context for the subagent.
+  on('classic.SubagentStart', async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'thread') return r
+    try {
+      const host = hostOf($)
+      const line = startAgent(`${threadsDir(await homeDir(host))}/${role.id}`, String(e?.agent_id ?? e?.agentId ?? ''), String(e?.agent_type ?? e?.agentType ?? ''))
+      if (line) return { ...r, additionalContext: [...(r?.additionalContext ?? []), line] }
+    } catch {
+      /* the subagent starts without the line; its agent definition says the same */
+    }
+    return r
   }).catch(($, e: any, next) => next(e))
 
   // the permission check (the auto mode classifier, a rule) denied a thread's worker Agent call: our guard is a token policy, not a safety
@@ -859,7 +940,10 @@ export const register: Register = on => {
   on('turn.complete', async ($, e: any, next) => {
     if (!e.agentId) busySince = 0
     if (!e.agentId) inTurn = false
-    if (role.kind === 'thread' && !e.agentId && lastSid) await threadEnd(hostOf($), role.id, lastTokens, lastSid)
+    if (role.kind === 'thread' && !e.agentId && lastSid) {
+      const tid = role.id
+      await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid))
+    }
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
@@ -890,7 +974,7 @@ export const register: Register = on => {
         await recordContext(host, id, sid, tokens)
         lastTokens = typeof tokens === 'number' ? tokens : null
         // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
-        if (!inTurn) await threadEnd(host, id, tokens, sid)
+        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid))
       } catch {
         /* the size stays unknown */
       }
@@ -950,10 +1034,12 @@ export const register: Register = on => {
     if (!isSkillAttachment(type)) return r
     if (role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) {
       skillsSeen(type, `not the desk (role ${role.kind}): untouched`)
+      noteCarried(r.text)
       return r
     }
-    const t = trimListing(r.text)
+    const t = trimListing(r.text, n => offeredTo(role.kind === 'thread' ? 'thread' : 'desk', n))
     skillsSeen(type, t.reason)
+    noteCarried(t.text ?? r.text) // what the model reads: the context breakdown's skills figure is corrected to it (noteParts)
     return t.text === null ? r : { ...r, text: t.text }
   }).catch(($, e: any, next) => next(e))
 
@@ -961,7 +1047,7 @@ export const register: Register = on => {
   on('tool.describe', { tool: 'Skill' }, async ($, e: any, next) => {
     const r: any = await next(e)
     if ((role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) || typeof r?.description !== 'string') return r
-    const t = trimListing(r.description)
+    const t = trimListing(r.description, n => offeredTo(role.kind === 'thread' ? 'thread' : 'desk', n))
     if (t.text === null) return r
     skillsSeen('Skill tool description', t.reason)
     return { ...r, description: t.text, breakPromptCache: true }
@@ -1238,6 +1324,7 @@ export const register: Register = on => {
     // (a background launch returns at once; a foreground call is released at return)
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && typeof e.subagent_type === 'string') noteAgentCall(`${threadsDir(await homeDir(host))}/${role.id}`, e.subagent_type, jobOf(e.prompt)) // pairs with the SubagentStart that follows (answers.ts)
     const gopts = { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }
     if (gcall) {
       try {
@@ -1319,6 +1406,10 @@ export const register: Register = on => {
       if (batch) lines.push(batch)
       const hint = octx?.threadDir ? takeDeniedHint(octx.threadDir) : null // a worker call was denied by the permission check: said once
       if (hint) lines.push(hint)
+      const slices = octx?.threadDir ? takeSliceNote(octx.threadDir) : null // the 11th fallback slice of a denied reader: "you are reading a long source yourself"
+      if (slices) lines.push(slices)
+      const warn = await warnNote($, host) // the context is at the warn level: ONE line per session, "write what you have learned to scratch/notes.md" (scratchnotes.ts)
+      if (warn) lines.push(warn)
     } catch {
       /* delivery is retried at the next call */
     }

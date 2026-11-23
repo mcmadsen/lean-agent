@@ -4,9 +4,12 @@
 // reading of any thread: `lean_doctor overhead` shows it next to its text estimate and the start reply of a thread says it once it is known.
 import { atomicWrite, homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
-import { kTokens } from './threadcontext'
+import { recordParts, requestText } from './ctxparts'
+import type { Parts } from './ctxparts'
 
-export type Base = { tokens: number; at: number; thread: string; tools: string }
+// 1.0.26: `tokens` is the FIRST REQUEST of the session (fixed parts + the first prompt + whatever the first turn loaded), not a base; the real
+// fixed base comes from the breakdown at the first turn end (ctxparts.ts), kept here as `parts` when it is the same thread's session.
+export type Base = { tokens: number; at: number; thread: string; tools: string; parts?: Parts }
 export const baseFile = (home: string) => `${leanDir(home)}/base.json`
 const seen = new Set<string>() // sessions whose first request was measured
 
@@ -20,6 +23,7 @@ export async function noteBase(h: Host, thread: string, sid: string, usage: unkn
     const tokens = baseOf(usage)
     if (tokens <= 0) return false
     seen.add(key)
+    await recordParts(h, thread, sid, { request: tokens }) // the thread's own record: its first request next to the breakdown to come
     if (seen.size > 200) seen.delete(seen.values().next().value as string)
     await atomicWrite(h, baseFile(await homeDir(h)), JSON.stringify({ tokens, at: await h.clock.now(), thread, tools } satisfies Base) + '\n')
     return true
@@ -29,10 +33,23 @@ export async function noteBase(h: Host, thread: string, sid: string, usage: unkn
 }
 export const resetBase = () => seen.clear()
 
-export async function readBase(h: Host): Promise<Base | null> {
-  const b = await readJson<Partial<Base> | null>(h, baseFile(await homeDir(h)), null)
-  return b && typeof b.tokens === 'number' && b.tokens > 0 ? { tokens: b.tokens, at: Number(b.at) || 0, thread: String(b.thread ?? ''), tools: String(b.tools ?? '') } : null
+// the breakdown of the thread's first turn end goes next to the newest first-request reading when that reading is the same thread's
+export async function attachParts(h: Host, thread: string, parts: Parts): Promise<boolean> {
+  try {
+    const home = await homeDir(h)
+    const b = await readJson<Partial<Base> | null>(h, baseFile(home), null)
+    if (!b || b.thread !== thread || typeof b.tokens !== 'number') return false
+    await atomicWrite(h, baseFile(home), JSON.stringify({ ...b, parts }) + '\n')
+    return true
+  } catch {
+    return false
+  }
 }
 
-// "measured base: 47k tokens before any work (full built-in tool set; threads.tools can cut it)"
-export const baseLine = (b: Base): string => `measured base ${kTokens(b.tokens)} tokens on every request, before any work (${b.tools ? `built-in tools: ${b.tools}` : 'full built-in tool set; config threads.tools can cut it'})`
+export async function readBase(h: Host): Promise<Base | null> {
+  const b = await readJson<Partial<Base> | null>(h, baseFile(await homeDir(h)), null)
+  return b && typeof b.tokens === 'number' && b.tokens > 0 ? { tokens: b.tokens, at: Number(b.at) || 0, thread: String(b.thread ?? ''), tools: String(b.tools ?? ''), ...(b.parts && typeof b.parts === 'object' ? { parts: b.parts as Parts } : {}) } : null
+}
+
+// "fixed base 28.2k (skills 7.9k, ...) + first prompt 25k = first request 53k (full built-in tool set; ...)"; without a breakdown: "first request 47k tokens (...)"
+export const baseLine = (b: Base): string => requestText(b.tokens, b.parts, b.tools)

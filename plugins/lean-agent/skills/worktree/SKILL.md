@@ -1,11 +1,13 @@
 ---
 name: worktree
-description: Create, adopt, list and remove git worktrees for a project under ~/.lean-agent/worktrees, so threads never share a checkout; installs dependencies in a fresh one. Use when a thread needs its own branch checkout, a PR branch made with plain `git worktree add` should be registered, or a worktree must be cleaned up.
+description: Create, adopt, list and remove git worktrees under ~/.lean-agent/worktrees so threads never share a checkout. Use when a thread needs its own branch checkout, a plain `git worktree add` branch must be registered, or a worktree cleaned up.
 argument-hint: new <project> <branch> | adopt <path> | list | rm <project> <branch>
 roles: thread
 ---
 
 # Worktrees
+
+`lean_worktree` is deferred in a thread session: load it first with ToolSearch (`select:mcp__lean-agent__lean_worktree`).
 
 Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch become `-`). Registry:
 `~/.lean-agent/worktrees.json`, an object keyed `<project>/<branch>` with `{path, repo, branch, thread?, shared?}`.

@@ -31,6 +31,8 @@ import { loadView } from './view'
 import { threadToolsArgv } from './orchestrate'
 import { threadSpendLine } from './stats'
 import { baseLine, readBase } from './base'
+import { readParts } from './ctxparts'
+import { briefLint, freeText, lintRoots } from './briefsize'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
@@ -425,7 +427,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   const { notes: settled, ended } = sid ? await settle(h, home, t, { sid, old, name }) : { notes: [] as string[], ended: false }
   const started = ended ? ENDED_AT_ONCE : 'started' // loud: the head of the reply says it
   const base = await readBase(h).catch(() => null)
-  const lt = (base ? ` · ${baseLine({ ...base, tools: (await threadToolsArgv(h))[1] ?? '' })}` : '') + (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
+  const lt = (base ? ` · ${baseLine({ ...base, tools: (await threadToolsArgv(h))[1] ?? '' })}` : '') + ` · ${freeText((await threadLimits(h)).limit, base?.parts?.fixed)}` + (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} ${started} (${sid}) · ${how}${lt}`, data: { fresh: true, ...(ended ? { ended: true } : {}) } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -830,6 +832,23 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
     // The text given to restart / reopen / start / wake / resume is the first instruction of the session that call starts: it is queued (flagged) before
     // the action, so a start that is held or refused leaves it queued for the next one, and a fresh session gets it as the LAST part of its first
     // prompt (handover.ts). The reply says which happened.
+    // size lint (briefsize.ts, script, no refusal): the sources a brief names weigh more than half of the thread's free context (its limit minus its
+    // fixed base), or it names many: the reply and the brief say to split it into a READING and a WRITING thread. Before the text is carried.
+    let sizeLint = ''
+    if ((i.action === 'new' || i.action === 'start' || i.action === 'send') && typeof i.text === 'string' && i.text.trim()) {
+      try {
+        const home = await homeDir(h)
+        const t = ID.test(i.tN ?? '') ? await load(h, home, i.tN!) : null
+        const fixed = (t ? (await readParts(h, home, t.id))?.first?.fixed : undefined) ?? (await readBase(h))?.parts?.fixed // (a new thread: the newest session's)
+        const l = await briefLint(h, i.text, await lintRoots(h, (t?.project ?? i.project ?? '').trim(), t?.id), { limit: (await threadLimits(h)).limit, fixed })
+        if (l) {
+          sizeLint = l.line
+          i = { ...i, text: `${i.text}\n\n${l.line}` }
+        }
+      } catch {
+        /* no lint: the call goes through as it was */
+      }
+    }
     let carried: { ts: number; chars: number; id: string; home: string } | null = null
     if (CARRY.has(i.action) && ID.test(i.tN ?? '') && typeof i.text === 'string' && i.text.trim()) {
       const home = await homeDir(h)
@@ -859,7 +878,8 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       const why = (data: unknown) => ((data as { pending?: boolean } | undefined)?.pending ? 'the call was held for the user\'s approval' : (out.text.split('\n')[0] ?? '').slice(0, 140))
       out = { ...out, text: left ? `${out.text} · text not delivered: ${why(out.data)}; it is queued (${carried.chars} chars) and the next start carries it` : fresh(out) ? `${out.text} · new session; your text (${carried.chars} chars) is its first instruction` : `${out.text} · your text (${carried.chars} chars) was delivered to the session as its message` }
     }
-    return lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
+    const fin = lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
+    return sizeLint && fin.ok ? { ...fin, text: `${fin.text}\n${sizeLint}` } : fin
   } catch (e) {
     return err(`${i.action} failed: ${(e as Error)?.message ?? e}`)
   }

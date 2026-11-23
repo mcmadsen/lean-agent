@@ -17,7 +17,7 @@ export type StopRec = { sid: string; at: number; tokens: number; limit: number; 
 export const stopFile = (home: string, id: string) => `${threadsDir(home)}/${id}/contextstop.json`
 
 export const stopLine = (tokens: number, limit: number) =>
-  `context limit reached (${kTokens(tokens)} of ${kTokens(limit)}): your state is saved. End your turn now; a fresh session continues from the handover. Do not start workers or report again.`
+  `context limit reached (${kTokens(tokens)} of ${kTokens(limit)}): your state is saved. End your turn now; a fresh session continues from the handover (your reading stays in scratch/notes.md and the scratch files). Do not start workers or report again.`
 export const stopRecordText = (tokens: number, limit: number) => `context ${kTokens(tokens)} over the limit ${kTokens(limit)}: state saved, restart me`
 
 export async function readStop(h: Host, home: string, id: string, sid: string): Promise<StopRec | null> {

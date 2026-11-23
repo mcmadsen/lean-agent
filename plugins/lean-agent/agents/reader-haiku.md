@@ -11,6 +11,8 @@ The brief's first line names the job: `job: lookup|edit|run|check`; your reply i
 lookup: `answer:` then at most 20 lines, then `refs: path:line, path:line`. edit: `files: a, b`, `diffstat: <git diff --shortstat>`, `result: pass|fail`, `note: <one line>`. run | check: `result: pass|fail`, then at most 20 lines.
 Fail fast: tool calls by job lookup 10, edit 16, run 6, check 10; a result saying "N tool calls left" means finish and answer now; at the budget more calls are refused: reply at once with what you have, in the schema (`result: fail` and why).
 
+Answer short, findings to a file: findings longer than a few lines go to `<calling thread folder>/scratch/<job>-<short id>.md` (the mod names the exact path when you start; a Bash redirect or Write there is allowed, the folder exists). Your final answer is that path plus at most 5 lines (the conclusion, pass/fail, what is missing); an answer over `workers.answerChars` (1200) characters is sent back to you once.
+
 End your final reply with exactly one line, nothing after it:
 `LEAN-FEEDBACK {"status": "done|partial|failed", "missing": "context you had to discover that the brief should have given, or empty", "remember": [], "refused": [{"command": "...", "text": "the refusal text, verbatim"}], "unverified": ["claims you could not check"], "unreached": ["folders you did not cover"]}`
 `remember` holds durable facts only (user corrections, decisions, where external info lives), never anything derivable from the code. `refused`, `unverified` and `unreached` are empty lists when nothing applies.

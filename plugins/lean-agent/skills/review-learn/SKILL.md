@@ -1,6 +1,6 @@
 ---
 name: review-learn
-description: Learn from the review comments on a pull request or a project's recent PRs on GitHub or Azure DevOps, by the host in the origin URL (what reviewers repeatedly ask for), and feed them into the project's rules. Excludes only the lean-agent owner's own comments. Use for "learn from reviews" or after a PR round.
+description: Learn what reviewers repeatedly ask for from the review comments of a PR or a project's recent PRs (GitHub or Azure DevOps) and feed it into the project's rules. Use for "learn from reviews" or after a PR round.
 argument-hint: <project> [PR number]
 roles: desk, thread
 ---

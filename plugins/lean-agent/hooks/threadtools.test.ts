@@ -77,8 +77,10 @@ test('the measured base: written once per session from the first request, shown 
   expect(await noteBase(h.host, 't1', SID, { input_tokens: 3, cache_read_input_tokens: 60_000 }, '')).toBe(false) // later requests do not change it
   const b = (await readBase(h.host))!
   expect(b).toMatchObject({ tokens: 47_133, thread: 't1' })
-  expect(baseLine(b)).toBe('measured base 47k tokens on every request, before any work (full built-in tool set; config threads.tools can cut it)')
-  expect(await overheadReport(h.host, ROOT, { home: '/h', transcript: [] })).toContain('newest thread session measured by the mod: measured base 47k tokens')
+  // no breakdown yet: the number is the first request (fixed parts + first prompt), never "base" or "before any work"
+  expect(baseLine(b)).toBe('first request 47.1k tokens (fixed parts + the first prompt; no breakdown recorded yet) (full built-in tool set; config threads.tools can cut it)')
+  expect(await overheadReport(h.host, ROOT, { home: '/h', transcript: [] })).toContain('newest thread session measured by the mod: first request 47.1k tokens')
   const r = await leanThread(h.host, ROOT, { action: 'auto-restart', tN: 't1', reason: 'context' })
-  expect(r.text).toContain('measured base 47k tokens on every request')
+  expect(r.text).toContain('first request 47.1k tokens')
+  expect(r.text).not.toContain('before any work')
 })
