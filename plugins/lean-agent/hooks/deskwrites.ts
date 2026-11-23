@@ -32,7 +32,7 @@ export const PR_KINDS = ['reply', 'status', 'comment', 'link']
 export const WI_KINDS = ['comment', 'update']
 export const CREATE_KINDS = ['create'] // a NEW work item has no id: the grant's target is `{workitem: 'new'}` and rests on the user's words asking for it
 // the table: which request kind a grant kind covers (a batch is never one kind: every item is looked at)
-const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'ado-workitem-create': 'create', 'ado-pr-workitem-link': 'link', 'gh-pr-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
+const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'ado-workitem-create': 'create', 'ado-pr-workitem-link': 'link', 'gh-pr-comment': 'comment', 'gh-pr-review-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
 
 // `statuses`: [] for the user's WORDS (any status of a covered kind); a grant of the dialog's fourth choice (writeHumanGrant) names the thread statuses (fixed,
 // closed, active) or the work item states it covers, and a reply with a status needs the `status` kind as well

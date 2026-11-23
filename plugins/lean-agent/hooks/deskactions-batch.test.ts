@@ -318,12 +318,15 @@ test('batch: another target, a nested batch, a bad item, an empty list and more 
   expect(checkAction({ kind: 'batch' }).ok).toBe(false)
   expect(checkAction({ kind: 'batch', items: 'x' }).ok).toBe(false)
   expect(checkAction({ kind: 'batch', items: [COMMENT], params: { items: [COMMENT], other: 1 } }).ok).toBe(false)
-  const ten = Array.from({ length: BATCH_MAX }, (_v, i) => ({ kind: 'ado-pr-comment', params: { ...COMMENT.params, body: `note ${i}` } }))
+  // (1.0.29: a batch of ONLY PR comments may hold up to 60; every other mix stays at ten)
+  const ten = Array.from({ length: BATCH_MAX }, (_v, i) => ({ kind: 'ado-pr-reply', params: { ...COMMENT.params, thread: i + 1, body: `note ${i}` } }))
   const okTen = checkAction({ kind: 'batch', items: ten })
   expect(okTen.ok).toBe(true)
   const eleven = checkAction({ kind: 'batch', items: [...ten, ten[0]] })
   expect(eleven.ok).toBe(false)
   if (!eleven.ok) expect(eleven.text).toContain('at most 10')
+  const elevenComments = Array.from({ length: BATCH_MAX + 1 }, (_v, i) => ({ kind: 'ado-pr-comment', params: { ...COMMENT.params, body: `note ${i}` } }))
+  expect(checkAction({ kind: 'batch', items: elevenComments }).ok).toBe(true)
 })
 
 test('a batch request refused by the door reports nothing; a good one through addActionRequest is signed and listed', async () => {
