@@ -117,7 +117,7 @@ test('a turn that announces a restart is a checkpoint restart, never "do the nex
 })
 
 test('the phrases: a text asking for a fresh session / a restart of the thread, and a report asking the desk for one', () => {
-  for (const s of ['please restart t85', 'Ask the desk to restart me', 'a fresh session continues from the notes', 'my context is near its cap', 'near the cap, the new session continues', 'I asked the desk for a restart', 'restart this thread please']) expect([s, asksRestart(s)]).toEqual([s, true])
+  for (const s of ['please restart t7', 'Ask the desk to restart me', 'a fresh session continues from the notes', 'my context is near its cap', 'near the cap, the new session continues', 'I asked the desk for a restart', 'restart this thread please']) expect([s, asksRestart(s)]).toEqual([s, true])
   for (const s of ['restart the dev server', 'fixed the cap on the retry limit', 'all specs green']) expect([s, asksRestart(s)]).toEqual([s, false])
   for (const s of ['context limit reached soon', 'my context is near the cap', 'new session continues']) expect([s, announcesRestart(s)]).toEqual([s, true])
   expect(announcesRestart('restart the dev server')).toBe(false)

@@ -35,12 +35,12 @@ test('fileFromGithub: added, modified, renamed, deleted, binary and a patch GitH
 
 test('checkAnchor: an added or changed line stands, anything else is refused with the exact words', () => {
   const f = files(gh({ filename: 'src/a.ts', status: 'modified', patch: '@@ -39,2 +40,14 @@\n x\n' + '+a\n'.repeat(12) + ' y', changes: 12 }))
-  expect(checkAnchor('t103', f, { file: 'src/a.ts', line: 41, side: 'right' })).toBeNull()
-  expect(checkAnchor('t103', f, { file: 'src/a.ts', line: 41, endLine: 52, side: 'right' })).toBeNull()
-  expect(checkAnchor('t103', f, { file: 'src/a.ts', line: 41, endLine: 60, side: 'right' })).toContain('src/a.ts:41-60')
+  expect(checkAnchor('t7', f, { file: 'src/a.ts', line: 41, side: 'right' })).toBeNull()
+  expect(checkAnchor('t7', f, { file: 'src/a.ts', line: 41, endLine: 52, side: 'right' })).toBeNull()
+  expect(checkAnchor('t7', f, { file: 'src/a.ts', line: 41, endLine: 60, side: 'right' })).toContain('src/a.ts:41-60')
   const two = files(gh({ filename: 'src/a.ts', status: 'modified', patch: '@@ -39,2 +40,14 @@\n x\n' + '+a\n'.repeat(12) + ' y\n@@ -95,2 +98,14 @@\n x\n' + '+b\n'.repeat(12) + ' y', changes: 24 }))
-  expect(checkAnchor('t103', two, { file: 'src/a.ts', line: 120, side: 'right' })).toBe('t103 asked for src/a.ts:120: the PR does not change that line (changed ranges: 41-52, 99-110)')
-  expect(checkAnchor('t103', two, { file: 'src/z.ts', line: 3, side: 'right' })).toBe('t103 asked for src/z.ts:3: the PR does not change that file')
+  expect(checkAnchor('t7', two, { file: 'src/a.ts', line: 120, side: 'right' })).toBe('t7 asked for src/a.ts:120: the PR does not change that line (changed ranges: 41-52, 99-110)')
+  expect(checkAnchor('t7', two, { file: 'src/z.ts', line: 3, side: 'right' })).toBe('t7 asked for src/z.ts:3: the PR does not change that file')
   // a context line is not a changed line; a removed line only with side left
   const g = files(gh({ filename: 'src/g.ts', status: 'modified', patch: '@@ -1,3 +1,3 @@\n c\n-old\n+new\n d', changes: 2 }))
   expect(checkAnchor('t1', g, { file: 'src/g.ts', line: 1, side: 'right' })).toContain('changed ranges: 2')
@@ -74,21 +74,21 @@ function ghReader(over: Record<string, unknown> = {}): { r: Reader; calls: strin
 
 test('verifyAnchors (GitHub): reads files and the head once per PR, refuses by anchor, returns the head commit', async () => {
   const { r, calls } = ghReader()
-  const out = await verifyAnchors(r, 't103', [A({ line: 45 }), A({ line: 120 }), A({ file: 'src/other.ts', line: 1 })])
+  const out = await verifyAnchors(r, 't7', [A({ line: 45 }), A({ line: 120 }), A({ file: 'src/other.ts', line: 1 })])
   expect(out.refusals[0]).toBeNull()
-  expect(out.refusals[1]).toBe('t103 asked for src/a.ts:120: the PR does not change that line (changed ranges: 41-52)')
-  expect(out.refusals[2]).toBe('t103 asked for src/other.ts:1: the PR does not change that file')
+  expect(out.refusals[1]).toBe('t7 asked for src/a.ts:120: the PR does not change that line (changed ranges: 41-52)')
+  expect(out.refusals[2]).toBe('t7 asked for src/other.ts:1: the PR does not change that file')
   expect(out.heads[prKey(A())]).toBe(SHA)
   expect(calls).toEqual(['repos/acme/shop/pulls/7/files?per_page=100', 'repos/acme/shop/pulls/7'])
 })
 
 test('verifyAnchors (GitHub): a failed read, or no head commit, refuses as cannot verify', async () => {
   const bad = ghReader({ 'repos/acme/shop/pulls/7/files?per_page=100': null })
-  expect((await verifyAnchors(bad.r, 't103', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(bad.r, 't7', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
   const nohead = ghReader({ 'repos/acme/shop/pulls/7': {} })
-  expect((await verifyAnchors(nohead.r, 't103', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(nohead.r, 't7', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
   const throws: Reader = { gh: async () => { throw new Error('boom') }, az: async () => null }
-  expect((await verifyAnchors(throws, 't103', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(throws, 't7', [A({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
 })
 
 const AZ = 'https://dev.azure.com/acme/Shop%20App/_apis/git/repositories/shop-api'
@@ -111,8 +111,8 @@ const BLOCKS = { value: [{ path: '/src/a.ts', lineDiffBlocks: [{ changeType: 'no
 
 test('verifyAnchors (Azure DevOps): the last iteration, its changes and the file diff; changed ranges and the exact refusal', async () => {
   const { r, calls } = azReader(BLOCKS)
-  const out = await verifyAnchors(r, 't103', [AZA({ line: 45 }), AZA({ line: 120 }), AZA({ line: 71, side: 'left' }), AZA({ line: 100, endLine: 104 })])
-  expect(out.refusals).toEqual([null, 't103 asked for src/a.ts:120: the PR does not change that line (changed ranges: 40-52, 98-110)', null, null])
+  const out = await verifyAnchors(r, 't7', [AZA({ line: 45 }), AZA({ line: 120 }), AZA({ line: 71, side: 'left' }), AZA({ line: 100, endLine: 104 })])
+  expect(out.refusals).toEqual([null, 't7 asked for src/a.ts:120: the PR does not change that line (changed ranges: 40-52, 98-110)', null, null])
   expect(calls[0]!.url).toBe(`${AZ}/pullRequests/42/iterations?api-version=7.1`)
   expect(calls[1]!.url).toBe(`${AZ}/pullRequests/42/iterations/2/changes?$top=2000&api-version=7.1`)
   const d = calls.filter(c => c.method === 'POST')
@@ -123,18 +123,18 @@ test('verifyAnchors (Azure DevOps): the last iteration, its changes and the file
 test('verifyAnchors (Azure DevOps): not in the PR, deleted file, renamed file, numeric block types, unreadable diff, cut-short listing', async () => {
   const del = { value: [{ lineDiffBlocks: [{ changeType: 2, originalLineNumberStart: 1, originalLinesCount: 5 }] }] }
   const a = azReader(del)
-  expect((await verifyAnchors(a.r, 't103', [AZA({ file: 'src/none.ts', line: 1 })])).refusals[0]).toBe('t103 asked for src/none.ts:1: the PR does not change that file')
-  expect((await verifyAnchors(a.r, 't103', [AZA({ file: 'src/gone.ts', line: 3, side: 'left' })])).refusals[0]).toBeNull()
-  expect((await verifyAnchors(a.r, 't103', [AZA({ file: 'src/gone.ts', line: 3 })])).refusals[0]).toContain('the PR deletes that file')
+  expect((await verifyAnchors(a.r, 't7', [AZA({ file: 'src/none.ts', line: 1 })])).refusals[0]).toBe('t7 asked for src/none.ts:1: the PR does not change that file')
+  expect((await verifyAnchors(a.r, 't7', [AZA({ file: 'src/gone.ts', line: 3, side: 'left' })])).refusals[0]).toBeNull()
+  expect((await verifyAnchors(a.r, 't7', [AZA({ file: 'src/gone.ts', line: 3 })])).refusals[0]).toContain('the PR deletes that file')
   const ren = azReader({ value: [{ lineDiffBlocks: [{ changeType: 1, modifiedLineNumberStart: 4, modifiedLinesCount: 2 }] }] })
-  expect((await verifyAnchors(ren.r, 't103', [AZA({ file: 'src/b.ts', line: 5 })])).refusals[0]).toBeNull()
+  expect((await verifyAnchors(ren.r, 't7', [AZA({ file: 'src/b.ts', line: 5 })])).refusals[0]).toBeNull()
   expect(ren.calls.find(c => c.method === 'POST')!.body).toMatchObject({ fileDiffParams: [{ path: '/src/b.ts', originalPath: '/src/old.ts' }] })
   const none = azReader(null)
-  expect((await verifyAnchors(none.r, 't103', [AZA({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(none.r, 't7', [AZA({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
   const cut = azReader(BLOCKS, undefined, { nextSkip: 2000 })
-  expect((await verifyAnchors(cut.r, 't103', [AZA({ file: 'src/none.ts', line: 1 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(cut.r, 't7', [AZA({ file: 'src/none.ts', line: 1 })])).refusals).toEqual([CANNOT_VERIFY])
   const nothing: Reader = { gh: async () => null, az: async () => null }
-  expect((await verifyAnchors(nothing, 't103', [AZA({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
+  expect((await verifyAnchors(nothing, 't7', [AZA({ line: 45 })])).refusals).toEqual([CANNOT_VERIFY])
 })
 
 test('lintReviewText: a pure disclaimer or a lone LGTM is refused with the reason; a real finding passes, with or without a disclaimer next to it', () => {

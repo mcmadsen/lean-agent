@@ -7,7 +7,7 @@
 // restart-text path); no desk message, no user step, no wait for the limit. Loop guard: one automatic restart per thread per 10 minutes (autorestart.json `last`, shared with
 // the limit restart): a fresh session that asks again sooner gets a notice instead.
 // The same restart is made for a turn that ANNOUNCES one ("Next: my context is near its cap, a fresh session continues ...", continuepending.ts) and for a report that asks
-// the desk for a restart (register.tsx). One desk line per restart: "t85 restarted itself at 104k (checkpoint)".
+// the desk for a restart (register.tsx). One desk line per restart: "t7 restarted itself at 104k (checkpoint)".
 import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { setNotice } from './notices'
