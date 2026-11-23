@@ -40,7 +40,7 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -52,6 +52,10 @@ export const COMMENT_TYPES: Record<string, number> = { text: 1, codechange: 2 }
 export const ANCHOR_NOTE = 'anchors checked against the PR diff'
 export const QUESTION_TEXT_MAX = 300 // a comment's text in the desk's question of a review batch (the card shows all of it)
 export const WI_TYPES = ['Bug', 'Task', 'User Story', 'Issue']
+// the review writes of 1.0.30 (vote, update, reviewer, policy queue, work item unlink, label): the REST value of each vote of `az repos pr set-vote`
+export const VOTES: Record<string, number> = { approve: 10, 'approve-with-suggestions': 5, reject: -10, reset: 0, 'wait-for-author': -5 }
+export const PH_INDEX = '<link index>' // the position of the PR's link in the work item's relations: read by a GET of the work item right before an unlink is sent
+export const PH_ME ='<your reviewer id>' // the identity the token belongs to: read by a GET of connectionData right before it is sent (the user sees the placeholder)
 export const PH_PROJECT = '<project id>' // placeholders in a PR link's body: the mod reads the two ids by a GET right before it sends (the user sees the placeholders)
 export const PH_REPO = '<repository id>'
 export const PH_NEW = '<new id>' // the id of the work item a create step just made
@@ -69,6 +73,12 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'gh-pr-comment': 'repo (owner/name), pr, body',
   'gh-pr-review-comment': 'repo (owner/name), pr, file, line, body, optional endLine, side right|left: an inline comment on that line of the PR',
   'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
+  'ado-pr-vote': `org, project, repo, pr, vote (${Object.keys(VOTES).join(' | ')}): the vote of the identity the token belongs to`,
+  'ado-pr-update': 'org, project, repo, pr, title?, description?, draft? (true | false), status? (active | abandoned); never completing, auto-complete, merge options, bypass: the user does that by hand',
+  'ado-pr-reviewer': 'org, project, repo, pr, op (add | remove), reviewer (the id, or the unique email or display name the API takes), required? (true | false, add only)',
+  'ado-pr-policy-queue': 'org, project, repo, pr, evaluationId (the GUID of the policy evaluation to queue again)',
+  'ado-pr-workitem-unlink': 'org, project, repo, pr, workitem (id): removes the link of the PR from that work item',
+  'ado-pr-label': 'org, project, repo, pr, op (add | remove), label (text of at most 40 characters)',
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -82,6 +92,12 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'gh-pr-comment': ['repo', 'pr', 'body'],
   'gh-pr-review-comment': ['repo', 'pr', 'file', 'line', 'body', 'endLine', 'side'],
   'gh-pr-thread-resolve': ['repo', 'pr', 'thread'],
+  'ado-pr-vote': ['org', 'project', 'repo', 'pr', 'vote'],
+  'ado-pr-update': ['org', 'project', 'repo', 'pr', 'title', 'description', 'draft', 'status'],
+  'ado-pr-reviewer': ['org', 'project', 'repo', 'pr', 'op', 'reviewer', 'required'],
+  'ado-pr-policy-queue': ['org', 'project', 'repo', 'pr', 'evaluationId'],
+  'ado-pr-workitem-unlink': ['org', 'project', 'repo', 'pr', 'workitem', 'workItem'],
+  'ado-pr-label': ['org', 'project', 'repo', 'pr', 'op', 'label'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
@@ -94,7 +110,8 @@ export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assi
 // `anchor`: an inline review comment: the mod reads the PR's diff and checks the line before it is shown and again before it is sent (anchor.ts)
 // `items`: a batch of PR comments, numbered, for the card and the question; `cont`: a failing item is reported and the rest still run
 export type ReviewItem = { n: number; file: string; where: string; text: string }
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
+// `me`: the write names the identity the token belongs to (PH_ME in the URL): read by a GET of connectionData right before it is sent
+export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number; unlink?: number /* the work item the PR's link is REMOVED from */ }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
@@ -130,6 +147,87 @@ const linkPlan = (base: string, org: string, project: string, repo: string, pr: 
 // where an inline comment sits, as the renderings, the card and the question show it
 export const whereOf = (a: { file: string; line: number; endLine?: number; side: 'right' | 'left' }): string => `${a.file}:${a.line}${a.endLine !== undefined && a.endLine !== a.line ? `-${a.endLine}` : ''}${a.side === 'left' ? ' (removed line)' : ''}`
 
+// the review writes on ONE Azure DevOps PR (vote ...): repo + pr are common; each kind adds its own params. `bad` is the caller's refusal.
+const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue', 'ado-pr-workitem-unlink', 'ado-pr-label']
+// what a thread never does to a PR (the user does it by hand): completing, auto-complete, squash / merge options, bypassing policy, deleting the source branch
+const BY_HAND = /complet|squash|merge|bypass|deletesource|sourcebranch/
+const byHand = (what: string): Checked => refuse(`action ado-pr-update: ${what} is not something a thread does: the user does this by hand (completing the PR, auto-complete, squash / merge options, bypassing policy, deleting the source branch). A thread may change the title, the description, draft, and set the status to active or abandoned`)
+function checkReview(k: ActionKind, p: Params, az: { org: string; project: string; base: string }, params: Params, bad: (what: string) => Checked): Checked {
+  const repo = typeof p.repo === 'string' && NAME.test(p.repo.trim()) ? p.repo.trim() : null
+  const pr = int(p.pr)
+  if (!repo || pr === null) return bad('repo must be a repository name and pr a number')
+  Object.assign(params, { repo, pr })
+  const where = `${az.org}/${az.project}/${repo}`
+  const prs = `${az.base}/_apis/git/repositories/${enc(repo)}/pullRequests/${pr}`
+  if (k === 'ado-pr-vote') {
+    const word = typeof p.vote === 'string' ? p.vote.trim().toLowerCase().replace(/[\s_]+/g, '-') : ''
+    if (!Object.prototype.hasOwnProperty.call(VOTES, word)) return bad(`vote must be one of ${Object.keys(VOTES).join(', ')}`)
+    params.vote = word
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url: `${prs}/reviewers/${enc(PH_ME)}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ vote: VOTES[word] }), headline: `vote "${word}" on PR ${pr} (${where})`, text: `vote "${word}" (${VOTES[word]}) on PR ${pr} of ${repo}, as the identity the desk's Azure DevOps login belongs to`, me: { org: az.org } } }
+  }
+  if (k === 'ado-pr-update') {
+    const str = (key: string, max: number): string | null | undefined => {
+      if (p[key] === undefined) return undefined
+      const v = typeof p[key] === 'string' ? (p[key] as string).replace(/\r\n?/g, '\n').trim() : ''
+      return v && v.length <= max && !CONTROL.test(v.replace(/[\n\t]/g, '')) ? v : null
+    }
+    const title = str('title', 400)
+    const description = str('description', 4000)
+    const draft = p.draft === undefined ? undefined : typeof p.draft === 'boolean' ? p.draft : null
+    const status = p.status === undefined ? undefined : typeof p.status === 'string' ? p.status.trim().toLowerCase() : null
+    if (title === null || description === null || draft === null || status === null || (status !== undefined && status !== 'active' && status !== 'abandoned')) return bad('title is non-empty text of at most 400 characters, description non-empty text of at most 4000, draft true or false, status active or abandoned')
+    const body: Record<string, unknown> = {}
+    const lines: string[] = []
+    if (title !== undefined) (body.title = title), lines.push(`title: ${title}`)
+    if (description !== undefined) (body.description = description), lines.push(`description: ${description}`)
+    if (draft !== undefined) (body.isDraft = draft), lines.push(`draft: ${draft}`)
+    if (status !== undefined) (body.status = status), lines.push(`status: ${status}`)
+    if (!lines.length) return bad('give at least one of title, description, draft, status')
+    for (const [key, v] of Object.entries({ title, description, draft, status })) if (v !== undefined) params[key] = v
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${prs}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify(body), headline: `update PR ${pr} (${where})`, text: lines.join('\n') } }
+  }
+  if (k === 'ado-pr-reviewer') {
+    const op = typeof p.op === 'string' ? p.op.trim().toLowerCase() : ''
+    const reviewer = typeof p.reviewer === 'string' ? p.reviewer.trim() : ''
+    const required = p.required === undefined ? undefined : typeof p.required === 'boolean' ? p.required : null
+    if ((op !== 'add' && op !== 'remove') || !reviewer || reviewer.length > FIELD_MAX || CONTROL.test(reviewer) || /^\.+$/.test(reviewer) || required === null) return bad('op must be add or remove, reviewer the id (or the unique email or display name) of the reviewer, required true or false')
+    if (op === 'remove' && required !== undefined) return bad('required goes with add only')
+    Object.assign(params, { op, reviewer, ...(required !== undefined ? { required } : {}) })
+    const url = `${prs}/reviewers/${enc(reviewer)}?api-version=7.1`
+    if (op === 'remove') return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'DELETE', url, contentType: '', body: '', headline: `remove reviewer ${reviewer} from PR ${pr} (${where})`, text: `remove reviewer ${reviewer} from PR ${pr} of ${repo}` } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url, contentType: 'application/json', body: JSON.stringify({ id: reviewer, isRequired: required ?? false }), headline: `add reviewer ${reviewer} to PR ${pr} (${where})`, text: `add reviewer ${reviewer} (${required ? 'required' : 'optional'}) to PR ${pr} of ${repo}` } }
+  }
+  if (k === 'ado-pr-policy-queue') {
+    // queue a policy evaluation of the PR again (REST: PATCH policy/evaluations/<id>, the project in the path; the PR is named for the card and the batch target)
+    const ev = typeof p.evaluationId === 'string' ? p.evaluationId.trim().toLowerCase() : ''
+    if (!GUID.test(ev)) return bad('evaluationId must be the GUID of a policy evaluation of the PR')
+    params.evaluationId = ev
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${az.base}/_apis/policy/evaluations/${ev}?api-version=7.1-preview.1`, contentType: 'application/json', body: '{}', headline: `queue policy evaluation ${ev} of PR ${pr} again (${where})`, text: `queue policy evaluation ${ev} of PR ${pr} of ${repo} again` } }
+  }
+  if (k === 'ado-pr-workitem-unlink') {
+    // `workItem` is the same field as `workitem` (the link kind's spelling)
+    const a = p.workitem === undefined ? undefined : int(p.workitem)
+    const b = p.workItem === undefined ? undefined : int(p.workItem)
+    const wi = a === undefined ? b : a
+    if (wi === undefined || wi === null || (b !== undefined && a !== undefined && a !== b)) return bad('workitem must be a work item number')
+    params.workitem = wi
+    // the work item's relation is removed by its POSITION, read right before it is sent; a test op on the link's url guards the position (nothing else is removed)
+    const url = `vstfs:///Git/PullRequestId/${PH_PROJECT}%2F${PH_REPO}%2F${pr}`
+    const ops = [{ op: 'test', path: `/relations/${PH_INDEX}/url`, value: url }, { op: 'remove', path: `/relations/${PH_INDEX}` }]
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${az.base}/_apis/wit/workitems/${wi}?api-version=7.1`, contentType: 'application/json-patch+json', body: JSON.stringify(ops), headline: `unlink PR ${pr} from work item ${wi} (${where})`, text: `remove the link of PR ${pr} of ${repo} from work item ${wi}`, link: { org: az.org, project: az.project, repo, pr, unlink: wi } } }
+  }
+  if (k === 'ado-pr-label') {
+    const op = typeof p.op === 'string' ? p.op.trim().toLowerCase() : ''
+    const label = typeof p.label === 'string' ? p.label.trim() : ''
+    if ((op !== 'add' && op !== 'remove') || !label || label.length > 40 || CONTROL.test(label) || /[/\\]/.test(label) || /^\.+$/.test(label)) return bad('op must be add or remove and label text of at most 40 characters (no / or \\)')
+    Object.assign(params, { op, label })
+    const labels = `${prs}/labels`
+    if (op === 'remove') return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'DELETE', url: `${labels}/${enc(label)}?api-version=7.1`, contentType: '', body: '', headline: `remove label "${label}" from PR ${pr} (${where})`, text: `remove label "${label}" from PR ${pr} of ${repo}` } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${labels}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ name: label }), headline: `add label "${label}" to PR ${pr} (${where})`, text: `add label "${label}" to PR ${pr} of ${repo}` } }
+  }
+  return bad('not a review write')
+}
+
 // the table's one door: a kind, exactly its params (no others), every value checked; the plan is what the mod will send
 export function checkAction(a: unknown): Checked {
   const x = a && typeof a === 'object' && !Array.isArray(a) ? (a as Record<string, unknown>) : null
@@ -139,6 +237,12 @@ export function checkAction(a: unknown): Checked {
   if (k === 'batch') return checkBatch(x)
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
   if (!p) return refuse(`action ${k} needs params {${ACTION_KINDS[k]}}`)
+  if (k === 'ado-pr-update') {
+    const key = Object.keys(p).find(x => BY_HAND.test(x.toLowerCase()))
+    if (key) return byHand(`"${key.slice(0, 30)}"`)
+    const st = typeof p.status === 'string' ? p.status.trim().toLowerCase() : ''
+    if (BY_HAND.test(st)) return byHand(`status "${st.slice(0, 20)}"`)
+  }
   for (const key of Object.keys(p)) if (!PARAM_KEYS[k].includes(key)) return refuse(`action ${k}: unknown param "${key.slice(0, 30)}" (params: ${ACTION_KINDS[k]})`)
   const name = (key: string): string | null => {
     const v = typeof p[key] === 'string' ? (p[key] as string).trim() : ''
@@ -216,6 +320,7 @@ export function checkAction(a: unknown): Checked {
   const az = azure()
   if (!az) return bad('org and project are required names')
   const where0 = `${az.org}/${az.project}`
+  if (REVIEW_KINDS.includes(k)) return checkReview(k, p, az, params, bad)
   if (k === 'ado-pr-workitem-link') {
     const repo = name('repo')
     const pr = num('pr')
@@ -872,6 +977,20 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
     return h.process.run(['curl', '-sS', '--fail-with-body', '--max-time', '60', '-X', method, '-K', '-', url], { stdin: config, timeoutMs: 70_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
   }
   let body = plan.body
+  let url = plan.url
+  if (plan.me) {
+    // a vote names the reviewer by id: the identity the token belongs to, read by a GET of connectionData (nothing is written yet, so a failure is a plain refusal)
+    const g = await call('GET', `https://dev.azure.com/${enc(plan.me.org)}/_apis/connectionData?api-version=7.1-preview.1`, '', null)
+    let me = ''
+    try {
+      const id = (JSON.parse(g.exitCode === 0 ? g.stdout : '{}') as { authenticatedUser?: { id?: unknown } }).authenticatedUser?.id
+      me = typeof id === 'string' ? id : ''
+    } catch {
+      me = ''
+    }
+    if (!GUID.test(me)) return { ok: false, text: `could not read who the login is${g.exitCode === 0 ? '' : ` (${scrub(oneLine(g.stderr || g.stdout, 120))})`}: nothing was written` }
+    url = url.split(enc(PH_ME)).join(me)
+  }
   if (plan.link) {
     // a PR link names the project and the repository by id: two reads (nothing is written yet, so a failure here is a plain refusal)
     const { org, project, repo } = plan.link
@@ -885,8 +1004,36 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
     const rid = await get(`https://dev.azure.com/${enc(org)}/${enc(project)}/_apis/git/repositories/${enc(repo)}?api-version=7.1`, `repository ${repo}`)
     if (typeof rid === 'string') return { ok: false, text: rid }
     body = body.split(PH_PROJECT).join(pid.id).split(PH_REPO).join(rid.id)
+    if (plan.link.unlink !== undefined) {
+      // an unlink: the work item's relations are read now, the PR's link is found by its url and removed by position (the test op in the body fails the whole patch if it moved)
+      const wi = plan.link.unlink
+      const w = await call('GET', `https://dev.azure.com/${enc(org)}/_apis/wit/workitems/${wi}?$expand=relations&api-version=7.1`, '', null)
+      let rels: { rel?: unknown; url?: unknown }[] | null = null
+      try {
+        const o = JSON.parse(w.exitCode === 0 ? w.stdout : '') as { relations?: unknown }
+        rels = Array.isArray(o.relations) ? (o.relations as { rel?: unknown; url?: unknown }[]) : []
+      } catch {
+        rels = null
+      }
+      if (!rels) return { ok: false, text: `could not read work item ${wi}${w.exitCode === 0 ? '' : ` (${scrub(oneLine(w.stderr || w.stdout, 120))})`}: nothing was written` }
+      const want = `vstfs:///git/pullrequestid/${pid.id}/${rid.id}/${plan.link.pr}`.toLowerCase()
+      const plain = (u: string): string => {
+        try {
+          return decodeURIComponent(u).toLowerCase()
+        } catch {
+          return u.toLowerCase()
+        }
+      }
+      const at = rels.findIndex(x => x && x.rel === 'ArtifactLink' && typeof x.url === 'string' && plain(x.url) === want)
+      if (at < 0) return { ok: false, text: `work item ${wi} has no link to PR ${plan.link.pr} (nothing to remove): nothing was written` }
+      const ops = JSON.parse(body) as { op: string; path: string; value?: unknown }[]
+      ops[0]!.path = ops[0]!.path.split(PH_INDEX).join(String(at))
+      ops[0]!.value = rels[at]!.url
+      ops[1]!.path = ops[1]!.path.split(PH_INDEX).join(String(at))
+      body = JSON.stringify(ops)
+    }
   }
-  const r = await call(plan.method, plan.url, plan.contentType, body)
+  const r = await call(plan.method, url, plan.contentType, body === '' ? null : body)
   if (r.exitCode !== 0) {
     const why = scrub(oneLine(r.stderr || r.stdout, 200)) || `curl exit ${r.exitCode}`
     return UNKNOWN_EXIT.has(r.exitCode) ? { ok: false, unknown: true, text: `the connection broke after the request may have been sent (${why}): outcome unknown, check the target before asking again` } : { ok: false, text: `Azure DevOps refused or could not be reached: ${why}` }
