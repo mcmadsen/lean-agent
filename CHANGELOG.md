@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.27
 
 ### Added
 - **The warning line shows what fills the context.** At the warn level, and again at 90% of the limit, the one line a thread gets also says what its context consists of, by script from its own transcript: tool results by tool (top three), its own tool inputs (Agent briefs), worker answers, the first prompt, the two biggest single results (kinds and sizes, never their text), and ONE fix for the largest source. The same text is in `lean_doctor context tN`, and a thread can ask for it with `lean_run {context: true}`.
