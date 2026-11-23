@@ -158,6 +158,17 @@ test('edit schema: files, diffstat, pass|fail, one-line note', () => {
   expect(trimJobResult('edit', `could not\n${FB.replace('done', 'failed')}`).text).toContain('result: fail')
 })
 
+test('edit schema carries the worker\'s own commit: sha + diffstat, no sha line when it did not commit', () => {
+  const sha = 'files: a.ts, b.ts\ndiffstat: 2 files changed, 5 insertions(+), 1 deletion(-)\nsha: 3f9c2ab\nresult: pass\nnote: committed'
+  expect(trimJobResult('edit', sha).trimmed).toBe(false) // already in the schema
+  const t = trimJobResult('edit', `Done.\nfiles: a.ts\n 1 file changed, 2 insertions(+)\nsha: 3F9C2AB1 (branch fix-x)\nresult: pass\nnote: ok\nextra chatter\nmore`)
+  expect(t.text).toContain('sha: 3f9c2ab1\n')
+  expect(t.text).not.toContain('branch fix-x')
+  const none = trimJobResult('edit', 'files: a.ts\ndiffstat: 1 file changed\nresult: fail\nnote: test failed, no commit\nmore\nmore')
+  expect(none.text).not.toContain('sha:') // a failing test means no commit and no sha line
+  expect(PARTS.edit).toContain('sha')
+})
+
 test('run and check schema: pass|fail and at most 20 lines', () => {
   expect(trimJobResult('run', 'result: pass\nall 12 ok').trimmed).toBe(false)
   const noisy = ['FAIL a.test.ts', ...Array.from({ length: 60 }, (_, i) => `log ${i}`)].join('\n')

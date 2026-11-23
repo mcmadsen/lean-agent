@@ -9,14 +9,14 @@ import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { threadHint } from './denial'
 
-export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
+export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number; commit: boolean }
 export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[]; selfEdit?: string[] } // selfEdit: the worktrees the user let this thread edit itself (selfedit.ts, verified per call); projects: the registered projects' folders (only to name a path's kind in a refusal record)
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
 export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (workers may read and edit) / lean-agent:reader-haiku (set the Agent parameter run_in_background to the boolean false; a worker that still starts in the background is fine: wait for its result notification, do not poll or duplicate the job)'
 export const SPLIT = 'return what you have; the thread splits the rest'
-export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
+export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true }
 
 // What was tried, for the refusal record (never a path, never an argument): ` [tried: Edit project]`, ` [tried: az pipelines]`. feedback.ts takes it out
 // of the text into the row's `what`, refusals.ts groups by it. A path is named by its KIND only.
@@ -72,6 +72,7 @@ export function orchConfig(cfg: any): OrchConfig {
     stepsByJob: byJob(pick(cfg, 'workers.stepsByJob')),
     requireJob: pick(cfg, 'workers.requireJob') === true,
     grantTtlMin: num(pick(cfg, 'grants.ttlMinutes'), DEFAULTS.grantTtlMin),
+    commit: pick(cfg, 'workers.commit') !== false && pick(cfg, 'workers.commit') !== 'false', // a worker may commit its own change when the brief says `commit: <message>`
   }
 }
 

@@ -763,6 +763,11 @@ test('a worker runs any shell command except the never-list, and edits anywhere 
   for (const c of ['git push origin x', 'git tag v1.0.0', 'gh pr merge 3', 'gh release create v1', 'az repos pr create', 'claude plugin install x', 'echo {} > ~/.claude/settings.json', 'echo x > /h/.lean-agent/config.json', 'rm /h/.lean-agent/projects.json'])
     expect(await worker(c), c).not.toBeNull()
   expect(await worker('cat /h/.lean-agent/config.json')).toBeNull() // reading is fine
+  // a worker's own commit (brief line `commit: <message>`) is allowed; the git writes that lose or rewrite work are not
+  for (const c of ['git -C /h/.lean-agent/worktrees/app/t1 add src/a.ts src/b.ts', 'git -C /h/.lean-agent/worktrees/app/t1 commit -m "rebase notes and reset --hard docs"', 'git status --short', 'git diff --shortstat', 'git checkout -- src/a.ts', 'git rev-parse --short HEAD', 'git log -1 --format=%h'])
+    expect(await worker(c), c).toBeNull()
+  for (const c of ['git reset --hard HEAD~1', 'git -C /r reset --hard', 'git rebase main', 'git commit --amend --no-edit', 'git checkout main', 'git switch other', 'git checkout -b x', 'git add -A && git rebase -i HEAD~2'])
+    expect(await worker(c), c).toContain('a worker never')
   const edit = (p: string) => run(h, thread, { tool: 'Edit', file_path: p }, '/r', 'lean-agent:worker-haiku', 'w1')
   expect(await edit('/anywhere/else/a.ts')).toBeNull() // no grant line, no grant record
   expect(await edit('/h/.lean-agent/config.json')).toContain('own state')
