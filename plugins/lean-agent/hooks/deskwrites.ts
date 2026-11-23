@@ -21,10 +21,10 @@ import { macOf } from './reviews'
 import { parseOrigin } from './prhost'
 import type { PrHost } from './prhost'
 import { listProjects } from './projects'
-import { claimAndSend, exclusive, logHistory, revokeGrant, rows, sound, standingView, targetOf, threadOk } from './deskactions'
+import { azureGet, claimAndSend, exclusive, logHistory, revokeGrant, rows, sound, standingView, targetOf, threadOk } from './deskactions'
 import type { ActionKind, Params, Plan } from './deskactions'
 import { recentPrompts } from './humanprompts'
-import { createIn, instructionIn, revokeIn } from './writeinstr'
+import { SOFT_WORDS, createIn, instructionIn, revokeIn } from './writeinstr'
 
 export const WRITES_TTL_MS = 24 * 60 * 60 * 1000
 export const WRITES_CAP = 40
@@ -72,21 +72,29 @@ const num = (v: unknown): number | null => {
   const n = typeof v === 'string' && /^\d{1,9}$/.test(v.trim()) ? Number(v.trim()) : v
   return typeof n === 'number' && Number.isInteger(n) && n > 0 && n < 1e9 ? n : null
 }
-// a URL of a PR or a work item -> the scope it names (the same text targetOf makes), or null
-export function scopeOfUrl(u: string): Target | null {
+// a URL of a PR or a work item: the number at its end names the target, the rest identifies the forge, org, project and repository (an Azure DevOps URL may
+// carry the GUIDs of the project and the repository instead of their names: resolveRef reads them against the thread's own project remote)
+export type ForgeRef = { host: 'github' | 'azure'; org: string; project: string; repo: string; type: 'pr' | 'workitem'; n: number }
+export function parseForgeUrl(u: string): ForgeRef | null {
   const s = u.trim().replace(/[)>.,;]+$/, '')
-  let m = /^https?:\/\/(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d{1,9})(?:[/?#]\S*)?$/i.exec(s)
-  if (m) return { scope: `GitHub PR ${m[1]}/${m[2]}#${m[3]}`, type: 'pr', n: Number(m[3]), url: true }
-  m = /^https?:\/\/(?:[^@/]+@)?dev\.azure\.com\/([^/]+)\/([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d{1,9})(?:[/?#]\S*)?$/i.exec(s)
-  if (m) return { scope: `Azure DevOps PR ${dec(m[1]!)}/${dec(m[2]!)}/${dec(m[3]!)}#${m[4]}`, type: 'pr', n: Number(m[4]), url: true }
-  m = /^https?:\/\/([^./]+)\.visualstudio\.com\/(?:DefaultCollection\/)?([^/]+)\/_git\/([^/]+)\/pullrequest\/(\d{1,9})(?:[/?#]\S*)?$/i.exec(s)
-  if (m) return { scope: `Azure DevOps PR ${dec(m[1]!)}/${dec(m[2]!)}/${dec(m[3]!)}#${m[4]}`, type: 'pr', n: Number(m[4]), url: true }
-  m = /^https?:\/\/(?:[^@/]+@)?dev\.azure\.com\/([^/]+)\/([^/]+)\/_workitems\/edit\/(\d{1,9})(?:[/?#]\S*)?$/i.exec(s)
-  if (m) return { scope: `Azure DevOps work item ${dec(m[1]!)}/${dec(m[2]!)}#${m[3]}`, type: 'workitem', n: Number(m[3]), url: true }
-  m = /^https?:\/\/([^./]+)\.visualstudio\.com\/(?:DefaultCollection\/)?([^/]+)\/_workitems\/edit\/(\d{1,9})(?:[/?#]\S*)?$/i.exec(s)
-  if (m) return { scope: `Azure DevOps work item ${dec(m[1]!)}/${dec(m[2]!)}#${m[3]}`, type: 'workitem', n: Number(m[3]), url: true }
+  const tail = '(?:[/?#]\\S*)?$'
+  let m = new RegExp(`^https?://(?:www\\.)?github\\.com/([^/\\s]+)/([^/\\s]+)/pull/(\\d{1,9})${tail}`, 'i').exec(s)
+  if (m) return { host: 'github', org: m[1]!, project: '', repo: m[2]!, type: 'pr', n: Number(m[3]) }
+  m = new RegExp(`^https?://(?:[^@/]+@)?dev\\.azure\\.com/([^/]+)/([^/]+)/_git/([^/]+)/pullrequest/(\\d{1,9})${tail}`, 'i').exec(s) ?? new RegExp(`^https?://([^./]+)\\.visualstudio\\.com/(?:DefaultCollection/)?([^/]+)/_git/([^/]+)/pullrequest/(\\d{1,9})${tail}`, 'i').exec(s)
+  if (m) return { host: 'azure', org: dec(m[1]!), project: dec(m[2]!), repo: dec(m[3]!), type: 'pr', n: Number(m[4]) }
+  m = new RegExp(`^https?://(?:[^@/]+@)?dev\\.azure\\.com/([^/]+)/([^/]+)/_workitems/edit/(\\d{1,9})${tail}`, 'i').exec(s) ?? new RegExp(`^https?://([^./]+)\\.visualstudio\\.com/(?:DefaultCollection/)?([^/]+)/_workitems/edit/(\\d{1,9})${tail}`, 'i').exec(s)
+  if (m) return { host: 'azure', org: dec(m[1]!), project: dec(m[2]!), repo: '', type: 'workitem', n: Number(m[3]) }
   return null
 }
+// the scope text of a reference (the same text targetOf makes)
+export const scopeOfRef = (r: ForgeRef): string =>
+  r.host === 'github' ? `GitHub PR ${r.org}/${r.repo}#${r.n}` : r.type === 'pr' ? `Azure DevOps PR ${r.org}/${r.project}/${r.repo}#${r.n}` : `Azure DevOps work item ${r.org}/${r.project}#${r.n}`
+// a URL of a PR or a work item -> the scope it names AS WRITTEN (names, or GUIDs), or null
+export function scopeOfUrl(u: string): Target | null {
+  const r = parseForgeUrl(u)
+  return r ? { scope: scopeOfRef(r), type: r.type, n: r.n, url: true } : null
+}
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const dec = (s: string): string => {
   try {
     return decodeURIComponent(s)
@@ -108,8 +116,42 @@ async function remoteOf(h: Host, thread: string): Promise<PrHost | string> {
 const repoScope = (host: PrHost, pr: number): string => (host.kind === 'github' ? `GitHub PR ${host.owner}/${host.repo}#${pr}` : host.kind === 'azure' ? `Azure DevOps PR ${host.org}/${host.project}/${host.repo}#${pr}` : '')
 const itemScope = (host: PrHost, id: number): string | null => (host.kind === 'azure' ? `Azure DevOps work item ${host.org}/${host.project}#${id}` : null)
 
+// A URL against the thread's own project remote: the forge and the org (and the project) must be the thread's, else the URL is refused with where it points.
+// The GUIDs of an Azure DevOps URL (project, repository) are read once (a GET) and must name the thread's project; when they cannot be read the thread's own
+// project / repository are taken, and the answer says so.
+export async function resolveRef(h: Host, thread: string, ref: ForgeRef): Promise<{ ok: true; ref: ForgeRef; note?: string } | { ok: false; text: string }> {
+  const host = await remoteOf(h, thread)
+  if (typeof host === 'string') return { ok: false, text: `the project remote of ${thread} could not be read, so the URL cannot be checked against it (${host.replace(/: give the full URL.*$/, '')})` }
+  const mine = host.kind === 'github' ? `${host.owner}/${host.repo}` : host.kind === 'azure' ? `${host.org}/${host.project}` : host.host
+  const wrong = (theirs: string) => ({ ok: false as const, text: `this URL points at ${theirs}, not the project of ${thread} (${mine})` })
+  if (ref.host === 'github') return host.kind === 'github' && lc(host.owner) === lc(ref.org) && lc(host.repo) === lc(ref.repo) ? { ok: true, ref } : wrong(`${ref.org}/${ref.repo}`)
+  if (host.kind !== 'azure' || lc(host.org) !== lc(ref.org)) return wrong(`${ref.org}/${ref.project}`)
+  let { project, repo } = ref
+  let note = ''
+  const base = `https://dev.azure.com/${encodeURIComponent(host.org)}`
+  if (GUID.test(project)) {
+    const p = await azureGet(h, `${base}/_apis/projects/${project}?api-version=7.1`)
+    const name = typeof p?.name === 'string' ? p.name : ''
+    if (name && lc(name) !== lc(host.project)) return wrong(`${ref.org}/${name}`)
+    if (!name) note = `the ids in the URL could not be read, so they were taken as ${host.project}`
+    project = host.project
+  } else if (lc(project) !== lc(host.project)) return wrong(`${ref.org}/${project}`)
+  if (ref.type === 'pr' && GUID.test(repo)) {
+    const r = await azureGet(h, `${base}/${encodeURIComponent(host.project)}/_apis/git/repositories/${repo}?api-version=7.1`)
+    const name = typeof r?.name === 'string' ? r.name : ''
+    const pn = typeof (r?.project as { name?: unknown } | undefined)?.name === 'string' ? ((r!.project as { name: string }).name) : ''
+    if (pn && lc(pn) !== lc(host.project)) return wrong(`${ref.org}/${pn}`)
+    if (name) repo = name
+    else {
+      repo = host.repo
+      note = note || `the ids in the URL could not be read, so they were taken as ${host.project}/${host.repo}`
+    }
+  }
+  return { ok: true, ref: { ...ref, project, repo }, ...(note ? { note } : {}) }
+}
+
 // what the model proposed -> the exact target (never invented: a number alone is read against the thread's own project remote)
-export async function resolveTarget(h: Host, thread: string, t: unknown): Promise<{ ok: true; target: Target; viaRemote: boolean } | { ok: false; text: string }> {
+export async function resolveTarget(h: Host, thread: string, t: unknown): Promise<{ ok: true; target: Target; viaRemote: boolean; note?: string } | { ok: false; text: string }> {
   const x = t && typeof t === 'object' && !Array.isArray(t) ? (t as TargetIn) : null
   const keys = x ? Object.keys(x).filter(k => (x as Record<string, unknown>)[k] !== undefined && (x as Record<string, unknown>)[k] !== null && (x as Record<string, unknown>)[k] !== '') : []
   if (!x || keys.length !== 1 || (keys[0] !== 'pr' && keys[0] !== 'workitem')) return { ok: false, text: 'allow-writes needs target: {pr: <number or URL>} or {workitem: <id>} (exactly one)' }
@@ -122,9 +164,11 @@ export async function resolveTarget(h: Host, thread: string, t: unknown): Promis
     return { ok: true, target: { scope: `Azure DevOps work item ${host.org}/${host.project}#new`, type, n: 0, create: true }, viaRemote: true }
   }
   if (typeof raw === 'string' && /^https?:\/\//i.test(raw.trim())) {
-    const u = scopeOfUrl(raw)
-    if (!u || u.type !== type) return { ok: false, text: `${raw.slice(0, 100)} is not the URL of a ${type === 'pr' ? 'GitHub or Azure DevOps PR' : 'Azure DevOps work item'}` }
-    return { ok: true, target: u, viaRemote: false }
+    const ref = parseForgeUrl(raw)
+    if (!ref || ref.type !== type) return { ok: false, text: `${raw.slice(0, 100)} is not the URL of a ${type === 'pr' ? 'GitHub or Azure DevOps PR' : 'Azure DevOps work item'} (like https://dev.azure.com/<org>/<project>/_git/<repo>/pullrequest/<n>, https://github.com/<owner>/<repo>/pull/<n> or https://dev.azure.com/<org>/<project>/_workitems/edit/<n>)` }
+    const res = await resolveRef(h, thread, ref)
+    if (!res.ok) return res
+    return { ok: true, target: { scope: scopeOfRef(res.ref), type, n: ref.n, url: true }, viaRemote: false, ...(res.note ? { note: res.note } : {}) }
   }
   const n = num(raw)
   if (n === null) return { ok: false, text: `target.${type} must be a positive whole number or a URL` }
@@ -137,10 +181,15 @@ export async function resolveTarget(h: Host, thread: string, t: unknown): Promis
 
 // does the user's text name this target? the number as a WHOLE token (never inside a longer number, 1,042 or 42.5 or 142), or a URL that parses to the same scope.
 // A number written after the word of the OTHER kind ("work item 42" for a PR) is not the target.
+const URLS = /https?:\/\/[^\s<>"']+/g
 const tokenRe = (n: number) => new RegExp(`(?<!\\d)(?<!\\d[.,])${n}(?!\\d)(?![.,]\\d)`, 'g')
 const OWN: Record<Target['type'], RegExp> = { pr: /(?:\bpr|\bpull(?:\s*request)?|!)\s*#?\s*$/i, workitem: /(?:work\s*item|\bwi|\bticket|\btask|\bbug|\bstory)\s*#?\s*$/i }
-export function namesTarget(text: string, target: Target, remoteScope: string | null): boolean {
-  for (const u of text.match(/https?:\/\/[^\s<>"']+/g) ?? []) if (scopeOfUrl(u) && lc(scopeOfUrl(u)!.scope) === lc(target.scope)) return true
+// `scopes`: the URLs of the text, each already resolved against the thread's remote (a GUID URL names the project by name only after that)
+export function namesTarget(text: string, target: Target, remoteScope: string | null, scopes?: Map<string, string>): boolean {
+  for (const u of text.match(URLS) ?? []) {
+    const sc = scopes?.get(u) ?? scopeOfUrl(u)?.scope
+    if (sc && lc(sc) === lc(target.scope)) return true
+  }
   // a number alone names the target only when the target is the one of the thread's own project remote (a URL to another repo needs its own URL in the words)
   if (target.url && !(remoteScope && lc(remoteScope) === lc(target.scope))) return false
   const other = OWN[target.type === 'pr' ? 'workitem' : 'pr']
@@ -181,8 +230,18 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   const label = tg.scope.replace(/^(Azure DevOps|GitHub) /, '')
   const remoteScope = res.viaRemote ? tg.scope : await remoteScopeOf(h, thread, tg)
   const prompts = await recentPrompts(h)
-  const hit = [...prompts].reverse().find(p => (tg.create ? createIn(p.text) : namesTarget(p.text, tg, remoteScope) && instructionIn(p.text)))
-  if (!hit) return { ok: false, text: `no written instruction from the user covers ${label}: ask with AskUserQuestion (the user's own typed words of the last 24 h must name the PR or work item and ask for the work, like "fix the comments on PR 42"), or ask the user to type /lean-agent:allow ${thread} <PR or work item>. Nothing was created` }
+  // the URLs the user wrote that carry the number of this target: each resolved against the thread's remote (a GUID URL names its project by name only after that)
+  const scopes = new Map<string, string>()
+  for (const p of prompts.slice(-8)) {
+    for (const u of (p.text.match(URLS) ?? []).slice(0, 4)) {
+      const ref = parseForgeUrl(u)
+      if (!ref || ref.n !== tg.n || ref.type !== tg.type || scopes.has(u)) continue
+      const r = await resolveRef(h, thread, ref)
+      if (r.ok) scopes.set(u, scopeOfRef(r.ref))
+    }
+  }
+  const hit = [...prompts].reverse().find(p => (tg.create ? createIn(p.text) : namesTarget(p.text, tg, remoteScope, scopes) && instructionIn(p.text)))
+  if (!hit) return { ok: false, text: refusalText(thread, label, tg.create === true, prompts) }
   const cap = await capOf(h)
   return exclusive(async () => {
     const now = await h.clock.now()
@@ -192,8 +251,18 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
     const keep = (await grantRows(h, now)).filter(x => !(x.thread === thread && lc(x.scope) === lc(tg.scope)))
     await saveGrants(h, [...keep, g])
     await logHistory(h, thread, { kind: 'writes-granted', id: g.id, scope: g.scope, kinds: want, quote: g.quote, cap, hours: 24 })
-    return { ok: true, text: `allowed ${thread} on ${label}: ${want.join(', ')} (up to ${cap} writes, 24 h or until ${thread} closes), resting on your words "${g.quote}". Revoke: the pane's Revoke button, /lean-agent:revoke ${thread}, or say "stop writes". Tell the user this in one line` }
+    return { ok: true, text: `allowed ${thread} on ${label}: ${want.join(', ')} (up to ${cap} writes, 24 h or until ${thread} closes), resting on your words "${g.quote}". Revoke: the pane's Revoke button, /lean-agent:revoke ${thread}, or say "stop writes".${res.note ? ` Note: ${res.note}.` : ''} Tell the user this in one line` }
   })
+}
+// the forms that count, said in the refusal (the field: nothing said which form counts or why one failed)
+export const FORMS = (thread: string) => `type to the DESK (not in a shell; a line starting with ! never reaches lean-agent): /lean-agent:allow ${thread} <PR number or URL> (also without the slash: allow ${thread} <PR number or URL>), or say 'fix the comments on PR <n>' (or paste the PR URL with 'please handle this')`
+const SOFT_IN = new RegExp(`(?<![\\w-])(${SOFT_WORDS.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')).join('|')})(?![\\w-])`, 'i')
+const COMMAND_TRY =/(?:^|[\s!])\/?(?:lean-agent:)?allow\b/i
+function refusalText(thread: string, label: string, create: boolean, prompts: { text: string }[]): string {
+  const last = prompts[prompts.length - 1]
+  const tried = last && (/lean-agent:allow/i.test(last.text) || COMMAND_TRY.test(last.text.trim()) || instructionIn(last.text) || createIn(last.text) || SOFT_IN.test(last.text)) ? last.text.replace(/\s+/g, ' ').trim().slice(0, 60) : ''
+  const miss = tried ? `your last message '${tried}' did not name ${create ? 'a new work item to create' : 'a PR number or URL'} that matches ${label}${create ? '' : ' (a number counts as a whole word, after PR, or the PR / work item URL of this thread\'s project)'}: ` : ''
+  return `${miss}no written instruction from the user covers ${label}: ask with AskUserQuestion, or the forms that count are: ${FORMS(thread)}. Nothing was created`
 }
 async function remoteScopeOf(h: Host, thread: string, tg: Target): Promise<string | null> {
   const host = await remoteOf(h, thread)

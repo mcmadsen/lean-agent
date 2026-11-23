@@ -12,7 +12,11 @@ export const VERBS = ['fix', 'fixes', 'fixing', 'resolve', 'resolves', 'resolvin
 export const OBJECTS = ['comment', 'comments', 'thread', 'threads', 'review', 'reviews', 'feedback', 'pr', 'prs', 'pull request', 'pull requests', 'work item', 'workitem', 'work items', 'ticket', 'task']
 export const EXPLICIT_LEAD = ['approve', 'approved', 'allow', 'allowed', 'go ahead', 'yes', 'ok', 'okay', 'permit']
 export const EXPLICIT_OBJECT = ['write', 'writes', 'reply', 'replies', 'comment', 'comments']
-export const COMMANDS = ['/lean-agent:allow', '/allow']
+// the command typed to the DESK's prompt; with the slash or without it (`lean-agent:allow t43 5659`, `allow t43 5659`) it is the command itself
+export const COMMANDS = ['/lean-agent:allow', 'lean-agent:allow', '/allow', 'allow']
+// SOFT: a word that asks for the work when the user pasted the URL of the PR or work item and no verb of the table is there ("please get this done <url>")
+export const SOFT_WORDS = ['please', 'pls', 'get this done', 'get it done', 'get that done', 'lets get this done', "let's get this done", 'go ahead', 'go on', 'handle', 'handle it', 'finish', 'finish it', 'finish this', 'take it from here', 'carry on', 'proceed', 'do it', 'sort it']
+const FORGE_URL = /https?:\/\/[^\s<>"']*\/(?:pullrequest|pull|_workitems\/edit)\/\d{1,9}/i
 // the user's own words that take a grant back (deskwrites.ts revokeByWords): "stop writes", "revoke", "revoke tN", "no more writes"
 export const REVOKE_WORDS = ['stop writes', 'stop the writes', 'stop writing', 'revoke', 'no more writes', 'no more replies', 'cancel the writes']
 export const REVOKE_COMMANDS = ['/lean-agent:revoke']
@@ -21,7 +25,8 @@ const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/ /
 const alt = (l: string[]) => l.map(esc).join('|')
 const WORK = new RegExp(`(?<![\\w-])(${alt(VERBS)})(?![\\w-])[^.!?\\n]{0,${WORK_GAP}}?(?<![\\w-])(${alt(OBJECTS)})(?![\\w-])`, 'gi')
 const EXPLICIT = new RegExp(`(?<![\\w-])(${alt(EXPLICIT_LEAD)})(?![\\w-])[^.!?\\n]{0,${WORK_GAP}}?(?<![\\w-])(${alt(EXPLICIT_OBJECT)})(?![\\w-])`, 'gi')
-const NEGATION = /(?<![\w-])(don'?t|do\s+not|dont|never|not|no|without|stop|cannot|can'?t)(?![\w-])/i
+const SOFT = new RegExp(`(?<![\\w-])(${alt(SOFT_WORDS)})(?![\\w-])`, 'gi')
+const NEGATION =/(?<![\w-])(don'?t|do\s+not|dont|never|not|no|without|stop|cannot|can'?t)(?![\w-])/i
 
 const negated = (text: string, at: number): boolean => NEGATION.test(text.slice(Math.max(0, at - NEG_GAP), at))
 
@@ -33,6 +38,10 @@ export function instructionIn(text: string): string | null {
   for (const re of [WORK, EXPLICIT]) {
     re.lastIndex = 0
     for (let m = re.exec(t); m; m = re.exec(t)) if (!negated(t, m.index)) return m[0]
+  }
+  if (FORGE_URL.test(t) && !NEGATION.test(t)) {
+    SOFT.lastIndex = 0
+    for (let m = SOFT.exec(t); m; m = SOFT.exec(t)) if (!negated(t, m.index)) return m[0]
   }
   return null
 }

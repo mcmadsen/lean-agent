@@ -731,6 +731,22 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
   }
   return { ok: true, text: scrub(resultOf(r.stdout, 'url')), id: idIn(r.stdout) }
 }
+// a READ of Azure DevOps (a GET, the token on curl's stdin like every write): the JSON object it answered, or null (no token, no network, an error status)
+export async function azureGet(h: Host, url: string): Promise<Record<string, unknown> | null> {
+  const tok = await azureToken(h)
+  if ('error' in tok) return null
+  const q = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  const config = [`header = ${q(`Authorization: Bearer ${tok.token}`)}`, `header = ${q('Accept: application/json')}`, ''].join('\n')
+  const r = await h.process.run(['curl', '-sS', '--fail-with-body', '--max-time', '30', '-X', 'GET', '-K', '-', url], { stdin: config, timeoutMs: 40_000 }).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }))
+  if (r.exitCode !== 0) return null
+  try {
+    const o = JSON.parse(String(r.stdout)) as unknown
+    return o && typeof o === 'object' && !Array.isArray(o) ? (o as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
 // a batch or a reply with a status: the writes in order, stopped at the first failure, each reported (done / failed with the reason / not run)
 type Ran = { sent: Sent; progress: boolean }
 async function runSteps(h: Host, plan: Plan): Promise<Ran> {

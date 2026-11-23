@@ -19,13 +19,13 @@ const COMMENT = { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42, bo
 const GH_URL = 'https://github.com/acme/shop-api/pull/42'
 const GH_THREAD = 'PRRT_kwDOAbCdEf4'
 
-function setup(verify: 'same' | 'other' = 'same') {
+function setup(verify: 'same' | 'other' = 'same', remote: 'azure' | 'github' = 'azure') {
   const h = fakeHost(null)
   resetLocks()
   resetActions()
   for (const t of ['t5', 't6']) h.files.set(`${L}/threads/${t}/thread.json`, JSON.stringify({ id: t, title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
-  h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'https://dev.azure.com/acme/Shop%20App/_git/shop-api\n' } : { exitCode: 1, stdout: '' })
+  h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: remote === 'github' ? 'https://github.com/acme/shop-api.git\n' : 'https://dev.azure.com/acme/Shop%20App/_git/shop-api\n' } : { exitCode: 1, stdout: '' })
   h.exec.handler = argv => {
     if (argv[0] === 'az') return { exitCode: 0, stdout: `${TOKEN}\n` }
     if (argv[0] === 'curl') return { exitCode: 0, stdout: JSON.stringify({ id: 77, url: 'https://dev.azure.com/acme/_apis/x/77' }) }
@@ -256,7 +256,7 @@ test('the user\'s command /lean-agent:allow is the explicit way, through the sam
 })
 
 test('GitHub: a PR URL names its own repo; gh-pr-comment is covered; a review-thread resolve only after the mod verified it belongs to the PR', { timeoutMs: 20_000 }, async () => {
-  const s = setup()
+  const s = setup('same', 'github')
   await s.say(`address the review comments on ${GH_URL}`)
   expect((await allowWrites(s.host, 't5', { pr: GH_URL })).ok).toBe(true)
   const [g] = (await writesView(s.host)).grants
@@ -266,7 +266,7 @@ test('GitHub: a PR URL names its own repo; gh-pr-comment is covered; a review-th
   expect(s.h.calls.some(c => c.argv[0] === 'gh' && c.argv.includes('graphql') && !c.argv.includes('--method'))).toBe(true) // the read that verified it
   expect(await go(s, 'gh-pr-comment', { repo: 'acme/other', pr: 42, body: 'x' })).toBeNull()
   // the thread belongs to another PR: asked, never sent
-  const o = setup('other')
+  const o = setup('other', 'github')
   await o.say(`address the review comments on ${GH_URL}`)
   await allowWrites(o.host, 't5', { pr: GH_URL })
   expect(await go(o, 'gh-pr-thread-resolve', { repo: 'acme/shop-api', pr: 42, thread: GH_THREAD })).toBeNull()
