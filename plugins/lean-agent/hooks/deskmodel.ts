@@ -20,7 +20,8 @@ import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
 import type { Choice } from './models'
 import { setNotice } from './notices'
 
-export type DeskModelState = { running: string; pin: Choice; at: number; why?: string }
+// `session` / `tries`: the session whose attempts could not apply the pin, and how many (deskauto: two tries are a reason for the automatic restart)
+export type DeskModelState = { running: string; pin: Choice; at: number; why?: string; session?: string; tries?: number }
 export const NOTICE_KEY = 'desk-model' // the pin could not be applied (cleared when a request runs on it)
 export const NOTICE_SET = 'desk-model-set' // the mod applied it (one line, until the next session's attempt)
 const stateFile = (home: string) => `${leanDir(home)}/desk/model.json`
@@ -31,7 +32,7 @@ export const deskModelText = (m: DeskModelState): string => `the desk runs ${m.r
 
 export async function readDeskModel(h: Host): Promise<DeskModelState | null> {
   const v = await readJson<Partial<DeskModelState> | null>(h, stateFile(await homeDir(h)), null)
-  return v && typeof v.running === 'string' && v.pin && typeof v.pin.model === 'string' && typeof v.pin.effort === 'string' ? { running: v.running.slice(0, 80), pin: { model: v.pin.model, effort: v.pin.effort }, at: Number(v.at) || 0, ...(typeof v.why === 'string' && v.why ? { why: v.why.slice(0, 200) } : {}) } : null
+  return v && typeof v.running === 'string' && v.pin && typeof v.pin.model === 'string' && typeof v.pin.effort === 'string' ? { running: v.running.slice(0, 80), pin: { model: v.pin.model, effort: v.pin.effort }, at: Number(v.at) || 0, ...(typeof v.why === 'string' && v.why ? { why: v.why.slice(0, 200) } : {}), ...(typeof v.session === 'string' && v.session ? { session: v.session } : {}), ...(typeof v.tries === 'number' && v.tries > 0 ? { tries: v.tries } : {}) } : null
 }
 // The record of a switch (kept, unlike model.json): the app started the desk on `from`, lean-agent switched the session to `to` at `at`.
 // Doctor reads it so that the spend on `from` before the switch is not reported as a session on an unexpected model.
@@ -161,7 +162,9 @@ export async function checkDeskModel(h: Host, eng: Engine | null, running: strin
   }
   // what failed, exactly (the red row says it): the engine's refusals, the unverified set, or no engine call at all
   const why = still || done?.why.filter(w => !/effort/.test(w)).join('; ') || (eng ? '' : 'the session has no config call')
-  const st: DeskModelState = { running: running.slice(0, 80), pin, at: await h.clock.now(), ...(why ? { why } : {}) }
+  const before = await readDeskModel(h)
+  const tries = session && before?.session === session ? (before.tries ?? 1) + 1 : 1
+  const st: DeskModelState = { running: running.slice(0, 80), pin, at: await h.clock.now(), ...(why ? { why } : {}), ...(session ? { session, tries } : {}) }
   await mkdirp(h, `${leanDir(await homeDir(h))}/desk`)
   await atomicWrite(h, stateFile(await homeDir(h)), JSON.stringify(st) + '\n')
   const text = deskModelText(st)

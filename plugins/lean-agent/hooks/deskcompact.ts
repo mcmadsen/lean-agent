@@ -1,6 +1,6 @@
 // The desk's own context. A desk session lives for days: at 80% of its limit (config.json `deskTokens`, default 100000) the handover is written and
-// the pane says "restart the desk soon" with the Restart desk button; at the limit the desk's next reply starts with one line saying so (once) and,
-// with config `desk.autoRestart: true`, the mod opens the new desk itself at the end of the turn (no question to the user open). When it is idle and
+// the pane says "restart the desk soon" with the Restart desk button; at 95% of the limit the mod opens the new desk itself at the end of the turn
+// (config `desk.autoRestart`, default true since 1.0.28; also for an update, a pin that cannot be applied, lost tools: autoRestartDesk). When it is idle and
 // over its limit the mod also tries to compact it (`$.session.compact` with fixed instructions; the app's desk cannot, see below). Every compaction that was vetoed or failed is recorded with its
 // reason (desk/compact.json, a notice, the doctor check) and tried again when the desk's turn ends. When compaction is not possible
 // the mod writes desk/handover.md and the status line asks the user to type /compact or start a new desk session, which reads it.
@@ -31,6 +31,9 @@ import { readSnapshot } from './snapshot'
 import { waitingScripts } from './scripts'
 import { setNotice } from './notices'
 import { dismissOldDesk, recordOldDesk, titleOf } from './olddesk'
+import { autoGuard, cancelAutoStart, lastAutoRun, noteAutoRun, resetAuto, retiredInfo, sayGuardOnce, writeAutoStart } from './deskauto'
+import type { AutoKind } from './deskauto'
+import { readDeskModel } from './deskmodel'
 import type { Thread } from './threads'
 
 export const DEFAULT_TOKENS = 100_000 // (was 200k: the desk only routes, a conversation that big is mostly old reports)
@@ -94,6 +97,7 @@ export const resetDeskCompact = (): void => {
   ctxTokens = 0
   sawUsage = false
   ds = freshDesk()
+  resetAuto()
 }
 // a headless (-p / SDK) session: the engine's own text is "lean-agent: $.session.compact: not available in a headless (-p / SDK) session
 // yet: compaction here runs inside a turn (a /compact prompt); ..." (the prefix and the `$.` vary with the engine)
@@ -262,22 +266,71 @@ export const limitLineOnce = (): string | null => {
   return `[lean-agent] The desk context reached its limit (${n}). Start your next reply with this one line, once, then carry on: "Desk context ${n}: press Restart desk in the pane (the handover is written)."`
 }
 
-// config desk.autoRestart (default false): at the end of a desk turn over the limit, with no question to the user open, the mod opens the new desk itself
-// (restartDesk: the handover is written first). Once per desk session. A failure is a notice (the pane's Restart desk button is still there).
-export async function autoRestartDesk(h: Host, o: { tokens: number; restart: () => Promise<{ ok: boolean; text: string }> }): Promise<'off' | 'under' | 'question' | 'already' | 'restarted' | 'failed'> {
+// config desk.autoRestart (default TRUE since 1.0.28; false = the Restart desk button only): at the end of a desk turn the mod opens the new desk itself
+// (restartDesk: the handover is written first, the link is opened without taking the focus) for one of four reasons, in this order:
+//   context  the desk's context is at 95% of its limit or over (deskTokens)
+//   version  lean-agent was updated and this desk still runs the older code (skew.ts: the same comparison as the status line and the doctor)
+//   model    the model pin could not be applied in two tries of this session (deskmodel.ts)
+//   tools    the desk lost its tools: the mod's own send was refused with "this session has no SendMessage tool" (deliver-to-thread.ts)
+// and only when: this session is the current desk (deskauto.ts retiredInfo); no turn is running (an AskUserQuestion in flight is a running turn);
+// the desk is shown in the desktop app; no thread's question to the user is open (the handover carries them, so over 120% of the limit it goes on
+// anyway); the loop guard allows it (last one 30+ min ago, fewer than 4 in 24 h: else ONE notice and the amber status line). Requests, approvals,
+// grants and threads are in the handover (buildDeskHandover) and need no wait. Once per desk session. A failure is a notice (the Restart desk button is
+// still there). A model / tools reason is not repeated for the same cause within 24 h (the new desk would have the same trouble: only the button).
+export type AutoIn = {
+  tokens: number
+  restart: () => Promise<{ ok: boolean; text: string }>
+  sid?: string // this desk session
+  busy?: boolean // a desk turn is running
+  inApp?: boolean // the desk is shown in the desktop app (the surface check)
+  skew?: string | null // the skew sentence of this session (skew.ts skewText), when the installed lean-agent is newer
+  toolsLost?: string | null // directUnavailable(): why the mod's send to threads is refused for this session
+  status?: (text: string) => void // the amber line
+  notify?: (text: string) => void // the toast
+}
+export type AutoOut = 'off' | 'none' | 'retired' | 'busy' | 'app' | 'already' | 'question' | 'guard' | 'restarted' | 'failed'
+export const QUESTION_OVER_PCT = 120
+export async function autoRestartDesk(h: Host, o: AutoIn): Promise<AutoOut> {
   const home = await homeDir(h)
-  if (((await readConfig(h, home)) as any)?.desk?.autoRestart !== true) return 'off'
-  if (o.tokens < (await deskTokens(h))) return 'under'
+  if (((await readConfig(h, home)) as any)?.desk?.autoRestart === false) return 'off'
+  if (o.sid && (await retiredInfo(h, o.sid))) return 'retired' // a newer desk took over: this one never starts another
+  const limit = await deskTokens(h)
+  const now = await h.clock.now()
+  const last = await lastAutoRun(h)
+  const again = (kind: AutoKind, text = '') => !!last && last.kind === kind && now - last.at < 24 * 3_600_000 && (kind !== 'version' || last.text === text)
+  let kind: AutoKind | null = null
+  let text = ''
+  if (o.tokens >= Math.floor((limit * 95) / 100)) [kind, text] = ['context', `context ${kTokens(o.tokens)}`]
+  const ver = o.skew ? /code (\S+) is running but (\S+) is installed/.exec(o.skew) : null
+  if (!kind && o.skew && !again('version', ver ? `lean-agent updated: running ${ver[1]}, installed ${ver[2]}` : 'lean-agent updated')) [kind, text] = ['version', ver ? `lean-agent updated: running ${ver[1]}, installed ${ver[2]}` : 'lean-agent updated']
+  if (!kind && o.sid && !again('model')) {
+    const m = await readDeskModel(h)
+    if (m && m.session === o.sid && (m.tries ?? 0) >= 2) [kind, text] = ['model', `the model pin could not be applied (${m.tries} tries)`]
+  }
+  if (!kind && o.toolsLost && !again('tools')) [kind, text] = ['tools', `the desk lost its tools (${why(o.toolsLost).slice(0, 80)})`]
+  if (!kind) return 'none'
+  if (o.busy) return 'busy'
+  if (o.inApp === false) return 'app'
   if (ds.auto) return 'already'
-  if ((await openQuestions(h)).length) return 'question' // the user is deciding something: not now (the next turn end asks again)
+  if ((await openQuestions(h)).length && !(kind === 'context' && o.tokens >= Math.floor((limit * QUESTION_OVER_PCT) / 100))) return 'question' // the user is deciding something: not now (the next turn end asks again)
+  const blocked = await autoGuard(h)
+  if (blocked) {
+    await sayGuardOnce(h, blocked, text)
+    o.status?.(`desk restart needed (${text}) but not automatic: ${blocked}. Press Restart desk`)
+    return 'guard'
+  }
   ds.auto = true
+  await writeAutoStart(h, { reason: text, kind, from: o.sid ?? '' }) // (the new desk's start finds it)
   const r = await o.restart().catch(e => ({ ok: false, text: why(e) }))
   if (!r.ok) {
     ds.auto = false
-    await setNotice(h, 'desk-autorestart', `the desk is over its limit and could not open a new one by itself: ${r.text}`)
+    await cancelAutoStart(h)
+    await setNotice(h, 'desk-autorestart', `the desk needs a restart (${text}) and could not open a new one by itself: ${r.text}`)
     return 'failed'
   }
+  await noteAutoRun(h, kind, text)
   await setNotice(h, 'desk-autorestart', null)
+  o.notify?.(`desk restarted automatically: ${text}`)
   return 'restarted'
 }
 
@@ -382,7 +435,10 @@ export const KEEP_READ_HANDOVERS = 3
 // Only a NEW desk session consumes it: the file names the session that wrote it, and that session's own start (a resume, a compaction, a
 // reload) leaves it where it is. A start whose own id is unknown cannot tell, so it leaves a named handover alone too; a handover that
 // names no writer (an older file) goes to whichever desk starts.
+let servedText: string | null = null
+export const servedBody = (): string | null => servedText // the handover the last serveHandover moved (deskauto.ts deskStartLines lists what it holds)
 export async function serveHandover(h: Host, sid = ''): Promise<string | null> {
+  servedText = null
   try {
     const home = await homeDir(h)
     const from = handoverFile(home)
@@ -399,6 +455,7 @@ export async function serveHandover(h: Host, sid = ''): Promise<string | null> {
     const old = (await h.fs.list(deskState(home)).catch(() => [])).filter(f => f.kind === 'file' && /^handover-read-.+\.md$/.test(f.name)).map(f => f.name.replace(/\.md$/, '')).sort().map(n => `${n}.md`) // (the date sorts as text; without the extension, `-2` after the same second sorts after it)
     const drop = old.slice(0, Math.max(0, old.length - KEEP_READ_HANDOVERS)).filter(n => `${deskState(home)}/${n}` !== to)
     if (drop.length) await h.process.run(['rm', '-f', ...drop.map(n => `${deskState(home)}/${n}`)]).catch(() => undefined)
+    servedText = body
     return `a desk handover${written ? ` (written ${written})` : ''} from an earlier desk session is waiting in ${to}: read it now (goals, open threads, questions, approvals; disregard it if it is old news), then carry on`
   } catch {
     return null

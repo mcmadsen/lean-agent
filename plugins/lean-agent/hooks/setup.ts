@@ -106,7 +106,8 @@ export async function platformOf(h: Host): Promise<Platform> {
   }
   return (await h.env.get('OS').catch(() => undefined)) === 'Windows_NT' ? 'windows' : 'linux'
 }
-export const openerArgv = (p: Platform, url: string): string[] => (p === 'mac' ? ['open', url] : p === 'windows' ? ['rundll32', 'url.dll,FileProtocolHandler', url] : ['xdg-open', url])
+// `background` (the automatic desk restart): macOS `open -g` opens the link without bringing the app to the front; the other systems have no such flag
+export const openerArgv = (p: Platform, url: string, background = false): string[] => (p === 'mac' ? (background ? ['open', '-g', url] : ['open', url]) : p === 'windows' ? ['rundll32', 'url.dll,FileProtocolHandler', url] : ['xdg-open', url])
 
 const firstLine = (s: string | undefined): string => ((s ?? '').split('\n').map(x => x.trim()).find(Boolean) ?? '').slice(0, 200).replace(/\.+$/, '')
 // a process that could not be started at all (not installed), as opposed to one that started and then timed out or failed
@@ -150,12 +151,12 @@ export async function openThreadSession(h: Host, id: string, release: () => Prom
 // itself: without a running app there is nothing to open it in (checked on macOS; a pane drawn on the 'desktop' surface is inside
 // the app, so the check is skipped; if the check itself errors the link is opened anyway). `claude --desktop` is only the last
 // fallback, for a system whose opener cannot be started at all.
-export async function openDesk(h: Host, surface?: string): Promise<{ ok: boolean; text: string }> {
+export async function openDesk(h: Host, surface?: string, background = false): Promise<{ ok: boolean; text: string }> {
   const dir = deskDir(await homeDir(h))
   if (!(await h.fs.exists(dir))) return { ok: false, text: 'The desk folder is missing: press Set up first.' }
   const plat = await platformOf(h)
   if (plat === 'mac' && surface !== 'desktop' && (await appRunning(h)) === false) return { ok: false, text: 'The Claude app is not running: open it, then press Open desk again.' }
-  const argv = openerArgv(plat, newSessionLink(await realPath(h, dir)))
+  const argv = openerArgv(plat, newSessionLink(await realPath(h, dir)), background)
   const by = 'start a new session in ~/lean-agent-desk by hand'
   let spawnError = ''
   try {

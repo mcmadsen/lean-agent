@@ -48,7 +48,8 @@ import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed,
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
-import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, sessionId } from './deskcompact'
+import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, servedBody, sessionId } from './deskcompact'
+import { deskStartLines, retiredInfo, retiredLine } from './deskauto'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
@@ -72,7 +73,7 @@ import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
-import { deliveryTick, setThreadSender } from './deliver-to-thread'
+import { deliveryTick, directUnavailable, setThreadSender } from './deliver-to-thread'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
@@ -488,6 +489,7 @@ function every($: any, ms: number, want: Role['kind'], fn: (host: Host) => Promi
   const t = $.clock.every(ms, async () => {
     if (role.kind !== want) return
     try {
+      if (want === 'desk' && (await retiredInfo(hostOf($), lastSid))) return // a newer desk took over (desk.json names it): this one's relays, chaser, restarts, stall and budget alerts stop (deskauto.ts)
       await fn(hostOf($))
     } catch {
       /* the next tick tries again */
@@ -832,14 +834,12 @@ export const register: Register = on => {
       const said = await takeNotice(host, 'ledger-rotation')
       if (said) pending.push(`[lean-agent] ${said}`)
       // a handover left by the previous desk session is served now: renamed (a later desk must not find it as a fresh one), and named in the first prompt
+      // (the button's new desk and the script's new desk start the same way: deskauto.ts deskStartLines adds only "started automatically at <time> because <reason>")
+      // a desk left behind by a restart: the new desk's first notice names it once (olddesk.ts); the pane's one line and the doctor row stay until it is archived
       await soft($, 'desk handover', async () => {
         const served = await serveHandover(host, lastSid)
-        if (served) pending.push(`[lean-agent] ${served}`)
-      })
-      // a desk left behind by "Restart desk": the new desk's first notice names it (olddesk.ts); then once per desk turn until it is archived
-      await soft($, 'old desk', async () => {
-        const said = await oldDeskStep(host, lastSid, 'start')
-        if (said) pending.push(`[lean-agent] ${said}`)
+        const old = await oldDeskStep(host, lastSid, 'start').catch(() => null)
+        pending.push(...(await deskStartLines(host, lastSid, { served, body: servedBody(), oldDesk: old })).map(l => `[lean-agent] ${l}`))
       })
     }
     // the desk's model and effort pin, when the session's model is already known (else the first request does it)
@@ -966,8 +966,8 @@ export const register: Register = on => {
     await redetect($)
     await showSkew($)
     if (!e.agentId && role.kind === 'desk') {
-      const said = await oldDeskStep(hostOf($), lastSid, 'turn').catch(() => null) // at most once per desk turn, until the old desk is archived
-      if (said) pending.push(`[lean-agent] ${said}`)
+      // the old desk's state is kept up (settled when archived); its reminder is the pane's one line, not a line in every turn (olddesk.ts)
+      if (!(await retiredInfo(hostOf($), lastSid))) await oldDeskStep(hostOf($), lastSid, 'turn').catch(() => null)
     }
     return next(e)
   })
@@ -984,9 +984,24 @@ export const register: Register = on => {
     // later (deskcompact.ts)
     if (role.kind === 'desk' && !e.agentId) {
       deskTurnEnded()
-      // config desk.autoRestart (default false): over its limit and no question to the user open, the mod opens the new desk itself (deskcompact.ts)
+      // config desk.autoRestart (default true): the mod opens the new desk itself, without taking the focus, when the context is over its limit, lean-agent
+      // was updated, the model pin failed twice or the desk lost its tools, and nothing blocks it (deskcompact.ts autoRestartDesk)
       const host = hostOf($)
-      void autoRestartDesk(host, { tokens: contextSize(), restart: () => restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host) }) }).catch(() => undefined)
+      void (async () => {
+        const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false)
+        const out = await autoRestartDesk(host, {
+          tokens: contextSize(),
+          sid: lastSid,
+          busy: inTurn,
+          inApp,
+          skew: await skewNote(host, String($.plugin.root), VERSION).catch(() => null),
+          toolsLost: directUnavailable(),
+          restart: () => restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, 'desktop', true) }),
+          status: text => $.ui.status(text),
+          notify: text => $.ui.notify(text, { key: 'lean-desk-autorestart' }),
+        })
+        if (out !== 'none' && out !== 'off') $.ui.log(`lean-agent: desk auto restart: ${out}`, { to: 'debug' })
+      })().catch(() => undefined)
     }
     return next(e)
   })
@@ -1529,6 +1544,11 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e: any, next) => {
     const host = hostOf($)
     await redetect($)
+    // a desk that a newer one replaced (desk.json names the other session) answers with one line and acts on nothing: no pin, no reports taken (deskauto.ts)
+    if (role.kind === 'desk' && !e.agentId) {
+      const gone = await retiredInfo(host, lastSid)
+      if (gone) return next({ ...e, context: [...(e.context ?? []), retiredLine(gone)] })
+    }
     if (role.kind === 'desk') {
       await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session

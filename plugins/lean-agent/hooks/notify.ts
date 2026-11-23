@@ -13,6 +13,7 @@
 import { readConfig } from './budget'
 import { budgetEvents } from './budgetalert'
 import { deskState } from './delivery'
+import { isRetiredNow } from './deskauto'
 import { homeDir, readJson, writeJson } from './state'
 import type { Host } from './state'
 import { loadView } from './view'
@@ -45,6 +46,7 @@ const seenFile = (home: string) => `${deskState(home)}/notify-seen.json`
 // One pass: the toasts that are due are handed to `toast` (the engine's $.ui.toast); returns their texts. Never throws.
 export async function notifyTick(h: Host, toast: (text: string) => void, view?: View): Promise<string[]> {
   try {
+    if (isRetiredNow()) return [] // a newer desk took over (deskauto.ts): its toasts and its seen-list are the newer desk's
     const home = await homeDir(h)
     const cfg = await notifyConfig(h)
     const v = view ?? (await loadView(h))
