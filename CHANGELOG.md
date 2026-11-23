@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.30
+
+### Changed
+- The pane is easier to read. A thread's request to send several comments is now a numbered list, grouped by file, one line each (where it goes and the first 120 characters). The Approve / Deny / Open / Dismiss buttons are at the top of the card, and the full text is one tap away.
+- A request that is too long to approve in the pane now says so on the card: "Approve in the desk question".
+- One row per fact. The desk context, "restart the desk", the doctor finding and the "old desk not archived" line are no longer shown three or four times each. The desk row says "restarting" when the desk restarts itself, and "restart the desk" (with its button) only when it cannot.
+- The doctor shows "Doctor: N findings (F fix)" on one line; the info lines are behind show / hide, each cut to one line.
+- Colors mean something: amber only for labels and chips, red only when something is broken. "rules: 1 over the size cap, still loaded", the old desk and a held-back automatic restart are amber warnings, not red errors. Card text is in the normal text color.
+- Status chips on every thread and card: working, waiting, needs you, done, restarting, blocked. The plan window (5 h) is a small bar with the number, not an amber line.
+- A done thread is one row: title, chip, cost, context bar, Open and Resume. Every other action (Restart from handover, Start new session, Close) is behind "more". One main button per state: working and waiting have Open, done has Open and Resume, blocked has Restart.
+- A thread that checkpointed itself shows a quiet "restarting" chip, not a blocked card. "review not green" is red only on a done thread (where it blocks the push).
+- New, optional and off by default: a calm light and dark theme for the app. Turn it on with `pane.theme: on` in `~/.lean-agent/config.json`. It is sent once at the start of a session, your own look is never touched unless you turn it on, and turning it off again removes it. `lean_doctor` says whether it is on and whether anything draws it (and why not).
+
 ## 1.0.29
 
 ### Added

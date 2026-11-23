@@ -507,6 +507,27 @@ What a thread never does with `ado-pr-update`, and is refused with the reason "t
 
 Not tested against a live organisation: the specs run on canned curl output, nothing is ever sent from them.
 
+## The pane (1.0.30)
+
+A polish of the desk pane, and one optional look. **It was not judged visually here:** the container has no desktop app, so the layout, the colors and the theme are covered by specs that read the tree (texts, buttons, keys), not by eye. Send a screenshot of the pane and the list in both modes if anything looks off.
+
+**The "Needs you" card.** The buttons (Approve, Deny, Open, Dismiss) are the first row of the card; the card's label is an amber chip (`needs you`, `blocked`, `question`, `ready to push`, `stalled`) and the text under it is the normal text color. A review of several comments is a numbered list grouped by file, one line each (where the comment goes and its first 120 characters); "show full text" opens all of it. A request the pane cannot show whole (over 400 characters) has no Approve in the pane, as before, and the card now says so: "Approve in the desk question".
+
+**One row per fact.**
+- The desk context is one bar and one row under it, from 80 %: "restarting the desk (...): a new session opens by itself" when the 1.0.29 automatic restart will run (95 % of the limit and the guard of one per 30 minutes allows it), otherwise "restart the desk (...)" with the Restart desk button. No card, no second line, no "type /compact". The footer button stays.
+- The old desk that was not archived is one amber line (not a red error and not again in the doctor lines). The rules cap ("N over the size cap, still loaded") and a held-back automatic restart are amber too. A real failure stays red with `error:`.
+- The doctor is one line, "Doctor: N findings (F fix)", with show / hide for the lines (each cut to one line); the ones that need a fix are always shown, in red. A doctor line that repeats what the desk row or a notice already says is left out.
+
+**Threads.** Every thread has a status chip (`working`, `waiting`, `needs you`, `done`, `restarting`, `blocked`), then model, cost, a context bar (`ctx 79k of 120k`), branch and review. A done thread is **one row**: title, chip, cost, context, Open | Resume, "more". One main button per state: working and waiting: Open; done and idle: Open | Resume; blocked: Restart. Behind "more": Resume, Start new session, Restart from handover, Close. "review not green" is red only on a done thread; on a working one it is dim. A thread that checkpointed itself (its checkpoint record names the session and the restart has not happened) is a `restarting` chip and has no blocked card. "Close all done" is unchanged. The 5 h plan window is a bar with the number (green, amber from 90 %, red from 100 %).
+
+**The optional look.** Off unless the config says so:
+
+```json
+{ "pane": { "theme": "on" } }
+```
+
+in `~/.lean-agent/config.json`. When on, the look (a calm palette, cool grays and one teal accent, light and dark; danger, success and warning keep red, green and amber) is sent once at each session start with `$.theme.set`, built by `makeColors` (`hooks/make-colors.js`, copied unchanged from the plugin-authoring skill; a spec checks that nothing in its `problems` makes Desktop ignore the theme and that every color name is real). With the config off, or never set, lean-agent sets nothing and clears nothing. The theme is cleared only when the config goes from on to off (the mod keeps one record, `~/.lean-agent/look.json`, so it clears a look it set and never another plugin's at any other time). `lean_doctor` has one row: `pane theme: off`, `on, drawn`, or `on, not drawn: <the reason>` (the terminal and editors draw no look).
+
 ## Skills
 
 | Skill | Use |
