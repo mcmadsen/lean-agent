@@ -144,7 +144,7 @@ function world() {
   }
   const call = (i: any) => leanThread(h.host, ROOT, i)
   const bg = () => h.claudeCalls().filter(a => a[0] === '--bg')
-  const thread = (o: Record<string, unknown> = {}) => h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'a', project: '', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high', ...o }))
+  const thread = (o: Record<string, unknown> = {}) => h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'a', project: '', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high', effortSet: true, ...o }))
   const running = () => (state.rows = [{ sessionId: SID, name: 't1 · a', cwd: T1, status: 'busy', state: 'working', startedAt: 1, pid: 4242 }])
   return { h, state, call, bg, thread, running }
 }

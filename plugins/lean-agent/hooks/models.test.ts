@@ -136,6 +136,19 @@ test('threads.effort from config.json applies; the thread\'s recorded choice bea
   expect(typeof (await threadChoice(h.host, '/h', { effort: 'max' }))).toBe('string')
 })
 
+test('effort by role: an orchestrating thread defaults to medium; the call, a named record and config.json threads.effort win; off means high', async () => {
+  const h = fakeHost(null)
+  const c = (given: any, rec?: any, orch = true) => threadChoice(h.host, '/h', given, rec, orch).then(x => (typeof x === 'string' ? x : x.effort))
+  expect(await c({})).toBe('medium')
+  expect(await c({}, undefined, false)).toBe('high') // lean.orchestrate off: the thread edits itself
+  expect(await c({ effort: 'high' })).toBe('high') // design / refactoring named by the desk
+  expect(await c({}, { effort: 'high' })).toBe('medium') // a recorded default is recomputed (restart, auto restart)
+  expect(await c({}, { effort: 'high', effortSet: true })).toBe('high') // a recorded effort a call named stays
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { effort: 'low' } }))
+  expect(await c({})).toBe('low')
+  expect(await c({ effort: 'high' })).toBe('high')
+})
+
 test('check says when the desk settings file does not parse, and merge refuses an array', async () => {
   const h = fakeHost(null)
   h.files.set(DESK, '{ broken')

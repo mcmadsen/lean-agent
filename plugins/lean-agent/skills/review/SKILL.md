@@ -98,7 +98,7 @@ tool's refusal: do what it says.
    review: the reviewer passes (up to 4 per review: two runs on the first pass of a high-risk diff, one on each re-review; 6 per session) and the second-opinion reader (the `review: second-opinion` line) do not
    count against it, and the guard lets them through when the cap is used up. Never skip or merge a reviewer pass to save a slot, and do not
    put the `review: second-opinion` line on any other agent.
-   It answers in prose plus ONE fenced `json` block (findings, gaps, user_facing, risks, checks, reuse, coverage, siblings, searches,
+   It answers with ONE fenced `json` block (no prose; at most 12 findings, each with path:line) (findings, gaps, user_facing, risks, checks, reuse, coverage, siblings, searches,
    unverified) before its LEAN-FEEDBACK line. Keep that block: it is the `review` of the record (for two runs, the `reviews` of it).
    The full answer is written to `scratch/review-<short id>.md` of the thread's folder; the reply is the path, a `verdict:` line and a few
    lines (a long reply is sent back once): read the json block from that file (Read), not from the reply.

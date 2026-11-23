@@ -427,7 +427,8 @@ test('a thread\'s daily spend line: reviewer passes and the first request of eac
   expect(Math.round(c.usd * 100)).toBe(1290)
   expect(Math.round(c.reviews! * 100)).toBe(510)
   expect(Math.round(c.restarts! * 100)).toBe(90)
-  expect(costLine(c)).toBe('today $12.90 (reviews $5.10, restarts $0.90)')
+  expect(costLine(c)).toBe('today $12.90 (reviews $5.10, restarts $0.90)') // the card and the list: the short form
+  expect(costLine(c, true)).toBe('today $12.90 (main $7.30 · workers $0.50 · reviews $5.10, restarts $0.90)') // the thread pane: where today's money went
   expect(await threadSpendLine(h.host, 't1')).toBe('today $12.90 (reviews $5.10, restarts $0.90)')
   expect(await threadSpendLine(h.host, 't7')).toBeNull()
   expect(costLine({ usd: 3, over: false })).toBe('today $3.00') // no split: nothing in brackets

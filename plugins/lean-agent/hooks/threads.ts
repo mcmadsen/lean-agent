@@ -31,7 +31,7 @@ import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
 import { dismissAction } from './dismiss'
 import { loadView } from './view'
-import { threadToolsArgv } from './orchestrate'
+import { loadOrch, threadToolsArgv } from './orchestrate'
 import { threadSpendLine } from './stats'
 import { baseLine, readBase } from './base'
 import { readParts } from './ctxparts'
@@ -57,6 +57,7 @@ export type Thread = {
   delivered: number // inbox.jsonl lines already handed to the session
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
+  effortSet?: boolean // a call named the effort (lean_thread new / start ... effort:); an effort that was only the default is recomputed at every start (models.ts)
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
   version?: string // the lean-agent version the DESK saw installed when the session was last started or resumed (what the session really runs is `running`)
@@ -362,7 +363,7 @@ async function holdExpensive(h: Host, t: Thread, model: string, effort: string |
 // A call that names no model never inherits an expensive one that is only the thread's RECORDED model and not approved for it: it gets
 // sonnet and the reply says so (a model the call names is held by holdExpensive; an approved one is kept). A string = the refusal.
 async function pickModel(h: Host, home: string, t: Thread, given: Given): Promise<{ choice: Choice; note: string } | string> {
-  const choice = await threadChoice(h, home, given, t)
+  const choice = await threadChoice(h, home, given, t, (await loadOrch(h).catch(() => undefined))?.on !== false)
   if (typeof choice === 'string') return choice
   if (given.model === undefined && t.model && choice.model === t.model && isExpensiveModel(t.model) && !(await modelAllowed(h, t.id, t.model))) {
     return { choice: { ...choice, model: 'sonnet' }, note: `${t.id} was recorded on ${t.model}; started on sonnet (${familyOf(t.model)} needs the user's approval in the pane)` }
@@ -379,10 +380,11 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (held) return held
   t.model = choice.model
   t.effort = choice.effort
+  if (given.effort !== undefined) t.effortSet = true
   // before the session exists its mod reads model, effort and needs from thread.json (at its first request): only these three are saved now,
   // the rest of the record (state, sid) is saved when the start worked
   const disk = await load(h, home, t.id)
-  if (disk) await save(h, home, { ...disk, model: t.model, effort: t.effort, ...(t.needs ? { needs: t.needs } : {}) })
+  if (disk) await save(h, home, { ...disk, model: t.model, effort: t.effort, ...(t.effortSet ? { effortSet: true } : {}), ...(t.needs ? { needs: t.needs } : {}) })
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   // the project's profile (plus this thread's needs): plugins outside it are switched off in the thread's settings; its MCP servers
   // outside it are deferred by the thread's own mod, which reads loaded.json (profile.ts). No profile = nothing held back.

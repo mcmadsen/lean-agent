@@ -31,7 +31,7 @@ export type Row = { ts: number; role: string; tN?: string; agentId?: string; age
 
 // ---- alert thresholds (config.json `budget`): these only warn the desk, they never refuse a request (dailyCapUsd does that) ---------------
 export const DEFAULT_DAILY_USD = 25
-export const DEFAULT_THREAD_DAILY_USD = 20
+export const DEFAULT_THREAD_DAILY_USD = 15 // (20 before 1.0.27)
 // a positive number (or a numeric string) is the limit; "off" / false / 0 / a negative is none; absent or junk is the default
 export function limitOf(v: unknown, dflt: number): number | null {
   if (v === undefined || v === null) return dflt

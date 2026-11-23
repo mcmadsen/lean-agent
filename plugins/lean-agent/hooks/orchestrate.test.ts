@@ -19,10 +19,11 @@ const call = (ctx: any, e: any, c = C) => orchDecide(c, ctx, e)
 let seqN = 0 // a fresh brief each time: an identical brief is a retry (jobs.ts retryDenial)
 
 test('config: defaults, nested and flat keys, junk falls back, false switches the model off', () => {
-  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
+  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true })
   const c =orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
-  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
+  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true })
   expect(orchConfig({ 'lean.orchestrate': false }).on).toBe(false)
+  expect([orchConfig({ workers: { commit: false } }).commit, orchConfig({ 'workers.commit': false }).commit, orchConfig({}).commit]).toEqual([false, false, true])
   expect(orchConfig({ workers: { steps: 'x' }, threads: { workers: -1 } })).toEqual(C)
   expect(orchConfig({ threads: { directReads: 0 } }).directReads).toBe(0)
 })
@@ -167,9 +168,12 @@ test('worker: a tool-call budget (workers.steps); at the budget the call is refu
   expect(call(worker, { tool: 'Read' }, c)).toBe(SPLIT)
   expect(call(worker, { tool: 'Bash', command: 'ls' }, c)).toBe(SPLIT)
   expect(call({ ...worker, agentId: 'w2' }, { tool: 'Read' }, c)).toBeNull()
-  // the reviewer and other agents have no budget
+  // the reviewer has the budget of a check job (never above workers.steps, here 3: see the reviewer spec below); other agents have none
   const rev = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'v1' }
-  for (let i = 0; i < 40; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  for (let i = 0; i < 3; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  expect(call(rev, { tool: 'Read' }, c)).toContain("the reviewer's budget (3 tool calls")
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'x1' }
+  for (let i = 0; i < 40; i++) expect(call(ex, { tool: 'Read' }, c)).toBeNull()
 })
 
 test('config off: every rule is off (today)', () => {
@@ -235,6 +239,22 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   const b = await capTo(h.host, 't1', bash, 6000)
   expect(b.result.stdout.length).toBeLessThan(7000)
   expect(b.result.interrupted).toBe(false)
+})
+
+test('the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) and is told what to do at the end', () => {
+  orchReset()
+  const rv = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'rv1' }
+  const bash = { tool: 'Bash', command: 'git -C /r/app diff main...abc' }
+  for (let n = 1; n <= 10; n++) expect(call(rv, bash), `call ${n}`).toBeNull()
+  const over = call(rv, bash)
+  expect(over).toContain("the reviewer's budget (10 tool calls")
+  expect(over).toContain('write the json block')
+  expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull()
+  const small = orchConfig({ workers: { stepsByJob: { check: 2 } } })
+  expect([call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small)].map(x => x === null)).toEqual([true, true, false])
+  // another subagent type (explorer, auditor) is not counted by this rule
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'ex1' }
+  for (let n = 1; n <= 30; n++) expect(call(ex, bash)).toBeNull()
 })
 
 test('lean_run: an unknown runner keeps the last 15 lines; runSummary runs the command with its output in a file', async () => {
