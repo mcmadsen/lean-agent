@@ -14,7 +14,7 @@ import { NOTICE_SET, deskModelStatus, deskModelText, readDeskModel, readDeskSwit
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
@@ -75,7 +75,7 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'restarting' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'restarting' | 'waiting' | 'waiting for answer' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
@@ -84,6 +84,7 @@ export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.approval) return { word: 'approval', color: 'warning' }
   if (t.blocked) return { word: 'blocked', color: 'error' }
   if (t.asking) return { word: 'asking', color: 'warning' }
+  if (t.live === 'waiting') return { word: 'waiting for answer', color: 'warning' } // it asked a question and did nothing since (threadstate.ts): not "working"
   if (t.live === 'stuck') return { word: 'stuck', color: 'error' }
   if (t.live === 'stalled') return { word: 'stalled', color: 'error' } // alive and working, no tool call or report for threads.stallMinutes (stall.ts)
   if (t.finishing) return { word: 'done (finishing)', color: 'inactive' } // reported done, the session only waits for a background worker's notification
@@ -313,7 +314,7 @@ export async function loadView(h: Host): Promise<View> {
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
       const queued = (await unconsumed(h, home, t.id)).msgs
-      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null })
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })

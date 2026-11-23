@@ -66,16 +66,36 @@ export async function touchActivity(h: Host, home: string, id: string, kind: str
   }
 }
 
-// ---- running | idle | stuck | stalled | done | parked ------------------------------------------------------------------------
+// ---- the waiting state (1.0.27c) -------------------------------------------------------------------------------------------
+// A thread that asks a question (lean_ask, or a blocked report that waits for the user and carries no approval or action) records
+// <thread folder>/waiting.json {since, text, q?}: its own mod writes it at the question, the desk's delivery clears it when an answer or an
+// instruction is delivered (deliver-to-thread.ts). A session is WAITING (word `waiting`, "waiting for your answer") while that record exists and its last
+// activity is the question itself (no activity newer than since + WAIT_EPS_MS): it shows `working` in `claude agents`, but it waits for the
+// user, not for work. (A separate file, not thread.json: the desk rewrites thread.json whole, the thread's mod must not race it.)
+export type Waiting = { since: number; text?: string; q?: number; reminded?: boolean; tries?: number }
+export const WAIT_EPS_MS = 5_000 // the activity writes of the question's own tool call are at most this far from `since` (touchActivity throttles at 5 s)
+export const waitingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/waiting.json`
+export async function readWaiting(h: Host, home: string, id: string): Promise<Waiting | null> {
+  const w = await readJson<Partial<Waiting> | null>(h, waitingFile(home, id), null)
+  return w && typeof w === 'object' && Number.isFinite(Number(w.since)) && Number(w.since) > 0 ? { ...w, since: Number(w.since) } : null
+}
+export const markWaiting = (h: Host, home: string, id: string, w: Waiting): Promise<void> => writeJson(h, waitingFile(home, id), w).catch(() => undefined)
+export const clearWaiting = (h: Host, home: string, id: string): Promise<void> => writeJson(h, waitingFile(home, id), {}).catch(() => undefined)
+// still waiting: the record exists and nothing was done since the question (`activityAt`: the last activity, null = none recorded)
+export const stillWaiting = (w: { since: number } | null | undefined, activityAt: number | null | undefined): boolean => !!w && w.since > 0 && (activityAt ?? 0) < w.since + WAIT_EPS_MS
+
+// ---- running | idle | stuck | stalled | waiting | done | parked ------------------------------------------------------------------------
 // stuck: the oldest unread queued message is older than stuckMinutes. A working session reads its queue at every tool call (delivery.ts
 // takeBatch), so a message that stays unread that long means no tool call and no inbox read; an idle session never reads it.
 // stalled: the session is alive and working, but no tool call and no report for stallMinutes (activityAt), or a message unread that long.
 // A session that waits on a prompt for the user (waitingFor / blocked) is the user's to answer, never "stuck" or "stalled".
-export type Word = 'running' | 'idle' | 'stuck' | 'stalled' | 'done' | 'parked'
+export type Word = 'running' | 'idle' | 'stuck' | 'stalled' | 'waiting' | 'done' | 'parked'
 export const isStuck = (w: Word | string | undefined): boolean => w === 'stuck' || w === 'stalled'
 export type Truth = { word: Word; unread: number; oldestMs: number; text: string; stalledMs?: number; lastAt?: number }
 const hhmm = (ts: number) => new Date(ts).toTimeString().slice(0, 5)
-export function truthOf(o: { threadState: string; finished?: boolean; row: AgentRow | undefined; queued: { ts: number }[]; now: number; stuckMinutes?: number; stallMinutes?: number; activityAt?: number | null }): Truth {
+// waitingSince: the `since` of the thread's waiting.json (the question it asked); `waiting` is the word while no activity followed it (see above).
+// A session that waits on a PERMISSION prompt (waitingFor / blocked) stays `running`: that one is the user's to answer in the session itself.
+export function truthOf(o: { threadState: string; finished?: boolean; row: AgentRow | undefined; queued: { ts: number }[]; now: number; stuckMinutes?: number; stallMinutes?: number; activityAt?: number | null; waitingSince?: number | null }): Truth {
   const unread = o.queued.length
   const oldestMs = unread ? Math.max(0, o.now - Math.min(...o.queued.map(m => Number(m.ts) || o.now))) : 0
   const limit = (o.stuckMinutes ?? STUCK_MINUTES) * 60_000
@@ -87,6 +107,8 @@ export function truthOf(o: { threadState: string; finished?: boolean; row: Agent
   let word: Word
   if (o.threadState === 'parked') word = 'parked'
   else if (o.finished || o.threadState === 'closed' || live === 'gone') word = 'done'
+  else if (!!o.row?.waitingFor) word = 'running' // an open permission prompt: the user's to answer in the session itself
+  else if (typeof o.waitingSince === 'number' && stillWaiting({ since: o.waitingSince }, o.activityAt)) word = 'waiting' // (the engine labels it blocked or working: it waits for the user's answer)
   else if (waits) word = 'running'
   else if (live === 'working' && stalledMs >= stallLimit) word = 'stalled'
   else if (unread && oldestMs >= limit) word = 'stuck'
@@ -96,6 +118,7 @@ export function truthOf(o: { threadState: string; finished?: boolean; row: Agent
   const lastAt = typeof o.activityAt === 'number' && o.activityAt > 0 ? o.activityAt : undefined
   const text =
     word === 'idle' ? `idle${unread ? `, ${unread} unread queued` : ''}`
+    : word === 'waiting' ? `waiting for your answer (asked ${hhmm(o.waitingSince!)}, nothing done since)${unread ? `, ${unread} unread queued` : ''}`
     : word === 'stuck' ? `stuck: ${unread} unread queued for ${min} min, no tool call or inbox read`
     : word === 'stalled' ? `stalled: no tool call or report for ${smin} min${lastAt ? ` (last activity ${hhmm(lastAt)})` : ''}${unread ? `, ${unread} unread queued` : ''}`
     : word
