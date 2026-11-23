@@ -1,6 +1,6 @@
 ---
 name: review
-description: Every review runs through here. On the desk `/lean-agent:review <pr|branch|sha|url> [base]` starts a review thread; in a thread it reviews the worktree's diff (or someone else's ref, read-only) in ordered passes with the read-only reviewer agent, then records a verdict for the sha; a green record of your own HEAD unlocks `git push`. Use for any review request, before any push.
+description: Every review runs through here: on the desk `/lean-agent:review <pr|branch|sha|url> [base]` starts a review thread; a thread reviews the diff with the reviewer agent and records a verdict (a green record of HEAD unlocks `git push`). Use for any review request, before any push.
 argument-hint: <pr | branch | sha | url> [base]
 roles: desk, thread
 ---
@@ -100,6 +100,8 @@ tool's refusal: do what it says.
    put the `review: second-opinion` line on any other agent.
    It answers in prose plus ONE fenced `json` block (findings, gaps, user_facing, risks, checks, reuse, coverage, siblings, searches,
    unverified) before its LEAN-FEEDBACK line. Keep that block: it is the `review` of the record (for two runs, the `reviews` of it).
+   The full answer is written to `scratch/review-<short id>.md` of the thread's folder; the reply is the path, a `verdict:` line and a few
+   lines (a long reply is sent back once): read the json block from that file (Read), not from the reply.
 6. Fix every blocker and major finding (edit, test, commit). A finding the user decides not to fix is declined, never ignored: ask
    the user (`lean_ask`), then `lean_review` with `action: "decline"`, `project`, `branch` (or `all: true`), `kind` (the finding's
    category), `symbol`, `why`; later passes are told and do not raise it again. A decline never turns a verdict green by itself.

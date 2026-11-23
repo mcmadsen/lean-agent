@@ -1,6 +1,6 @@
 ---
 name: compare
-description: Measure what a lean-agent session costs at start against a clean Claude Code session (overhead: cheap, no model judging), or run one read-only task both ways and let a judge compare (task mode, costs money). Use for "compare <project>", "what does lean-agent cost per session" or "optimize the overhead".
+description: Measure what a lean-agent session costs at start against a clean Claude Code session (overhead: cheap) or run one read-only task both ways (task mode, costs money). Use for "compare <project>", "what does lean-agent cost per session", "optimize the overhead".
 argument-hint: <project> [--task "<read-only task>"] [--history]
 roles: desk, thread
 ---

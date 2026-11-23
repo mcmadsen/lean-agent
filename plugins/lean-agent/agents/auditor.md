@@ -21,6 +21,8 @@ Also check that the declared `run` line runs only this script.
 
 Verdict: `adopt` (use as is), `adapt` (usable after the concrete changes you list), `reject` (with the reason). The mod applies its own rules on top: network, deletes, writes outside the declared outputs, hardcoded values or secrets are never `adopt`, so do not argue past them.
 
+Keep the checklist answers and ALSO write them (prose, item by item) to `<calling thread folder>/scratch/audit-<short id>.md` (the mod names the exact path when you start; a Bash redirect there is allowed, the folder exists). Your reply is that path, the verdict (`adopt|adapt|reject`) with the one blocking reason in a line, then the two lines below; an answer over `workers.answerChars` (1200) characters (those two lines not counted) is sent back to you once.
+
 End your reply with exactly these two lines, nothing after them (the first is recorded by the mod; every answer is required, `network`, `deletes`, `secrets` and `generalises` must be true or false):
 `LEAN-AUDIT {"name": "<script name>", "sha": "<the Script sha256 from the brief>", "verdict": "adopt|adapt|reject", "reads": [], "writes": [], "network": false, "deletes": false, "secrets": false, "hardcoded": [], "deterministic": true, "errors_handled": true, "generalises": true, "changes": [], "reason": ""}`
 `LEAN-FEEDBACK {"status": "done|partial|failed", "missing": "context you had to discover that the brief should have given, or empty", "remember": [], "refused": [{"command": "...", "text": "the refusal text, verbatim"}], "unverified": ["claims you could not check"], "unreached": ["folders you did not cover"]}`

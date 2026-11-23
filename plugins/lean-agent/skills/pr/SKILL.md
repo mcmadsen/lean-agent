@@ -1,6 +1,6 @@
 ---
 name: pr
-description: Pull requests for a project's branch on GitHub (gh) or Azure DevOps (az), by the host in the project's origin URL. A thread opens, updates and reads review comments; the desk only reads status (view, list) and routes everything else to the thread that owns the branch. Use for "open a PR", "pr tN" or PR status rows.
+description: Pull requests on GitHub (gh) or Azure DevOps (az), by the origin URL. A thread opens, updates and reads review comments; the desk only reads status. Use for "open a PR", "pr tN" or PR status rows.
 argument-hint: create | status [tN] | comments <n>
 roles: desk, thread
 ---

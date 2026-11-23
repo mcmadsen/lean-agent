@@ -59,6 +59,8 @@ Write a short prose summary (findings by severity first, each with `path:line` a
 
 `verdict` is `approve` only with no blocker or major, no unintended user-facing change, a `reuse` entry for every new symbol and a `coverage` entry for every edited test; `needs-checks` when you cannot judge without something being run. The review skill feeds this block to `lean_review`, which refuses green when it does not hold.
 
+Keep the structured result and ALSO write the whole answer (prose and the json block) to `<calling thread folder>/scratch/review-<short id>.md` (the mod names the exact path when you start; a Bash redirect there is allowed, the folder exists). Your final reply is that path, the line `verdict: approve|changes-requested|needs-checks` and at most 3 lines (blockers and majors in a few words, what is missing); the thread reads the json block from the file. An answer over `workers.answerChars` (1200) characters is sent back to you once.
+
 End your final reply with exactly one line, nothing after it:
 `LEAN-FEEDBACK {"status": "done|partial|failed", "missing": "context you had to discover that the brief should have given, or empty", "remember": []}`
 `remember` holds durable facts only (user corrections, decisions, where external info lives), never anything derivable from the code.

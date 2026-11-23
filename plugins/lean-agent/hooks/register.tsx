@@ -31,7 +31,7 @@ import type { Engine } from './deskmodel'
 import { squeezeResult, trimTools } from './squeeze'
 import { readConfig } from './budget'
 import { hostOf } from './host'
-import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, skillsSeen, trimListing } from './skilltrim'
+import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteSection, offeredTo, skillsSeen, trimListing } from './skilltrim'
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
 import { jobOf, jobResult } from './jobs'
 import { overheadReport } from './overhead'
@@ -68,6 +68,7 @@ import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { noteBase } from './base'
 import { threadToolsArgv } from './orchestrate'
+import { ANSWER_RULE, answersEnd, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
@@ -781,12 +782,39 @@ export const register: Register = on => {
     const id = typeof e?.agent_id === 'string' ? e.agent_id : typeof e?.agentId === 'string' ? e.agentId : ''
     if (id && role.kind === 'thread') {
       const host = hostOf($)
+      // a long final answer: sent back ONCE to write its findings to the file and answer with the path (answers.ts); the subagent goes on,
+      // so nothing is released yet. A second long answer is let through and counted.
+      try {
+        const type = String(e?.agent_type ?? e?.agentType ?? '')
+        const dir = `${threadsDir(await homeDir(host))}/${role.id}`
+        const v = stopAnswer(dir, id, type, e?.last_assistant_message ?? e?.result, await loadAnswerChars(host))
+        if (v?.block) return { ...(await next(e)), block: v.block } as any
+        if (v?.tooLong) await logRefusal(host, { role: 'worker', rule: ANSWER_RULE, text: `${ANSWER_RULE}: a second answer of ${v.tooLong.chars} characters, let through`, agent: type, tool: 'SubagentStop', thread: role.id, version: VERSION })
+      } catch {
+        /* the stop goes through as before */
+      }
+      answersEnd(id)
       orchAgentEnd(id)
       // a worker that ended after the context limit stopped the thread: its result goes into the snapshot's pending list (by script, never acted on)
       if (stopped && typeof (e?.last_assistant_message ?? e?.result) === 'string') await notePending(host, role.id, stopped.sid, { agent: String(e?.agent_type ?? id), text: String(e.last_assistant_message ?? e.result) }).catch(() => false)
       await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
     }
     return next(e)
+  }).catch(($, e: any, next) => next(e))
+
+  // a subagent started: the thread's folder names the file its findings go to (answers.ts). The Agent call's input is never changed; the
+  // engine's SubagentStart answer carries the line as context for the subagent.
+  on('classic.SubagentStart', async ($, e: any, next) => {
+    const r: any = await next(e)
+    if (role.kind !== 'thread') return r
+    try {
+      const host = hostOf($)
+      const line = startAgent(`${threadsDir(await homeDir(host))}/${role.id}`, String(e?.agent_id ?? e?.agentId ?? ''), String(e?.agent_type ?? e?.agentType ?? ''))
+      if (line) return { ...r, additionalContext: [...(r?.additionalContext ?? []), line] }
+    } catch {
+      /* the subagent starts without the line; its agent definition says the same */
+    }
+    return r
   }).catch(($, e: any, next) => next(e))
 
   // the permission check (the auto mode classifier, a rule) denied a thread's worker Agent call: our guard is a token policy, not a safety
@@ -951,7 +979,7 @@ export const register: Register = on => {
       skillsSeen(type, `not the desk (role ${role.kind}): untouched`)
       return r
     }
-    const t = trimListing(r.text)
+    const t = trimListing(r.text, n => offeredTo(role.kind === 'thread' ? 'thread' : 'desk', n))
     skillsSeen(type, t.reason)
     return t.text === null ? r : { ...r, text: t.text }
   }).catch(($, e: any, next) => next(e))
@@ -960,7 +988,7 @@ export const register: Register = on => {
   on('tool.describe', { tool: 'Skill' }, async ($, e: any, next) => {
     const r: any = await next(e)
     if ((role.kind !== 'desk' && !(await threadSkillsLean(hostOf($), role.kind))) || typeof r?.description !== 'string') return r
-    const t = trimListing(r.description)
+    const t = trimListing(r.description, n => offeredTo(role.kind === 'thread' ? 'thread' : 'desk', n))
     if (t.text === null) return r
     skillsSeen('Skill tool description', t.reason)
     return { ...r, description: t.text, breakPromptCache: true }
@@ -1224,6 +1252,7 @@ export const register: Register = on => {
     // (a background launch returns at once; a foreground call is released at return)
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
     const gcall = g && hasGrants(g) ? String(e.toolUseId ?? `g${++grantSeq}`) : ''
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && typeof e.subagent_type === 'string') noteAgentCall(`${threadsDir(await homeDir(host))}/${role.id}`, e.subagent_type, jobOf(e.prompt)) // pairs with the SubagentStart that follows (answers.ts)
     const gopts = { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }
     if (gcall) {
       try {
