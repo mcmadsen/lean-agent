@@ -122,19 +122,23 @@ test('the handover holds what the desk sent since the last report (queued, deliv
   const t = JSON.parse(w.h.files.get(`${T1}/thread.json`)!)
   const ho = await buildHandover(w.h.host, '/h', t, 'test', [rows[3]!])
   const p = ho.prompt
-  expect(p).toContain('## Since your last report')
-  const since = p.slice(p.indexOf('## Since your last report'))
-  expect(since.indexOf('The cache bug is fixed by t7.')).toBeGreaterThan(0)
-  expect(since.indexOf('thread 7 set to fixed')).toBeGreaterThan(since.indexOf('The cache bug'))
-  expect(p).not.toContain('old message before the report')
-  expect(p.indexOf('## Messages from the desk that were queued for you')).toBeGreaterThan(p.indexOf('## Since your last report')) // the queued one is in its own section, not twice
+  // one section right after the brief, every message since the thread's start (also those before its last report), newest last, each once
+  expect(p).toContain('## Corrections since the brief\nThese came after the brief and win where they differ:')
+  const c = p.slice(p.indexOf('## Corrections since the brief'))
+  const at = (s: string) => c.indexOf(s)
+  expect(at('old message before the report')).toBeGreaterThan(0)
+  expect(at('The cache bug is fixed by t7.')).toBeGreaterThan(at('old message'))
+  expect(at('thread 7 set to fixed')).toBeGreaterThan(at('The cache bug'))
+  expect(at('still queued: skip the retry work')).toBeGreaterThan(at('thread 7 set to fixed'))
   expect(p.split('still queued: skip the retry work').length).toBe(2)
-  // a message that was queued WITH text for a restart is the instruction block, not a queued line
+  expect(p.slice(p.indexOf('## Brief') + 1, p.indexOf('## Corrections since the brief'))).not.toContain('\n## ') // DIRECTLY after the brief
+  // a message that was queued WITH text for a restart is the instruction block (whole, last); the section only points at it
   const ho2 = await buildHandover(w.h.host, '/h', t, 'test', [{ ts: 4000, text: 'do X now', instr: true }])
   expect(ho2.prompt.endsWith(`${INSTR_HEAD}\ndo X now`)).toBe(true)
-  expect(ho2.prompt).not.toContain('## Messages from the desk that were queued for you')
-  // no report yet and no message: no section
+  expect(ho2.prompt.split('do X now').length).toBe(2)
+  expect(ho2.prompt).toContain('(the text given to this start: at the END of this prompt)')
+  // no message: no section
   const none = world()
   none.thread()
-  expect((await buildHandover(none.h.host, '/h', JSON.parse(none.h.files.get(`${T1}/thread.json`)!), 'test', [])).prompt).not.toContain('Since your last report')
+  expect((await buildHandover(none.h.host, '/h', JSON.parse(none.h.files.get(`${T1}/thread.json`)!), 'test', [])).prompt).not.toContain('Corrections since the brief')
 })
