@@ -6,9 +6,10 @@ import { jobOf, retryDenial, retryRan, retryReset, stepBudget, stepNote } from '
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
+import { threadHint } from './denial'
 
 export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
-export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[] } // projects: the registered projects' folders (only to name a path's kind in a refusal record)
+export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[]; selfEdit?: string[] } // selfEdit: the worktrees the user let this thread edit itself (selfedit.ts, verified per call); projects: the registered projects' folders (only to name a path's kind in a refusal record)
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
@@ -282,19 +283,24 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   return null
 }
 
+// a refusal after a denied worker call says what is allowed now (the hint is also said once on its own)
+const fallbackNote = (ctx: OCtx): string => {
+  const d = denied.get(key(ctx))
+  return d && d.kind !== 'reader' && d.roots.length ? `; the worker was denied (${d.category}): your own edits in ${d.roots[0]} are allowed now, pass an absolute path inside it` : ''
+}
 function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   const t = e.tool
   if (t.startsWith('mcp__lean-agent__') || /^(TodoWrite|ToolSearch|Skill|AskUserQuestion|SendMessage|Monitor|ScheduleWakeup|TaskCreate|TaskGet|TaskList|TaskStop|TaskUpdate|CronCreate|CronDelete|CronList)$/.test(t)) return null
   if (isAgentTool(e)) return agentCallDenial(c, ctx, e)
   if (t === 'Edit' || t === 'Write' || t === 'NotebookEdit') {
     const f = String(e.file_path ?? e.notebook_path ?? '')
-    return f && (inLean(ctx, f) || deniedEdit(ctx, e)) ? null : THREAD_STEP + tried(`${t} ${pathKind(ctx, f)}`)
+    return f && (inLean(ctx, f) || deniedEdit(ctx, e) || selfEditOk(ctx, e)) ? null : THREAD_STEP + fallbackNote(ctx) + tried(`${t} ${pathKind(ctx, f)}`)
   }
   if (t === 'Read') {
     const f = String(e.file_path ?? '')
     if (f && inLean(ctx, f)) return null
+    if (f && (deniedEdit(ctx, e) || selfEditOk(ctx, e))) return null // a path the denied call named, or a worktree the user let the thread edit itself: not counted, no limit needed
     const lim = Number(e.limit)
-    if (f && deniedEdit(ctx, e) && Number.isFinite(lim) && lim >= 1 && lim <= DIRECT_READ_LINES) return null // a small read of a path the denied call named: not counted
     if (!Number.isFinite(lim) || lim < 1 || lim > DIRECT_READ_LINES) return `${THREAD_STEP}; a direct read needs limit <= ${DIRECT_READ_LINES}${tried(`Read ${pathKind(ctx, f)}`)}`
     const k = key(ctx)
     const n = reads.get(k) ?? 0
@@ -304,7 +310,7 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   }
   if (t === 'Grep' || t === 'Glob') {
     const p = String(e.path ?? '')
-    return p && (inLean(ctx, p) || deniedEdit(ctx, e)) ? null : THREAD_STEP + tried(`${t} ${pathKind(ctx, p || ctx.cwd || '/')}`)
+    return p && (inLean(ctx, p) || deniedEdit(ctx, e) || selfEditOk(ctx, e)) ? null : THREAD_STEP + fallbackNote(ctx) + tried(`${t} ${pathKind(ctx, p || ctx.cwd || '/')}`)
   }
   if (t === 'Bash') {
     const bad = bashBad(ctx, String(e.command ?? ''))
@@ -385,31 +391,61 @@ export function orchAgentEnd(agentId: string): void {
 // says so), the thread's OWN Edit/Write on the paths that call named in its brief (and its own small reads there) are allowed for the
 // rest of the session; the engine's own permission check still judges each of those edits itself. Nothing here changes a permission.
 export const DELEGATION_DENIED = 'the permission check denied the worker call: do this one step yourself (your own edit is allowed here now), then carry on'
-const denied = new Map<string, { roots: string[]; told: boolean }>() // thread key -> roots of the denied worker call(s), said once
-export function noteDelegationDenied(threadKey: string, roots: string[]): boolean {
-  const abs = roots.map(r => normPath(r)).filter(r => r !== '/')
-  if (!abs.length) return false
+type DeniedRec = { roots: string[]; told: boolean; category: string; kind: 'worker' | 'reader' | 'other'; broad: string }
+const denied = new Map<string, DeniedRec>() // thread key -> roots of the denied worker call(s), said once
+// roots: the thread's registered worktrees + the worktree folders and absolute paths the brief named (denial.ts worktreeRoots / pathsOf). A denied READER
+// (kind reader) allows nothing by itself: the thread gets the category and the retry advice only (denial.ts READER_RETRY).
+export function noteDelegationDenied(threadKey: string, roots: string[], info: { category?: string; kind?: 'worker' | 'reader' | 'other'; broad?: string } = {}): boolean {
+  const kind = info.kind ?? 'worker'
+  const abs = kind === 'reader' ? [] : roots.map(r => normPath(r)).filter(r => r !== '/')
   const cur = denied.get(threadKey)
-  denied.set(threadKey, { roots: [...new Set([...(cur?.roots ?? []), ...abs])].slice(-12), told: cur?.told ?? false })
-  return true
+  const had = cur?.roots ?? []
+  const next = [...new Set([...had, ...abs])].slice(-12)
+  if (!abs.length && !cur && kind !== 'reader' && !info.category) return false
+  denied.set(threadKey, { roots: next, told: false, category: info.category ?? cur?.category ?? 'unspecified', kind, broad: info.broad ?? '' })
+  return next.length > 0
 }
 export const delegationDenied = (threadKey: string): boolean => denied.has(threadKey)
+export const deniedRoots = (threadKey: string): string[] => denied.get(threadKey)?.roots ?? []
+export const clearDenied = (): void => denied.clear() // a fresh session starts clean
 // said once: the next refusal of a worker call, or else the next tool result of the thread
 export function takeDeniedHint(threadKey: string): string | null {
   const d = denied.get(threadKey)
   if (!d || d.told) return null
   d.told = true
-  return DELEGATION_DENIED
+  return threadHint({ category: d.category, kind: d.kind, worktree: d.roots[0], broad: d.broad })
+}
+const protectedLean = (ctx: OCtx, abs: string): boolean => {
+  const lean = `${ctx.home}/.lean-agent`
+  return under(abs, lean) && !under(abs, `${lean}/worktrees`) // lean state is never opened by a fallback or a grant; a worktree under it is the work (1.0.18 listed worktrees/ as protected, so a denied worker's own worktree could never be edited: the deadlock)
 }
 const inDenied = (ctx: OCtx, abs: string): boolean => {
   const d = denied.get(key(ctx))
-  if (!d) return false
-  const lean = `${ctx.home}/.lean-agent`
-  return d.roots.some(r => under(abs, r)) && !(under(abs, lean) && LEAN_PROTECTED.test(abs.slice(lean.length))) // never its own settings, grants or review records
+  return !!d && d.roots.some(r => under(abs, r)) && !protectedLean(ctx, abs) // never its own settings, grants or review records, nor any other lean state
 }
-// the thread's own edit (or read) of a path the denied worker call named: the guard's fallback (register logs the edit as `delegation-denied`)
+const inSelfEdit = (ctx: OCtx, abs: string): boolean => (ctx.selfEdit ?? []).some(r => under(abs, r)) && !protectedLean(ctx, abs)
+const FALLBACK_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob'])
+const pathOf = (e: Call): string => String(e.file_path ?? e.notebook_path ?? e.path ?? '')
+// the thread's own edit / read / search of a path the denied worker call named (or of its worktrees): the guard's fallback
 export function deniedEdit(ctx: OCtx, e: Call): boolean {
-  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType) return false
-  const f = String(e.file_path ?? e.notebook_path ?? e.path ?? '')
+  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType || !FALLBACK_TOOLS.has(e.tool)) return false
+  const f = pathOf(e)
   return !!f && inDenied(ctx, normPath(f, ctx.cwd))
 }
+// the thread's own work inside a worktree the USER let it edit itself (selfedit.ts grant, verified before the call: ctx.selfEdit)
+export function selfEditOk(ctx: OCtx, e: Call): boolean {
+  if (ctx.kind !== 'thread' || ctx.agentId || ctx.agentType || !FALLBACK_TOOLS.has(e.tool)) return false
+  const f = pathOf(e)
+  return !!f && inSelfEdit(ctx, normPath(f, ctx.cwd))
+}
+// which fallback let this call through (for the refusal record: `self-edit-grant` / `delegation-denied`); null: neither was needed
+export function fallbackUsed(ctx: OCtx, e: Call): 'self-edit-grant' | 'delegation-denied' | null {
+  if (!isThreadOwn(ctx) || !FALLBACK_TOOLS.has(e.tool)) return null
+  const f = pathOf(e)
+  if (!f) return null
+  const abs = normPath(f, ctx.cwd)
+  if (inLean(ctx, abs)) return null
+  return inSelfEdit(ctx, abs) ? 'self-edit-grant' : inDenied(ctx, abs) ? 'delegation-denied' : null
+}
+const isThreadOwn = (ctx: OCtx): boolean => ctx.kind === 'thread' && !ctx.agentId && !ctx.agentType
+export const deniedCategory = (threadKey: string): string => denied.get(threadKey)?.category ?? ''
