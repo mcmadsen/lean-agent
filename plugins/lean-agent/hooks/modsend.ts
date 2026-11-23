@@ -11,4 +11,4 @@ export async function asMod<T>(f: () => Promise<T>): Promise<T> {
     depth--
   }
 }
-export const modSending = (e: { message?: unknown }): boolean => depth > 0 && typeof e.message === 'string' && e.message.startsWith(MOD_SEND_PREFIX)
+export const modSending = (e: { [k: string]: any }): boolean => depth > 0 && typeof e.message === 'string' && e.message.startsWith(MOD_SEND_PREFIX)
