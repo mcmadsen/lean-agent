@@ -161,5 +161,39 @@ test('a text the card cannot show in full has no Approve in the pane (the desk q
   expect(await has(ui, /Needs you \(1\)/)).toBe(true)
   expect(!!(await ui.find({ type: 'Button', key: `action-approve-${v.id}` }))).toBe(false)
   expect(!!(await ui.find({ type: 'Button', key: `action-deny-${v.id}` }))).toBe(true)
+  // 1.0.30: the card says where it IS approved, and the full text is one tap away
+  expect(await has(ui, /Approve in the desk question: this card cannot approve it \(\d+ characters/)).toBe(true)
+  expect(await has(ui, /the pane shows only the start/)).toBe(false)
+  const fullLen = (await texts(ui)).filter(t => t.includes('more words')).reduce((m, t) => Math.max(m, t.length), 0)
+  await ui.press({ key: `action-full-${v.id}` })
+  const fullLen2 = (await texts(ui)).filter(t => t.includes('more words')).reduce((m, t) => Math.max(m, t.length), 0)
+  expect(fullLen2).toBeGreaterThan(fullLen) // the whole text is drawn after the tap
+  expect(await ui.find({ type: 'Button', key: `action-full-${v.id}`, text: 'hide full text' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a review batch is numbered one-liners grouped by file (anchor + the first 120 characters); the buttons are on top; the full text is one tap away', { timeoutMs: 20_000 }, async ($, on) => {
+  const w = world(on)
+  const PR = { org: 'acme', project: 'Shop', repo: 'shop-api', pr: 42 }
+  const items = Array.from({ length: 12 }, (_, i) => ({ kind: 'ado-pr-comment', params: { ...PR, body: i === 3 ? `Point 4: ${'y'.repeat(200)} the-end` : `Point ${i + 1} is wrong.` } }))
+  const r = await addActionRequest(w.host, 't5', { kind: 'batch', items, why: 'a review' } as any)
+  expect(r.ok, r.text).toBe(true)
+  const v = r.request!
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await has(ui, /Needs you \(1\)/)).toBe(true)
+  expect(await has(ui, /General comments \(no file\) \(12\)/)).toBe(true)
+  expect(await has(ui, /^ {2}1\. PR comment: Point 1 is wrong\.$/)).toBe(true)
+  const four = (await texts(ui)).find(t => /^ {2}4\. /.test(t))!
+  expect(four.length).toBeLessThanOrEqual('  4. PR comment: '.length + 120)
+  expect(four).not.toContain('the-end') // cut at 120 characters
+  // too long for the card: no Approve, the hint, Deny and Open stay; the buttons come before the text
+  expect(!!(await ui.find({ type: 'Button', key: `action-approve-${v.id}` }))).toBe(false)
+  expect(await has(ui, /Approve in the desk question/)).toBe(true)
+  for (const k of [`action-deny-${v.id}`, 'pane-t5', `action-full-${v.id}`]) expect([k, !!(await ui.find({ type: 'Button', key: k }))]).toEqual([k, true])
+  const keys = (await ui.findAll({ type: 'Button' })).map((b: any) => String(b.key))
+  expect(keys.indexOf(`action-deny-${v.id}`)).toBeLessThan(keys.indexOf(`action-full-${v.id}`))
+  await ui.press({ key: `action-full-${v.id}` })
+  expect(await has(ui, /the-end/)).toBe(true) // the full text, after the tap
   await ui.unmount()
 })

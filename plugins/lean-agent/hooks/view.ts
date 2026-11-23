@@ -75,6 +75,7 @@ export type View = { scripts: { candidates: number; adopted: number; needsUpdate
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
 export const ARCHIVE_MS = 7 * 86_400_000 // a read inbox row older than this is hidden in the pane (it stays in inbox.jsonl)
+export const ACTION_CARD_MAX = 400 // a write request longer than this is not approved in the pane (the desk question shows all of it)
 export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
@@ -492,7 +493,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   // a thread's request for a remote write: the exact text is on the card; the thread's own "blocked" row is not shown on top of it
   const asking = new Set((v.actionRequests ?? []).map(r => r.thread))
   for (const r of v.actionRequests ?? []) {
-    const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : `${r.thread} wants to ${r.headline}: ${r.text.length > (r.kind === 'batch' ? 4000 : 400) ? `${r.text.slice(0, r.kind === 'batch' ? 3999 : 399)}… (${r.text.length} characters: the pane shows only the start, so it is approved in the desk's question, which shows all of it)` : r.text}`
+    const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : r.items?.length ? `${r.thread} wants to ${r.headline}` : `${r.thread} wants to ${r.headline}: ${r.text.length > ACTION_CARD_MAX ? `${r.text.slice(0, ACTION_CARD_MAX - 1)}…` : r.text}` // a review batch: the pane draws its numbered one-liners; a text too long for the card: the pane says where it is approved
     out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text, notify: r.state === 'pending', action: r, dk: { thread: r.thread, kind: 'action', id: `${r.id}:${r.state}` } })
   }
   for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true, dk: { thread: t.id, kind: 'approval', id: String(t.recTs) } })

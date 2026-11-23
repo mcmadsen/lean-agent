@@ -4,7 +4,7 @@
 // In the minimized widget form (e.props.placement 'widget') only a glance is drawn, with no button: clicks may not reach it.
 // Opens by itself only in the desk and through /lean-agent anywhere. Never blank: a failure is drawn as a red line.
 // Resume/Start/Restart/Close go through leanThread (the lean_thread tool), so the logic exists once.
-import { OVER_PCT, READ_SHOWN, ackRows, loadView, resetViewCache, stateOf, threadStatus } from './view'
+import { ACTION_CARD_MAX, OVER_PCT, READ_SHOWN, ackRows, loadView, resetViewCache, stateOf, threadStatus } from './view'
 import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './panestate'
 import type { GoalTone, NeedRow, ThreadRow, View } from './view'
 import { leanThread } from './threads'
@@ -687,9 +687,6 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const ar = n.action
       return (
         <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
-          <Text color={tone} wrap="wrap">
-            {n.text}
-          </Text>
           <Box flexWrap="wrap" columnGap={1}>
             {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
             {n.kind === 'denial' && !!n.thread && <Button key={`denial-self-${n.thread}`} label={selfEditLabel(n.thread)} onPress={selfEditPress(n.thread)} />}
@@ -703,15 +700,35 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!mr && mr.origin === 'tool' && <Button key={`model-sonnet-${mr.id}`} label="Start on sonnet instead" onPress={onSonnet(mr)} />}
             {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
             {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
-            {!!ar && !(ar.state === 'pending' && ar.text.length > 400) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
-            {!!ar && ar.state === 'pending' && !!ar.standing && !(ar.text.length > 400) && <Button key={`action-standing-${ar.id}`} label={confirming(ui, `action:standing:${ar.id}`, now2) ? `Confirm: ${standingLabelOf(ar.kind).replace(/^Approve/, 'send')}` : standingLabelOf(ar.kind)} onPress={approveWriteStanding(ar)} />}
+            {!!ar && !(ar.state === 'pending' && ar.text.length > ACTION_CARD_MAX) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
+            {!!ar && ar.state === 'pending' && !!ar.standing && !(ar.text.length > ACTION_CARD_MAX) && <Button key={`action-standing-${ar.id}`} label={confirming(ui, `action:standing:${ar.id}`, now2) ? `Confirm: ${standingLabelOf(ar.kind).replace(/^Approve/, 'send')}` : standingLabelOf(ar.kind)} onPress={approveWriteStanding(ar)} />}
             {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
             {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {n.kind === 'stalled' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!n.dk && !(mr && mr.state === 'denied') && <Button key={`dismiss-${n.dk.thread}-${n.dk.kind}${['model', 'action', 'script'].includes(n.dk.kind) ? `-${n.dk.id.split(':')[0]}` : ''}`} label={confirming(ui, `dismiss:${n.key}`, now2) ? `Confirm dismiss ${n.thread ?? 'it'}` : 'Dismiss'} onPress={dismissCard(n)} />}
           </Box>
+          <Text color={tone} wrap="wrap">
+            {n.text}
+          </Text>
+          {!!ar && ar.state === 'pending' && ar.items && ar.items.length > 0 && reviewLines(ar)}
+          {!!ar && ar.state === 'pending' && ar.text.length > ACTION_CARD_MAX && <Text color="warning" wrap="wrap">{`Approve in the desk question: this card cannot approve it (${ar.text.length} characters, the question shows all of it).`}</Text>}
+          {!!ar && ar.state === 'pending' && (ar.items?.length || ar.text.length > ACTION_CARD_MAX) ? <Button key={`action-full-${ar.id}`} plain label={ui.rows[`full${ar.id}`] ? 'hide full text' : 'show full text'} onPress={toggleRow(`full${ar.id}`)} /> : null}
+          {!!ar && ar.state === 'pending' && ui.rows[`full${ar.id}`] === true && <Text wrap="wrap">{ar.text}</Text>}
         </Box>
       )
+    }
+    // a review batch (1.0.29 data): the comments numbered, grouped by file, each one line (anchor + the first 120 characters)
+    const reviewLines = (a: ActionView) => {
+      const groups = new Map<string, NonNullable<ActionView['items']>>()
+      for (const it of a.items ?? []) groups.set(it.file, [...(groups.get(it.file) ?? []), it])
+      return [...groups].map(([file, list]) => (
+        <Box key={`ri-${a.id}-${file}`} flexDirection="column">
+          <Text bold>{`${file || 'General comments (no file)'} (${list.length})`}</Text>
+          {list.map(it => (
+            <Text key={`ri-${a.id}-${it.n}`} wrap="wrap">{`  ${it.n}. ${it.where}: ${short(it.text, 120)}`}</Text>
+          ))}
+        </Box>
+      ))
     }
     // ---- covered replies in their hold window (sendhold.ts): the exact text, the countdown, Send now and Cancel ----
     const holdsBlock = v?.holds?.length ? (
