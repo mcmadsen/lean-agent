@@ -27,6 +27,7 @@ import type { ModelRequest } from './expensive'
 // answerAction is called from here and from the desk's AskUserQuestion hook (bindAnswers) and from nowhere else: only the user's press or the
 // user's answer to the desk's question approves a thread's remote write (deskactions.ts)
 import { answerAction, approveAction, revokeGrant, standingLabelOf } from './deskactions'
+import { cancelHeld, sendHeldNow } from './sendhold'
 import { revokeWrites } from './deskwrites'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
 import { NARROW as NARROW_BRIEF, RETRY_LABEL, selfEditLabel } from './denial'
@@ -712,6 +713,18 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
       )
     }
+    // ---- covered replies in their hold window (sendhold.ts): the exact text, the countdown, Send now and Cancel ----
+    const holdsBlock = v?.holds?.length ? (
+      <Box key="held-sends" flexDirection="column">
+        {v.holds.map(x => (
+          <Box key={`hold-${x.id}`} flexWrap="wrap" columnGap={1}>
+            <Text color="yellow" wrap="wrap">{`${x.thread}: goes out in ${Math.max(0, Math.ceil((x.until - Date.now()) / 1000))} s: ${x.text}`}</Text>
+            <Button key={`hold-now-${x.id}`} label="Send now" onPress={async () => { resetViewCache(); await sendHeldNow(host, x.id); tell() }} />
+            <Button key={`hold-cancel-${x.id}`} label="Cancel" onPress={async () => { resetViewCache(); const out = await cancelHeld(host, x.id); const den = out.ok ? await answerAction(host, x.id, 'deny', 'pane', tellAction) : out; resetViewCache(); sayModel(den.ok ? out.text : den.text, !den.ok); tell() }} />
+          </Box>
+        ))}
+      </Box>
+    ) : null
     // ---- the user's standing approvals (deskactions.ts): what the mod sent under one, and the grants still active, each with a Revoke button ----
     const stand = v?.standing
     const sentGrants = new Set((stand?.sent ?? []).map(s => s.grant).filter(Boolean))
@@ -796,6 +809,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{` · ${t.costLine ?? `${t.costBadge} today`}`}</Text> : t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
             {t.ctx ? <Text color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{` · ${t.ctx}${t.keep ? ' · keep' : ''}`}</Text> : null}
             {t.pending ? <Text color="warning">{` · ${t.pending}`}</Text> : null}
+            {t.keepGoing ? <Text color="cyan">{' · keep-going'}</Text> : null}
             {t.agents ? <Text dimColor>{` · ${t.agents}`}</Text> : null}
             {t.branch ? <Text dimColor>{` · ${t.branch}`}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>
@@ -910,6 +924,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           )
         })}
         {needsBlock}
+        {holdsBlock}
         {standingBlock}
         {writtenBlock}
         {selfEditBlock}

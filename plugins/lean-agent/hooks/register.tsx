@@ -9,9 +9,10 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
-import { bindAnswers, resetActions } from './deskactions'
+import { bindAnswers, resetActions, runStanding } from './deskactions'
+import { holdLines, holdsTick } from './sendhold'
 import { recordHumanPrompt } from './humanprompts'
-import { bindOfferAnswers, revokeByWords } from './deskwrites'
+import { bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
 import { ownFromGrant } from './ownpr'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
@@ -74,6 +75,7 @@ import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { deliveryTick, setThreadSender } from './deliver-to-thread'
+import { continueTick, noteTurnEnd } from './continuepending'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
@@ -190,7 +192,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -212,8 +214,9 @@ const SCHEMA = {
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'default sonnet. Never choose opus yourself: only when the user asked, with a reason' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
-    on: { type: 'boolean', description: 'project-private, keep: true or false; profile: false removes the profile' },
+    on: { type: 'boolean', description: 'project-private, keep, keep-going: true or false; profile: false removes the profile' },
     keep: { type: 'boolean', description: 'new/start: keep mode (follow-ups resume the session until its context passes the limit)' },
+    keepGoing: { type: 'boolean', description: 'new/start: the standing order "keep going, no asks"' },
     allowEdit: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     allowCmd: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs beyond its project profile' },
@@ -357,7 +360,18 @@ async function noteParts($: any, host: Host, id: string, sid: string): Promise<v
     /* no breakdown: the first request stays "first request" */
   }
 }
-async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>): Promise<void> {
+// The last assistant text of the turn that just ended, when NOTHING came after it (no tool call): the final message of the transcript tail is an assistant text.
+// null = unknown or a tool call came last (continuepending.ts then records no "next:" continue).
+async function lastTextOf($: any): Promise<string | null> {
+  try {
+    const m: any = await bounded($, Promise.resolve($.session.messages({ last: 3 })), 'session.messages', 5_000)
+    const last = Array.isArray(m) ? m[m.length - 1] : null
+    return last && last.role === 'assistant' && typeof last.text === 'string' && last.text.trim() ? last.text : null
+  } catch {
+    return null
+  }
+}
+async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>, text?: () => Promise<string | null>): Promise<void> {
   try {
     const tokens = typeof tokensIn === 'number' && Number.isFinite(tokensIn) ? tokensIn : null
     const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
@@ -365,6 +379,7 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null }) // "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
@@ -546,7 +561,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -567,6 +582,22 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await deliveryTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, rewind) => leanThread(host2, $.plugin.root, { action: 'answer-restart', tN: id, reason: why, rewind }) })
         for (const n of notes) {
           if (n.toast) $.ui.notify(n.text, { key: `lean-delivery-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a turn that ended with "next: ..." (or any turn end of a keep-going thread) is continued by script after threads.continueSeconds (continuepending.ts)
+      every($, 10_000, 'desk', async host2 => {
+        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-continue-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a covered reply held for actions.holdSeconds (sendhold.ts): sent when its window ends or the user pressed Send now; a thread that is no longer open sends nothing
+      every($, 5_000, 'desk', async host2 => {
+        const notes = await holdsTick(host2, { run: async id => (await runStanding(host2, id)) ?? (await runGranted(host2, id)), tell: (thread, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-hold-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -977,7 +1008,7 @@ export const register: Register = on => {
     if (!e.agentId) inTurn = false
     if (role.kind === 'thread' && !e.agentId && lastSid) {
       const tid = role.id
-      await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid))
+      await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid), () => lastTextOf($))
     }
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
@@ -1014,7 +1045,7 @@ export const register: Register = on => {
         await recordContext(host, id, sid, tokens)
         lastTokens = typeof tokens === 'number' ? tokens : null
         // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
-        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid))
+        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid), () => lastTextOf($))
       } catch {
         /* the size stays unknown */
       }
@@ -1554,6 +1585,8 @@ export const register: Register = on => {
         more = await takeReports(host)
         const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts
         if (stalled) more = more ? `${more}\n${stalled}` : stalled
+        const held = await holdLines(host).catch(() => null) // a covered reply waiting in its hold window (the exact text), a send held by a newer instruction (sendhold.ts)
+        if (held) more = more ? `${more}\n${held}` : held
         const lim = limitLineOnce() // the desk reached its limit: its reply starts with one line saying so, once (deskcompact.ts)
         if (lim) more = more ? `${more}\n${lim}` : lim
         const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks

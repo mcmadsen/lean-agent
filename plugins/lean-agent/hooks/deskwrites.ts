@@ -557,6 +557,7 @@ export async function runGranted(h: Host, id: string): Promise<{ sent: boolean; 
     return true
   })
   if (!out) return null
+  if (out.held) return out.held // held by sendhold.ts (a newer instruction, or its hold window): the write count is taken when it really goes out
   const g: WGrant = taken ?? cover.g
   const what = `${out.plan.headline}: ${out.plan.text}`
   if (!out.sent) return { sent: false, line: `sent under your instruction '${g.quote}' FAILED: ${out.text}` }

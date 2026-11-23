@@ -14,13 +14,15 @@ import { allowWrites, askWrites, dropWriteGrants, revokeWrites, writesListText }
 import { noteBrief, ownFromGrant, recordPassedPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
 import { deliver } from './deliver'
+import { cancelHeld } from './sendhold'
+import { clearPendingMarkers } from './parkclear'
 import { denialRec } from './denial'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stillWaiting, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
 import { aliveRow, answered, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
 import type { MsgKind } from './deliver-to-thread'
@@ -67,6 +69,7 @@ export type Thread = {
   running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
   finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
   keep?: boolean // keep mode (threadcontext.ts): after a done report the session is RESUMED for follow-ups until its context passes the limit
+  keepGoing?: boolean // the standing order "keep going, no asks" (continuepending.ts): a turn end that is not done / blocked / a question is continued by script
   gen?: number // how many sessions this thread has had (1 = the first): the name of the session is "tN · title", "tN · title (2)" ... (threadstate.ts sessionName)
   req0?: number // the thread's request count in the ledger when its session was started or woken: a session that ended its turn at once added at most two
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
@@ -240,7 +243,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; rewind?: number /* answer-restart only (the delivery tick) */; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string }
+export type Input = { action: string; rewind?: number /* answer-restart only (the delivery tick) */; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; keepGoing?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -503,7 +506,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
-  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}) }
+  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : {}) }
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -670,7 +673,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
   const row = listed.find(a => a.sid === t.sid)
   const now = await h.clock.now()
-  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, waitingSince: await waitingSinceOf(h, home, t) })
+  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, stallMinutes: 20 /* (wake decides on stuck; the stall word is the watchdog's, whose default is 10 since 1.0.28) */, waitingSince: await waitingSinceOf(h, home, t) })
   const limited = !!opts.limit && isLimitRow(row)
   // A hard-stopped session (contextstop.ts: every tool call refused) can do nothing with a message, so one never queues behind it, whatever the
   // session shows (working, blocked, idle): the same forced stop as the pane's restart, then a fresh session with the message in its first prompt.
@@ -775,10 +778,10 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
 // is `verbose: true`. The desk's conversation keeps every reply, so the default stays small (a spec pins the size).
 export const LIST_LINE_MAX = 200
 const LAST_CHARS = 80
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean }): string {
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean }): string {
   const word = `${o.state === 'open' ? (o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
-  return [`${o.id} ${word}`, o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
 async function list(h: Host, home: string, root = '', verbose = false): Promise<Out> {
   const listed = await agents(h)
@@ -803,7 +806,7 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const q = queued.length
     const row = rows.find(a => a.sid === t.sid)
     // running | idle | stuck | done: from the session's own state and the queue, never from the thread's last report
-    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stall.minutes, activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null }) : null
+    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stallFor(stall.minutes, t), activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null }) : null
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
@@ -819,9 +822,9 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
     const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
-    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
@@ -864,7 +867,7 @@ const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume'])
 // ---- the fields each action uses (the tool entry refuses the others: a dropped field is a lost instruction) ----------------------------------
 const TEXTY = ['text', 'message']
 const USES: Record<string, string[]> = {
-  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'allowEdit', 'allowCmd', 'needs', 'reason'],
+  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'keepGoing', 'allowEdit', 'allowCmd', 'needs', 'reason'],
   send: TEXTY,
   wake: TEXTY,
   close: [],
@@ -872,7 +875,7 @@ const USES: Record<string, string[]> = {
   reopen: [...TEXTY, 'model', 'effort', 'reason', 'needs'],
   list: ['verbose'],
   resume: [...TEXTY, 'model', 'effort', 'reason'],
-  start: [...TEXTY, 'model', 'effort', 'reason', 'keep', 'needs'],
+  start: [...TEXTY, 'model', 'effort', 'reason', 'keep', 'keepGoing', 'needs'],
   restart: [...TEXTY, 'model', 'effort', 'reason'],
   projects: ['all'],
   'project-add': ['project', 'path'],
@@ -892,6 +895,8 @@ const USES: Record<string, string[]> = {
   'revoke-self-edit': ['id'],
   deliver: ['file', 'to', 'name'],
   keep: ['on'],
+  'keep-going': ['on'],
+  'action-cancel': ['id'],
   find: TEXTY,
   ask: TEXTY,
   report: ['section', 'full'],
@@ -990,6 +995,19 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
   }
 }
 
+// the standing order "keep going, no asks" (continuepending.ts): stored in thread.json (the flag only; the desk rewrites the file whole, so it is re-read first)
+async function setKeepGoing(h: Host, home: string, t: Thread, on: boolean): Promise<void> {
+  const { keepGoing: _was, ...rest } = (await load(h, home, t.id)) ?? t
+  if (on) t.keepGoing = true
+  else delete t.keepGoing
+  await save(h, home, { ...rest, ...(on ? { keepGoing: true } : {}) })
+  if (!on) await writeJson(h, `${tpath(home, t.id)}/continue-pending.json`, {}).catch(() => undefined)
+}
+const keepGoingText = (id: string, on: boolean): string =>
+  on
+    ? `${id} keep-going on: a turn end that is not done, blocked or a question is continued by script after threads.continueSeconds ("Continue with the next step of your task.", at most 30 an hour); it is flagged stalled after 5 minutes without a tool call`
+    : `${id} keep-going off`
+
 async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
   try {
     const home = await homeDir(h)
@@ -1002,6 +1020,11 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
       const tell = (thread: string, text: string): Promise<void> => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined)
       if (i.action === 'action-list') return { ok: true, text: `${await actionListText(h, tell)}${await writesListText(h).catch(() => '')}` }
       const o = await approveAction(h, (i.id ?? '').trim(), tell)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    // a covered reply that waits in its hold window (sendhold.ts): the desk cancels it
+    if (i.action === 'action-cancel') {
+      const o = await cancelHeld(h, (i.id ?? '').trim(), (thread, text) => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined))
       return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     // approval in advance (deskwrites.ts): the mod makes the grant only when the user's own recorded words name the target and ask for the work
@@ -1099,6 +1122,12 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           await save(h, home, { ...rest, ...(i.on ? { keep: true } : {}) })
           return { ok: true, text: keepText(id, i.on, limits), data: { keep: i.on } }
         }
+        case 'keep-going': {
+          // `keep-going tN on|off`: the standing order "keep going, no asks" (continuepending.ts); without on/off it only says what is set
+          if (i.on === undefined) return { ok: true, text: keepGoingText(id, t.keepGoing === true), data: { keepGoing: t.keepGoing === true } }
+          await setKeepGoing(h, home, t, i.on)
+          return { ok: true, text: keepGoingText(id, i.on), data: { keepGoing: i.on } }
+        }
         case 'finish': {
           // only the desk's tick calls this (not in the tool's schema; finish.ts picks the candidates): the thread's last report is done.
           // Checked again here, inside the lock. A session that is still working (a final step after the report) is left alone and
@@ -1170,6 +1199,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
             else delete t.keep
             await save(h, home, { ...rest, ...(i.keep === true ? { keep: true } : {}) }) // (only the keep flag: needs added above stay unsaved until a session starts)
           }
+          if (i.keepGoing !== undefined && (t.keepGoing === true) !== (i.keepGoing === true)) await setKeepGoing(h, home, t, i.keepGoing === true)
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
           const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined
@@ -1288,6 +1318,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         case 'park': {
           t.state = 'parked'
           await save(h, home, t)
+          await clearPendingMarkers(h, home, id) // restart marker, continue-pending, delivery watch, usage-limit resume: nothing acts on them after a reopen
           return { ok: true, text: `${id} parked` }
         }
         case 'reopen': {
