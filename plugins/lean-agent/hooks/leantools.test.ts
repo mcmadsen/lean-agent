@@ -7,7 +7,7 @@ test('desk: every built-in tool strict mode cannot allow is denied, the ones it 
   const s = deskSettings()
   for (const t of DESK_TOOLS) expect([t, s.permissions.deny.includes(t)]).toEqual([t, false])
   for (const t of ['Agent', 'Task', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Monitor', 'CronCreate', 'EnterPlanMode', 'Workflow']) expect([t, s.permissions.deny.includes(t)]).toEqual([t, true])
-  expect(s.permissions.deny.length).toBe(BUILTIN_TOOLS.filter(t => !DESK_TOOLS.includes(t)).length)
+  expect(s.permissions.deny.length).toBe(BUILTIN_TOOLS.filter(t => !DESK_TOOLS.includes(t) && t !== 'SendMessage').length) // (SendMessage stays: the engine gates the mod's direct send on it, deliver-to-thread.ts)
   expect(s.permissions.deny.some(t => t.startsWith('mcp__lean-agent'))).toBe(false) // lean-agent's own tools are never denied
   expect(s.env.ENABLE_CLAUDEAI_MCP_SERVERS).toBe('false')
   expect(s.enableAllProjectMcpServers).toBe(false)

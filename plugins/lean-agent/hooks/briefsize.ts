@@ -7,6 +7,7 @@
 // a READING thread that writes a summary file and a WRITING thread that reads only that file.
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
+import { scratchList } from './scratchnotes'
 
 export const LINT_SHARE = 0.5
 export const DEFAULT_BASE = 40_000
@@ -87,6 +88,17 @@ export async function briefLint(h: Host, text: string, roots: string[], o: { lim
   } catch {
     return null
   }
+}
+
+// A WORKER brief over BRIEF_SOFT characters (the hard cap is workers.briefChars, 3000) while the thread has scratch / notes files: one soft hint
+// in the Agent call's result (1.0.27; never a refusal): point at the file instead of restating it.
+export const BRIEF_SOFT = 1_500
+export const briefHintText = (file: string, chars: number): string => `brief of ${chars} characters: point at ${file} instead of restating it (workers read files cheaply)`
+export async function briefHint(h: Host, prompt: string, threadDir: string): Promise<string | null> {
+  if (prompt.length <= BRIEF_SOFT) return null
+  const scratch = await scratchList(h, threadDir)
+  const file = scratch[0] ? `${threadDir}/scratch/${scratch[0].name}` : (await h.fs.exists(`${threadDir}/notes.md`).catch(() => false)) ? `${threadDir}/notes.md` : ''
+  return file ? briefHintText(file, prompt.length) : null
 }
 
 // the roots a brief's relative paths are tried under: the project's path (projects.json) and the thread's worktree (worktrees.json)

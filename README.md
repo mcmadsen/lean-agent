@@ -734,6 +734,28 @@ the push output). No PR is attempted after a failed push. The reply, the thread'
 thread ("the desk pushed `<sha>`; PR `<url>`") say what happened; a failure names the step and its first error line. A second
 `push` needs a new approval.
 
+## Fewer turns, cheaper roles, visible cost (1.0.27)
+
+A thread's own session is its biggest cost: every turn re-reads the whole context, and one orchestration step used to take about five turns (brief a worker, wait for the notification, read the diff, commit, report). 1.0.27 attacks that, and shows where the money goes.
+
+**Workers commit their own change.** Put `commit: <message>` in an edit brief. The worker runs the brief's one test command first and commits only when it passes (`git add` of the files it changed, `git commit` in its worktree); its answer is `files`, `diffstat`, `sha`, `result`, `note`. A failing test means no commit and no `sha`. One brief may carry up to three small related edits (one job type, one test command). The thread checks by the sha and the diffstat and does not re-read the diff or run `git diff` unless the step failed. The guard allows a worker's `git add` / `commit` / `status` / `diff` and refuses `reset --hard`, `rebase`, `commit --amend`, a checkout or switch of another branch, `push` and tags. `workers.commit: false` switches it off.
+
+**Effort by role.** With `lean.orchestrate` on, a thread that only briefs workers defaults to effort medium; `threads.effort` and `effort:` on `lean_thread new` still win, and `high` is for design and refactoring work the desk names. Fresh starts, restarts and auto restarts follow one rule (an effort a call named is kept, a recorded default is recomputed), and the start reply names the effort. Worker agents keep their own effort (medium for sonnet workers, low for haiku).
+
+**A cheaper reviewer.** `maxTurns: 12`, the tool-call budget of a `check` job (`workers.stepsByJob.check`), per-file added/removed line counts handed over by script with "read each changed file once, diff hunks only", a re-review that reads only the diff since the last reviewed sha (light and full), a JSON-only answer with at most 12 findings (`path:line`). Every `lean_review` reply ends with "review cost for <sha>: $ over N passes, M requests", and "expected ~$X" is the median of earlier passes of the same level in the project.
+
+**Cost per tier and job.** `lean_doctor stats` has a section "by worker tier and job" (runs, requests, cost, cost per run, second tries, step budget hits per agent type and job type), "thread main session" (requests, average context, cost) and an estimate of what the sonnet edit runs would have cost on haiku. The thread pane shows "main $a · workers $b · reviews $c"; the card turns amber at `budget.threadDaily` (default $15 now). When a project has a good haiku record for a job type (at least 5 successful runs, at least 80%), the `why-sonnet` refusal says so.
+
+### Savings
+
+What each part can save, in words (the section "by worker tier and job" and the saving line in `lean_doctor stats` measure it on your own ledger):
+
+- **Worker commits** remove the turns a thread spent reading a diff, committing and reporting per step; each removed turn is one whole re-read of the thread's context, so the saving grows with the thread's context size and the number of steps.
+- **Effort medium for orchestrating threads** lowers the thinking the thread's own session does on every turn, where its job is only to brief, wait and check.
+- **The cheaper reviewer** cuts the reviewer's exploration (the budget and the per-file counts), and its re-reads of what did not change.
+- **Per-tier cost and the haiku record** save nothing by themselves: they show which edit jobs sonnet ran that haiku had already done well in the project, so the next brief can start on haiku.
+- **The lower thread alert** warns earlier, before a thread's day gets expensive.
+
 ## Budgets
 
 Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:
@@ -748,7 +770,7 @@ Desk reports: while the desk is idle, a thread's question or `done` / `blocked` 
 Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
 step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
 
-**Alerts by default** (they warn, they never refuse a request): `{ "budget": { "daily": 25, "threadDaily": 20 } }` (USD; both are
+**Alerts by default** (they warn, they never refuse a request): `{ "budget": { "daily": 25, "threadDaily": 15 } }` (USD; both are
 the defaults, `"off"` turns one off). The desk gets a notice (the pane lists it) and a toast when the day's spend reaches 50% and 80% of
 `budget.daily`, once per day per level, with today's spend, the top 3 threads by cost and their models; and when one thread passes
 `budget.threadDaily` (once a day per thread). The goals chaser also asks a stale thread that is over `threadDaily` what the spend bought.
@@ -858,6 +880,18 @@ A thread that starts again (reopen, restart, a resume that must start fresh) get
 - **Notes are found where the thread kept them**: `notes.md`, `notes/*.md` and `scratch/*.md` (newest first, at most 6 files). The text of `notes.md` and `notes/progress.md` (else the newest notes file) is carried within the handover budget, the rest by name, size and first line with "read these before re-reading sources". With no goal set, the goal is the first line of the brief. The doctor preview lists the files it used and those it found but left out (reason: budget).
 - **One account of the checkout.** The state snapshot and the preflight section read one computation of `git status` and `git diff --stat HEAD`: a snapshot younger than 60 s is reused ("as of <time>"), an older one is recomputed once and written back. The handover states the commit and whether the worktree was dirty, and prints one diff number per file.
 - **Open tasks are the thread's own.** The preflight lists only open to-do items that carry the thread's id, branch or worktree, or PR / work item, or share at least two significant words with its goal or title (stop words: `hooks/stopwords.ts`): at most 5, then a count of the others ("N more tasks not about this thread"), never the rest. With none linked it says "open tasks: none linked to this thread".
+
+### What fills a thread's context, and how little a restart needs
+
+A thread's context is its cost, so lean-agent keeps it small by script. At the warn level (`threadWarnTokens`) and again at 90% of the limit the thread's next tool result carries one line: what its context consists of (tool results by tool, its own tool inputs and Agent briefs, worker answers, the first prompt, the two biggest single results by kind and size, never their text) and one fix for the largest source. `lean_doctor context tN` prints the same, and the thread can ask for it itself with `lean_run {context: true}`.
+
+Noise is cut before it enters the conversation: `lean_run` answers a recognised runner (jest, vitest, mocha, node:test, pytest, go test, cargo test, tsc, eslint, and the yarn / npm / pnpm wrappers) with the exit code, the runner's totals and the failed tests only (a clean run is one line); an unknown runner keeps its last 15 lines; the whole output is the file named in the reply. A thread's own Bash and MCP results are capped at `threadToolResultChars` (default 8000; a worker's keep `toolResultChars`, 20000); the cut says which command produced the text, and a `git diff` / `git show` result adds "use --stat first, then one path at a time". A worker brief over 1500 characters gets a hint to point at a notes file instead of restating it.
+
+A restart prompt is built by script and bounded. `handover.mode` in `config.json` is `"core"` (the default) or `"full"`. Core: at most ~1500 tokens, only what changes behaviour (the task line, the first 600 characters of the brief, at most 5 corrections since the brief, the open question or blocked request verbatim, branch / HEAD / dirty / one diffstat line, the next step) plus a pull list of one-line commands with sizes. Reports, the state snapshot, the preflight and the notes are not in the prompt; the thread pulls a section when the next step needs it: `lean_run {pull: "reports"}` lists the reports and `{pull: "reports", section: "3"}` reads one; `{pull: "notes"}` lists headings, `{pull: "notes", section: "<heading>"}` reads one; `{pull: "snapshot", section: "status,tasks"}`; `{pull: "preflight", section: "<word>"}`; `{pull: "brief"}`. Full: the bounded prompt (`handoverTokens`, default 6000, for the whole prompt: the last 3 reports as digests, the snapshot at 1500 characters, the preflight at 800). `lean_doctor handover tN` shows both sizes against their budgets and says "over budget by N tokens" when a fixed part does not fit.
+
+### Messages to a thread: direct delivery, verified, restarted by script
+
+A thread reads its inbox file only at its next tool call, so a thread that asked a question and ended its turn never saw the answer. The mod now delivers by script (`hooks/deliver-to-thread.ts`): a message for a thread whose session is alive goes straight to it with `$.session.send` (`send`, `wake`, the answer to a question, approval results, the chaser). The engine runs `$.session.send` only in a session whose tool pool has the `SendMessage` tool, so the desk keeps that tool in its pool and its settings (`doctor fix` removes the old deny entry; a desk started before needs a restart); the desk model itself still cannot call it, only the mod's own marked send passes the guard. No setting or environment variable turns messaging on beyond that. If the send is refused for the session, the refusal is remembered for 10 minutes and the next route runs at once: a session shown as `blocked` + `idle` with no `waitingFor` (a thread that asked and ended its turn) is idle, so the wake resumes it with the message (stop the idle process, `claude --bg --resume`, conversation kept). A session on an open permission prompt cannot take a message; the reply says so and the inbox keeps it. With no live session the old inbox + wake runs. Whichever route carried it, the desk's timer checks the thread's `activity.json`: no prompt, tool call, worker call or received message within `threads.answerWaitSeconds` (default 45) for an idle or waiting thread means it did not react, and the mod stops that session and starts a fresh one whose first prompt carries the message (its notes are kept), with one notice and no question to the user. Not for FYI / status-check messages, an open permission prompt or a working session that asked nothing. `threads.escalate: false` turns the restart off (one notice asks instead). A thread that asked a question shows `waiting for your answer` (not `running`) until it does something or the answer arrives; after `threads.waitReminderMinutes` (default 15) the question comes back once as a notice.
 
 ## The store is the memory
 

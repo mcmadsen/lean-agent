@@ -10,9 +10,10 @@ import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchn
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
 
-export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
-const OLD_REPORT_MAX = 700 // an older report is cut to this
-const NEWEST_REPORT_MAX = 20_000 // the newest is whole up to this (the prompt is one argv string: Linux caps a single one at 128 KB)
+export const REPORT_DIGESTS = 3 // 1.0.27: the restart prompt carries the last 3 reports as digests (state, first 200 characters, file path), the rest is a count
+export const DIGEST_CHARS = 200
+export const SNAPSHOT_MAX = 1_500 // chars of the state snapshot in the prompt (the file has the rest)
+export const PREFLIGHT_MAX = 800 // chars of the preflight in the prompt
 const QUEUED_EACH = 1_000 // a desk message in the corrections, cut to this
 export const PROMPT_MAX = 80_000 // hard cap on the whole handover prompt (the parts above add up to about 60k at most)
 const BRIEF_MAX = 6_000
@@ -21,32 +22,18 @@ const REMEMBER_MAX = 20
 const flat = (s: string) => s.replace(/\r/g, '').trim()
 const cut = (s: string, n: number, tail = false) => (s.length <= n ? s : tail ? '…' + s.slice(s.length - n) : s.slice(0, n) + '…')
 
-// The reports of one thread, oldest first, inside the budget: the newest whole, older ones newest-first while they fit.
-// `pathOf`: where the FULL text of a report is (desk/reports/<file>); a line that is cut names it, so the new session can Read the rest
-// instead of guessing. `cutRecs` are the reports whose line was cut (the caller makes sure their file exists).
-export function reportHistory(recs: DeskRec[], budget = REPORT_BUDGET, pathOf?: (r: DeskRec) => string): { lines: string[]; omitted: number; cutRecs: DeskRec[] } {
+// The reports of one thread, oldest first: the LAST 3 as digests (state, first 200 characters, the file with the full text when cut), older ones
+// only counted (the head says `lean_thread report tN`). `pathOf`: where the FULL text of a report is (desk/reports/<file>).
+// `cutRecs` are the reports whose line was cut (the caller makes sure their file exists).
+export function reportHistory(recs: DeskRec[], pathOf?: (r: DeskRec) => string): { lines: string[]; omitted: number; cutRecs: DeskRec[] } {
   const cutRecs: DeskRec[] = []
-  const line = (r: DeskRec, max: number) => {
+  const lines = recs.slice(-REPORT_DIGESTS).map(r => {
     const text = flat(r.text)
-    const isCut = text.length > max
-    return `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(text, max)}${isCut && pathOf ? ` (cut: full text in ${pathOf(r)})` : ''}`
-  }
-  const kept: string[] = []
-  let used = 0
-  let omitted = 0
-  for (let i = recs.length - 1; i >= 0; i--) {
-    const r = recs[i]!
-    const max = i === recs.length - 1 ? NEWEST_REPORT_MAX : OLD_REPORT_MAX
-    const l = line(r, max)
-    if (kept.length && used + l.length > budget) {
-      omitted = i + 1
-      break
-    }
-    kept.unshift(l)
-    if (flat(r.text).length > max) cutRecs.unshift(r)
-    used += l.length
-  }
-  return { lines: kept, omitted, cutRecs }
+    const isCut = text.length > DIGEST_CHARS
+    if (isCut) cutRecs.push(r)
+    return `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(text, DIGEST_CHARS)}${isCut && pathOf ? ` (cut: full text in ${pathOf(r)})` : ''}`
+  })
+  return { lines, omitted: Math.max(0, recs.length - REPORT_DIGESTS), cutRecs }
 }
 
 // Make sure the full text of every cut report is in desk/reports/<ts>-<from>-<kind>.md (the file a long direct send wrote; a short
@@ -126,7 +113,22 @@ export function corrections(rows: Inbox[], queued: Inbox[], created: number): { 
   return { lines: all.slice(-CORRECTIONS_MAX).map(line), older: Math.max(0, all.length - CORRECTIONS_MAX) }
 }
 
-export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false): Promise<Handover> {
+// ---- the pull mode (1.0.27): config.json `handover.mode` ---------------------------------------------------------------------------------
+// "core" (default): the first prompt holds ONLY what changes behaviour (about CORE_TOKENS), script-built; the rest is a pull list of one-line
+// commands with sizes (pull.ts: `lean_run {pull}` returns a section, not the whole store). "full": the bounded prompt (handoverTokens).
+export type HandoverMode = 'core' | 'full'
+export const CORE_TOKENS = 1_500
+export const CORE_BRIEF = 600 // characters of the brief in the core prompt
+export const CORE_CORRECTIONS = 5
+const CORE_EACH = 240 // characters of one correction
+export async function handoverMode(h: Host, home: string): Promise<HandoverMode> {
+  const cfg = await readJson<{ handover?: { mode?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
+  return cfg?.handover?.mode === 'full' ? 'full' : 'core'
+}
+const lastLine = (s: string) => s.split('\n').map(l => l.trim()).filter(Boolean).pop() ?? ''
+
+export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false, modeIn?: HandoverMode): Promise<Handover> {
+  const mode = modeIn ?? (await handoverMode(h, home))
   const dir = `${threadsDir(home)}/${t.id}`
   const instr = queuedAll.filter(m => m.instr)
   const text = async (p: string) => {
@@ -149,7 +151,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask') && !(r as { mod?: boolean }).mod)
   // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
-  const hist = reportHistory(recs, REPORT_BUDGET, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
+  const capped = (s: string, n: number, file: string) => (s.length > n ? `${s.slice(0, n)}\n…(cut to ${n} characters: full text in ${file})` : s)
+  const hist = reportHistory(recs, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX).map(m => ({ ...m, text: retireText(m.text!) })) // (a forge write by script is retired, not passed on)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const now = await h.clock.now()
@@ -163,6 +166,39 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   // everything the desk sent this thread after its start (queued, delivered, to a session that has ended, the text of a restart / wake / resume, the
   // results of the actions the desk made for it), newest last, right after the brief: it is newer than the brief and wins where they differ.
   const corr = corrections(await readJsonl<Inbox>(h, `${dir}/inbox.jsonl`), queuedAll, Number.isFinite(t.created) ? t.created : 0)
+  if (mode === 'core') {
+    // only what changes behaviour; every other source is one line in the pull list, with its size
+    const last3 = recs.slice(-REPORT_DIGESTS)
+    const nonePaths = await ensureReportFiles(h, home, last3)
+    const digestPaths = last3.map(r => (nonePaths.has(r) ? `${deskState(home)}/inbox.jsonl (ts ${r.ts})` : reportFile(home, r)))
+    const open = wait ? '' : waitingLead(recs) ?? '' // an open question / blocked request with its id, verbatim (when the lead is not already it)
+    const diffLine = snap?.diffStat ? lastLine(snap.diffStat) : ''
+    const git = snap && (snap.branch || snap.head) ? `branch ${snap.branch || '?'} · HEAD ${snap.head ? snap.head.slice(0, 10) : '?'} · dirty: ${snap.status.length ? `yes (${snap.status.length} paths)` : 'no'}${diffLine ? ` · ${diffLine}` : ''}` : ''
+    const nextTask = snap?.tasks.find(x => x.status === 'in_progress') ?? snap?.tasks.find(x => x.status === 'pending')
+    const noteLines = (notes ? notes.split('\n').length : 0) + (scratchNotesText ? scratchNotesText.split('\n').length : 0)
+    const pull = [
+      brief.length > CORE_BRIEF && `- brief in full: read ${dir}/brief.md (${brief.split('\n').length} lines; headings first: lean_run {pull: "brief"})`,
+      recs.length > 0 && `- earlier reports: lean_run {pull: "reports"} lists ${recs.length}, {pull: "reports", section: "<n>"} reads one; last ${last3.length} digests: ${digestPaths.join(', ')}`,
+      (notes || scratchNotesText || nl.listed.length) && `- notes: ${dir}/notes.md${scratchNotesText ? `, ${dir}/scratch/${NOTES_FILE}` : ''} (${noteLines} lines${nl.listed.length ? `, +${nl.listed.length} more files in ${dir}` : ''}): headings only first: lean_run {pull: "notes"}, then {pull: "notes", section: "<heading>"}`,
+      snap && `- state snapshot: ${snapshotFile(home, t.id)} (${snapshotText(snap, now).length} characters; fields: lean_run {pull: "snapshot", section: "status,tasks,report,pending"})`,
+      pre && `- preflight: lean_run {pull: "preflight"} (${pre.length} characters; section: "<word>" keeps the lines with it)`,
+    ].filter((x): x is string => !!x)
+    const core: Part[] = [
+      { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
+      { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; this prompt holds only what changes your behaviour.`, mode: 'fixed' },
+      { name: 'brief', head: `## Brief (first ${CORE_BRIEF} characters)`, body: cut(flagForeignPaths(brief, t.id), CORE_BRIEF), file: `${dir}/brief.md`, mode: 'head' },
+      { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
+      { name: 'open', head: '## Open', body: open, mode: 'fixed' },
+      { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
+      { name: 'git', head: '## Git', body: git, mode: 'fixed' },
+      { name: 'next', head: '## Next step (your task list)', body: nextTask ? `[${nextTask.status}] ${cut(nextTask.text, 300)}` : '', mode: 'fixed' },
+      { name: 'pull', head: '## Pull list', body: pull.length ? `Read only what the next step needs from the pull list; a pull returns a section, not the whole store.\n${pull.join('\n')}` : '', mode: 'fixed' },
+    ]
+    const ctail = instrBlock(instr)
+    const csized = fitParts(core, Math.max(2_000, CORE_TOKENS * 4 - (ctail ? ctail.length + 2 : 0)))
+    const cbase = cutPrompt(csized.map(partText).filter(Boolean).join('\n\n'))
+    return { prompt: ctail ? `${cbase}\n\n${ctail}` : cbase, worktree: wt?.path, branch: wt?.branch, parts: ctail ? [...csized, { name: 'instructions', head: INSTR_HEAD, body: ctail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : csized, missing: [!goalText && 'no goal (goal-set tN "<line>")', !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x) }
+  }
   const parts: Part[] = [
     { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
@@ -171,9 +207,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
-    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now, { git: !gitInPre, scratch: false }) : '', file: snapshotFile(home, t.id), mode: 'head' },
-    { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
-    { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
+    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? capped(snapshotText(snap, now, { git: !gitInPre, scratch: false }), SNAPSHOT_MAX, snapshotFile(home, t.id)) : '', file: snapshotFile(home, t.id), mode: 'head' },
+    { name: 'preflight', head: '## Preflight', body: capped(pre, PREFLIGHT_MAX, `${dir}/preflight`), file: `${dir}/preflight`, mode: 'head' },
+    { name: 'reports', head: `## Your reports so far (last ${Math.min(REPORT_DIGESTS, recs.length)}, oldest first${hist.omitted ? `; ${hist.omitted} older reports: lean_thread report ${t.id}` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
     { name: 'progress', head: `## Your notes (end of ${progress?.path})`, body: progressText ? cut(progressText, NOTES_MAX, true) : '', file: `${dir}/${progress?.path}`, mode: 'tail' },
     { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
@@ -183,8 +219,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   ]
   const noNotes = !notes && !progressText && !scratchNotesText && !nl.listed.length && !nl.left.length
   const missing = [!goalText && 'no goal (goal-set tN "<line>")', noNotes && `no notes (looked in ${dir}/notes.md, ${dir}/notes/*.md, ${dir}/scratch/*.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
-  const sized = fitParts(parts, (await handoverTokens(h, home)) * 4)
-  const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap
+  const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap (but counted in the budget: the rest shrinks to make room)
+  const sized = fitParts(parts, Math.max(2_000, (await handoverTokens(h, home)) * 4 - (tail ? tail.length + 2 : 0)))
   const base = cutPrompt(sized.map(partText).filter(Boolean).join('\n\n'))
   return { prompt: tail ? `${base}\n\n${tail}` : base, worktree: wt?.path, branch: wt?.branch, parts: tail ? [...sized, { name: 'instructions', head: INSTR_HEAD, body: tail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : sized, missing, notes: { content: nl.content.map(f => f.path), listed: nl.listed.map(f => f.path), left: nl.left.map(f => f.path), scratchNotes: !!scratchNotesText } }
 }
@@ -243,7 +279,7 @@ let preflight: PreflightFn | null = null
 export const setPreflight = (fn: PreflightFn | null) => {
   preflight = fn
 }
-async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
+export async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
   try {
     const s = preflight ? await preflight(h, home, t) : ''
     return typeof s === 'string' ? s.trim() : ''
@@ -269,15 +305,22 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
   if (!t || typeof t !== 'object') return `no thread ${id}`
   const queued = (await unconsumed(h, home, id).catch(() => ({ msgs: [] as Inbox[] }))).msgs
-  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued)
-  const budget = await handoverTokens(h, home)
+  const mode = await handoverMode(h, home)
+  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode)
+  const other = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode === 'core' ? 'full' : 'core')
+  const budget = mode === 'core' ? CORE_TOKENS : await handoverTokens(h, home)
   const tok = (s: string) => Math.ceil(s.length / 4)
+  const sizes = `modes (config handover.mode, now "${mode}"): core ~${tok((mode === 'core' ? ho : other).prompt)} tokens (budget ${CORE_TOKENS}) · full ~${tok((mode === 'full' ? ho : other).prompt)} tokens (budget ${await handoverTokens(h, home)})`
   const rows = (ho.parts ?? []).filter(p => p.body).map(p => `  ${p.name.padEnd(10)} ~${String(tok(partText(p))).padStart(5)} tokens${p.cut ? `  (cut: full text in ${p.file})` : ''}`)
   const all = tok(ho.prompt)
   const sum = (...names: string[]) => (ho.parts ?? []).filter(p => names.includes(p.name)).reduce((n, p) => n + tok(partText(p)), 0)
+  // an overrun is never hidden: by how much, and the largest section (what is left once every cuttable section is at its floor)
+  const big = [...(ho.parts ?? [])].filter(p => p.body).sort((a, b) => tok(partText(b)) - tok(partText(a)))[0]
+  const over = all > budget ? `over budget by ${all - budget} tokens: the largest section is ${big?.name ?? '?'} (~${big ? tok(partText(big)) : 0} tokens${big?.mode === 'fixed' ? ', a fixed line: never cut' : ''}); the desk's instructions and the fixed lines are never cut` : ''
   return [
     `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}`,
-    `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
+    `${t.title}: ~${all} tokens of a budget of ${budget} (${mode === 'core' ? 'core mode' : 'config handoverTokens'}, the whole prompt)${over ? ` - ${over}` : ' - within budget'}`,
+    sizes,
     'sections:',
     ...rows,
     ...notesRows(ho, `${threadsDir(home)}/${id}`),

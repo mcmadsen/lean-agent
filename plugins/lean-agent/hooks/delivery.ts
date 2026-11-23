@@ -8,6 +8,7 @@ import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
+import { markWaiting } from './threadstate'
 import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
 import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
@@ -494,6 +495,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
       }
       await clearReportFailure(h, home, id)
+      if (rState === 'blocked' && !approval && !action) await markWaiting(h, home, id, { since: ts, text: rText.slice(0, 300) }) // a blocked report with a question for the user (no approval or action card)
       if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
@@ -508,6 +510,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       const options = Array.isArray(i.options) ? i.options.filter((x: unknown) => typeof x === 'string') : undefined
       await appendJsonl(h, `${leanDir(home)}/questions.jsonl`, { ts, from: id, question: str(i.question), options, answered: false })
       await appendJsonl(h, `${deskState(home)}/inbox.jsonl`, { ts, from: id, kind: 'ask', text: str(i.question), options } satisfies DeskRec)
+      await markWaiting(h, home, id, { since: ts, text: str(i.question).slice(0, 300), q: ts }) // the thread now waits for the answer (its state word `waiting`, threadstate.ts)
       const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'ask', text: str(i.question), options }, true)
       return { ok: true, text: `question sent${sent}; the answer arrives as a desk message` }
     }

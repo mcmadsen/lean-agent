@@ -24,14 +24,14 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
   return Math.round(usd * 1e6) / 1e6
 }
 
-export type Config = { budget?: { daily?: unknown; threadDaily?: unknown } /* budgetalert.ts: alerts, not caps */; dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean; reportChars?: number /* reportdigest.ts: characters of a thread report the desk gets (default 400; 0 = the full text) */; autoRestart?: boolean /* deskcompact.ts: open the new desk itself at the limit (default false) */ }; deskTokens?: number; notify?: { toast?: boolean; sound?: boolean } /* notify.ts: toasts for the desk (default on); sound is accepted, no clip is bundled */; toolResultChars?: number; refusals?: { repeat?: number } /* refusals.ts: how often one refusal pattern repeats before the doctor names it (default 3) */; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
+export type Config = { budget?: { daily?: unknown; threadDaily?: unknown } /* budgetalert.ts: alerts, not caps */; dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean; reportChars?: number /* reportdigest.ts: characters of a thread report the desk gets (default 400; 0 = the full text) */; autoRestart?: boolean /* deskcompact.ts: open the new desk itself at the limit (default false) */ }; deskTokens?: number; notify?: { toast?: boolean; sound?: boolean } /* notify.ts: toasts for the desk (default on); sound is accepted, no clip is bundled */; toolResultChars?: number; threadToolResultChars?: number /* cap.ts: a thread's own results (default 8000) */; refusals?: { repeat?: number } /* refusals.ts: how often one refusal pattern repeats before the doctor names it (default 3) */; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
 // effort / tmodel: a thread's row carries the effort and the model the thread was started with (thread.json); `model` is what answered
 // fresh: the first main-loop request of a thread session (what a restart costs before any work; stats.ts threadSpendLine)
 export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; fresh?: true; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
 // ---- alert thresholds (config.json `budget`): these only warn the desk, they never refuse a request (dailyCapUsd does that) ---------------
 export const DEFAULT_DAILY_USD = 25
-export const DEFAULT_THREAD_DAILY_USD = 20
+export const DEFAULT_THREAD_DAILY_USD = 15 // (20 before 1.0.27)
 // a positive number (or a numeric string) is the limit; "off" / false / 0 / a negative is none; absent or junk is the default
 export function limitOf(v: unknown, dflt: number): number | null {
   if (v === undefined || v === null) return dflt

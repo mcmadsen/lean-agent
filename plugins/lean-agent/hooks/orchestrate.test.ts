@@ -4,7 +4,8 @@ import { fakeHost } from './fake'
 import { decide } from './guard'
 import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, tried, triedWords } from './orchestrate'
 import { capTo } from './cap'
-import { RUN_TIMEOUT_MS, runSummary, runText, summarize } from './runjob'
+import { RUN_TIMEOUT_MS, runSummary, runText } from './runjob'
+import { digest } from './rundigest'
 import { preflightFor, preflightText } from './preflight'
 import { buildHandover, setPreflight } from './handover'
 import { bucketOf, contextStat, contextText } from './contextstat'
@@ -18,10 +19,11 @@ const call = (ctx: any, e: any, c = C) => orchDecide(c, ctx, e)
 let seqN = 0 // a fresh brief each time: an identical brief is a retry (jobs.ts retryDenial)
 
 test('config: defaults, nested and flat keys, junk falls back, false switches the model off', () => {
-  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
+  expect(C).toEqual({ on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true })
   const c =orchConfig({ lean: { orchestrate: false }, deskToolResultChars: 3000, threads: { directReads: 1, workers: 2 }, workers: { briefChars: 500, steps: 5 }, agentResultChars: 4000 })
-  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120 })
+  expect(c).toEqual({ on: false, deskChars: 3000, agentChars: 4000, directReads: 1, workers: 2, briefChars: 500, steps: 5, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true })
   expect(orchConfig({ 'lean.orchestrate': false }).on).toBe(false)
+  expect([orchConfig({ workers: { commit: false } }).commit, orchConfig({ 'workers.commit': false }).commit, orchConfig({}).commit]).toEqual([false, false, true])
   expect(orchConfig({ workers: { steps: 'x' }, threads: { workers: -1 } })).toEqual(C)
   expect(orchConfig({ threads: { directReads: 0 } }).directReads).toBe(0)
 })
@@ -166,9 +168,12 @@ test('worker: a tool-call budget (workers.steps); at the budget the call is refu
   expect(call(worker, { tool: 'Read' }, c)).toBe(SPLIT)
   expect(call(worker, { tool: 'Bash', command: 'ls' }, c)).toBe(SPLIT)
   expect(call({ ...worker, agentId: 'w2' }, { tool: 'Read' }, c)).toBeNull()
-  // the reviewer and other agents have no budget
+  // the reviewer has the budget of a check job (never above workers.steps, here 3: see the reviewer spec below); other agents have none
   const rev = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'v1' }
-  for (let i = 0; i < 40; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  for (let i = 0; i < 3; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  expect(call(rev, { tool: 'Read' }, c)).toContain("the reviewer's budget (3 tool calls")
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'x1' }
+  for (let i = 0; i < 40; i++) expect(call(ex, { tool: 'Read' }, c)).toBeNull()
 })
 
 test('config off: every rule is off (today)', () => {
@@ -236,13 +241,27 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   expect(b.result.interrupted).toBe(false)
 })
 
-test('lean_run: summarize keeps failing names and the last 40 lines; runSummary runs the command with its output in a file', async () => {
+test('the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) and is told what to do at the end', () => {
+  orchReset()
+  const rv = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'rv1' }
+  const bash = { tool: 'Bash', command: 'git -C /r/app diff main...abc' }
+  for (let n = 1; n <= 10; n++) expect(call(rv, bash), `call ${n}`).toBeNull()
+  const over = call(rv, bash)
+  expect(over).toContain("the reviewer's budget (10 tool calls")
+  expect(over).toContain('write the json block')
+  expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull()
+  const small = orchConfig({ workers: { stepsByJob: { check: 2 } } })
+  expect([call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small)].map(x => x === null)).toEqual([true, true, false])
+  // another subagent type (explorer, auditor) is not counted by this rule
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'ex1' }
+  for (let n = 1; n <= 30; n++) expect(call(ex, bash)).toBeNull()
+})
+
+test('lean_run: an unknown runner keeps the last 15 lines; runSummary runs the command with its output in a file', async () => {
   const log = [...Array.from({ length: 100 }, (_, i) => `ok ${i}`), 'FAIL  a.test.ts > adds', '✗ b fails', 'FAIL  a.test.ts > adds', ...Array.from({ length: 50 }, (_, i) => `tail ${i}`)].join('\n')
-  const s = summarize(log)
-  expect(s.failing).toEqual(['FAIL  a.test.ts > adds', '✗ b fails'])
-  expect(s.tail.split('\n')).toHaveLength(40)
-  expect(s.tail).toContain('tail 49')
-  expect(summarize('all good\n').failing).toEqual([])
+  const s = digest(log, 1)
+  expect(s.body.split('\n')).toHaveLength(15)
+  expect(s.body).toContain('tail 49')
 
   const h = fakeHost(null)
   h.exec.handler = (argv: string[]) => {
@@ -258,7 +277,7 @@ test('lean_run: summarize keeps failing names and the last 40 lines; runSummary 
   expect(h.calls.at(-1)!.argv[2]).toContain("cd '/r/app' && ( npm test )")
   const t = runText(r)
   expect(t).toContain('exit 1')
-  expect(t).toContain('✗ b fails')
+  expect(t).toContain('tail 49')
   expect(t).toContain('full log:')
   expect(t).not.toContain('ok 0')
   await expect(runSummary(h.host, { command: 'git push origin main', home: '/h' })).rejects.toThrow('no push')
@@ -332,6 +351,7 @@ test('a thread (a review thread too) keeps what the store-as-memory, review and 
 
 test('the preflight pack is in the handover once connected (setPreflight(preflightFor) in register.tsx): the thread\'s project checkout is read, nothing explores', async () => {
   const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', '{"handover":{"mode":"full"}}') // (the full prompt carries the preflight section; core only lists it)
   h.git.handler = (a: string[]) => (a.includes('rev-parse') ? { exitCode: 0, stdout: 'fix-x\n' } : { exitCode: 1, stdout: '' })
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   const t: any = { id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }

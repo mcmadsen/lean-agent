@@ -1,5 +1,5 @@
 // Budget alerts by default: the desk is told when the day's spend reaches 50% and 80% of config `budget.daily` (default 25 USD, "off" allowed)
-// and when one thread passes `budget.threadDaily` (default 20 USD). Each alert is a desk notice (notices.ts: the pane lists it) and a toast
+// and when one thread passes `budget.threadDaily` (default 15 USD). Each alert is a desk notice (notices.ts: the pane lists it) and a toast
 // (notify.ts reads `budgetEvents`), once per day per level / per thread. These are warnings: a request is only ever refused by
 // dailyCapUsd (budget.ts overBudget). Run from the desk's chaser tick (chaser.ts), a minute apart; a stat and the tail of the ledger each time.
 import { budgetLimits } from './budget'

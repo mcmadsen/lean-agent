@@ -11,6 +11,7 @@ const THREAD = { id: 't9', title: 'port the inventory', project: 'app', state: '
 
 function world() {
   const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${T}/thread.json`, JSON.stringify(THREAD))
   h.files.set(`${T}/brief.md`, '# Port the inventory to the new store\nmore detail\n')
   h.git.handler = () => ({ exitCode: 1, stdout: '' })

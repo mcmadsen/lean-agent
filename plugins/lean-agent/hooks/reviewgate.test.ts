@@ -535,6 +535,38 @@ test('lean_review prepare says the expected cost: the median of the earlier revi
   expect(two.text).toContain('expected review cost ~$2.40 (2 passes, sonnet; median of 3 earlier reviewer passes on this project)')
 })
 
+test('lean_review prepare: the reviewer gets per-file stats and a reading plan (10 tool calls, each file once); a re-review reads the diff since the last pass; the reply shows what the passes of this sha cost', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const p = await tool(h, { action: 'prepare', base: 'main' })
+  expect(p.text).toMatch(/Changed files \(1, added\/removed lines, from the script\): src\/plain\.ts \+\d+\/-0/)
+  expect(p.text).toContain('Read each changed file once, diff hunks only')
+  expect(p.text).toContain('You have 10 tool calls')
+  expect(p.text).not.toContain('review cost for') // no pass ran yet
+  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: h.clock.t + 10, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.2, ...o })
+  h.files.set(`${L}/ledger.jsonl`, [row({ agentId: 'a1' }), row({ agentId: 'a1', usd: 0.3 }), row({ agentId: 'a2', usd: 0.34 }), row({ agentId: 'z', tN: 't7', usd: 9 })].join('\n') + '\n')
+  const again = await tool(h, { action: 'prepare', base: 'main' })
+  expect(again.text).toMatch(/\nreview cost for [0-9a-f]{12}: \$0\.84 over 2 passes, 3 requests/)
+  h.files.set(`${L}/config.json`, JSON.stringify({ workers: { stepsByJob: { check: 7 } } }))
+  expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('You have 7 tool calls')
+})
+
+test('lean_review prepare: the expected cost of a light pass is the median of the earlier LIGHT passes (full ones are dearer); fewer than two known: all passes', async () => {
+  const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
+  const row = (at: number, id: string, usd: number) => JSON.stringify({ ts: at, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd, agentId: id })
+  const t = h.clock.t
+  await tool(h, { action: 'prepare', base: 'main' }) // light, at t
+  h.clock.t = t + 100
+  await tool(h, { action: 'prepare', base: 'main', level: 'full' }) // full, at t + 100
+  h.files.set(`${L}/ledger.jsonl`, [row(t + 10, 'l1', 0.4), row(t + 20, 'l2', 0.5), row(t + 110, 'f1', 3), row(t + 120, 'f2', 3.2)].join('\n') + '\n')
+  h.clock.t = t + 200
+  const light = await tool(h, { action: 'prepare', base: 'main' })
+  expect(light.text).toContain('expected review cost ~$0.45 (1 pass, sonnet; median of 2 earlier light reviewer passes on this project)')
+  const full = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  expect(full.text).toContain('median of 2 earlier full reviewer passes on this project')
+  h.files.set(`${L}/ledger.jsonl`, [row(t + 10, 'l1', 0.4), row(t + 110, 'f1', 3)].join('\n') + '\n') // one pass of each level: the median is over all
+  expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('median of 2 earlier reviewer passes on this project')
+})
+
 test('lean_review prepare: generated files are left out of the lists, the line count, the risk and the diff the reviewer reads; the text says how many', async () => {
   const golden = Array.from({ length: 900 }, (_, i) => `"token${i}": "secret${i}"`)
   const diff = newFileDiff('src/a.ts', 'export function aa1() {}') + newFileDiff('test/golden/out.json', ...golden) + newFileDiff('web/app.min.js', 'var a=1') + newFileDiff('pnpm-lock.yaml', 'a: 1', 'b: 2') + newFileDiff('src/gen.ts', 'export function genned() {}') + newFileDiff('docs/x.txt', 'cfg')

@@ -47,6 +47,7 @@ test('flagForeignPaths: only threads/tM/ with M != N; a relative path too; nothi
 
 test('no message after the start: no section; many messages: the newest 30 and a count of the older', async () => {
   const h = fakeHost(null)
+  h.files.set(`${L}/config.json`, '{"handover":{"mode":"full"}}') // (full prompt: 30 corrections; core keeps 5)
   h.files.set(`${T}/thread.json`, JSON.stringify(THREAD))
   expect((await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])).prompt).not.toContain('Corrections since the brief')
   h.files.set(`${T}/inbox.jsonl`, rows(...Array.from({ length: 35 }, (_, i) => ({ ts: 2000 + i, text: `msg ${i}` }))))

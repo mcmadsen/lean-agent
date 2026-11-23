@@ -121,7 +121,7 @@ export async function drawNewThread($: any, e: any, roleOf: () => Role): Promise
   const projectOptions = [{ value: NO_PROJECT, label: 'none' }, ...names.map(n => ({ value: n, label: n }))]
   const known = projectOptions.some(o => o.value === form.project)
   const modelOptions = [{ value: DEFAULT, label: 'default (sonnet, or threads.model in config.json)' }, ...MODEL_CHOICES.map(m => ({ value: m, label: needsApproval(m) ? `${m} (needs your Approve press)` : m }))]
-  const effortOptions = [{ value: DEFAULT, label: 'default (high, or threads.effort in config.json)' }, ...EFFORT_CHOICES.map(x => ({ value: x, label: x }))]
+  const effortOptions = [{ value: DEFAULT, label: 'default (medium, high when lean.orchestrate is off, or threads.effort in config.json)' }, ...EFFORT_CHOICES.map(x => ({ value: x, label: x }))]
   return (
     <Box flexDirection="column">
       <Text bold>New thread</Text>

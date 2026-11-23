@@ -9,12 +9,14 @@ import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, mode
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
-import { jobOf } from './jobs'
+import { WHY_SONNET, jobOf } from './jobs'
+import { haikuRecord } from './workerruns'
 import { selfEditRoots } from './selfedit'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
 import type { Host } from './state'
 import type { Role } from './role'
+import { modSending } from './modsend'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
@@ -287,8 +289,11 @@ const DESK_BASH = 'Bash' // only the commands deskBashOk lists
 const DESK_FREE = new Set(['Skill', 'ToolSearch', 'TodoWrite', 'AskUserQuestion'])
 const LEAN_TOOLS = 'mcp__lean-agent__'
 export const DESK_TOOLS: readonly string[] = [...DESK_READ, DESK_BASH, ...DESK_FREE]
+// Tools the desk's MOD calls, never the model: the engine's `$.session.send` runs only when the session's tool pool has SendMessage ("this session has no
+// SendMessage tool", seen live), so the pool and the settings keep it (it is a deferred tool: a name in the listing) and deskDenial lets only the mod's own send use it
+export const DESK_MOD_TOOLS: readonly string[] = ['SendMessage']
 // can strict mode ever allow this tool (by name)? lean-agent's own tools always
-export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
+export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || DESK_MOD_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
 
 export function deskBashOk(c: string): boolean {
   if (hasMeta(c)) return false
@@ -321,6 +326,7 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     return ROUTE
   }
   if (DESK_FREE.has(e.tool) || e.tool.startsWith(LEAN_TOOLS)) return null
+  if (DESK_MOD_TOOLS.includes(e.tool)) return modSending(e) ? null : `${ROUTE}: the desk does not message sessions itself; \`lean_thread send\` delivers a message to a thread (the mod sends it straight to the session)`
   return `${ROUTE}: ${e.tool} is not for the desk`
 }
 
@@ -906,6 +912,22 @@ export function forgeTried(c: string): string {
   const m = all.find(x => x[1] === 'gh' || x[1] === 'az') ?? all[0]
   return m ? `${m[1]} ${m[2]}` : progName(c.trim().split(/\s+/)[0])
 }
+// A worker commits its OWN change (brief line `commit: <message>`: git add of the files it changed, git commit; status / diff / log read). The git writes that
+// could lose or rewrite someone else's work are refused: reset --hard, a checkout / switch of a branch (`checkout -- <path>` restores a file and stays),
+// rebase, amend (a worker's commit is always a new one). Quoted text is blanked first, so a commit message that says "rebase" is no rebase.
+const GIT_WORDS = /\bgit\s+(?:(?:-C|-c)\s+\S+\s+|-{1,2}[\w-]+(?:=\S+)?\s+)*([a-z][a-z-]*)\b([^;&|\n]*)/g
+export function workerGitDenial(c: string, commit = true): string | null {
+  for (const m of UNQUOTED(c).matchAll(GIT_WORDS)) {
+    const sub = m[1]!
+    const rest = m[2]!.trim().split(/\s+/).filter(Boolean)
+    if (sub === 'commit' && !commit) return 'lean-agent: workers.commit is off: a worker does not commit; return files + diffstat and the thread commits'
+    if (sub === 'reset' && rest.some(a => /^--(hard|merge|keep)$/.test(a))) return 'lean-agent: a worker never runs `git reset --hard`; commit what you changed and report the rest to the thread'
+    if (sub === 'rebase') return 'lean-agent: a worker never rebases; report to the thread'
+    if (sub === 'commit' && rest.includes('--amend')) return 'lean-agent: a worker never amends: a commit of yours is a new commit (git add <your files> && git commit -m <message>)'
+    if ((sub === 'checkout' || sub === 'switch') && !rest.includes('--')) return `lean-agent: a worker never changes branch (git ${sub}); stay on the worktree's branch, and \`git checkout -- <path>\` restores a file`
+  }
+  return null
+}
 // the never-list of every subagent's shell
 async function neverDenial($: Host, c: string): Promise<string | null> {
   const a = analyze(c)
@@ -989,6 +1011,8 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     const scratch = ownId ? `${lean}/threads/${ownId}/scratch` : undefined // the one place under the lean home a subagent writes notes and drafts, created on demand
     if (scratch && c.includes(scratch)) await mkdirp($, scratch).catch(() => undefined)
     if (isWorker(t)) {
+      const wg = workerGitDenial(c, (await loadOrch($).catch(() => undefined))?.commit !== false)
+      if (wg) return wg + tried(forgeTried(c))
       const pat = await leanStateShell($, c, ownId)
       if (pat) return `lean-agent: a worker never changes lean-agent's own state (settings, grants, approvals, review records, threads); ${scratchHint(lean, ownId)}; report the rest to the thread${tried(`Bash ${pat === 'thread folder' ? 'thread folder' : 'lean state'} ${pat}`)}`
       return null
@@ -1147,7 +1171,14 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const projs = own ? await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {}) : {}
     const projects = Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/')).map(norm)
     const selfEdit = own && ctx.role.kind === 'thread' ? await selfEditRoots($, ctx.role.id).catch(() => []) : undefined // the worktrees the user let this thread edit itself (selfedit.ts, signed, verified per call)
-    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects, selfEdit }, e)
+    // haiku first, measured: a worker-sonnet brief without `why-sonnet:` for a job type haiku has a good record on in this project is refused as before, and the refusal says so
+    let haiku = ''
+    if (own && ctx.role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?worker-sonnet$/.test(String(e.subagent_type ?? '')) && !WHY_SONNET.test(String(e.prompt ?? ''))) {
+      const jb = jobOf(e.prompt)
+      const project = String((await readJson<{ project?: unknown }>($, `${threadsDir(home)}/${ctx.role.id}/thread.json`, {}))?.project ?? '')
+      if (jb && project) haiku = await haikuRecord($, project, jb)
+    }
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects, selfEdit, ...(haiku ? { haiku } : {}) }, e)
     if (o) return o
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {

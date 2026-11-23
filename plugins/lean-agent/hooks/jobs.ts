@@ -65,6 +65,8 @@ export function retryDenial(thread: string, prompt: unknown): string | null {
   if (n === 1 && !WHY_SONNET.test(String(typeof prompt === 'string' ? prompt : ''))) return 'this exact job already ran once and did not settle it: change the brief (one line saying what the first answer lacked), or escalate once with a `why-sonnet: <reason>` line; a third identical try is refused'
   return null
 }
+// how many times this brief already ran in this thread (a second try is a run with count >= 1 before it)
+export const retryCount = (thread: string, prompt: unknown): number => tries.get(`${thread}|${jobHash(prompt)}`) ?? 0
 // a worker ran for this brief (the Agent call returned a real result, or a background launch was accepted): one try used
 export function retryRan(thread: string, prompt: unknown): void {
   const k = `${thread}|${jobHash(prompt)}`
@@ -132,8 +134,9 @@ function editCanon(body: string, feedback: string): string {
   const stat = field(lines, 'diffstat')?.value || lines.find(l => /\d+ files? changed|\+\d+\s*[\/,]\s*-\d+/.test(l))?.trim() || ''
   const res = field(lines, 'result')?.value ?? ''
   const verdict = /\b(pass|fail)\b/i.test(res) ? /\b(pass|fail)\b/i.exec(res)![1]!.toLowerCase() : verdictOf(body, feedback)
-  const note = field(lines, 'note')?.value || lines.map(l => l.trim()).find(l => l && !/^(files|diffstat|result|note)\s*:/i.test(l) && !/^[-*]\s/.test(l)) || ''
-  return [`files: ${fl.length ? fl.join(', ') : 'none'}`, `diffstat: ${stat ? cut(stat, 120) : 'none'}`, `result: ${verdict}`, `note: ${cut(squash(note), 160)}`].join('\n')
+  const note = field(lines, 'note')?.value || lines.map(l => l.trim()).find(l => l && !/^(files|diffstat|sha|result|note)\s*:/i.test(l) && !/^[-*]\s/.test(l)) || ''
+  const sha = /\b[0-9a-f]{7,40}\b/i.exec(field(lines, 'sha')?.value ?? '')?.[0] // the worker's own commit (brief line `commit: <message>`); a line only when it committed
+  return [`files: ${fl.length ? fl.join(', ') : 'none'}`, `diffstat: ${stat ? cut(stat, 120) : 'none'}`, ...(sha ? [`sha: ${sha.toLowerCase()}`] : []), `result: ${verdict}`, `note: ${cut(squash(note), 160)}`].join('\n')
 }
 
 function runCanon(body: string, feedback: string): string {
@@ -145,7 +148,7 @@ function runCanon(body: string, feedback: string): string {
   return [`result: ${verdict}`, ...clip(rest)].join('\n')
 }
 
-export const PARTS: Record<Job, string> = { lookup: 'answer (<= 20 lines) + refs', edit: 'files, diffstat, pass|fail, one-line note', run: 'pass|fail + <= 20 lines', check: 'pass|fail + <= 20 lines' }
+export const PARTS: Record<Job, string> = { lookup: 'answer (<= 20 lines) + refs', edit: 'files, diffstat, sha, pass|fail, one-line note', run: 'pass|fail + <= 20 lines', check: 'pass|fail + <= 20 lines' }
 
 // the result cut to the job's schema; marked when anything was dropped or rebuilt
 export function trimJobResult(job: Job, text: string): { text: string; trimmed: boolean } {

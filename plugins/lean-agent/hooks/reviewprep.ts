@@ -286,6 +286,33 @@ export function capPrep(p: Prep): Prep {
   return { ...p, files: p.files.slice(0, CAP.files), symbols: p.symbols.slice(0, CAP.symbols), tests: p.tests.slice(0, CAP.tests), params: p.params.slice(0, CAP.params), state: p.state.slice(0, CAP.state), exports: p.exports.slice(0, CAP.exports), renamed: p.renamed.slice(0, CAP.renamed) }
 }
 
+// added / removed lines per file of a unified diff, by script (the reviewer is handed these so it does not run `git diff --stat` and explore)
+export function perFileStats(diff: string): { path: string; add: number; del: number }[] {
+  const out: { path: string; add: number; del: number }[] = []
+  let cur: { path: string; add: number; del: number } | null = null
+  let inHunk = false
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) {
+      const m = / b\/(.+)$/.exec(l)
+      cur = m ? { path: m[1]!, add: 0, del: 0 } : null
+      if (cur) out.push(cur)
+      inHunk = false
+    } else if (l.startsWith('@@')) inHunk = true
+    else if (cur && inHunk) {
+      if (l.startsWith('+')) cur.add++
+      else if (l.startsWith('-')) cur.del++
+    }
+  }
+  return out
+}
+// the reviewer's reading plan: one line, the changed files with their counts, and the rule that keeps it from exploring
+export function statsText(diff: string, steps: number, max = 40): string {
+  const st = perFileStats(diff)
+  if (!st.length) return ''
+  const rows = st.slice(0, max).map(s => `${s.path} +${s.add}/-${s.del}`).join('; ')
+  return `Changed files (${st.length}, added/removed lines, from the script): ${rows}${st.length > max ? `; and ${st.length - max} more` : ''}.\nRead each changed file once, diff hunks only (git diff of the range for that file), then only the surrounding lines a finding needs; do not explore. You have ${steps} tool calls (the budget of a check job); write the json block when "N tool calls left" appears.`
+}
+
 // the lists as the reviewer's brief reads them
 export function prepText(p: Prep): string {
   const parts: string[] = []

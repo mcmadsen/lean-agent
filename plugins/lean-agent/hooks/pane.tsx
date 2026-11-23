@@ -33,7 +33,7 @@ import { NARROW as NARROW_BRIEF, RETRY_LABEL, selfEditLabel } from './denial'
 import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
-export const VERSION = '1.0.26'
+export const VERSION = '1.0.27'
 const NOTE_MS = 30_000 // the one-time "lean-agent set the model" line is drawn this long, then only the header chip carries it
 const GROUP_ROWS = 20 // rows drawn in one unfolded inbox group
 const NARROW = 50 // a body narrower than this (cells) gets the short forms
@@ -152,7 +152,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       }
       const th = v?.threads ?? []
       const working = th.filter(t => stateOf(t).word === 'working').length
-      const stuck = th.filter(t => ['blocked', 'waiting', 'approval', 'stuck', 'stalled'].includes(stateOf(t).word)).length
+      const stuck = th.filter(t => ['blocked', 'waiting', 'waiting for answer', 'approval', 'stuck', 'stalled'].includes(stateOf(t).word)).length
       const needN = v?.needs.length ?? 0
       const dk = v?.desk
       const dpct = dk && dk.limit > 0 && dk.context > 0 ? `${Math.round((dk.context / dk.limit) * 100)}%` : 'n/a'

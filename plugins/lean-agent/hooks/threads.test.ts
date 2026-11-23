@@ -2,14 +2,15 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadSettings as leanThreadSettings } from './leantools'
 import { leanThread, parseAgents, resetLocks, threadClaudeMd, trustFolder } from './threads'
-import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handover'
+import { PROMPT_MAX, olderVersion, reportHistory } from './handover'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = '/p'
 
-function setup(on: any = null) {
+function setup(on: any = null, orchestrate = false) {
   resetLocks()
-  const h = fakeHost(on)
+  const h = fakeHost(on, orchestrate ? { orchestrate: true } : undefined)
+  h.files.set('/h/.lean-agent/config.json', on && !orchestrate ? '{"lean":{"orchestrate":false},"handover":{"mode":"full"}}' : '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   // a scripted `claude`: --bg prints the sid; `agents --json` answers from `rows`
@@ -372,7 +373,7 @@ test('new and start pass --model/--effort (call > config.json > default), record
   const { h, state, call } = setup()
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku' } }))
   await call({ action: 'new', title: 'cheap', text: 'x' })
-  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'high']) // the default effort is high
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'high']) // the default effort is high (specs run with lean.orchestrate off: the medium default is in the orchestrating specs below)
   await call({ action: 'new', title: 'hard', text: 'x', model: 'sonnet', effort: 'high' })
   expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
   const t2 = JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!)
@@ -396,15 +397,33 @@ test('new and start pass --model/--effort (call > config.json > default), record
   for (const r of resumes) expect(r.some(x => x === '--model' || x === '--effort')).toBe(false)
 })
 
-test('thread defaults are sonnet/high; config.json threads.effort and the call still override', async () => {
-  const { h, call } = setup()
+test('thread defaults are sonnet/medium while lean.orchestrate is on (high when off); config.json threads.effort and the call still override', async () => {
+  const { h, call } = setup(null, true)
   await call({ action: 'new', title: 'plain', text: 'x' })
-  expect(h.claudeCalls().filter(a => a[0] === '--bg')[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
+  expect((await call({ action: 'new', title: 'plain2', text: 'x' })).text).toContain('sonnet/medium') // the start reply names the effort
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { effort: 'low' } }))
   await call({ action: 'new', title: 'cfg', text: 'x' })
-  expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'low'])
-  await call({ action: 'new', title: 'call', text: 'x', effort: 'medium' })
-  expect(h.claudeCalls().filter(a => a[0] === '--bg')[2]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[2]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'low'])
+  await call({ action: 'new', title: 'call', text: 'x', effort: 'high' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[3]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
+})
+
+test('effort by role: a restart recomputes a recorded default, keeps an effort a call named, and lean.orchestrate off means high', async () => {
+  const { h, call } = setup(null, true)
+  const bg = () => h.claudeCalls().filter(a => a[0] === '--bg')
+  await call({ action: 'new', title: 'plain', text: 'x' }) // t1: default
+  await call({ action: 'new', title: 'design', text: 'x', effort: 'high' }) // t2: the desk named high (design / refactoring)
+  expect(bg()[1]!.slice(5, 7)).toEqual(['--effort', 'high'])
+  const rec = (id: string, over: any) => h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ ...JSON.parse(h.files.get(`/h/.lean-agent/threads/${id}/thread.json`)!), sid: '', ...over }))
+  rec('t1', { effort: 'high' }) // a record from before 1.0.27: high only because it was the default
+  await call({ action: 'start', tN: 't1' })
+  await call({ action: 'start', tN: 't2' })
+  expect(bg()[2]!.slice(5, 7)).toEqual(['--effort', 'medium']) // restart of the defaulted thread
+  expect(bg()[3]!.slice(5, 7)).toEqual(['--effort', 'high']) // the named one keeps it
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ lean: { orchestrate: false } }))
+  await call({ action: 'new', title: 'self', text: 'x' }) // a thread that edits itself keeps high
+  expect(bg()[4]!.slice(5, 7)).toEqual(['--effort', 'high'])
 })
 
 test('a dead status with a lingering process is stopped and resumed, not left queued', async () => {
@@ -767,10 +786,10 @@ test('an older report cut in the handover names the file with its full text, wri
   await call({ action: 'new', title: 'a', text: 'brief' })
   const long = 'L'.repeat(1200)
   const rows = [
-    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (700) and the desk never wrote a file: the handover does
+    { ts: 10, from: 't1', kind: 'report', text: 'ancient', state: 'working' }, // older than the last 3: only counted
+    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (200) and the desk never wrote a file: the handover does
     { ts: 12, from: 't1', kind: 'report', text: `middle ${long}`, state: 'working' }, // cut, the desk's own file already exists
     { ts: 13, from: 't1', kind: 'report', text: 'short one', state: 'working' }, // whole: no pointer
-    { ts: 14, from: 't1', kind: 'report', text: 'last one', state: 'done' },
   ]
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
   h.files.set('/h/.lean-agent/desk/reports/12-t1-report.md', 'the desk wrote this')
@@ -778,6 +797,8 @@ test('an older report cut in the handover names the file with its full text, wri
   state.rows = []
   await call({ action: 'reopen', tN: 't1' })
   const prompt = bg[1]![bg[1]!.length - 1]!
+  expect(prompt).toContain('1 older reports: lean_thread report t1')
+  expect(prompt).not.toContain('ancient')
   expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/11-t1-report.md)')
   expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/12-t1-report.md)')
   expect(h.files.get('/h/.lean-agent/desk/reports/11-t1-report.md')).toBe(`# Report from t1 (working)\n\nearly ${long}\n`)
@@ -789,18 +810,19 @@ test('an older report cut in the handover names the file with its full text, wri
 test('reportHistory names the full-text path of a cut line only when asked, and reports which were cut', () => {
   const recs = [{ ts: 1, from: 't1', kind: 'report' as const, text: 'x'.repeat(900), state: 'working' }, { ts: 2, from: 't1', kind: 'ask' as const, text: 'last?', state: undefined }]
   expect(reportHistory(recs).lines[0]).not.toContain('full text in')
-  const r = reportHistory(recs, REPORT_BUDGET, x => `/d/reports/${x.ts}.md`)
+  const r = reportHistory(recs, x => `/d/reports/${x.ts}.md`)
   expect(r.lines[0]).toContain('(cut: full text in /d/reports/1.md)')
   expect(r.cutRecs.map(x => x.ts)).toEqual([1])
 })
 
-test('the handover keeps the newest report whole and cuts older ones to the budget', () => {
+test('1.0.27: the handover keeps the last 3 reports as 200-character digests and counts the older ones', () => {
   const recs = Array.from({ length: 40 }, (_, n) => ({ ts: n, from: 't1', kind: 'report' as const, text: `report ${n} ` + 'x'.repeat(900), state: 'working' }))
   recs.push({ ts: 99, from: 't1', kind: 'report', text: 'FINAL ' + 'y'.repeat(5000), state: 'done' })
   const { lines, omitted } = reportHistory(recs)
-  expect(lines[lines.length - 1]).toContain('y'.repeat(5000)) // newest whole
-  expect(lines.join('\n').length).toBeLessThan(REPORT_BUDGET + 6000)
-  expect(omitted).toBeGreaterThan(0)
+  expect(lines).toHaveLength(3)
+  expect(lines[2]).toContain('[done] FINAL ')
+  expect(lines[2]!.length).toBeLessThan(260)
+  expect(omitted).toBe(38)
   expect(lines.some(l => l.includes('report 39'))).toBe(true)
   expect(lines.some(l => l.includes('report 0 '))).toBe(false)
   expect(reportHistory([]).lines).toEqual([])

@@ -9,14 +9,14 @@ import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { threadHint } from './denial'
 
-export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number }
-export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[]; selfEdit?: string[] } // selfEdit: the worktrees the user let this thread edit itself (selfedit.ts, verified per call); projects: the registered projects' folders (only to name a path's kind in a refusal record)
+export type OrchConfig = { on: boolean; deskChars: number; agentChars: number; directReads: number; workers: number; briefChars: number; steps: number; stepsByJob: Partial<Record<string, number>>; requireJob: boolean; grantTtlMin: number; commit: boolean }
+export type OCtx = { kind: 'desk' | 'thread' | 'other'; agentType?: string; agentId?: string; job?: string; home: string; threadDir?: string; cwd?: string; projects?: string[]; selfEdit?: string[]; haiku?: string /* the haiku record of this project for the brief's job type (workerruns.ts haikuRecordText), said in the why-sonnet refusal */ } // selfEdit: the worktrees the user let this thread edit itself (selfedit.ts, verified per call); projects: the registered projects' folders (only to name a path's kind in a refusal record)
 export type Call = { tool: string; [k: string]: any }
 
 export const DESK_ROUTE = 'the desk routes: start or ask a thread (lean_thread new / send)'
 export const THREAD_STEP = 'one step for a small worker: lean-agent:worker-haiku (workers may read and edit) / lean-agent:reader-haiku (set the Agent parameter run_in_background to the boolean false; a worker that still starts in the background is fine: wait for its result notification, do not poll or duplicate the job)'
 export const SPLIT = 'return what you have; the thread splits the rest'
-export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120 }
+export const DEFAULTS: OrchConfig = { on: true, deskChars: 6000, agentChars: 6000, directReads: 3, workers: 4, briefChars: 3000, steps: 24, stepsByJob: {}, requireJob: false, grantTtlMin: 120, commit: true }
 
 // What was tried, for the refusal record (never a path, never an argument): ` [tried: Edit project]`, ` [tried: az pipelines]`. feedback.ts takes it out
 // of the text into the row's `what`, refusals.ts groups by it. A path is named by its KIND only.
@@ -72,6 +72,7 @@ export function orchConfig(cfg: any): OrchConfig {
     stepsByJob: byJob(pick(cfg, 'workers.stepsByJob')),
     requireJob: pick(cfg, 'workers.requireJob') === true,
     grantTtlMin: num(pick(cfg, 'grants.ttlMinutes'), DEFAULTS.grantTtlMin),
+    commit: pick(cfg, 'workers.commit') !== false && pick(cfg, 'workers.commit') !== 'false', // a worker may commit its own change when the brief says `commit: <message>`
   }
 }
 
@@ -118,6 +119,8 @@ export function takeStepNote(workerKey: string): string | null {
 const slots = new Map<string, { key: string; at: number }>() // subagent id -> the thread whose worker slot it holds (a background worker outlives its Agent call)
 const stopped = new Set<string>() // subagents that ended before their launch result was seen
 const MAX_TRACKED = 500
+const budgetHit = new Set<string>() // subagent ids whose call past the step budget was refused
+export const hitBudget = (agentId: string | undefined): boolean => !!agentId && budgetHit.has(agentId)
 export const orchTurnStart = (key: string): void => void reads.delete(key)
 export function orchReset(): void {
   reads.clear()
@@ -126,6 +129,7 @@ export function orchReset(): void {
   notes.clear()
   slots.clear()
   stopped.clear()
+  budgetHit.clear()
   denied.clear()
   readerDenied.clear()
   retryReset()
@@ -269,7 +273,7 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (isSmall(ctx.agentType)) return 'a worker never spawns workers; answer `split: <rest>` and the thread starts the next step'
   const s = bare(typeof e.subagent_type === 'string' ? e.subagent_type : '')
   const p = String(e.prompt ?? e.description ?? '')
-  if ((s === 'worker-sonnet' || s === 'reader-sonnet') && !/^\s*why-sonnet:\s*\S/m.test(p)) return `haiku by default: add a prompt line \`why-sonnet: <reason>\` or use lean-agent:${s.replace('sonnet', 'haiku')}`
+  if ((s === 'worker-sonnet' || s === 'reader-sonnet') && !/^\s*why-sonnet:\s*\S/m.test(p)) return `haiku by default: add a prompt line \`why-sonnet: <reason>\` or use lean-agent:${s.replace('sonnet', 'haiku')}${ctx.haiku ? `; ${ctx.haiku}` : ''}`
   if (!isSmall(s)) return null
   if (p.length > c.briefChars) return `one step per job: the brief is ${p.length} chars, at most ${c.briefChars} (workers.briefChars); split it, one job per step`
   if (c.requireJob && !jobOf(p)) return 'the first line of the brief names the job: `job: lookup|edit|run|check` (workers.requireJob)'
@@ -336,13 +340,18 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   const note = n <= budget ? stepNote(n, budget) : null // 75% of the budget used: the result of THIS call carries the line (takeStepNote)
   if (note) notes.set(k, note)
   else notes.delete(k)
+  if (n > budget) { // the run used its whole step budget (workerruns.ts counts the share of runs that did)
+    if (budgetHit.size >= MAX_TRACKED) budgetHit.delete(budgetHit.values().next().value as string)
+    budgetHit.add(k)
+  }
+  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, the check job's) is used: write the json block with what you have and answer; list what you could not check in unverified`
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
 // null = allow, a string = the refusal
 export function orchDecide(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (!c.on) return null
-  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : null
+  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : bare(ctx.agentType) === 'reviewer' ? workerDenial(c, { ...ctx, job: 'check' }, e) : null // the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) so it cannot explore
   if (ctx.kind === 'desk') return isAgentTool(e) ? DESK_ROUTE : null
   if (ctx.kind === 'thread') return threadDenial(c, ctx, e)
   return null

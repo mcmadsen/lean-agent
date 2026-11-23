@@ -1,5 +1,6 @@
 // Small messages (scripts over models): an oversized tool result is cut BEFORE it enters a thread's conversation. A Bash or MCP text
-// over config.json `toolResultChars` (default 20000, 0 = off) keeps its head and tail; the full text is saved in the one output
+// over config.json `toolResultChars` (default 20000, 0 = off; for a thread's OWN results `threadToolResultChars`, default 8000, 1.0.27;
+// a worker's keep 20000) keeps its head and tail (a `git diff` / `git show` result also gets a hint line: --stat first); the full text is saved in the one output
 // folder (~/.lean-agent/output/, output.ts; the Bash line squeeze saves there too) and one line says where (Read it if it is needed). Never touched: Edit and Write results, errors, the
 // desk, a subagent's results, lean-agent's own tools. A result that cannot be saved in full is never cut. Every cut is counted
 // (capped.jsonl) for `lean_doctor stats` ("saved 140k chars in 12 results").
@@ -12,6 +13,7 @@ import { resetOutput, saveOutput } from './output'
 import { readConfig } from './budget'
 
 export const DEFAULT_CAP = 20_000
+export const DEFAULT_THREAD_CAP = 8_000 // 1.0.27: a thread's own results (its context is the one that is capped); a worker's and a reader's keep DEFAULT_CAP
 const MIN_CAP = 2_000 // a smaller configured value is ignored
 
 // config.json `toolResultChars`: a number >= 2000 (below that, or not a number: the default); 0 turns the cap off
@@ -20,9 +22,19 @@ export async function capChars(h: Host): Promise<number> {
   if (v === 0) return 0
   return typeof v === 'number' && Number.isFinite(v) && v >= MIN_CAP ? Math.floor(v) : DEFAULT_CAP
 }
+// config.json `threadToolResultChars` (a number >= 2000, default 8000): the cap of a thread's own results; never above `toolResultChars`; 0 there = off
+export async function threadCapChars(h: Host): Promise<number> {
+  const base = await capChars(h)
+  if (!base) return 0
+  const v = ((await readConfig(h, await homeDir(h))) as any)?.threadToolResultChars
+  return typeof v === 'number' && Number.isFinite(v) && v >= MIN_CAP ? Math.min(Math.floor(v), base) : Math.min(DEFAULT_THREAD_CAP, base)
+}
+// a Bash command that prints a diff: the hint line says how to read one cheaply
+const DIFF_CMD = /\bgit\b[^|;&\n]*?\s(?:diff|show)\b|\bgit\b[^|;&\n]*?\slog\b[^|;&\n]*\s(?:-p|--patch)\b/
+export const diffHint = (command: string, text: string): string => (DIFF_CMD.test(command) ? `diff: ${text.split('\n').length} lines: use --stat first, then one path at a time` : '')
 
 // head (about 60%) and tail (about 30%) of a text, cut at line ends where there is one near, with the pointer line at the end
-export function cutText(text: string, cap: number, file: string): string {
+export function cutText(text: string, cap: number, file: string, what = ''): string {
   let head = text.slice(0, Math.floor(cap * 0.6))
   let tail = text.slice(text.length - Math.floor(cap * 0.3))
   const nl = head.lastIndexOf('\n')
@@ -30,7 +42,7 @@ export function cutText(text: string, cap: number, file: string): string {
   const tn = tail.indexOf('\n')
   if (tn >= 0 && tn < tail.length * 0.5) tail = tail.slice(tn + 1)
   const dropped = text.length - head.length - tail.length
-  return `${head}\n[... ${dropped} characters cut ...]\n${tail}\n[lean-agent: result cut from ${text.length} to ${head.length + tail.length} characters; the full text is in ${file} (Read it if you need more)]`
+  return `${head}\n[... ${dropped} characters cut ...]\n${tail}\n[lean-agent: result${what ? ` of ${what}` : ''} cut from ${text.length} to ${head.length + tail.length} characters; the full text is in ${file} (Read it if you need more)]`
 }
 
 export const isText = (b: any): b is { type: 'text'; text: string } => !!b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string'
@@ -61,14 +73,17 @@ export const resetCap = (): void => {
 }
 
 // `r` is what `next(e)` resolved to. Returns it unchanged unless a text of it is over the cap.
-export async function capResult(h: Host, thread: string, tool: string, r: any): Promise<any> {
+// `o.worker`: the result is a worker's (its own context: the 20000 cap); `o.command`: the Bash command, named in the cut text
+export async function capResult(h: Host, thread: string, tool: string, r: any, o: { worker?: boolean; command?: string } = {}): Promise<any> {
   if (!r || r.deny !== undefined || r.isError || !cappable(tool) || !/^t\d+$/.test(thread)) return r
   const res = r.result
   if (!res || (typeof res === 'object' && !Array.isArray(res) && res.isError === true)) return r
   const bash = tool === 'Bash'
   if (bash && (typeof res !== 'object' || Array.isArray(res) || typeof res.stdout !== 'string')) return r // (a failed call's result is its error text)
-  const cap = await capChars(h)
+  const cap = o.worker ? await capChars(h) : await threadCapChars(h)
   if (!cap) return r
+  const command = bash && typeof o.command === 'string' ? o.command.replace(/\s+/g, ' ').trim() : ''
+  const what = bash ? (command ? `\`${command.length > 80 ? command.slice(0, 79) + '…' : command}\`` : 'Bash') : tool
   const all = bash ? [res.stdout as string, typeof res.stderr === 'string' ? (res.stderr as string) : ''] : textsOf(res)
   if (!all.some(t => t.length > cap)) return r
   const home = await homeDir(h)
@@ -81,7 +96,8 @@ export async function capResult(h: Host, thread: string, tool: string, r: any): 
   let saved = 0
   const f = (t: string) => {
     if (t.length <= cap) return t
-    const out = cutText(t, cap, file)
+    const hint = bash && t === res.stdout ? diffHint(command, t) : ''
+    const out = cutText(t, cap, file, what) + (hint ? `\n${hint}` : '')
     if (out.length >= t.length) return t // (a cap near the minimum: the pointer lines would make it longer)
     saved += t.length - out.length
     return out

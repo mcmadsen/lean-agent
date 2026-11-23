@@ -15,6 +15,7 @@ const LIM = { limit: 120_000, warn: 100_000 }
 function setup() {
   const h = fakeHost(null)
   h.clock.t = 1_000_000
+  h.files.set(`${L}/config.json`, '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${T1}/thread.json`, JSON.stringify(THREAD))
   h.files.set(`${T1}/brief.md`, 'write the plan\n')
   h.files.set(`${T1}/scratch/notes.md`, '## living doc\nsays: the plan has 4 phases\nstill need: phase 3 owner\n')
@@ -28,7 +29,11 @@ test('the warn line: at the warn level ONE line per session, with the numbers an
   warnReset()
   expect(takeWarn('s1', 100_000, LIM)).toBeNull() // at the level is not over it
   expect(takeWarn('s1', 101_000, LIM)).toBe('context 101k of 120k: write what you have learned so far to scratch/notes.md now (one short section per source: what it says, what you still need); a restart resumes from it and the scratch files replace re-reading the sources')
-  expect(takeWarn('s1', 110_000, LIM)).toBeNull()
+  expect(takeWarn('s1', 107_000, LIM)).toBeNull() // under 90% of the limit (108k)
+  expect(takeWarn('s1', 110_000, LIM)).toBe(warnLine(110_000, 120_000)) // 1.0.27: and once more at 90%
+  expect(takeWarn('s1', 115_000, LIM)).toBeNull()
+  expect(takeWarn('s4', 112_000, LIM)).toBe(warnLine(112_000, 120_000)) // both levels passed at once: one line
+  expect(takeWarn('s4', 113_000, LIM)).toBeNull()
   expect(takeWarn('s2', 99_000, LIM)).toBeNull()
   expect(takeWarn('s2', 105_000, LIM)).toBe(warnLine(105_000, 120_000))
   expect(takeWarn('', 110_000, LIM)).toBeNull()
@@ -67,7 +72,7 @@ test('the state snapshot lists the scratch files and the handover carries scratc
 test('the handover budget cuts the scratch list before the notes, and the notes before the brief', async () => {
   const h = setup()
   for (let i = 0; i < 20; i++) h.files.set(`${T1}/scratch/r${String(i).padStart(2, '0')}.md`, `# summary ${i} ${'y'.repeat(120)}`)
-  h.files.set(`${L}/config.json`, JSON.stringify({ handoverTokens: 500 }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ handoverTokens: 500, handover: { mode: 'full' } }))
   const ho = await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])
   const parts = ho.parts!
   const list = parts.find(p => p.name === 'scratchlist')!.body // (at most 6 files in all: scratch/notes.md has its own section, 5 are listed at most, the rest is one line)
@@ -100,5 +105,8 @@ test('through the engine: a tool result of a thread at the warn level carries th
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 104_000
   expect(await ctx()).toContain('context 104k of 120k: write what you have learned so far to scratch/notes.md now')
-  expect(await ctx()).not.toContain('scratch/notes.md') // once per session
+  expect(await ctx()).not.toContain('scratch/notes.md') // once per session at the warn level
+  tokens = 110_000
+  expect(await ctx()).toContain('context 110k of 120k: write what you have learned') // and again at 90% of the limit
+  expect(await ctx()).not.toContain('scratch/notes.md')
 })

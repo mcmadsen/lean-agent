@@ -202,4 +202,6 @@ vv=$(sed -n "s/^export const VERSION = '\([^']*\)'.*/\1/p" "$root/hooks/pane.tsx
 [ -n "$pv" ] && [ "$pv" = "$mv" ] && [ "$pv" = "$vv" ] || fail "version mismatch: plugin.json=$pv marketplace.json=$mv pane.tsx=$vv"
 # roles: tools named per role, and the desk's commands (hooks/skills-roles.test.ts runs them through strict mode)
 node "$root/hooks/skills-contract.mjs" || fail "skills roles (see above)"
+# 1.0.27: the context diet line, word for word, in the thread guide and the thread skill
+for f in "$root/templates/thread.md" "$here/thread/SKILL.md"; do grep -qF -- 'run the full test suite once per step, targeted runs in between; read diffs with --stat and one path; never read a notes file in full: headings first' "$f" || fail "$(basename "$f") lacks the context diet line"; done
 echo "ok skills-contract"
