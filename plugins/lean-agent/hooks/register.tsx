@@ -17,6 +17,7 @@ import { ownFromGrant } from './ownpr'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
+import { registerLook } from './look'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
@@ -1101,6 +1102,7 @@ export const register: Register = on => {
   })
 
   registerPane(on, () => role)
+  registerLook(on) // the optional look (config pane.theme: on; off by default, look.ts)
 
   // the desk pane's two companions, opened by its buttons (threadpane.tsx, newthread.tsx): one pane per thread and the new-thread form;
   // any other pane id goes on to the hook that draws it
