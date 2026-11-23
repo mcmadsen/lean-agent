@@ -10,7 +10,7 @@ import type { Host } from './state'
 import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
-import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
+import { recordHumanPrompt } from './humanprompts'import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -1342,6 +1342,8 @@ export const register: Register = on => {
     if (role.kind === 'desk') {
       await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session
+      // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
+      if (!e.agentId) await recordHumanPrompt(host, e).catch(() => false)
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
