@@ -27,6 +27,7 @@ import type { ModelRequest } from './expensive'
 // answerAction is called from here and from the desk's AskUserQuestion hook (bindAnswers) and from nowhere else: only the user's press or the
 // user's answer to the desk's question approves a thread's remote write (deskactions.ts)
 import { STANDING_LABEL, answerAction, approveAction, revokeGrant } from './deskactions'
+import { revokeWrites } from './deskwrites'
 import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
@@ -544,6 +545,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       sayModel(out.text, !out.ok)
       tell()
     }
+    // the user's written approvals (deskwrites.ts): the pane's Revoke only takes power away
+    const revokeWritten = (grant: string) => async () => {
+      resetViewCache()
+      const out = await revokeWrites(host, { id: grant })
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    }
     const denyWrite = (a: ActionView) =>
       twoStep(`action:deny:${a.id}`, async () => {
         resetViewCache()
@@ -696,6 +705,26 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           ))}
         </Box>
       ) : null
+    // ---- the user's written approvals (deskwrites.ts): each write sent under one with its exact text, and the grants still live, each with Revoke ----
+    const wr = v?.writes
+    const wrSent = new Set((wr?.sent ?? []).map(s => s.grant).filter(Boolean))
+    const writtenBlock =
+      wr && (wr.sent.length > 0 || wr.grants.length > 0) ? (
+        <Box key="written-approvals" flexDirection="column">
+          {wr.sent.map(s => (
+            <Box key={`wr-sent-${s.ts}-${s.thread}`} flexWrap="wrap" columnGap={1}>
+              <Text wrap="wrap">{`${s.thread}: ${s.text}`}</Text>
+              {!!s.grant && <Button key={`wr-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={revokeWritten(s.grant)} />}
+            </Box>
+          ))}
+          {wr.grants.filter(g => !wrSent.has(g.id)).map(g => (
+            <Box key={`wr-grant-${g.id}`} flexWrap="wrap" columnGap={1}>
+              <Text dimColor wrap="wrap">{`${g.thread}: your instruction '${g.quote.slice(0, 80)}' allows ${g.kinds.join(', ')} on ${g.scope.replace(/^(Azure DevOps|GitHub) /, '')} (${g.used}/${g.cap} writes) until ${new Date(g.exp).toISOString().slice(11, 16)} UTC`}</Text>
+              <Button key={`wr-revoke-${g.id}`} label="Revoke" onPress={revokeWritten(g.id)} />
+            </Box>
+          ))}
+        </Box>
+      ) : null
     const needsBlock =
       needs.length > 0 ? (
         <Box flexDirection="column">
@@ -835,6 +864,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         })}
         {needsBlock}
         {standingBlock}
+        {writtenBlock}
         <Box flexWrap="wrap" columnGap={1}>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}
           {doneThreads.length >= 2 && closable.length > 0 && (

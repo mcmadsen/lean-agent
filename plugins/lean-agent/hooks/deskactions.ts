@@ -195,7 +195,7 @@ export function checkAction(a: unknown): Checked {
 }
 
 // a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
-const targetOf = (kind: ActionKind, p: Params): string =>
+export const targetOf = (kind: ActionKind, p: Params): string =>
   kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
 function checkBatch(x: Record<string, unknown>): Checked {
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
@@ -246,16 +246,16 @@ export const STANDING_LABEL = 'Approve, and allow status changes on this PR for 
 export const standingEligible = (kind: ActionKind, p: Params): boolean => kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status))
 
 const REQUESTS = 'action.requests'
-const answerKey = (id: string) => `action.answer.${id}`
+export const answerKey = (id: string) => `action.answer.${id}`
 const usedKey = (id: string) => `action.used.${id}`
 const sigText = (r: Pick<ActionRequest, 'id' | 'thread' | 'kind' | 'hash' | 'ts' | 'exp'>) => `desk-action\n${r.id}\n${r.thread}\n${r.kind}\n${r.hash}\n${r.ts}\n${r.exp}`
-const answerText = (a: Pick<Answer, 'id' | 'hash' | 'answer' | 'ts'>) => `desk-action-answer\n${a.id}\n${a.hash}\n${a.answer}\n${a.ts}`
+export const answerText = (a: Pick<Answer, 'id' | 'hash' | 'answer' | 'ts'>) => `desk-action-answer\n${a.id}\n${a.hash}\n${a.answer}\n${a.ts}`
 const idOk = (s: unknown): s is string => typeof s === 'string' && /^a\d{1,16}-\d{1,9}$/.test(s)
-const threadOk = (s: unknown): s is string => typeof s === 'string' && /^t\d{1,9}$/.test(s)
+export const threadOk = (s: unknown): s is string => typeof s === 'string' && /^t\d{1,9}$/.test(s)
 let seq = 0
 
 let gate: Promise<unknown> = Promise.resolve()
-const exclusive = <T>(f: () => Promise<T>): Promise<T> => {
+export const exclusive = <T>(f: () => Promise<T>): Promise<T> => {
   const r = gate.then(f, f)
   gate = r.catch(() => undefined)
   return r
@@ -266,14 +266,14 @@ export const resetActions = () => {
   seq = 0
 }
 
-async function rows(h: Host): Promise<ActionRequest[]> {
+export async function rows(h: Host): Promise<ActionRequest[]> {
   const v = await h.store.get(REQUESTS).catch(() => null)
   return (Array.isArray(v) ? v : []).filter((r): r is ActionRequest => !!r && idOk(r.id) && threadOk(r.thread) && isKind(r.kind) && typeof r.hash === 'string' && typeof r.sig === 'string' && Number.isFinite(r.ts) && Number.isFinite(r.exp) && !!r.params && typeof r.params === 'object')
 }
 const save = (h: Host, all: ActionRequest[]) => h.store.set(REQUESTS, all.slice(-ACTIONS_MAX))
 
 // the request's own checks: signed by this mod, and what it would send is still exactly what was hashed. A plan is returned only for a sound request.
-async function sound(h: Host, r: ActionRequest): Promise<Plan | null> {
+export async function sound(h: Host, r: ActionRequest): Promise<Plan | null> {
   const want = await macOf(h, sigText(r), false)
   if (!want || want.length !== r.sig.length || want !== r.sig) return null
   const c = checkAction({ kind: r.kind, params: r.params })
@@ -289,7 +289,7 @@ async function answerOf(h: Host, r: ActionRequest): Promise<Answer | null> {
 // used = the store holds the time it was sent; an unreadable store counts as used (never sent twice on a guess)
 const usedOf = async (h: Host, id: string): Promise<boolean> => typeof (await h.store.get(usedKey(id)).catch(() => 1)) === 'number'
 
-async function stateOf(h: Host, r: ActionRequest, now: number): Promise<ActionState> {
+export async function stateOf(h: Host, r: ActionRequest, now: number): Promise<ActionState> {
   if (await usedOf(h, r.id)) return 'used'
   const a = await answerOf(h, r)
   if (a?.answer === 'deny') return 'denied'
@@ -331,7 +331,7 @@ export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 't
   }
 }
 
-const logHistory = async (h: Host, thread: string, rec: Record<string, unknown>): Promise<void> => {
+export const logHistory = async (h: Host, thread: string, rec: Record<string, unknown>): Promise<void> => {
   const home = await homeDir(h)
   await appendJsonl(h, `${threadsDir(home)}/${thread}/history.jsonl`, { ts: await h.clock.now(), ...rec }).catch(() => undefined)
 }
@@ -544,6 +544,30 @@ export async function runStanding(h: Host, id: string): Promise<{ sent: boolean;
   await h.store.set(SENT, [...(Array.isArray(prev) ? prev : []), { ts: now, thread: r.thread, text: line, ...(cover.grant ? { grant: cover.grant } : {}) } satisfies SentRec].slice(-10))
   await logHistory(h, r.thread, { kind: 'standing-sent', id, action: r.kind, by: cover.label, result: what.slice(0, 300) })
   return { sent: true, line }
+}
+
+// the user's WRITTEN instruction covers this request (deskwrites.ts decided): the mod records its own signed answer (by 'standing') and sends it through
+// the SAME executor (approveAction: signature, hash re-check, token on stdin). `before` runs inside the claim (the grant's write count is taken there,
+// and may refuse). Returns null when the request is no longer pending or `before` refused; else whether it went out.
+export async function claimAndSend(h: Host, id: string, label: string, before?: (r: ActionRequest, plan: Plan) => Promise<boolean>): Promise<{ sent: boolean; text: string; plan: Plan; r: ActionRequest } | null> {
+  const r = (await rows(h)).find(x => x.id === id)
+  if (!r) return null
+  const plan = await sound(h, r)
+  if (!plan) return null
+  const now = await h.clock.now()
+  const claimed = await exclusive(async () => {
+    if ((await stateOf(h, r, now)) !== 'pending') return false
+    if (before && !(await before(r, plan))) return false
+    const base = { id, hash: r.hash, answer: 'approve' as const, by: 'standing' as const, ts: now }
+    const sig = await macOf(h, answerText(base), true)
+    if (!sig) return false
+    await h.store.set(answerKey(id), { ...base, sig } satisfies Answer)
+    return true
+  })
+  if (!claimed) return null
+  await logHistory(h, r.thread, { kind: 'action-approve', id, action: r.kind, hash: checkCode(r.hash), by: label })
+  const out = await approveAction(h, id)
+  return { sent: out.ok, text: out.text, plan, r }
 }
 
 // what the pane and `action-list` show: the active grants, and the recent standing sends (each with its grant while that is still active)

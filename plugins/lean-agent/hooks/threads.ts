@@ -10,6 +10,7 @@ import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
+import { allowWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
@@ -230,7 +231,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string }
+export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[] }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -788,6 +789,8 @@ const USES: Record<string, string[]> = {
   push: ['sha', 'pr', 'reason'],
   'action-list': [],
   'approve-action': ['id'],
+  'allow-writes': ['target', 'kinds'],
+  'revoke-writes': ['id'],
   keep: ['on'],
   find: TEXTY,
   ask: TEXTY,
@@ -872,8 +875,18 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     // only a request the user approved; the thread is told the outcome through its inbox
     if (i.action === 'action-list' || i.action === 'approve-action') {
       const tell = (thread: string, text: string): Promise<void> => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined)
-      if (i.action === 'action-list') return { ok: true, text: await actionListText(h, tell) }
+      if (i.action === 'action-list') return { ok: true, text: `${await actionListText(h, tell)}${await writesListText(h).catch(() => '')}` }
       const o = await approveAction(h, (i.id ?? '').trim(), tell)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    // approval in advance (deskwrites.ts): the mod makes the grant only when the user's own recorded words name the target and ask for the work
+    if (i.action === 'allow-writes') {
+      const o = await allowWrites(h, (i.tN ?? '').trim(), i.target, i.kinds)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    if (i.action === 'revoke-writes') {
+      const tn = (i.tN ?? '').trim()
+      const o = await revokeWrites(h, i.id ? { id: i.id.trim() } : tn ? { thread: tn } : { all: true }, 'user, by the desk')
       return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     if (/^projects$|^project-(add|remove|private)$/.test(i.action)) {
@@ -1054,6 +1067,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
           await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
           await dropGrants(h, id).catch(() => undefined) // and its standing approvals end with it
+          await dropWriteGrants(h, id).catch(() => undefined) // and so do the written approvals (deskwrites.ts)
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null

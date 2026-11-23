@@ -10,7 +10,9 @@ import type { Host } from './state'
 import { BUSY_MAX_MS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
-import { recordHumanPrompt } from './humanprompts'import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
+import { recordHumanPrompt } from './humanprompts'
+import { revokeByWords } from './deskwrites'
+import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { overBudget, record } from './budget'
@@ -176,13 +178,15 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
     message: { type: 'string', description: 'alias of text (restart / reopen / start / wake / resume / send / new)' },
     text: { type: 'string', description: 'restart / reopen / start / wake / resume: NEW INSTRUCTIONS and facts for the session this call starts: they are the last part of its first prompt, after the handover, and win where they differ (put them here, never in a separate send); new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     id: { type: 'string', description: 'approve-action: the request id from action-list (like a1700000000000-1), only after the USER chose Approve for exactly that request in AskUserQuestion (or pressed Approve in the pane)' },
+    target: { type: 'object', description: 'allow-writes (tN + this): the PR or work item the USER named in their own typed words: exactly one of pr (number or URL) or workitem (id). The mod makes the grant only when a recorded prompt of the user, not older than 24 h, names it and asks for the work (fix / resolve / answer ... the comments); else it refuses and you ask with AskUserQuestion. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
+    kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: optional narrower list; a PR: reply, status, comment (default all three); a work item: comment, update' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
     reason: { type: 'string', description: 'approve-push: why, in a few words. new/start/reopen/restart/resume with an expensive model (opus): why sonnet is not enough (required; the thread does NOT start, the request waits in the pane for the user\'s Approve)' },
     review: { type: 'object', description: 'new: start a REVIEW thread (it runs lean-agent:review at level full and cannot report done without a lean_review record): exactly one of pr (number or URL), branch or sha, plus base (optional); needs project; sonnet/high by default (haiku is raised to sonnet)', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
@@ -479,7 +483,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once; approval in advance: when the user\'s own words name a PR or work item and ask for the work, allow-writes (tN, target {pr | workitem}, kinds?) lets the mod send that thread\'s writes on that target without asking (refused unless the user\'s recorded words carry it), revoke-writes (tN or id) takes it back. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -1343,7 +1347,8 @@ export const register: Register = on => {
       await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
-      if (!e.agentId) await recordHumanPrompt(host, e).catch(() => false)
+      // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
+      if (!e.agentId && (await recordHumanPrompt(host, e).catch(() => false))) await revokeByWords(host, e.text).catch(() => undefined)
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
