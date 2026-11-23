@@ -513,19 +513,28 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   await feed($, 85_000)
   ui = await $.ui.mount(DESKPANE as any)
   expect(await ui.find({ type: 'Text', text: /85k of 100k/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'desk context 85k of 100k: restart the desk soon (the handover is ready)' })).toBeTruthy() // the amber line, with the button next to it
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeTruthy() // ONE amber line, with the button next to it
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy() // still under the limit: not yet a need
   await ui.unmount()
+  // 1.0.30: over the limit it is the same ONE row (no card, no second line, no "type /compact"); the desk restarts itself, so the row says "restarting" and has no button
   await feed($, 105_000)
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /desk context 105k is over its limit \(100k\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeTruthy() // the button on the need's own card
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy() // and beside the bar
-  await ui.press({ key: 'restart-desk-top' })
-  expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy() // one two-step for both
-  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(3) // the card, beside the bar, the footer
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: 'restarting the desk (context 105k of 100k): a new session opens by itself' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /over its limit|\/compact|restart the desk/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer' })).toBeTruthy() // the footer button is permanent
+  await ui.unmount()
+  // the guard holds the automatic restart back (one ran 5 min ago): "restart the desk" with the button, still one row
+  h.files.set('/h/.lean-agent/desk/auto-restarts.json', JSON.stringify({ runs: [{ at: h.clock.t - 300_000, kind: 'context', text: 'context 100k' }] }))
+  resetViewCache()
+  ui = await $.ui.mount(DESKPANE as any)
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 105k of 100k, the handover is ready)' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
+  await ui.press({ key: 'restart-desk' })
+  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(2) // beside the row, the footer
   await ui.unmount()
 })
 

@@ -37,7 +37,7 @@ test('a set-up home with a doctor finding shows "Doctor: 1 finding (1 fix, 0 inf
   ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Text', text: /lean-agent is not set up/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /Set up lean-agent/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /Doctor: \d+ findings? \(\d+ fix, \d+ info\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Doctor: \d+ findings? \(\d+ fix\)/ })).toBeTruthy() // 1.0.30: "N findings (F fix)", the info lines behind show / hide in the desk
   expect(await ui.find({ type: 'Button', text: /Run fix/ })).toBeTruthy()
   await ui.unmount()
 })

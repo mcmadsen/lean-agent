@@ -286,6 +286,25 @@ test('every section empty: no Needs you, no Goals, an empty-state line for threa
   await ui.unmount()
 })
 
+test('1.0.30: the rules cap and the old desk are ONE amber line each, never "error:"; a real failure stays "error:"', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = world(on)
+  h.files.set(`${L}/notices/rules-cap.txt`, 'rules synthetic: 1 over the size cap, still loaded; learn synthetic --trim or lean_rules check\n')
+  h.files.set(`${L}/notices/old-desk.txt`, `lean-agent: the old desk session synthetic-desk is not archived: ${'archive it in the app, '.repeat(12)}\n`)
+  h.files.set(`${L}/notices/other.txt`, 'something is really broken\n')
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  const rules = all.filter(t => /over the size cap/.test(t))
+  expect(rules).toHaveLength(1)
+  expect(rules[0]).not.toMatch(/error/)
+  const old = all.filter(t => /old desk session/.test(t))
+  expect(old).toHaveLength(1) // one row for the old desk
+  expect(old[0]).not.toMatch(/error/)
+  expect(old[0]!.length).toBeLessThanOrEqual(160) // one line
+  expect(all).toContain('error: something is really broken')
+  await ui.unmount()
+})
+
 test('every section full: needs, cards, inbox, goals, closed and More all draw, and the buttons of each work', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1) })

@@ -18,7 +18,7 @@ import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
-import { kTokens, recentUser, restartDesk, sessionId, soonText } from './deskcompact'
+import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
 import { openNewThread, openThreadPane } from './panelinks'
 import { notifyTick } from './notify'
 // grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
@@ -193,8 +193,12 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const showHidden = (await readUi($)).rows.dismissed === true
     const isGone = (i: DItem) => goneDesk.has(dkey(i))
     const docId = (m: string): DItem => ({ thread: 'desk', kind: 'notice', id: `doctor:${m}` })
-    const fixes = showHidden ? fixes0 : fixes0.filter(m => !isGone(docId(m)))
-    const info = showHidden ? info0 : info0.filter(m => !isGone(docId(m)))
+    // one row per fact (1.0.30): a doctor line about what the header or a notice already says is not shown a second time
+    const deskRowShown = !!v && v.desk.limit > 0 && v.desk.context > 0 && Math.round((v.desk.context / v.desk.limit) * 100) >= OVER_PCT
+    const oldDeskShown = (v?.notices ?? []).some(n => /old desk session/.test(n.text))
+    const dupFact = (m: string) => (deskRowShown && /desk compaction|desk context|restart the desk/.test(m)) || (oldDeskShown && /old desk session/.test(m))
+    const fixes = (showHidden ? fixes0 : fixes0.filter(m => !isGone(docId(m)))).filter(m => !dupFact(m))
+    const info = (showHidden ? info0 : info0.filter(m => !isGone(docId(m)))).filter(m => !dupFact(m))
     const dismissLine = (items: DItem[]) => async () => {
       try {
         for (const i of items) await recordDismiss(host, homeP, i, i.id.slice(i.id.indexOf(':') + 1))
@@ -287,26 +291,30 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     )
     // what the doctor found beyond the setup: "Doctor: N findings (F fix, I info)", the fix rows red, the info rows dim; Run fix only when something needs a fix
     const nFindings = fixes.length + info.length
-    const doctorRows =
+    // ONE line "Doctor: N findings (F fix)" with show / hide; what needs a fix is red (something is broken), each line cut at one line, the info lines only when shown
+    const doctorBlock = (open: boolean, toggle?: () => Promise<void>) =>
       nFindings > 0 ? (
         <Box flexDirection="column">
           <Box flexWrap="wrap" columnGap={1}>
-            <Text bold color={fixes.length ? 'yellow' : undefined}>{`Doctor: ${nFindings} finding${nFindings === 1 ? '' : 's'} (${fixes.length} fix, ${info.length} info)`}</Text>
+            <Text bold color={fixes.length ? 'warning' : undefined}>{`Doctor: ${nFindings} finding${nFindings === 1 ? '' : 's'} (${fixes.length} fix)`}</Text>
+            {!!toggle && <Button key="doctor-toggle" plain label={open ? 'hide' : 'show'} onPress={toggle} />}
+            {fixes.length > 0 && <Button key="doctor-fix" label="Run fix" onPress={runSetup} />}
             <Button key="doctor-dismiss" label="Dismiss" onPress={dismissLine([...fixes, ...info].filter(m => !isGone(docId(m))).map(docId))} />
           </Box>
           {fixes.map((m, i) => (
-            <Text key={`df-${i}`} color="red">
-              {m}
+            <Text key={`df-${i}`} color="error">
+              {short(m, 160)}
             </Text>
           ))}
-          {info.map((m, i) => (
-            <Text key={`di-${i}`} dimColor>
-              {short(m, 200)}
-            </Text>
-          ))}
-          {fixes.length > 0 && <Button key="doctor-fix" label="Run fix" onPress={runSetup} />}
+          {open &&
+            info.map((m, i) => (
+              <Text key={`di-${i}`} dimColor>
+                {short(m, 160)}
+              </Text>
+            ))}
         </Box>
       ) : null
+    const doctorRows = doctorBlock(true)
     if (kind !== 'desk') {
       // a session that is not the desk: setup first (or the way to the desk), the desk's own view only in the desk
       return (
@@ -694,7 +702,6 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {(n.kind === 'question' || n.kind === 'push' || n.kind === 'blocked') && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!w && <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />}
             {!!w && <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />}
-            {n.kind === 'context' && <Button key="restart-desk-top" label={restartLabel} onPress={restartDeskPress} />}
             {!!mr && mr.state === 'pending' && <Button key={`model-approve-${mr.id}`} label={confirming(ui, `model:approve:${mr.id}`, now2) ? `Confirm approve ${mr.family} for ${mr.thread}` : 'Approve'} onPress={approveModel(mr)} />}
             {!!mr && mr.state === 'pending' && <Button key={`model-deny-${mr.id}`} label={confirming(ui, `model:deny:${mr.id}`, now2) ? `Confirm deny ${mr.family}` : 'Deny'} onPress={denyModel(mr)} />}
             {!!mr && mr.origin === 'tool' && <Button key={`model-sonnet-${mr.id}`} label="Start on sonnet instead" onPress={onSonnet(mr)} />}
@@ -898,13 +905,17 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         ) : (
           <Text dimColor>desk context: known after the next request</Text>
         )}
-        {/* from 80% of the limit: the amber line (the handover is already written, deskcompact.ts) with Restart desk next to it */}
-        {overDesk && (
-          <Box flexWrap="wrap" columnGap={1}>
-            <Text color="warning">{soonText(ctx, limit)}</Text>
-            <Button key="restart-desk" label={restartLabel} onPress={restartDeskPress} />
-          </Box>
-        )}
+        {/* from 80% of the limit: ONE row, one instruction (the handover is already written, deskcompact.ts): the desk restarts itself when it
+            can ("restarting", nothing to press), else "restart the desk" with the button */}
+        {overDesk &&
+          (desk?.restarting ? (
+            <Text color="warning">{`restarting the desk (context ${kTokens(ctx)} of ${kTokens(limit)}): a new session opens by itself`}</Text>
+          ) : (
+            <Box flexWrap="wrap" columnGap={1}>
+              <Text color="warning">{`restart the desk (context ${kTokens(ctx)} of ${kTokens(limit)}, the handover is ready)`}</Text>
+              <Button key="restart-desk" label={restartLabel} onPress={restartDeskPress} />
+            </Box>
+          ))}
         <Text dimColor size="caption">
           lean-agent {VERSION} · refreshed {lastRefresh || 'never'}
           {lastError ? ` · last error: ${lastError}` : ''}
@@ -914,7 +925,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     return (
       <Box flexDirection="column">
         {header}
-        {missing.length > 0 ? problemRows : doctorRows}
+        {missing.length > 0 ? problemRows : doctorBlock(ui.rows.doctor === true, toggleRow('doctor'))}
         {mcpBlock}
         {!!notice && !errors.includes(notice) && (
           <Box flexWrap="wrap" columnGap={1}>
@@ -932,8 +943,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           const hid = !!v?.dismissedNotices.includes(nt)
           return (
             <Box key={`nt-${nt.key}`} flexWrap="wrap" columnGap={1}>
-              <Text color={hid ? undefined : nt.budget ? 'warning' : 'red'} dimColor={hid} wrap="wrap">
-                {nt.budget ? nt.text : `error: ${nt.text}`}
+              <Text color={hid ? undefined : nt.budget || nt.warn ? 'warning' : 'error'} dimColor={hid} wrap="wrap">
+                {nt.budget ? nt.text : nt.warn ? short(nt.text.replace(/^lean-agent:\s*/, ''), 160) : `error: ${nt.text}`}
                 {hid ? ' (dismissed)' : ''}
               </Text>
               {!hid && <Button key={`notice-dismiss-${nt.key}`} label="Dismiss" onPress={dismissLine([nt.dk])} />}

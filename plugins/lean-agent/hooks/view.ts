@@ -28,6 +28,7 @@ import type { ActionView, StandingView } from './deskactions'
 import { writesView } from './deskwrites'
 import type { WritesView } from './deskwrites'
 import { contextSize, deskNote, deskTokens } from './deskcompact'
+import { autoGuard } from './deskauto'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
 import { slugOk } from './rules'
@@ -68,9 +69,9 @@ export type NeedKind ='approval' | 'denial' | 'question' | 'push' | 'blocked' | 
 export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting; request?: ModelRequest; action?: ActionView; dk?: DItem }
 // one thread's inbox: unread rows first, then at most READ_SHOWN read ones (`read` holds every read row that is not archived)
 // a line at the top of the pane that comes from a notice file (budget alert, restart that gave up, old-desk reminder, ...); budget: an alert, not an error
-export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean }
+export type NoticeRow = { key: string; text: string; dk: DItem; budget?: boolean; warn?: boolean /* a heads-up, nothing is broken (the rules cap, the old desk, the restart guard): amber, one line */ }
 export type InboxGroup = { from: string; title: string; unread: AnswerRow[]; read: AnswerRow[]; newest: number }
-export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string }
+export type DeskInfo = { context: number; limit: number; model: string; effort: string; note: string; restarting?: boolean /* the context is at the automatic restart level and the guard allows one: the desk restarts itself (deskauto.ts) */ }
 export type View = { scripts: { candidates: number; adopted: number; needsUpdate: number; waiting: Waiting[] }; projects: ProjectRow[]; goals: GoalRow[]; answers: AnswerRow[]; inbox: InboxGroup[]; archived: number; needs: NeedRow[]; openQuestions: { q: number; from?: string; question?: string }[]; unread: number; total: number; threads: ThreadRow[]; closed: ClosedRow[]; budget: string; spend: Spend | null; window: string; desk: DeskInfo; errors: string[]; dismissed: NeedRow[] /* cards the user dismissed (hidden from `needs`, not counted) */; notices: NoticeRow[]; dismissedNotices: NoticeRow[]; deskModel?: string; deskModelRed?: string; deskModelSet?: string; deskModelStatus?: string /* which case applies, in words (deskmodel.ts deskModelStatus) */; modelRequests: ModelRequest[]; actionRequests?: ActionView[]; standing?: StandingView /* active grants and recent standing sends (deskactions.ts) */; holds?: Held[] /* covered replies in their hold window (sendhold.ts) */; writes?: WritesView /* the user's written approvals and what was sent under them (deskwrites.ts) */; selfEdit?: SelfEditView /* the threads the user let edit their worktree themselves (selfedit.ts) */ }
 export const ANSWERS_MAX = 200 // rows the view hands the pane (it draws only what is unfolded)
 export const CLOSED_MAX = 40
@@ -444,13 +445,16 @@ export async function loadView(h: Host): Promise<View> {
     pin = await deskChoice(h, home)
   })
   await guard('desk', async () => {
-    v.desk = { context: contextSize(), limit: await deskTokens(h), model: deskRuns || pin.model, effort: deskRuns ? '' : pin.effort, note: deskNote() }
+    const ctx = contextSize()
+    const limit = await deskTokens(h)
+    const restarting = limit > 0 && ctx >= Math.floor((limit * 95) / 100) && (await autoGuard(h)) === null
+    v.desk = { context: ctx, limit, model: deskRuns || pin.model, effort: deskRuns ? '' : pin.effort, note: deskNote(), ...(restarting ? { restarting } : {}) }
   })
   // what the mod set is information, not an error: a dim line at the top, not a red one (and not counted in a thread's status line)
   const setNote = await peekNotice(h, NOTICE_SET)
   if (setNote) v.deskModelSet = setNote
   const day = dayOf(now)
-  const allNotices: NoticeRow[] = (await readNoticeRows(h)).filter(n => n.text !== deskModelNote && n.text !== setNote).map(n => ({ key: n.key, text: n.text, dk: noticeDk(n.key, n.text, day), ...(BUDGET_KEY.test(n.key) ? { budget: true } : {}) }))
+  const allNotices: NoticeRow[] = (await readNoticeRows(h)).filter(n => n.text !== deskModelNote && n.text !== setNote).map(n => ({ key: n.key, text: n.text, dk: noticeDk(n.key, n.text, day), ...(BUDGET_KEY.test(n.key) ? { budget: true } : {}), ...(WARN_KEY.test(n.key) ? { warn: true } : {}) }))
   // the inbox by thread, read rows older than a week hidden (they stay in inbox.jsonl)
   v.inbox = groupInbox(v.answers, now, new Map([...v.closed, ...v.threads].map(t => [t.id, t.title] as const))).groups
   // the user's Dismiss (dismissstore.ts): the card goes from `needs` (and from every count) until a newer item of its kind has another id
@@ -466,6 +470,7 @@ export async function loadView(h: Host): Promise<View> {
 // a notice's dismiss identity: a restart that gave up belongs to its thread; a budget alert is also bound to the day (the next day's is a new one);
 // the text is the rest (a new threshold or a changed finding has other text, so it shows again)
 const BUDGET_KEY = /^budget/
+const WARN_KEY = /^(rules-cap|old-desk|desk-autorestart-guard)$/
 const noticeDk = (key: string, text: string, day: string): DItem => {
   const m = /^restart-(t\d+)$/.exec(key)
   if (m) return { thread: m[1]!, kind: 'restart', id: text }
@@ -508,7 +513,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
     else if (t.stallId !== undefined) out.push({ key: `stalled:${t.id}:${t.stallId}`, kind: 'stalled', thread: t.id, text: `${t.id} is ${t.live}: ${t.liveNote || 'no progress'}`, notify: false, dk: { thread: t.id, kind: 'stalled', id: t.stallId } })
   }
   for (const w of v.scripts.waiting.slice(0, 8)) out.push({ key: `script:${w.name}:${w.update ?? ''}`, kind: 'script', text: `${w.name}${w.update ? ` ${w.update}` : ''} (${w.project}) waits for you: ${flat(w.why).slice(0, 80)}`, notify: false, script: w, dk: { thread: 'desk', kind: 'script', id: `${w.name}:${w.update ?? ''}:${w.sha.slice(0, 12)}` } })
-  if (v.desk.limit > 0 && (v.desk.context >= v.desk.limit || v.desk.note)) out.push({ key: 'context', kind: 'context', text: v.desk.note || `desk context ${Math.round(v.desk.context / 1000)}k is over its limit (${Math.round(v.desk.limit / 1000)}k)`, notify: false, dk: { thread: 'desk', kind: 'context', id: v.desk.note || 'over' } })
+  // (the desk's context is NOT a card any more, 1.0.30: the header has its one row, with the one instruction)
   return out
 }
 
