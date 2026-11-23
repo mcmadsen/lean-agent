@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { resetLocks } from './threads'
-import { DEFAULT_CAP, capChars, capResult, capStats, cutText } from './cap'
+import { DEFAULT_CAP, DEFAULT_THREAD_CAP, capChars, capResult, capStats, cutText, diffHint, threadCapChars } from './cap'
 import { statsText } from './stats'
 import { MAX_FILES, pruneOutput } from './output'
 
@@ -72,7 +72,7 @@ test('under the cap, or not a result to touch: returned unchanged (the same obje
   const same = async (tool: string, r: any, thread = 't1') => {
     expect(await capResult(h.host, thread, tool, r)).toBe(r)
   }
-  await same('Bash', { result: { stdout: big(19_000), stderr: '' } })
+  await same('Bash', { result: { stdout: big(7_500), stderr: '' } })
   await same('Edit', { result: { stdout: huge } })
   await same('Write', { result: huge })
   await same('Read', { result: huge })
@@ -140,6 +140,40 @@ test('the cap and the Bash line squeeze save into the same folder; old files are
   expect(left.length).toBe(MAX_FILES)
   expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY}-a`))).toBe(false) // the oldest of them went
   expect(left.some((k: string) => k.includes(`${100 * DAY - 3 * DAY + extra - 1}-a`))).toBe(true)
+})
+
+test('1.0.27: a thread\'s own result is capped at threadToolResultChars (default 8000); a worker\'s MCP result keeps 20000; config can lower, never raise above toolResultChars', async () => {
+  const h = fakeHost(null)
+  expect(await threadCapChars(h.host)).toBe(DEFAULT_THREAD_CAP)
+  expect(DEFAULT_THREAD_CAP).toBe(8000)
+  const mid = { result: { stdout: big(12_000), stderr: '' } }
+  const cut: any = await capResult(h.host, 't1', 'Bash', mid)
+  expect(cut.result.stdout.length).toBeLessThan(DEFAULT_THREAD_CAP + 600)
+  const mcp = { result: { content: [{ type: 'text', text: big(12_000) }], isError: false } }
+  expect(await capResult(h.host, 't1', 'mcp__x__y', mcp, { worker: true })).toBe(mcp) // a worker: under 20000
+  expect(await capResult(h.host, 't1', 'mcp__x__y', mcp)).not.toBe(mcp) // the thread: over 8000
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadToolResultChars: 3000 }))
+  expect(await threadCapChars(h.host)).toBe(3000)
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadToolResultChars: 50_000 }))
+  expect(await threadCapChars(h.host)).toBe(DEFAULT_CAP) // never above toolResultChars
+  h.files.set(`${L}/config.json`, JSON.stringify({ toolResultChars: 5000 }))
+  expect(await threadCapChars(h.host)).toBe(5000)
+  h.files.set(`${L}/config.json`, JSON.stringify({ toolResultChars: 0 }))
+  expect(await threadCapChars(h.host)).toBe(0)
+})
+
+test('1.0.27: the cut text names the command; a git diff / show / log -p result gets the hint line with the line count', async () => {
+  const h = fakeHost(null)
+  const diff = big(30_000, '+added line of a diff')
+  const out: any = await capResult(h.host, 't1', 'Bash', { result: { stdout: diff, stderr: '' } }, { command: 'git -C /r diff HEAD~3' })
+  const s: string = out.result.stdout
+  expect(s).toContain('result of `git -C /r diff HEAD~3` cut from')
+  expect(s.split('\n').pop()).toBe(`diff: ${diff.split('\n').length} lines: use --stat first, then one path at a time`)
+  for (const c of ['git show abc123', 'git log -p -3']) expect(((await capResult(h.host, 't1', 'Bash', { result: { stdout: diff } }, { command: c })) as any).result.stdout).toContain('use --stat first')
+  const plain: any = await capResult(h.host, 't1', 'Bash', { result: { stdout: diff } }, { command: 'git log --oneline' })
+  expect(plain.result.stdout).not.toContain('use --stat first')
+  expect(plain.result.stdout).toContain('result of `git log --oneline` cut')
+  expect(diffHint('git diff --stat', 'a\nb')).toContain('diff: 2 lines')
 })
 
 test('cutText keeps the head and the tail on line ends', () => {
