@@ -346,6 +346,32 @@ exact lines the thread copies into its workers' prompts, for work that needs a p
 file). No allow rule is added to any settings file to get past a classifier, and the guard is not widened for anything that writes or runs
 a program.
 
+### Reading a forge
+
+A status check after an approved write ("did the thread statuses land?") is a read and needs no workaround. A reader, a worker, the
+reviewer and the thread may run a fixed allow-list of read-only forms (`hooks/forgeread.ts`); everything else stays as before, and a
+forge write still gets the "forge writes go through the desk" text:
+
+- `az`: `repos pr show|list`, `repos pr policy list`, `repos pr reviewer list`, `repos pr work-item list`, `repos show|list`, `repos ref list`,
+  `boards work-item show`, `boards query`, `pipelines runs show|list`, `pipelines build show|list`, `pipelines show|list`, `devops invoke`
+  with `--http-method GET` or no method, `rest` with `--method get` or no method and no `--body`, `account show`, `account get-access-token`.
+- `gh`: `pr view|list|checks|diff|status`, `run view|list`, `issue view|list`, `repo view`, `release view|list`, `api` only as a GET (no
+  `-X` other than GET, no `-f` / `-F` / `--field` / `--raw-field` / `--input`: those make it a POST), `api graphql` only when the query
+  text starts with `query` or `{` (a `mutation` is a write).
+- `curl` / `wget` to `dev.azure.com`, `*.visualstudio.com`, `api.github.com`, `github.com`: a plain GET (no `-X` other than GET, no
+  `-d` / `--data*` / `-F` / `--form` / `-T` / `--upload-file` / `--json`, no output file outside a temp or scratch folder).
+
+A read form outside the list is refused with "read it with lean_run get (forge reads by the mod), or one of: az repos pr show, az devops
+invoke (GET), gh pr view, gh api (GET)"; the refusal record's rule id is `forge-read`.
+
+`lean_run` `get` reads by the mod, so no token is ever needed in a shell: `{host: "ado", org, project, path, query?}` (a REST path under
+the project, e.g. `git/repositories/<repo>/pullRequests/<n>/threads`) or `{host: "github", path}` (e.g. `repos/<owner>/<repo>/pulls/<n>/comments`).
+GET only, forge hosts only, no `..` in the path. The Azure bearer token from `az account get-access-token` goes to `curl` on stdin (never
+argv, a log or the output); GitHub goes through `gh api`. The answer is the JSON, cut to 8000 characters, and `select` (a list of dotted
+field paths, e.g. `["value.id", "value.status"]`) keeps only those fields. The common check is a shortcut:
+`lean_run {get: {host: "ado", org, project, repo, pr, threads: true}}` returns one line per thread: id, status, the first comment's first
+80 characters. A thread and its workers may call it; builds are `lean_run {ci}`.
+
 ### Why a thread gets blocked (measured)
 
 Measured on the feedback exports of three days (7 distinct files, lean-agent 1.0.5 to 1.0.12; the full table is in the changelog under

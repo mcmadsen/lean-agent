@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Forge reads are allowed.** A reader, a worker, the reviewer and the thread may run a fixed allow-list of read-only `az` / `gh` forms (`az devops invoke` with GET or no method, `az rest` GET, `gh api` as a GET, `gh api graphql` with a `query`, `gh release view|list`, ...) and a plain `curl` / `wget` GET to a forge host (`hooks/forgeread.ts`). Every write form is refused as before; a read form outside the list says to use `lean_run get` or an allowed form (rule id `forge-read`).
+- **`lean_run` `get`**: a forge read by the mod, GET only, Azure DevOps or GitHub (no token in a shell: the Azure bearer token goes to curl on stdin, GitHub through `gh api`), `select` to keep a few fields, and `{host: "ado", org, project, repo, pr, threads: true}` for one line per PR thread (id, status, first 80 characters).
+- README section "Reading a forge"; the thread template and the thread, pr and review-learn skills point to it.
+
 ## 1.0.25
 
 ### Added
