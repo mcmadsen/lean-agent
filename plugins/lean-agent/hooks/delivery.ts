@@ -17,6 +17,7 @@ import { notePending } from './approvals'
 import { blockedTruth } from './denial'
 import { ACTION_KINDS, addActionRequest, runStanding } from './deskactions'
 import { runGranted } from './deskwrites'
+import { runOwnPr } from './ownpr'
 import { logRefusal } from './feedback'
 import { missingOutputs, notDoneText } from './donecheck'
 import { digestable, digestText, partLines, partsOf, pointerText, prepareDigest, reportChars, sentenceCut } from './reportdigest'
@@ -471,7 +472,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         // the user's standing approval (a grant from the card / the question, or a rule in config.json) that covers EVERY write of the request: the
         // mod sends it at once (deskactions.ts runStanding) and nothing is left for the user to answer
         // (then the user's WRITTEN instruction, a grant of `lean_thread allow-writes`: deskwrites.ts runGranted, the same executor)
-        const std = (await runStanding(h, made.request!.id).catch(() => null)) ?? (await runGranted(h, made.request!.id).catch(() => null))
+        // (then the own-PR default of 1.0.28, ownpr.ts: a reply, a link or its own work item's state on the PR the thread owns, by script, no question)
+        const std = (await runStanding(h, made.request!.id).catch(() => null)) ?? (await runGranted(h, made.request!.id).catch(() => null)) ?? (await runOwnPr(h, made.request!.id).catch(() => null))
         if (std?.sent) standing = std.line
         else {
           if (std) standingFail = std.line

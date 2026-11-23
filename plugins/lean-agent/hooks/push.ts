@@ -11,6 +11,7 @@ import { greenReview, hasApproval, takeApproval } from './reviews'
 import { DEFAULT_PUSH_DENY, PROTECTED, guardedBy } from './guard'
 import type { Inbox, Out, Thread } from './threads'
 import { registerWorktree, takeoverCandidate, unregisteredAt, worktreeState } from './worktreereg'
+import { recordPushPr } from './ownpr'
 
 export type PrInput = { title?: unknown; body?: unknown; base?: unknown; draft?: unknown }
 
@@ -326,6 +327,8 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     } catch (e) {
       notes.push(`thread not told (${String((e as Error)?.message ?? e).slice(0, 100)})`)
     }
+    // the PR this push opened (or found open) is the thread's own: its replies need no question (ownpr.ts; the user gets a one-line notice in the pane)
+    if (res.ok && typeof extra.pr === 'string' && extra.pr) await recordPushPr(h, id, extra.pr).catch(() => null)
     return notes.length ? { ...res, text: `${res.text}. ${notes.join('; ')}` } : res
   }
 

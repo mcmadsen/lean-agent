@@ -21,7 +21,7 @@
 //
 // Never grantable this way: pushes, tags, releases (the push gate), merges, deletes, permission or settings changes, anything outside the
 // table. The token of Azure DevOps goes to curl on STDIN only (a curl config), never in an argument list, a log or an output.
-import { appendJsonl, homeDir, leanDir, readJson, threadsDir } from './state'
+import { appendJsonl, homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
@@ -846,6 +846,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     inflight.delete(id)
   }
   await logHistory(h, r.thread, { kind: sent.ok ? 'action-sent' : sent.unknown ? 'action-unknown' : 'action-failed', id, action: r.kind, hash: checkCode(r.hash), target: plan.url, result: sent.text.slice(0, 300) })
+  if (sent.ok || progress) await noteOwnItems(h, r, sent.text).catch(() => undefined)
   if (sent.ok && tell) await tell(r.thread, `The user approved your request ${id} and the desk sent it (${r.kind}): ${sent.text}. Carry on.`).catch(() => undefined)
   if (sent.unknown && tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved and sent, but the outcome is unknown (${sent.text}). Check the target before asking again.`).catch(() => undefined)
   if (progress && !sent.ok && !sent.unknown) {
@@ -855,6 +856,34 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
   return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused for its 2 h: try again, or tell ${r.thread}` }
+}
+
+// The work items a thread OWNS (thread.json `workItems`): the ones it created through `ado-workitem-create`, and the ones its own PR was linked to
+// (ownpr.ts adds the ones its brief names). Written by the mod after a send that went out, never by a thread.
+export async function addOwnWorkItems(h: Host, thread: string, ids: number[]): Promise<void> {
+  if (!ids.length) return
+  const path = `${threadsDir(await homeDir(h))}/${thread}/thread.json`
+  const t = await readJson<Record<string, unknown> | null>(h, path, null)
+  if (!t || typeof t !== 'object') return
+  const have = Array.isArray(t.workItems) ? (t.workItems as unknown[]).filter((x): x is number => typeof x === 'number') : []
+  const next = [...new Set([...have, ...ids])].slice(-20)
+  if (next.length !== have.length) await writeJson(h, path, { ...t, workItems: next })
+}
+async function noteOwnItems(h: Host, r: ActionRequest, sentText: string): Promise<void> {
+  const items = r.kind === 'batch' ? (Array.isArray(r.params.items) ? (r.params.items as { kind: string; params: Params }[]) : []) : [{ kind: r.kind as string, params: r.params }]
+  const t = await readJson<{ pr?: { org?: string; project?: string; repo?: string; id?: number } } | null>(h, `${threadsDir(await homeDir(h))}/${r.thread}/thread.json`, null).catch(() => null)
+  const ids: number[] = []
+  for (const it of items) {
+    if (it.kind === 'ado-workitem-create') {
+      const m = /(?:create: done \(|^)id (\d{1,9})\b/.exec(sentText) ?? /\bid (\d{1,9})\b/.exec(sentText)
+      if (m) ids.push(Number(m[1]))
+    } else if (it.kind === 'ado-pr-workitem-link') {
+      const p = it.params
+      const pr = t?.pr
+      if (pr && String(pr.org).toLowerCase() === String(p.org).toLowerCase() && String(pr.project).toLowerCase() === String(p.project).toLowerCase() && String(pr.repo).toLowerCase() === String(p.repo).toLowerCase() && pr.id === p.pr) ids.push(Number(p.workitem))
+    }
+  }
+  await addOwnWorkItems(h, r.thread, ids)
 }
 
 async function dropOne(h: Host, id: string): Promise<void> {

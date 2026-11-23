@@ -35,7 +35,40 @@ export const CREATE_KINDS = ['create'] // a NEW work item has no id: the grant's
 const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'ado-workitem-create': 'create', 'ado-pr-workitem-link': 'link', 'gh-pr-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
 
 type WGrant = { id: string; thread: string; scope: string; kinds: string[]; quote: string; qts: number; cap: number; used: number; ts: number; exp: number; sig: string }
-type WSent = { ts: number; thread: string; text: string; grant?: string }
+type WSent = { ts: number; thread: string; text: string; grant?: string; since?: number /* an own-PR default send (ownpr.ts): grant is `own:<tN>`, `since` when the thread took ownership */ }
+// the own-PR default (ownpr.ts) is not a grant: the user takes it back by marking the thread (or all, '*') revoked from now on; owning a PR later (a newer `since`) is a new default
+const OWN_REVOKED = 'action.ownpr.revoked'
+export async function ownRevoked(h: Host): Promise<Record<string, number>> {
+  const v = await h.store.get(OWN_REVOKED).catch(() => null)
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, number>) : {}
+}
+export const ownActive = (r: Record<string, number>, thread: string, since: number): boolean => (r[thread] ?? 0) < since && (r['*'] ?? 0) < since
+async function markOwnRevoked(h: Host, who: string[], at: number): Promise<void> {
+  const r = await ownRevoked(h)
+  for (const w of who) r[w] = at
+  await h.store.set(OWN_REVOKED, r)
+}
+// the open threads that own a PR (thread.json `pr`)
+async function ownRows(h: Host): Promise<{ id: string; pr: number }[]> {
+  const dir = threadsDir(await homeDir(h))
+  const names = await h.fs.list(dir).then(l => l.map(e => e.name), () => [] as string[])
+  const out: { id: string; pr: number }[] = []
+  for (const n of names) {
+    const pr = threadOk(n) ? (await readJson<{ pr?: { id?: unknown } } | null>(h, `${dir}/${n}/thread.json`, null).catch(() => null))?.pr : undefined
+    if (pr) out.push({ id: n, pr: Number(pr.id) })
+  }
+  return out
+}
+const ownThreads = async (h: Host): Promise<string[]> => (await ownRows(h)).map(r => r.id)
+const ownThreadsOf = async (h: Host, nums: string[]): Promise<string[]> => (await ownRows(h)).filter(r => nums.includes(`#${r.pr}`)).map(r => r.id)
+export async function revokeOwn(h: Host, by: { thread?: string; all?: boolean }, who: string): Promise<number> {
+  const now = await h.clock.now()
+  const threads = by.all ? await ownThreads(h) : by.thread ? (await ownThreads(h)).filter(t => t === by.thread) : []
+  if (!threads.length) return 0
+  await markOwnRevoked(h, by.all ? ['*'] : threads, now)
+  for (const t of threads) await logHistory(h, t, { kind: 'own-pr-revoked', by: who })
+  return threads.length
+}
 const WGRANTS = 'action.writes.grants'
 const WSENT = 'action.writes.sent'
 const SENT_SHOWN_MS = 30 * 60 * 1000
@@ -103,7 +136,7 @@ const dec = (s: string): string => {
   }
 }
 // the thread's project remote (the registry's folder of its project, `git remote get-url origin`)
-async function remoteOf(h: Host, thread: string): Promise<PrHost | string> {
+export async function remoteOf(h: Host, thread: string): Promise<PrHost | string> {
   const t = await readJson<{ project?: unknown; state?: unknown }>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, {}).catch(() => ({}) as { project?: unknown; state?: unknown })
   const project = typeof t.project === 'string' ? t.project : ''
   const row = project ? (await listProjects(h, true).catch(() => ({ rows: [] as { name: string; path: string }[] }))).rows.find(r => r.name === project) : undefined
@@ -347,8 +380,15 @@ export async function writesView(h: Host): Promise<WritesView> {
   const grants = await grantRows(h, now)
   const active = new Set(grants.map(g => g.id))
   const raw = await h.store.get(WSENT).catch(() => null)
-  const sent = (Array.isArray(raw) ? (raw as WSent[]) : []).filter(s => s && typeof s.text === 'string' && Number.isFinite(s.ts) && now - s.ts <= SENT_SHOWN_MS).map(s => ({ ts: s.ts, thread: String(s.thread), text: s.text, ...(s.grant && active.has(s.grant) ? { grant: s.grant } : {}) }))
+  const rev = await ownRevoked(h)
+  const live = (s: WSent) => !!s.grant && (active.has(s.grant) || (s.grant.startsWith('own:') && Number.isFinite(s.since) && ownActive(rev, String(s.thread), s.since!)))
+  const sent = (Array.isArray(raw) ? (raw as WSent[]) : []).filter(s => s && typeof s.text === 'string' && Number.isFinite(s.ts) && now - s.ts <= SENT_SHOWN_MS).map(s => ({ ts: s.ts, thread: String(s.thread), text: s.text, ...(live(s) ? { grant: s.grant } : {}) }))
   return { grants: grants.map(g => ({ id: g.id, thread: g.thread, scope: g.scope, kinds: g.kinds, quote: g.quote, used: g.used, cap: g.cap, exp: g.exp })), sent }
+}
+// an own-PR default send (ownpr.ts) shown in the pane: the exact text, with the Revoke button of `own:<tN>`
+export async function recordOwnSent(h: Host, rec: { ts: number; thread: string; text: string; since: number }): Promise<void> {
+  const prev = await h.store.get(WSENT).catch(() => null)
+  await h.store.set(WSENT, [...(Array.isArray(prev) ? prev : []), { ...rec, grant: `own:${rec.thread}` } satisfies WSent].slice(-10))
 }
 export async function writesListText(h: Host): Promise<string> {
   const v = await writesView(h)
@@ -358,6 +398,11 @@ export async function writesListText(h: Host): Promise<string> {
 
 // ---- revoking only takes power away ----------------------------------------------------------------------------------------------------------------
 export async function revokeWrites(h: Host, by: { id?: string; thread?: string; all?: boolean; scopeEnds?: string[] }, who = 'user, in the pane'): Promise<{ ok: boolean; text: string; n: number }> {
+  if (by.id?.startsWith('own:')) {
+    const thread = by.id.slice(4)
+    const n = threadOk(thread) ? await revokeOwn(h, { thread }, who) : 0
+    return n ? { ok: true, n, text: `revoked the own-PR default of ${thread}: its replies and work item moves are asked again` } : { ok: false, n: 0, text: `no own-PR default for ${by.id}` }
+  }
   const hit = await exclusive(async () => {
     const all = await grantRows(h, await h.clock.now())
     const gone = all.filter(g => (by.id && g.id === by.id) || (by.thread && g.thread === by.thread) || by.all || (by.scopeEnds ?? []).some(e => g.scope.endsWith(e)))
@@ -380,9 +425,15 @@ export async function revokeByWords(h: Host, text: string): Promise<number> {
   const nums = [...new Set([...text.matchAll(/(?<!\d)(?<!\d[.,])(\d{1,9})(?!\d)(?![.,]\d)/g)].map(m => `#${m[1]}`))]
   const named = threads.length > 0 || nums.length > 0
   let n = 0
-  if (!named) n += (await revokeWrites(h, { all: true }, 'user, typed words')).n
-  else {
-    for (const t of threads) n += (await revokeWrites(h, { thread: t }, 'user, typed words')).n
+  if (!named) {
+    n += (await revokeWrites(h, { all: true }, 'user, typed words')).n
+    n += await revokeOwn(h, { all: true }, 'user, typed words')
+  } else {
+    for (const t of threads) {
+      n += (await revokeWrites(h, { thread: t }, 'user, typed words')).n
+      n += await revokeOwn(h, { thread: t }, 'user, typed words')
+    }
+    if (nums.length) for (const t of await ownThreadsOf(h, nums)) n += await revokeOwn(h, { thread: t }, 'user, typed words')
     if (nums.length) n += (await revokeWrites(h, { scopeEnds: nums }, 'user, typed words')).n
   }
   const st = await standingView(h).catch(() => null)

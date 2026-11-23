@@ -11,6 +11,7 @@ import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
 import { allowWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
+import { recordBriefPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
 import { deliver } from './deliver'
 import { denialRec } from './denial'
@@ -505,7 +506,8 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await save(h, home, t)
   await trustFolder(h, dir)
   const r = await startSession(h, home, t, brief, i, installed, root)
-  return r.ok ? { ...r, data: t } : r
+  const owns = r.ok ? await recordBriefPr(h, id, brief).catch(() => null) : null // the PR the brief names is the thread's own (ownpr.ts): one line to the user
+  return r.ok ? { ...r, ...(owns ? { text: `${r.text}\n${owns}. Tell the user this in one line` } : {}), data: t } : r
 }
 
 // Stop a finished-but-alive session before anything takes its place (a resume, a fresh session). null = it is gone, go on; an Out =
