@@ -56,6 +56,7 @@ import { capResult, capTo, resetCap } from './cap'
 import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
+import { runGet } from './forgeget'
 import { contextReport } from './contextstat'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
@@ -173,7 +174,7 @@ const DOCTOR = 'lean_doctor'
 const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead: a session id or thread id tN (the REAL base of its first request, next to the text estimate); "probe" or "probe tN": a few one-word haiku calls (about 5 cents) that switch MCP, skills, other plugins and your user CLAUDE.md off one at a time and name the biggest part of the base; context: a session id, or a thread id (tN: its current session, with the top three sources and a fix each); default the newest session transcript' }, name: { type: 'string', description: 'mcp-env: the variable name (e.g. DD_MCP_DOMAIN); never a secret; handover: the thread id (tN) whose handover to preview' }, value: { type: 'string', description: 'mcp-env: its NON-secret value (a site or domain); without name and value the action lists the MCP servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is already set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7, max 90)' }, project: { type: 'string', description: "stats: only this project's rules; compare: the registered project" }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default, cheap) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section at the top' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
-const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool (a script polls every 45 s, no model turn per check; a worker may call it). {host: "ado", org, project, id | ids (run numbers, at most 10) | branch, waitMinutes} or {host: "github", repo (owner/name), id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10). Returns one compact line per run: id, status, result, failed stage/job/test names, URL; or "still running after N min"', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] } }, required: [] } }
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project; the output goes to a file and you get the exit code, the failing test names and the last 40 lines (never the stream). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder to run it in (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool (a script polls every 45 s, no model turn per check; a worker may call it). {host: "ado", org, project, id | ids (run numbers, at most 10) | branch, waitMinutes} or {host: "github", repo (owner/name), id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10). Returns one compact line per run: id, status, result, failed stage/job/test names, URL; or "still running after N min"', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only, forge hosts only; the Azure token never reaches a shell; a thread and its workers may call it). {host: "ado", org, project, path (a REST path under the project, e.g. git/repositories/<repo>/pullRequests/<n>/threads), query?} or {host: "github", path (e.g. repos/<owner>/<repo>/pulls/<n>/comments), query?}; select = dotted field paths to keep (["value.id", "value.status"]) so a status check returns a few lines. Shortcut: {host: "ado", org, project, repo, pr, threads: true} = one line per PR thread: id, status, the first comment\'s first 80 characters', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -1154,6 +1155,19 @@ export const register: Register = on => {
         if (!e.ci || typeof e.ci !== 'object' || Array.isArray(e.ci)) throw new Error('ci is an object {host, ...}')
         const r = await runCi(hostOf($), e.ci)
         return { result: r.text, ...(r.failed ? { isError: true as const } : {}) } as any
+      } catch (err) {
+        const why = `lean_run refused: ${String((err as Error)?.message ?? err)}`
+        await logRefusal(hostOf($), { role: 'thread', rule: 'run-refused', text: why, tool: RUN, thread: role.id, version: VERSION })
+        return { result: why, isError: true } as any
+      }
+    }
+    if (e.get !== undefined) {
+      // a forge READ by the mod (a thread and its workers): GET only, the Azure token on curl's stdin, never in a shell
+      try {
+        if (String(e.command ?? '').trim() || e.ci !== undefined) throw new Error('give one of command, ci or get')
+        if (!e.get || typeof e.get !== 'object' || Array.isArray(e.get)) throw new Error('get is an object {host, ...}')
+        const r = await runGet(hostOf($), e.get)
+        return { result: r.text } as any
       } catch (err) {
         const why = `lean_run refused: ${String((err as Error)?.message ?? err)}`
         await logRefusal(hostOf($), { role: 'thread', rule: 'run-refused', text: why, tool: RUN, thread: role.id, version: VERSION })
