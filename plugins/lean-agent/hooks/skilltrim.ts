@@ -12,7 +12,7 @@ const OWN = 'lean-agent:'
 // listing says. skills-contract.mjs checks this table against the front matter. A name not in the table is kept (a new skill is never hidden).
 export type Role = 'desk' | 'thread'
 export const SKILL_ROLES: Record<string, Role[]> = {
-  allow: ['desk'], list: ['desk'], new: ['desk'], revoke: ['desk'], threads: ['desk'], // commands/*.md
+  allow: ['desk'], 'allow-edit': ['desk'], list: ['desk'], new: ['desk'], revoke: ['desk'], 'revoke-edit': ['desk'], threads: ['desk'], // commands/*.md
   branch: ['thread'], budget: ['desk', 'thread'], compare: ['desk', 'thread'], doctor: ['desk'], feedback: ['desk', 'thread'],
   find: ['desk', 'thread'], goals: ['desk', 'thread'], handover: ['desk', 'thread'], 'lean-mode': ['thread'], learn: ['thread'],
   pr: ['desk', 'thread'], review: ['desk', 'thread'], 'review-learn': ['desk', 'thread'], 'rules-pr': ['desk', 'thread'],
