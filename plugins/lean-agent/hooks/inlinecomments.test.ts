@@ -3,7 +3,7 @@
 // Synthetic names only; nothing leaves the process.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { ANCHOR_NOTE, BATCH_MAX, COMMENT_BATCH_MAX, addActionRequest, approveAction, answerAction, bindAnswers, checkAction, listActions, questionOf, resetActions } from './deskactions'
+import { ANCHOR_NOTE, BATCH_MAX, COMMENT_BATCH_MAX, PR_CHANGES_MAX, addActionRequest, approveAction, answerAction, bindAnswers, checkAction, listActions, questionOf, resetActions, runPrChanges } from './deskactions'
 import { resetLocks } from './threads'
 
 const TOKEN = 'SECRET-TOKEN-0123456789'
@@ -16,7 +16,7 @@ const gh = (extra: Record<string, unknown> = {}) => ({ kind: 'gh-pr-review-comme
 const edit = (a: number, n: number, kind = 'edit') => ({ changeType: kind, modifiedLineNumberStart: a, modifiedLinesCount: n, originalLineNumberStart: a, originalLinesCount: n })
 
 // what the "forge" answers; a spec changes it between the request and the approval (a push to the PR)
-type World = { diffs: Record<string, unknown[] | null>; changes: unknown[]; ghFiles: unknown; ghPr: unknown; posts: { url: string; body: any; stdin: string }[]; ghPosts: { argv: string[]; stdin: string }[]; failPost: (n: number) => boolean }
+type World = { diffs: Record<string, unknown[] | null>; changes: unknown[]; ghFiles: unknown; ghPr: unknown; posts: { url: string; body: any; stdin: string }[]; diffCalls: any[]; ghPosts: { argv: string[]; stdin: string }[]; failPost: (n: number) => boolean }
 function setup() {
   const h = fakeHost(null)
   resetLocks()
@@ -24,10 +24,11 @@ function setup() {
   h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   const w: World = {
     diffs: { '/src/a.ts': [edit(40, 13), edit(98, 13, 'add')], '/src/b.ts': [edit(1, 100)] },
-    changes: [{ changeType: 'edit', item: { path: '/src/a.ts' } }, { changeType: 'edit', item: { path: '/src/b.ts' } }, { changeType: 'delete', item: { path: '/src/gone.ts' } }],
+    changes: [{ changeType: 'edit', changeTrackingId: 33, item: { path: '/src/a.ts' } }, { changeType: 'edit', changeTrackingId: 34, item: { path: '/src/b.ts' } }, { changeType: 'delete', changeTrackingId: 35, item: { path: '/src/gone.ts' } }],
     ghFiles: [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -39,2 +40,14 @@\n x\n' + '+a\n'.repeat(12) + ' y', changes: 12 }],
     ghPr: { head: { sha: SHA } },
     posts: [],
+    diffCalls: [],
     ghPosts: [],
     failPost: () => false,
   }
@@ -46,10 +47,13 @@ function setup() {
     if (argv[0] === 'curl') {
       const url = argv[argv.length - 1]!
       const method = argv[argv.indexOf('-X') + 1]
-      if (url === `${AZ}/pullRequests/42/iterations?api-version=7.1`) return { exitCode: 0, stdout: JSON.stringify({ value: [{ id: 3, sourceRefCommit: { commitId: 'sCommit' }, commonRefCommit: { commitId: 'cCommit' } }] }) }
+      if (url === `${AZ}/pullRequests/42/iterations?api-version=7.1`) return { exitCode: 0, stdout: JSON.stringify({ value: [{ id: 2, sourceRefCommit: { commitId: 's2' }, commonRefCommit: { commitId: 'c2' } }, { id: 3, sourceRefCommit: { commitId: 'sCommit' }, commonRefCommit: { commitId: 'cCommit' } }] }) }
       if (url.includes('/iterations/3/changes')) return { exitCode: 0, stdout: JSON.stringify({ changeEntries: w.changes }) }
+      if (url.includes('/iterations/2/changes')) return { exitCode: 0, stdout: JSON.stringify({ changeEntries: w.changes.map((c: any) => ({ ...c, changeTrackingId: 22 })) }) }
       if (url.startsWith(`${AZ}/filediffs`)) {
-        const d = w.diffs[data(c.stdin ?? '').fileDiffParams[0].path]
+        const asked = data(c.stdin ?? '')
+        w.diffCalls.push(asked)
+        const d = w.diffs[asked.fileDiffParams[0].path]
         return d ? { exitCode: 0, stdout: JSON.stringify({ value: [{ lineDiffBlocks: d }] }) } : { exitCode: 22, stdout: '', stderr: 'HTTP 500' }
       }
       if (method === 'POST' && url === `${AZ}/pullRequests/42/threads?api-version=7.1`) {
@@ -85,7 +89,7 @@ test('ado-pr-comment with file + line: a NEW thread with threadContext on the ri
   expect(c.ok).toBe(true)
   if (!c.ok) return
   expect(c.plan.url).toBe(`${AZ}/pullRequests/42/threads?api-version=7.1`)
-  expect(JSON.parse(c.plan.body)).toEqual({ comments: [{ parentCommentId: 0, content: 'The value is not escaped before it is rendered.', commentType: 1 }], status: 1, threadContext: { filePath: '/src/a.ts', rightFileStart: { line: 45, offset: 1 }, rightFileEnd: { line: 45, offset: 1 } } })
+  expect(JSON.parse(c.plan.body)).toEqual({ comments: [{ parentCommentId: 0, content: 'The value is not escaped before it is rendered.', commentType: 1 }], status: 1, threadContext: { filePath: '/src/a.ts', rightFileStart: { line: 45, offset: 1 }, rightFileEnd: { line: 45, offset: 1 } }, pullRequestThreadContext: { iterationContext: { firstComparingIteration: '<latest iteration>', secondComparingIteration: '<latest iteration>' }, changeTrackingId: '<change id>' } })
   expect(c.plan.text).toBe('comment on src/a.ts:45 of PR 42: The value is not escaped before it is rendered.')
   expect(c.plan.headline).toContain('comment on src/a.ts:45 of PR 42')
   expect(c.params).toEqual({ ...PR, body: 'The value is not escaped before it is rendered.', file: 'src/a.ts', line: 45 })
@@ -162,6 +166,7 @@ test('ado inline: approve sends ONE new thread with the threadContext, returns i
   expect(s.w.posts).toHaveLength(1)
   expect(s.w.posts[0]!.body.threadContext).toEqual({ filePath: '/src/a.ts', rightFileStart: { line: 45, offset: 1 }, rightFileEnd: { line: 48, offset: 1 } })
   expect(s.w.posts[0]!.body.comments[0].content).toBe('The value is not escaped before it is rendered.')
+  expect(s.w.posts[0]!.body.pullRequestThreadContext).toEqual({ iterationContext: { firstComparingIteration: 3, secondComparingIteration: 3 }, changeTrackingId: 33 }) // the latest iteration, read at send time
   expect(s.w.posts[0]!.stdin).toContain(TOKEN) // the config on stdin carries it
   expect(argvText(s)).not.toContain(TOKEN)
   expect(out.text + JSON.stringify([...s.h.files.values()]) + JSON.stringify(s.told)).not.toContain(TOKEN)
@@ -340,6 +345,91 @@ test('the question of a batch the user answered with another text than the canon
   const notes = await bindAnswers(s.h.host, [{ question: framed, options: q.options }], { [framed]: 'Approve' }, s.tell)
   expect(notes.join(' ')).toContain('NOT recorded')
   expect((await answerAction(s.h.host, r.request!.id, 'deny', 'pane', s.tell)).ok).toBe(true)
+})
+
+// ---- addendum: the thread's own fields, the iteration, and the pr-changes read ----------------------------------------------------------------------
+test('ado-pr-comment thread fields: status at creation (1..6), commentType, parentCommentId, offsets and lineEnd; every value is checked', () => {
+  const body = (extra: Record<string, unknown>) => {
+    const c = checkAction(ado(extra))
+    return c.ok ? JSON.parse(c.plan.body) : c
+  }
+  for (const [name, code] of [['active', 1], ['fixed', 2], ['wontFix', 3], ['closed', 4], ['byDesign', 5], ['pending', 6], ['WONTFIX', 3]] as const) expect([name, body({ status: name }).status]).toEqual([name, code])
+  expect(body({}).status).toBe(1)
+  expect(body({ commentType: 'codeChange' }).comments[0].commentType).toBe(2)
+  expect(body({ commentType: 'text' }).comments[0].commentType).toBe(1)
+  expect(body({ commentType: 2 }).comments[0].commentType).toBe(2)
+  expect(body({ parentCommentId: 4 }).comments[0].parentCommentId).toBe(4)
+  const o = body({ offset: 5, offsetEnd: 20, lineEnd: 47 })
+  expect(o.threadContext).toEqual({ filePath: '/src/a.ts', rightFileStart: { line: 45, offset: 5 }, rightFileEnd: { line: 47, offset: 20 } })
+  expect(body({ side: 'left', offset: 2 }).threadContext.leftFileStart).toEqual({ line: 45, offset: 2 })
+  const plain = checkAction({ kind: 'ado-pr-comment', params: { ...PR, body: 'Please rebase first.', status: 'fixed' } })
+  expect(plain.ok && JSON.parse(plain.plan.body)).toEqual({ comments: [{ parentCommentId: 0, content: 'Please rebase first.', commentType: 1 }], status: 2 })
+  expect(plain.ok && plain.plan.text).toContain('(thread created as fixed)')
+  const stored = checkAction(ado({ lineEnd: 47, status: 'Fixed', commentType: 'CodeChange' }))
+  expect(stored.ok && stored.params).toMatchObject({ endLine: 47, status: 'fixed', commentType: 'codeChange' })
+  expect(stored.ok && 'lineEnd' in stored.params).toBe(false)
+  for (const extra of [{ status: 'resolved' }, { status: 4 }, { commentType: 'note' }, { commentType: 3 }, { parentCommentId: -1 }, { parentCommentId: 'x' }, { offset: 0 }, { offsetEnd: 'x' }, { iteration: 0 }, { changeTrackingId: 5 }, { lineEnd: 46, endLine: 47 }, { lineEnd: 40 }])
+    expect([extra, checkAction(ado(extra)).ok]).toEqual([extra, false])
+  expect(checkAction({ kind: 'ado-pr-comment', params: { ...PR, body: 'Plain remark here.', offset: 2 } }).ok).toBe(false) // an offset needs file + line
+  expect(checkAction({ kind: 'ado-pr-comment', params: { ...PR, body: 'Plain remark here.', iteration: 2 } }).ok).toBe(false)
+})
+
+test('iteration: the comment follows the latest one by default (read at send time), or the one named; the anchor check reads the SAME iteration', async () => {
+  const s = setup()
+  const v = await approve(s, ado())
+  expect((await approveAction(s.h.host, v.id, s.tell)).ok).toBe(true)
+  expect(s.w.posts[0]!.body.pullRequestThreadContext).toEqual({ iterationContext: { firstComparingIteration: 3, secondComparingIteration: 3 }, changeTrackingId: 33 })
+  expect(s.w.diffCalls.every(d => d.targetVersionCommit === 'sCommit' && d.baseVersionCommit === 'cCommit')).toBe(true)
+  // iteration 2 named: its changes, its commits, its changeTrackingId
+  const t = setup()
+  const v2 = await approve(t, ado({ iteration: 2 }))
+  expect(v2.text).toContain('comment on src/a.ts:45')
+  expect((await approveAction(t.h.host, v2.id, t.tell)).ok).toBe(true)
+  expect(t.w.posts[0]!.body.pullRequestThreadContext).toEqual({ iterationContext: { firstComparingIteration: 2, secondComparingIteration: 2 }, changeTrackingId: 22 })
+  expect(t.w.diffCalls.length).toBeGreaterThan(0)
+  expect(t.w.diffCalls.every(d => d.targetVersionCommit === 's2' && d.baseVersionCommit === 'c2')).toBe(true)
+  // changeTrackingId named: it is sent as given
+  const u = setup()
+  const v3 = await approve(u, ado({ iteration: 2, changeTrackingId: 99 }))
+  expect(v3.text).toContain('comment on src/a.ts:45')
+  await approveAction(u.h.host, v3.id, u.tell)
+  expect(u.w.posts[0]!.body.pullRequestThreadContext.changeTrackingId).toBe(99)
+  // an iteration that does not exist cannot be verified: refused, nothing shown
+  const w = setup()
+  expect((await ask(w, ado({ iteration: 9 }))).text).toBe('could not verify the anchor: not sent')
+  // the file is not in that iteration's changes: refused as not changed
+  const x = setup()
+  x.w.changes = [{ changeType: 'edit', changeTrackingId: 1, item: { path: '/src/other.ts' } }]
+  expect((await ask(x, ado({ iteration: 2 }))).text).toBe('t5 asked for src/a.ts:45: the PR does not change that file')
+})
+
+test('lean_run pr-changes: a compact table of changed files with added / removed ranges, written whole to the thread scratch folder, cut at 6000 characters', async () => {
+  const s = setup()
+  s.w.diffs['/src/gone.ts'] = [{ changeType: 'delete', originalLineNumberStart: 1, originalLinesCount: 3, modifiedLineNumberStart: 0, modifiedLinesCount: 0 }]
+  const fails = (p: Promise<unknown>) => p.then(() => null, (e: Error) => e.message)
+  const ado0 = await runPrChanges(s.h.host, 't5', { forge: 'ado', org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42 })
+  expect(ado0).toContain('PR 42, iteration 3: 3 changed files')
+  expect(ado0).toContain('src/a.ts [modified]: added 40-52, 98-110 | removed 40-52')
+  expect(ado0).toContain('src/gone.ts [deleted]: added none | removed 1-3')
+  expect(s.h.files.get(`${L}/threads/t5/scratch/pr-changes-42.txt`)).toBe(`${ado0}\n`)
+  const it2 = await runPrChanges(s.h.host, 't5', { forge: 'ado', org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42, iteration: 2 })
+  expect(it2).toContain('iteration 2')
+  expect(s.h.files.has(`${L}/threads/t5/scratch/pr-changes-42-it2.txt`)).toBe(true)
+  const g = await runPrChanges(s.h.host, 't5', { forge: 'github', repo: 'acme/shop', pr: 7 })
+  expect(g).toBe('PR 7: 1 changed file (added = lines of the new side, removed = lines of the old side)\nsrc/a.ts [modified]: added 41-52 | removed none')
+  // many files: the answer is cut at 6000, the file has all of them
+  s.w.ghFiles = Array.from({ length: 300 }, (_, i) => ({ filename: `src/module-${i}/handler.ts`, status: 'modified', patch: '@@ -1,2 +1,3 @@\n a\n+b\n c', changes: 1 }))
+  const big = await runPrChanges(s.h.host, 't5', { forge: 'github', repo: 'acme/shop', pr: 7 })
+  expect(big.length).toBeLessThanOrEqual(PR_CHANGES_MAX + 200)
+  expect(big).toContain('cut at 6000 characters: the whole table is in')
+  expect(s.h.files.get(`${L}/threads/t5/scratch/pr-changes-7.txt`)).toContain('src/module-199/handler.ts')
+  // refusals: unknown field, bad forge, bad names, unreadable PR (nothing is guessed), a token never in the output
+  for (const bad of [{ forge: 'gitlab', pr: 1 }, { forge: 'ado', org: 'acme', pr: 1 }, { forge: 'github', repo: 'nope', pr: 1 }, { forge: 'github', repo: 'acme/shop', pr: 0 }, { forge: 'github', repo: 'acme/shop', pr: 7, iteration: 2 }, { forge: 'github', repo: 'acme/shop', pr: 7, ref: 'x' }, null])
+    expect([bad, typeof (await fails(runPrChanges(s.h.host, 't5', bad)))]).toEqual([bad, 'string'])
+  s.w.ghFiles = null
+  expect(await fails(runPrChanges(s.h.host, 't5', { forge: 'github', repo: 'acme/shop', pr: 7 }))).toContain('could not read the changes of PR 7')
+  expect(argvText(s)).not.toContain(TOKEN)
+  expect(ado0).not.toContain(TOKEN)
 })
 
 // (the guide line in templates/thread.md and skills/thread/SKILL.md is pinned word for word by hooks/skills-contract.test.sh: a hooks module cannot read the plugin's files)

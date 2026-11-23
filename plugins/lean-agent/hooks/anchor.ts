@@ -6,8 +6,8 @@
 // az bearer token on curl's stdin; a spec passes canned JSON). Nothing here writes, and no token is ever seen here.
 export type Range = [number, number]
 export type Lines = { right: Range[]; left: Range[] }
-export type PrFile = { path: string; status: 'added' | 'modified' | 'deleted' | 'renamed' | 'binary' | 'unknown'; right: Range[]; left: Range[] }
-export type Anchor = { host: 'github' | 'azure'; org: string; project: string; repo: string; pr: number; file: string; line: number; endLine?: number; side: 'right' | 'left' }
+export type PrFile = { path: string; status: 'added' | 'modified' | 'deleted' | 'renamed' | 'binary' | 'unknown'; right: Range[]; left: Range[]; changeId?: number }
+export type Anchor = { host: 'github' | 'azure'; org: string; project: string; repo: string; pr: number; file: string; line: number; endLine?: number; side: 'right' | 'left'; iteration?: number /* Azure DevOps: the iteration the comment and the check use (default: the latest) */ }
 export type Reader = {
   gh: (path: string, paginate?: boolean) => Promise<unknown | null> // `gh api <path>`: the parsed JSON (pages joined into one array), or null on any failure
   az: (method: 'GET' | 'POST', url: string, body?: unknown) => Promise<unknown | null> // Azure DevOps REST with the bearer token: parsed JSON or null
@@ -87,7 +87,7 @@ export function checkAnchor(thread: string, files: Map<string, PrFile>, a: Pick<
 // ---- reading the PR --------------------------------------------------------------------------------------------------------------------------
 const enc = encodeURIComponent
 const strip = (p: string): string => p.replace(/^\/+/, '')
-type Loaded = { files: (path: string) => Promise<PrFile | null>; head?: string }
+type Loaded = { files: (path: string) => Promise<PrFile | null>; head?: string; paths: string[]; iteration?: number; truncated?: boolean }
 const arr = (v: unknown): unknown[] | null => (Array.isArray(v) ? v : null)
 const rec = (v: unknown): Record<string, unknown> | null => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null)
 
@@ -100,16 +100,17 @@ async function loadGithub(r: Reader, a: Anchor): Promise<Loaded | null> {
     const p = fileFromGithub(f)
     if (p) map.set(p.path, p)
   }
-  return { files: async path => map.get(path) ?? null, head: sha }
+  return { files: async path => map.get(path) ?? null, head: sha, paths: [...map.keys()] }
 }
 const changeKind = (t: unknown): 'none' | 'add' | 'delete' | 'edit' => {
   const s = typeof t === 'number' ? ['none', 'add', 'delete', 'edit'][t] : typeof t === 'string' ? t.toLowerCase() : ''
   return s === 'add' || s === 'delete' || s === 'edit' ? s : 'none'
 }
-async function loadAzure(r: Reader, a: Anchor): Promise<Loaded | null> {
+async function loadAzure(r: Reader, a: Pick<Anchor, 'org' | 'project' | 'repo' | 'pr' | 'iteration'>): Promise<Loaded | null> {
   const repo = `https://dev.azure.com/${enc(a.org)}/${enc(a.project)}/_apis/git/repositories/${enc(a.repo)}`
   const iters = arr(rec(await r.az('GET', `${repo}/pullRequests/${a.pr}/iterations?api-version=7.1`))?.value)
-  const last = iters?.map(rec).filter((x): x is Record<string, unknown> => !!x && typeof x.id === 'number').sort((x, y) => (y.id as number) - (x.id as number))[0]
+  // the iteration asked for (a comment follows ONE iteration, the check reads that same one), else the latest
+  const last = iters?.map(rec).filter((x): x is Record<string, unknown> => !!x && typeof x.id === 'number' && (a.iteration === undefined || x.id === a.iteration)).sort((x, y) => (y.id as number) - (x.id as number))[0]
   const source = rec(last?.sourceRefCommit)?.commitId
   const common = rec(last?.commonRefCommit)?.commitId
   if (!last || typeof source !== 'string' || typeof common !== 'string') return null
@@ -117,12 +118,12 @@ async function loadAzure(r: Reader, a: Anchor): Promise<Loaded | null> {
   const entries = arr(ch?.changeEntries)
   if (!entries) return null
   const truncated = Number(ch?.nextSkip ?? 0) > 0 || Number(ch?.nextTop ?? 0) > 0
-  const known = new Map<string, { type: string; original: string }>()
+  const known = new Map<string, { type: string; original: string; id?: number }>()
   for (const e of entries) {
     const o = rec(e)
     const item = rec(o?.item)
     if (!o || !item || typeof item.path !== 'string' || item.isFolder === true) continue
-    known.set(strip(item.path), { type: String(o.changeType ?? '').toLowerCase(), original: typeof o.originalPath === 'string' ? o.originalPath : item.path })
+    known.set(strip(item.path), { type: String(o.changeType ?? '').toLowerCase(), original: typeof o.originalPath === 'string' ? o.originalPath : item.path, ...(typeof o.changeTrackingId === 'number' ? { id: o.changeTrackingId } : {}) })
   }
   const memo = new Map<string, Promise<PrFile | null>>()
   const one = async (path: string): Promise<PrFile | null> => {
@@ -131,7 +132,7 @@ async function loadAzure(r: Reader, a: Anchor): Promise<Loaded | null> {
     const status = k.type.includes('delete') ? 'deleted' : k.type.includes('add') ? 'added' : k.type.includes('rename') ? 'renamed' : 'modified'
     const d = rec(await r.az('POST', `${repo}/filediffs?api-version=7.1-preview.1`, { fileDiffParams: [{ path: `/${path}`, originalPath: k.original }], baseVersionCommit: common, targetVersionCommit: source }))
     const blocks = arr(rec(arr(d?.value)?.[0])?.lineDiffBlocks) ?? arr(d?.lineDiffBlocks)
-    if (!blocks) return { path, status: 'unknown', right: [], left: [] }
+    if (!blocks) return { path, status: 'unknown', right: [], left: [], ...(k.id !== undefined ? { changeId: k.id } : {}) }
     const right: Range[][] = []
     const left: Range[][] = []
     for (const b of blocks) {
@@ -143,31 +144,51 @@ async function loadAzure(r: Reader, a: Anchor): Promise<Loaded | null> {
       if ((kind === 'add' || kind === 'edit') && m[0]! > 0 && m[1]! > 0) right.push([[m[0]!, m[0]! + m[1]! - 1]])
       if ((kind === 'delete' || kind === 'edit') && l[0]! > 0 && l[1]! > 0) left.push([[l[0]!, l[0]! + l[1]! - 1]])
     }
-    return { path, status, right: fromBlocks(right), left: fromBlocks(left) }
+    return { path, status, right: fromBlocks(right), left: fromBlocks(left), ...(k.id !== undefined ? { changeId: k.id } : {}) }
   }
-  return { files: path => memo.get(path) ?? (memo.set(path, one(path)), memo.get(path)!) }
+  return { files: path => memo.get(path) ?? (memo.set(path, one(path)), memo.get(path)!), paths: [...known.keys()], iteration: last.id as number, truncated }
 }
 
 // Reads the diff of every distinct PR the anchors name (once each) and checks every anchor. refusals[i] is null for an anchor that stands; `heads` is the
 // PR head commit of each GitHub PR (the commit an inline GitHub comment must name). An unreadable diff refuses its anchors as CANNOT_VERIFY.
 export const prKey = (a: Pick<Anchor, 'host' | 'org' | 'project' | 'repo' | 'pr'>): string => `${a.host}/${a.org}/${a.project}/${a.repo}#${a.pr}`
-export async function verifyAnchors(r: Reader, thread: string, anchors: Anchor[]): Promise<{ refusals: (string | null)[]; heads: Record<string, string> }> {
+// `infos[i]`: the Azure DevOps iteration anchor i was checked against (the one a comment names, else the latest) and the file's changeTrackingId in it
+export type AnchorInfo = { iteration?: number; changeTrackingId?: number }
+export async function verifyAnchors(r: Reader, thread: string, anchors: Anchor[]): Promise<{ refusals: (string | null)[]; heads: Record<string, string>; infos: AnchorInfo[] }> {
   const loaded = new Map<string, Promise<Loaded | null>>()
   const heads: Record<string, string> = {}
   const refusals: (string | null)[] = []
+  const infos: AnchorInfo[] = []
   for (const a of anchors) {
-    const k = prKey(a)
+    const k = `${prKey(a)}@${a.iteration ?? ''}`
     if (!loaded.has(k)) loaded.set(k, (a.host === 'github' ? loadGithub(r, a) : loadAzure(r, a)).catch(() => null))
     const l = await loaded.get(k)!
     if (!l) {
       refusals.push(CANNOT_VERIFY)
+      infos.push({})
       continue
     }
-    if (l.head) heads[k] = l.head
+    if (l.head) heads[prKey(a)] = l.head
     const f = await l.files(a.file).catch(() => ({ path: a.file, status: 'unknown', right: [], left: [] }) as PrFile)
     refusals.push(checkAnchor(thread, f ? new Map([[a.file, f]]) : new Map(), a))
+    infos.push({ ...(l.iteration !== undefined ? { iteration: l.iteration } : {}), ...(f?.changeId !== undefined ? { changeTrackingId: f.changeId } : {}) })
   }
-  return { refusals, heads }
+  return { refusals, heads, infos }
+}
+
+// The table a thread reads (lean_run pr-changes): every changed file of a PR (an iteration of it, Azure DevOps) with the added / modified line ranges of the NEW side
+// and the removed ones of the OLD side, from the forge's own diff: no checkout, no git ref. null: the PR could not be read.
+export const MAX_TABLE_FILES = 200
+export async function changesTable(r: Reader, a: Pick<Anchor, 'host' | 'org' | 'project' | 'repo' | 'pr' | 'iteration'>): Promise<string | null> {
+  const l = await (a.host === 'github' ? loadGithub(r, a as Anchor) : loadAzure(r, a)).catch(() => null)
+  if (!l) return null
+  const rows: string[] = []
+  for (const path of l.paths.slice(0, MAX_TABLE_FILES)) {
+    const f = await l.files(path).catch(() => null)
+    rows.push(!f || f.status === 'unknown' ? `${path}: lines unknown (the forge gave no diff for it)` : f.status === 'binary' ? `${path}: binary or no text change` : `${path} [${f.status}]: added ${formatRanges(f.right)} | removed ${formatRanges(f.left)}`)
+  }
+  const more = l.paths.length - rows.length
+  return [`PR ${a.pr}${l.iteration !== undefined ? `, iteration ${l.iteration}` : ''}: ${l.paths.length} changed file${l.paths.length === 1 ? '' : 's'} (added = lines of the new side, removed = lines of the old side)${l.truncated ? '; the forge cut its list short' : ''}`, ...rows, ...(more > 0 ? [`... ${more} more files not read`] : [])].join('\n')
 }
 
 // ---- the lint of review-comment TEXT ---------------------------------------------------------------------------------------------------------

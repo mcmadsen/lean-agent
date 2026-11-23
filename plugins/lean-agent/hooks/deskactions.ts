@@ -22,7 +22,7 @@
 //
 // Never grantable this way: pushes, tags, releases (the push gate), merges, deletes, permission or settings changes, anything outside the
 // table. The token of Azure DevOps goes to curl on STDIN only (a curl config), never in an argument list, a log or an output.
-import { appendJsonl, homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
+import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
@@ -30,8 +30,8 @@ import { azureToken, joinPages, oneLine } from './prhost'
 import { typedApproval } from './writeinstr'
 import { setNotice } from './notices'
 import { holdCovered } from './sendhold'
-import { CANNOT_VERIFY, lintReviewText, prKey, verifyAnchors } from './anchor'
-import type { Anchor, Reader } from './anchor'
+import { CANNOT_VERIFY, changesTable, lintReviewText, prKey, verifyAnchors } from './anchor'
+import type { Anchor, AnchorInfo, Reader } from './anchor'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -45,6 +45,10 @@ export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
 export const PH_HEAD = '<PR head commit>' // the commit an inline GitHub comment names: read by a GET right before it is sent (the user sees the placeholder)
+export const PH_ITER = '<latest iteration>' // an inline Azure DevOps comment follows ONE iteration: the latest one, read right before it is sent, unless `iteration` is given
+export const PH_CHANGE = '<change id>' // the file's changeTrackingId in that iteration, read then too, unless `changeTrackingId` is given
+export const STATUS_CODES: Record<string, number> = { active: 1, fixed: 2, wontFix: 3, closed: 4, byDesign: 5, pending: 6 } // the REST values of a thread's status at creation
+export const COMMENT_TYPES: Record<string, number> = { text: 1, codechange: 2 }
 export const ANCHOR_NOTE = 'anchors checked against the PR diff'
 export const QUESTION_TEXT_MAX = 300 // a comment's text in the desk's question of a review batch (the card shows all of it)
 export const WI_TYPES = ['Bug', 'Task', 'User Story', 'Issue']
@@ -57,7 +61,7 @@ export const STATUS_NAMES = Object.values(THREAD_STATUS).join(', ')
 export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-reply': `org, project, repo, pr, thread, body, optional status (${STATUS_NAMES}: the desk then sets the thread's status, after the reply)`,
   'ado-pr-thread-status': `org, project, repo, pr, thread, status (${STATUS_NAMES})`,
-  'ado-pr-comment': 'org, project, repo, pr, body, optional file + line (+ endLine, side right|left): an inline comment on that line of the PR',
+  'ado-pr-comment': `org, project, repo, pr, body, optional file + line (+ endLine or lineEnd, offset, offsetEnd, side right|left, iteration, changeTrackingId): an inline comment on that line of the PR; optional status (${STATUS_NAMES}), commentType text|codeChange, parentCommentId`,
   'ado-workitem-comment': 'org, project, id, body',
   'ado-workitem-update': 'org, project, id, fields (state, assignedTo, tags, title; strings)',
   'ado-workitem-create': `org, project, type (${WI_TYPES.join(' | ')}), title, description?, area?, iteration?, assignedTo?, parent? (id), links? [{pr}] with repo`,
@@ -70,7 +74,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
 const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-reply': ['org', 'project', 'repo', 'pr', 'thread', 'body', 'status'],
   'ado-pr-thread-status': ['org', 'project', 'repo', 'pr', 'thread', 'status'],
-  'ado-pr-comment': ['org', 'project', 'repo', 'pr', 'body', 'file', 'line', 'endLine', 'side'],
+  'ado-pr-comment': ['org', 'project', 'repo', 'pr', 'body', 'file', 'line', 'endLine', 'lineEnd', 'offset', 'offsetEnd', 'side', 'status', 'commentType', 'parentCommentId', 'iteration', 'changeTrackingId'],
   'ado-workitem-comment': ['org', 'project', 'id', 'body'],
   'ado-workitem-update': ['org', 'project', 'id', 'fields'],
   'ado-workitem-create': ['org', 'project', 'type', 'title', 'description', 'area', 'iteration', 'assignedTo', 'parent', 'links', 'repo'],
@@ -158,10 +162,11 @@ export function checkAction(a: unknown): Checked {
   const json = (v: unknown) => JSON.stringify(v)
   // an inline comment's place: file (repo-relative), line (in the PR's NEW version; the old one with side left), endLine?, side?. undefined: none given; null: not valid
   const inlineOf = (): { file: string; line: number; endLine?: number; side: 'right' | 'left' } | null | undefined => {
-    if (['file', 'line', 'endLine', 'side'].every(key => p[key] === undefined)) return undefined
+    if (['file', 'line', 'endLine', 'lineEnd', 'side'].every(key => p[key] === undefined)) return undefined
     const file = typeof p.file === 'string' ? p.file.trim() : ''
     const line = num('line')
-    const endLine = p.endLine === undefined ? undefined : num('endLine')
+    const endLine = p.endLine === undefined && p.lineEnd === undefined ? undefined : num(p.endLine === undefined ? 'lineEnd' : 'endLine') // lineEnd is the same field as endLine
+    if (p.endLine !== undefined && p.lineEnd !== undefined && int(p.endLine) !== int(p.lineEnd)) return null
     const sideRaw = p.side === undefined ? 'right' : typeof p.side === 'string' ? p.side.trim().toLowerCase() : ''
     if (!file || file.length > 300 || CONTROL.test(file) || file.includes('\\') || file.split('/').some(s => !s || s === '..') || line === null || endLine === null || (endLine !== undefined && endLine < line) || (sideRaw !== 'right' && sideRaw !== 'left')) return null
     params.file = file
@@ -322,16 +327,39 @@ export function checkAction(a: unknown): Checked {
   const empty = tooEmpty(body)
   if (empty) return refuse(empty)
   params.body = body
+  // the thread's own fields (Azure DevOps 7.1): status at creation (1..6), the comment type (1 text, 2 codeChange), the parent comment (0 = a new comment)
+  const statusRaw = p.status === undefined ? undefined : typeof p.status === 'string' ? p.status.trim().toLowerCase() : null
+  const statusName = statusRaw ? THREAD_STATUS[statusRaw] : undefined
+  const typeRaw = p.commentType === undefined ? undefined : typeof p.commentType === 'string' ? COMMENT_TYPES[p.commentType.trim().toLowerCase()] : p.commentType === 1 || p.commentType === 2 ? p.commentType : undefined
+  const parent = p.parentCommentId === undefined ? undefined : typeof p.parentCommentId === 'number' && Number.isInteger(p.parentCommentId) && p.parentCommentId >= 0 && p.parentCommentId < 1e9 ? p.parentCommentId : null
+  const offset = p.offset === undefined ? undefined : num('offset')
+  const offsetEnd = p.offsetEnd === undefined ? undefined : num('offsetEnd')
+  const iteration = p.iteration === undefined ? undefined : num('iteration')
+  const changeId = p.changeTrackingId === undefined ? undefined : num('changeTrackingId')
+  if (statusRaw === null || (statusRaw && !statusName) || (p.commentType !== undefined && typeRaw === undefined) || parent === null || offset === null || offsetEnd === null || iteration === null || changeId === null) return bad(`status must be one of ${STATUS_NAMES}, commentType text or codeChange, parentCommentId a number (0 = new), offset and offsetEnd positive numbers, iteration and changeTrackingId positive numbers`)
+  if (!place && (offset !== undefined || offsetEnd !== undefined || iteration !== undefined || changeId !== undefined)) return bad('offset, offsetEnd, iteration and changeTrackingId go with file and line (an inline comment)')
+  if (changeId !== undefined && iteration === undefined) return bad('changeTrackingId goes with iteration')
+  if (statusName) params.status = statusName
+  if (typeRaw !== undefined) params.commentType = typeRaw === 2 ? 'codeChange' : 'text'
+  if (parent !== undefined) params.parentCommentId = parent
+  if (offset !== undefined) params.offset = offset
+  if (offsetEnd !== undefined) params.offsetEnd = offsetEnd
+  if (iteration !== undefined) params.iteration = iteration
+  if (changeId !== undefined) params.changeTrackingId = changeId
+  const comments = [{ parentCommentId: parent ?? 0, content: body, commentType: typeRaw ?? 1 }]
+  const statusNum = statusName ? STATUS_CODES[statusName]! : 1
   if (place) {
-    // an inline comment: a NEW thread whose threadContext names the file and the line (the old version's with side left)
-    const at = { line: place.line, offset: 1 }
-    const end = { line: place.endLine ?? place.line, offset: 1 }
+    // an inline comment: a NEW thread whose threadContext names the file and the line (the old version's with side left), and whose pullRequestThreadContext names the
+    // iteration it follows (the latest, read at send time, unless iteration is given) and the file's changeTrackingId in it (read then too, unless given)
+    const at = { line: place.line, offset: offset ?? 1 }
+    const end = { line: place.endLine ?? place.line, offset: offsetEnd ?? 1 }
     const threadContext = { filePath: `/${place.file}`, ...(place.side === 'left' ? { leftFileStart: at, leftFileEnd: end } : { rightFileStart: at, rightFileEnd: end }) }
-    const anchor: Anchor = { host: 'azure', org: az.org, project: az.project, repo, pr, ...place }
+    const pullRequestThreadContext = { iterationContext: { firstComparingIteration: iteration ?? PH_ITER, secondComparingIteration: iteration ?? PH_ITER }, changeTrackingId: changeId ?? PH_CHANGE }
+    const anchor: Anchor = { host: 'azure', org: az.org, project: az.project, repo, pr, ...place, ...(iteration !== undefined ? { iteration } : {}) }
     const w = whereOf(place)
-    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads?api-version=7.1`, contentType: 'application/json', body: json({ comments: [{ parentCommentId: 0, content: body, commentType: 1 }], status: 1, threadContext }), headline: `comment on ${w} of PR ${pr} (${where})`, text: `comment on ${w} of PR ${pr}: ${body}`, anchor } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads?api-version=7.1`, contentType: 'application/json', body: json({ comments, status: statusNum, threadContext, pullRequestThreadContext }), headline: `comment on ${w} of PR ${pr} (${where})`, text: `comment on ${w} of PR ${pr}${statusName && statusName !== 'active' ? ` (thread ${statusName})` : ''}: ${body}`, anchor } }
   }
-  return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads?api-version=7.1`, contentType: 'application/json', body: json({ comments: [{ parentCommentId: 0, content: body, commentType: 1 }], status: 1 }), headline: `post a new comment on PR ${pr} (${where})`, text: body } }
+  return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${prs}/threads?api-version=7.1`, contentType: 'application/json', body: json({ comments, status: statusNum }), headline: `post a new comment on PR ${pr} (${where})`, text: statusName && statusName !== 'active' ? `${body}\n\n(thread created as ${statusName})` : body } }
 }
 
 // a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
@@ -907,14 +935,53 @@ export function readerOf(h: Host): Reader {
     },
   }
 }
+// `lean_run {pr-changes: {forge, org, project, repo, pr, iteration?}}`: a READ for a thread (script, no model, no checkout, no git ref): the changed files of the PR with the
+// added / modified line ranges of the new side and the removed ones of the old side, the same reading the anchor check uses. Cut to PR_CHANGES_MAX characters; the whole
+// table is written to the thread's scratch folder.
+export const PR_CHANGES_MAX = 6000
+export async function runPrChanges(h: Host, thread: string, req: unknown): Promise<string> {
+  const g = req && typeof req === 'object' && !Array.isArray(req) ? (req as Record<string, unknown>) : null
+  if (!g) throw new Error('pr-changes is an object {forge: "ado" | "github", org, project, repo, pr, iteration?}')
+  for (const key of Object.keys(g)) if (!['forge', 'org', 'project', 'repo', 'pr', 'iteration'].includes(key)) throw new Error(`pr-changes: unknown field "${key.slice(0, 30)}" (forge, org, project, repo, pr, iteration)`)
+  const forge = g.forge === 'ado' || g.forge === 'github' ? g.forge : null
+  if (!forge) throw new Error('pr-changes.forge must be "ado" or "github"')
+  const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
+  const pr = int(g.pr)
+  if (pr === null) throw new Error('pr-changes.pr must be a PR number')
+  const iteration = g.iteration === undefined ? undefined : int(g.iteration)
+  if (iteration === null) throw new Error('pr-changes.iteration must be an iteration number')
+  if (forge === 'github' && (iteration !== undefined || g.org !== undefined || g.project !== undefined)) throw new Error('pr-changes forge github takes repo (owner/name) and pr only')
+  const repo = str(g.repo)
+  const org = str(g.org)
+  const project = str(g.project)
+  if (forge === 'github' ? !GH_REPO.test(repo) : !NAME.test(org) || !NAME.test(project) || !NAME.test(repo)) throw new Error(forge === 'github' ? 'pr-changes forge github needs repo as owner/name' : 'pr-changes forge ado needs org, project and repo (names)')
+  const table = await changesTable(readerOf(h), { host: forge === 'github' ? 'github' : 'azure', org, project, repo, pr, ...(iteration !== undefined ? { iteration } : {}) })
+  if (!table) throw new Error(`could not read the changes of PR ${pr}${iteration !== undefined ? ` iteration ${iteration}` : ''} (no login, no network, or no such PR${iteration !== undefined ? ' or iteration' : ''}): nothing is guessed`)
+  const file = `${threadsDir(await homeDir(h))}/${thread}/scratch/pr-changes-${pr}${iteration !== undefined ? `-it${iteration}` : ''}.txt`
+  await atomicWrite(h, file, `${table}\n`).catch(() => undefined)
+  if (table.length <= PR_CHANGES_MAX) return table
+  const head = table.slice(0, PR_CHANGES_MAX)
+  return `${head.slice(0, head.lastIndexOf('\n'))}\n... cut at ${PR_CHANGES_MAX} characters: the whole table is in ${file}`
+}
 // the anchors of a plan's writes (a batch holds many), checked against the PR diff read now: refusals line up with `list`
 const anchorsOf = (plan: Plan): Plan[] => (plan.steps ?? [plan]).filter(s => s.anchor)
 // (the commit goes into the JSON's commit_id by parsing it, never by a text replace: a comment may itself contain the placeholder's words)
-const withHead = (s: Plan, heads: Record<string, string>): Plan => {
-  const sha = s.anchor && s.tool === 'github' ? heads[prKey(s.anchor)] : undefined
-  return sha ? { ...s, body: JSON.stringify({ ...(JSON.parse(s.body) as Record<string, unknown>), commit_id: sha }) } : s
+// An Azure DevOps comment gets the iteration it was CHECKED against (the same one) and the file's changeTrackingId in it, unless the thread named them.
+const withHead = (s: Plan, heads: Record<string, string>, info: AnchorInfo = {}): Plan => {
+  if (!s.anchor) return s
+  const o = JSON.parse(s.body) as Record<string, any>
+  if (s.tool === 'github') return heads[prKey(s.anchor)] ? { ...s, body: JSON.stringify({ ...o, commit_id: heads[prKey(s.anchor)] }) } : s
+  const c = o.pullRequestThreadContext
+  if (!c) return s
+  const it = c.iterationContext.firstComparingIteration === PH_ITER ? info.iteration : c.iterationContext.firstComparingIteration
+  const ch = c.changeTrackingId === PH_CHANGE ? info.changeTrackingId : c.changeTrackingId
+  return { ...s, body: JSON.stringify({ ...o, pullRequestThreadContext: { iterationContext: { firstComparingIteration: it ?? PH_ITER, secondComparingIteration: it ?? PH_ITER }, changeTrackingId: ch ?? PH_CHANGE } }) }
 }
-const noHead = (s: Plan): boolean => s.tool === 'github' && !!s.anchor && (JSON.parse(s.body) as { commit_id?: unknown }).commit_id === PH_HEAD
+const noHead = (s: Plan): boolean => {
+  if (!s.anchor) return false
+  const o = JSON.parse(s.body) as Record<string, any>
+  return s.tool === 'github' ? o.commit_id === PH_HEAD : o.pullRequestThreadContext?.iterationContext?.firstComparingIteration === PH_ITER || o.pullRequestThreadContext?.changeTrackingId === PH_CHANGE
+}
 
 // a batch or a reply with a status: the writes in order, each reported (done / failed with the reason / not run). Stopped at the first failure, unless the plan says
 // `cont` (a review: a failing item is reported and the rest still run; an outcome that is unknown always stops). The anchor of an inline comment is checked
@@ -939,7 +1006,7 @@ async function runSteps(h: Host, thread: string, plan: Plan): Promise<Ran> {
     }
     const ai = anchored.indexOf(s0)
     const refusal = seen && ai >= 0 ? seen.refusals[ai] ?? null : null
-    const s1 = seen && ai >= 0 ? withHead(s0, seen.heads) : s0
+    const s1 = seen && ai >= 0 ? withHead(s0, seen.heads, seen.infos[ai]) : s0
     const s = s1.url.includes(PH_NEW) ? { ...s1, url: made ? s1.url.split(PH_NEW).join(made) : s1.url } : s1
     let one: Sent
     try {
@@ -969,7 +1036,7 @@ async function sendAnchored(h: Host, thread: string, plan: Plan): Promise<Sent> 
   const seen = await verifyAnchors(readerOf(h), thread, [plan.anchor!])
   const bad = seen.refusals[0]
   if (bad) return { ok: false, text: bad, refused: bad !== CANNOT_VERIFY }
-  const s = withHead(plan, seen.heads)
+  const s = withHead(plan, seen.heads, seen.infos[0])
   return noHead(s) ? { ok: false, text: CANNOT_VERIFY } : send(h, s)
 }
 const resultOf = (out: string, urlField: string): string => {
