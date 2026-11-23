@@ -22,7 +22,8 @@ function setup(opts: { thread?: Record<string, unknown>; config?: unknown; remot
   h.clock.t = 1_000_000
   h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, pr: PR, workItems: [1234], ...opts.thread }))
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
-  if (opts.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(opts.config))
+  const cfg = (opts.config ?? {}) as { actions?: Record<string, unknown> }
+  h.files.set(`${L}/config.json`, JSON.stringify({ ...cfg, actions: { holdSeconds: 0, ...cfg.actions } })) // (no hold window: sendhold.test.ts has its own specs)
   h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: `${opts.remote ?? 'https://dev.azure.com/acme/Shop%20App/_git/shop-api'}\n` } : { exitCode: 1, stdout: '' })
   h.exec.handler = argv => {
     if (argv[0] === 'az') return { exitCode: 0, stdout: `${TOKEN}\n` }

@@ -18,7 +18,8 @@ function setup(over: { get?: (url: string) => { exitCode: number; stdout: string
   const h = fakeHost(null)
   resetLocks()
   resetActions()
-  h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ actions: { holdSeconds: 0 } })) // (no hold window: sendhold.test.ts has its own specs)
+  h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 9e12, delivered: 0 })) // (lastWake far ahead: no prompt counts as newer than the last delivery, sendhold.test.ts)
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'https://dev.azure.com/acme/Shop%20App/_git/shop-api\n' } : { exitCode: 1, stdout: '' })
   h.exec.handler = argv => {

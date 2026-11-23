@@ -16,6 +16,7 @@ function setup() {
   const h = fakeHost(null)
   resetLocks()
   resetActions()
+  h.files.set(`${L}/config.json`, JSON.stringify({ actions: { holdSeconds: 0 } })) // (no hold window: sendhold.test.ts has its own specs)
   for (const t of ['t5', 't6']) h.files.set(`${L}/threads/${t}/thread.json`, JSON.stringify({ id: t, title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   h.exec.handler = argv => {
     if (argv[0] === 'az') return { exitCode: 0, stdout: 'TOKEN-0123456789\n' }
@@ -126,7 +127,7 @@ test('a batch of eligible items carries the choice (the kinds of every item); a 
 
 test('at most 40 writes under one grant (counted per write), then the user is asked again', { timeoutMs: 20_000 }, async () => {
   const s = setup()
-  s.h.files.set(`${L}/config.json`, JSON.stringify({ actions: { maxWritesPerGrant: 3 } }))
+  s.h.files.set(`${L}/config.json`, JSON.stringify({ actions: { maxWritesPerGrant: 3, holdSeconds: 0 } }))
   await allowed(s, 'ado-pr-reply', REPLY)
   expect(await sentNow(s, 'ado-pr-reply', { ...REPLY, thread: 8, body: 'one' })).toBe(true)
   expect(await sentNow(s, 'ado-pr-reply', { ...REPLY, thread: 9, body: 'two' })).toBe(true)
