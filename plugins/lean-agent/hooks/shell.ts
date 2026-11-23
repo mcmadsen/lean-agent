@@ -9,6 +9,8 @@
 export type Push = { args: string[]; known: boolean }
 export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[] }
 
+import { forgeReadOk } from './forgeread'
+
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
 // cheap whole-text check for private projects (ssh/flock/parallel are parsed; python -c, other interpreters' strings and eval with variables are not: documented residual risk).
@@ -33,7 +35,7 @@ const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\b
 const GHAZ = /(^|[^\w./-])(gh|az)($|[^\w-])/
 const DYNAMIC = /(^|[;&|(`\n]|\$\()\s*(\w+=\S*\s+)*["']?\$[\w{(]/
 const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o', '--output', '--query', '--organization', '--org', '--project', '--resource-group', '-g'])
-const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], search: ['prs', 'issues', 'repos', 'commits', 'code'], repo: ['view', 'list'], run: ['view', 'list'], auth: ['status'] }
+const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], search: ['prs', 'issues', 'repos', 'commits', 'code'], repo: ['view', 'list'], run: ['view', 'list'], release: ['view', 'list'], auth: ['status'] }
 const KW = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'time'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
 // programs that run a command given among their own arguments (the git word is looked for anywhere after them)
@@ -44,6 +46,7 @@ class Bad extends Error {}
 type Seg = { words: string[]; docs: string[] }
 
 function ghDenied(rest: string[]): boolean {
+  if (forgeReadOk(['gh', ...rest])) return false // the fixed allow-list of forge reads (forgeread.ts)
   const pos: string[] = []
   for (let i = 0; i < rest.length; i++) {
     const x = rest[i]!
@@ -61,6 +64,7 @@ function ghDenied(rest: string[]): boolean {
   return !(GH_READ[pos[0]!]?.includes(pos[1] ?? ''))
 }
 function azDenied(rest: string[]): boolean {
+  if (forgeReadOk(['az', ...rest])) return false
   let i = 0
   while (i < rest.length && rest[i]!.startsWith('-')) i += VALUE_FLAGS.has(rest[i]!) ? 2 : 1
   const pos: string[] = []

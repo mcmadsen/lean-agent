@@ -8,6 +8,7 @@ import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
+import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { jobOf } from './jobs'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -991,6 +992,8 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
       if (pat) return `lean-agent: a worker never changes lean-agent's own state (settings, grants, approvals, review records, threads); ${scratchHint(lean, ownId)}; report the rest to the thread${tried(`Bash ${pat === 'thread folder' ? 'thread folder' : 'lean state'} ${pat}`)}`
       return null
     }
+    // a reader's (and the reviewer's) curl / wget to a forge host is a plain GET that writes no file outside temp / scratch (forgeread.ts)
+    if ((plainPipeline(c) ?? []).some(s => isForgeFetch(s) && !forgeReadOk(s, p => forgeTempOk(p, scratch)))) return forgeReadRefusal() + tried(forgeTried(c))
     return readerWrite(c, scratch)
   }
   if (isReader(t)) {

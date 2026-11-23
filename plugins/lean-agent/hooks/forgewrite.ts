@@ -59,7 +59,13 @@ export const FORGE_RULE = 'forge-write'
 export const forgeRefusalHead = /^forge writes go through the desk/
 
 const HOST = /dev\.azure\.com|\.visualstudio\.com|api\.github\.com|github\.com|\/_apis\/|\/pullRequests\/\S*\/threads/i // (a note that gives only the path `.../pullRequests/<pr>/threads/<id>` is the same write)
-const METHOD = /(?:^|[\s'"])(?:-X|--request|--method|-m)[\s=]*['"]?(?:POST|PATCH|PUT|DELETE)\b/i
+const METHOD = /(?:^|[\s'"])(?:-X|--request|--method|--http-method|-m)[\s=]*['"]?(?:POST|PATCH|PUT|DELETE)\b/i
+// `gh api graphql` that only READS: the one gh api in the text, a query text that starts with `query` or `{`, no mutation / subscription, no other method, no --input
+const GH_API = /(?:^|[^\w./-])gh\s+(?:-\S+\s+)*api(?![\w-])/g
+const GQL_QUERY = /(?:^|\s)(?:-f|-F|--field|--raw-field)[\s=]*['"]?query=\s*['"]?\s*(?:query\b|\{)/
+const gqlRead = (t: string): boolean => (t.match(GH_API)?.length ?? 0) === 1 && /\bgh\s+(?:-\S+\s+)*api\s+graphql\b/.test(t) && GQL_QUERY.test(t) && !/\b(mutation|subscription)\b/i.test(t) && !METHOD.test(t) && !/--input\b/.test(t)
+// `az devops invoke` is a write only with a method that is not GET or a request body file
+const azInvokeWrite = (t: string): boolean => METHOD.test(t) || /--in-file\b|--http-method[\s=]+['"]?(?!get\b)\w/i.test(t)
 const GET_METHOD = /(?:^|[\s'"])(?:-X|--request|--method)[\s=]*['"]?GET\b/i
 const DATA = /(?:^|\s)(?:(?:-d|-F|-T)(?=[\s='"@{]|$)|--(?:data(?:-binary|-raw|-urlencode|-ascii)?|json|form(?:-string)?|upload-file|post-data|post-file|body-data|body-file)(?=[\s=]|$))/
 const GH_FIELD = /(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?=[\s='"]|$)/
@@ -73,8 +79,8 @@ export function isForgeWrite(command: string): boolean {
   if (/(?:^|[^\w./-])az\s+(?:-\S+\s+)*rest(?![\w-])/.test(t) && METHOD.test(t)) return true
   for (const m of t.matchAll(/(?:^|[^\w./-])az\s+(?:repos|boards|devops|pipelines)((?:\s+[a-z][a-z-]*){1,4})/g)) {
     const first = m[1]!.trim().split(/\s+/).find(w => AZ_READ.test(w) || AZ_WRITE.test(w))
-    if (first && AZ_WRITE.test(first)) return true
+    if (first === 'invoke' ? azInvokeWrite(t) : first && AZ_WRITE.test(first)) return true
   }
-  if (/(?:^|[^\w./-])gh\s+(?:-\S+\s+)*api(?![\w-])/.test(t) && (METHOD.test(t) || (GH_FIELD.test(t) && !GET_METHOD.test(t)))) return true
+  if (/(?:^|[^\w./-])gh\s+(?:-\S+\s+)*api(?![\w-])/.test(t) && !gqlRead(t) && (METHOD.test(t) || (GH_FIELD.test(t) && !GET_METHOD.test(t)))) return true
   return /(?:^|[^\w./-])gh\s+(?:(?:-R|--repo)\s+\S+\s+)?(?:pr|issue)\s+(?:comment|review|edit|close|reopen|merge|ready|lock|unlock)(?![\w-])/.test(t)
 }
