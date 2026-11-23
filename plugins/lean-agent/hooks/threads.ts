@@ -11,6 +11,9 @@ import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
 import { allowWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
+import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
+import { deliver } from './deliver'
+import { denialRec } from './denial'
 import { agentsText } from './guard'
 import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
@@ -233,7 +236,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean }
+export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -813,6 +816,9 @@ const USES: Record<string, string[]> = {
   'approve-action': ['id'],
   'allow-writes': ['target', 'kinds'],
   'revoke-writes': ['id'],
+  'allow-self-edit': [],
+  'revoke-self-edit': ['id'],
+  deliver: ['file', 'to', 'name'],
   keep: ['on'],
   find: TEXTY,
   ask: TEXTY,
@@ -888,6 +894,12 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       lint = briefLintLine()
       i = { ...i, text: `${i.text}\n\n${lint}` }
     }
+    // a thread whose worker was denied (denial.ts) and is told to retry: the user's own recorded words that name it ride along, so the next brief can
+    // quote them verbatim as the authority (selfedit.ts userWordsFor; nothing the model writes can stand in for them)
+    if (i.action === 'send' && ID.test(i.tN ?? '') && typeof i.text === 'string' && i.text.trim() && (await denialRec(h, i.tN!).catch(() => null))) {
+      const words = await userWordsFor(h, i.tN!).catch(() => '')
+      if (words) i = { ...i, text: `${i.text}\n\n[lean-agent] The user's own recorded words that name you (quote them verbatim in the next worker brief as the authority for the step): "${words}"` }
+    }
     let out = await leanThreadCore(h, root, i)
     if (out.ok && (i.action === 'new' || i.action === 'start')) {
       const warn = await holdWarning(h, await homeDir(h))
@@ -924,6 +936,21 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     if (i.action === 'allow-writes') {
       const o = await allowWrites(h, (i.tN ?? '').trim(), i.target, i.kinds)
       return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    // the user may let a thread whose worker was denied edit its worktree itself (selfedit.ts): the mod checks the user's recorded words
+    if (i.action === 'allow-self-edit') {
+      const o = await allowSelfEdit(h, (i.tN ?? '').trim())
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    if (i.action === 'revoke-self-edit') {
+      const tn = (i.tN ?? '').trim()
+      const o = await revokeSelfEdit(h, i.id ? { id: i.id.trim() } : tn ? { thread: tn } : { all: true }, 'user, by the desk')
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    // a file for the user's Downloads / Desktop / Documents (deliver.ts): the mod copies it from the thread's scratch folder, on the user's words
+    if (i.action === 'deliver') {
+      const o = await deliver(h, { tN: i.tN, file: i.file, to: i.to, name: i.name })
+      return o.ok ? { ok: true, text: o.text } : { ok: false, text: o.text, ...(o.data ? { data: o.data } : {}) }
     }
     if (i.action === 'revoke-writes') {
       const tn = (i.tN ?? '').trim()
@@ -1109,6 +1136,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
           await dropGrants(h, id).catch(() => undefined) // and its standing approvals end with it
           await dropWriteGrants(h, id).catch(() => undefined) // and so do the written approvals (deskwrites.ts)
+          await dropSelfEditGrants(h, id) // and the user's "let it edit itself" (selfedit.ts)
           const removed = await clearGoal(h, home, id) // a closed thread has no goal for the chaser to watch; its text is kept for a reopen's handover
           if (removed) t.lastGoal = removed
           const cleared = removed !== null

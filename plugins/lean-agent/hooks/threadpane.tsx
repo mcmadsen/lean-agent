@@ -201,6 +201,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
       {!!d.liveNote && <Text color={d.live === 'stuck' ? 'red' : 'yellow'}>{d.liveNote}</Text>}
       {d.needsYou && <Text color="yellow">It waits for you in its own session: press Open session.</Text>}
       {!!d.approval && <Text color="yellow">{`needs your yes: ${short(d.approval, 160)}`}</Text>}
+      {!!d.denial && <Text color="yellow" wrap="wrap">{d.denial}</Text>}
       <Text bold>Goal</Text>
       <Text dimColor={!d.goal}>{d.goal ? short(d.goal, 200) : 'no goal set'}</Text>
       <Text bold>Brief</Text>

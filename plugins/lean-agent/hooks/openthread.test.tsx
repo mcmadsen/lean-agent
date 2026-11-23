@@ -69,8 +69,8 @@ test('lean_report: `approval` is kept only on a blocked report (trimmed, one lin
   expect(approvalHint({ ts: 1, from: 't9', kind: 'report', state: 'done', text: 'x', approval: 'y' })).toBe('') // only blocked
 })
 
-test('the pane view: a blocked report with an approval is the thread\'s approval; a later record or a closed thread clears it', async () => {
-  const w = world([row()])
+test('the pane view: a blocked report with an approval is the thread\'s approval while a prompt is open; a later record or a closed thread clears it', async () => {
+  const w = world([row({ waitingFor: 'a permission prompt' })])
   expect((await loadView(w.h.host)).threads.find(t => t.id === 't1')?.approval).toBe(ACTION)
   w.h.files.set('/h/.lean-agent/desk/inbox.jsonl', (w.h.files.get('/h/.lean-agent/desk/inbox.jsonl') ?? '') + JSON.stringify({ ts: 9, from: 't1', kind: 'report', state: 'working', text: 'went on' }) + '\n')
   resetViewCache()
@@ -165,21 +165,32 @@ test('Open tN: the opener fails -> its first line and the way by hand; the app i
 
 const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
 
-test('the pane row "tN needs your yes in its own session: <action>" has an Open tN button; the press stops the process, then opens the link; a failure is said in the notice', { timeoutMs: 20_000 }, async ($, on) => {
+test('the pane row "tN needs your yes in its own session: <action>" and its Open tN button exist only while a prompt is open in the session (the list says it waits); a prompt is never stopped by the press', { timeoutMs: 20_000 }, async ($, on) => {
+  const w = world([row({ state: 'idle', waitingFor: 'a permission prompt' })], on) // (an Open button only with a prompt behind it: denial.ts)
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: new RegExp(`t1 needs your yes in its own session: ${ACTION}`) }), 'row text').toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: 'Open t1' }), 'button').toBeTruthy()
+  await ui.press({ key: 'open-t1' })
+  expect(w.order).toEqual([]) // a session that waits on a prompt of its own is never stopped (that would drop the prompt)
+  expect(await ui.find({ type: 'Text', text: /waits on a prompt of its own/ }), 'refused').toBeTruthy()
+  await ui.unmount()
+})
+
+test('no prompt is open (an idle session, a classifier denial): the card says so, offers the real options and has NO Open tN button', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world([row()], on)
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: new RegExp(`t1 needs your yes in its own session: ${ACTION}`) })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeTruthy()
-  await ui.press({ key: 'open-t1' })
-  expect(w.order).toEqual(['stop', `open ${LINK}`])
-  expect(await ui.find({ type: 'Text', text: /t1 opened in the Claude app/ })).toBeTruthy()
-  // the opener fails: the notice says so
-  w.state.rows = [row()]
-  w.h.opener.handler = () => ({ exitCode: 1, stdout: '', stderr: 'no app' })
-  await ui.press({ key: 'open-t1' })
-  expect(await ui.find({ type: 'Text', text: /Could not open the Claude app: no app; open t1 from the session list/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /no permission prompt exists for t1: the auto-mode classifier denied a worker call/ }), 'truth').toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /There is nothing to press in the session\./ }), 'nothing to press').toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: 'Let t1 edit its worktree itself' }), 'self edit').toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: 'Retry the worker with a narrower brief' }), 'retry').toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: 'Dismiss' }), 'dismiss').toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /needs your yes in its own session/ })).toBeFalsy()
+  expect(w.order).toEqual([])
   await ui.unmount()
 })
 

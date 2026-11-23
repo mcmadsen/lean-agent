@@ -43,9 +43,9 @@ test('through the engine: a denied reader gives the category and the narrower-re
   expect(r?.retry).toBeUndefined()
   const a: any = await $.tool.call({ tool: 'Bash', command: 'git -C /real/w status' } as any)
   expect(ctx(a)).toContain(readerDeniedHint('Destructive or Unwanted Actions'))
-  expect(ctx(a)).toContain('retry ONCE with a narrower brief: one file or one section, one question')
-  expect(ctx(a)).toContain('slices of at most 200 lines and write each finding to scratch/notes.md at once; never read a whole long file into your context')
-  expect(ctx(await $.tool.call({ tool: 'Bash', command: 'git -C /real/w log -1' } as any))).not.toContain('retry ONCE') // said once
+  expect(ctx(a)).toContain('retry once with one file, one question')
+  expect(ctx(a)).toContain('read in slices of 200 lines and write each finding to scratch/notes.md')
+  expect(ctx(await $.tool.call({ tool: 'Bash', command: 'git -C /real/w log -1' } as any))).not.toContain('retry once') // said once
   const again: any = await $.tool.call({ tool: 'Agent', subagent_type: READER, prompt: 'job: lookup\none file, one question' } as any)
   expect(again.deny).toBeUndefined() // the narrower retry runs
   expect(rows(h).filter((x: any) => x.rule === 'delegation-denied').length).toBe(1)
@@ -56,7 +56,7 @@ test('through the engine: a lookup job given to a worker type counts as a reader
   await session($, on)
   await $.classic.PostToolUseFailure({ ...denied('u2', WORKER, 'job: lookup\nread the history doc'), error: 'denied by the auto mode classifier: [Excessive Resource Use]' })
   const a: any = await $.tool.call({ tool: 'Bash', command: 'git -C /real/w status' } as any)
-  expect(ctx(a)).toContain('denied the reader call (Excessive Resource Use)')
+  expect(ctx(a)).toContain('the reader was denied (Excessive Resource Use)')
 })
 
 test('through the engine: the fallback reads are slices of <= 200 lines, counted; no cap per turn after a denial; the 11th carries the warning once', { timeoutMs: 20_000 }, async ($, on) => {
@@ -76,10 +76,10 @@ test('through the engine: the fallback reads are slices of <= 200 lines, counted
   expect(((await $.tool.call({ tool: 'Edit', file_path: '/real/w/a.ts' } as any)) as any).deny).toContain('one step for a small worker') // a denied reader opens no edit
 })
 
-test('through the engine: a denied EDIT worker keeps its own hint ("do this one step yourself") and no reader hint', { timeoutMs: 20_000 }, async ($, on) => {
+test('through the engine: a denied EDIT worker keeps its own hint ("do the step yourself") and no reader hint', { timeoutMs: 20_000 }, async ($, on) => {
   await session($, on)
   await $.classic.PermissionDenied(denied('u4', WORKER, 'job: edit\nedit /real/w/c.ts please'))
   const a: any = await $.tool.call({ tool: 'Edit', file_path: '/real/w/c.ts' } as any)
-  expect(ctx(a)).toContain('do this one step yourself')
+  expect(ctx(a)).toContain('do the step yourself')
   expect(ctx(a)).not.toContain('retry ONCE')
 })

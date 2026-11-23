@@ -81,8 +81,21 @@ test('noteCall: another thread, a bad id and a new session (the user opened it) 
 })
 
 // ---- the pane and the detail ----------------------------------------------------------------------------------------------------
-test('the pane: an idle blocked thread has the card; working, or a tool call since the report, ends it; an unreadable listing keeps it', async () => {
+const PROMPT = { waitingFor: 'a permission prompt' } // a real prompt is open in the session (`claude agents --json`)
+test('no prompt open (the session is idle and waits for nothing): there is no Open card, the pane says "no permission prompt exists" and offers the real options', async () => {
   const w = world([row()])
+  expect(await w.approval()).toBeUndefined()
+  const needs = needsOf(await loadView(w.h.host))
+  expect(needs.filter(n => n.kind === 'approval')).toHaveLength(0)
+  expect(needs.filter(n => n.kind === 'denial')).toHaveLength(1)
+  expect(needs.find(n => n.kind === 'denial')!.text).toContain('no permission prompt exists for t1')
+  expect(needs.find(n => n.kind === 'denial')!.text).toContain('There is nothing to press in the session.')
+  expect((await loadThreadDetail(w.h.host, 't1'))!.denial).toContain('no permission prompt exists for t1')
+  expect((await loadThreadDetail(w.h.host, 't1'))!.approval).toBe('')
+})
+
+test('the pane: an idle blocked thread has the card; working, or a tool call since the report, ends it; an unreadable listing keeps it', async () => {
+  const w = world([row(PROMPT)])
   expect(await w.approval()).toBe(ACTION)
   expect(needsOf(await loadView(w.h.host)).filter(n => n.kind === 'approval')).toHaveLength(1)
   w.state.rows = [row({ status: 'busy', state: 'working' })]
@@ -91,7 +104,7 @@ test('the pane: an idle blocked thread has the card; working, or a tool call sin
   expect(needsOf(await loadView(w.h.host)).filter(n => n.kind === 'approval')).toHaveLength(0)
   expect((await loadView(w.h.host)).threads.find(t => t.id === 't1')?.blocked).toBe(false) // no stale "blocked" row, word or toast takes its place
   expect(needsOf(await loadView(w.h.host)).filter(n => n.kind === 'blocked')).toHaveLength(0)
-  w.state.rows = [row()] // idle again, no later desk record: the card is back until a tool call follows the report
+  w.state.rows = [row(PROMPT)] // idle again, a prompt open, no later desk record: the card is back until a tool call follows the report
   resetViewCache()
   expect(await w.approval()).toBe(ACTION)
   await notePending(w.h.host, 't1', 5)
@@ -104,12 +117,12 @@ test('the pane: an idle blocked thread has the card; working, or a tool call sin
 })
 
 test('the thread detail follows the same rule', async () => {
-  const w = world([row()])
+  const w = world([row(PROMPT)])
   expect((await loadThreadDetail(w.h.host, 't1'))!.approval).toBe(ACTION)
   w.state.rows = [row({ status: 'busy', state: 'working' })]
   resetThreadCache()
   expect((await loadThreadDetail(w.h.host, 't1'))!.approval).toBe('')
-  w.state.rows = [row()]
+  w.state.rows = [row(PROMPT)]
   await notePending(w.h.host, 't1', 5)
   w.h.clock.t = 900
   await noteCall(w.h.host, 't1', 'Bash')

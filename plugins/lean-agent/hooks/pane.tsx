@@ -28,6 +28,8 @@ import type { ModelRequest } from './expensive'
 // user's answer to the desk's question approves a thread's remote write (deskactions.ts)
 import { STANDING_LABEL, answerAction, approveAction, revokeGrant } from './deskactions'
 import { revokeWrites } from './deskwrites'
+import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
+import { NARROW as NARROW_BRIEF, RETRY_LABEL, selfEditLabel } from './denial'
 import type { ActionView } from './deskactions'
 
 export const PANE = 'lean-agent'
@@ -553,6 +555,29 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       sayModel(out.text, !out.ok)
       tell()
     }
+    // a classifier denial has no prompt (denial.ts): the user's press here is a human answer the mod can trust, so it makes the same grant as the words do
+    const selfEditPress = (id: string) => async () => {
+      resetViewCache()
+      const out = await grantByHuman(host, id, 'pane')
+      if (out.ok) await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user let you edit your worktree yourself (their choice in the pane). Do the step yourself with your own Edit / Write / Read / Grep / Glob inside your worktree, then continue and report.` }).catch(() => undefined)
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    }
+    const retryPress = (id: string) => async () => {
+      resetViewCache()
+      const out = await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user chose: retry the worker with a narrower brief. ${NARROW_BRIEF}.` }).catch(() => ({ ok: false, text: `retry ${id} failed` }))
+      resetViewCache()
+      sayModel(out.ok ? `${id} was told to retry with a narrower brief` : out.text, !out.ok)
+      tell()
+    }
+    const revokeSelfEditPress = (grant: string) => async () => {
+      resetViewCache()
+      const out = await revokeSelfEdit(host, { id: grant })
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    }
     const denyWrite = (a: ActionView) =>
       twoStep(`action:deny:${a.id}`, async () => {
         resetViewCache()
@@ -666,6 +691,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>
           <Box flexWrap="wrap" columnGap={1}>
             {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
+            {n.kind === 'denial' && !!n.thread && <Button key={`denial-self-${n.thread}`} label={selfEditLabel(n.thread)} onPress={selfEditPress(n.thread)} />}
+            {n.kind === 'denial' && !!n.thread && <Button key={`denial-retry-${n.thread}`} label={RETRY_LABEL} onPress={retryPress(n.thread)} />}
             {(n.kind === 'question' || n.kind === 'push' || n.kind === 'blocked') && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!w && <Button key={`sa-${w.name}`} label={confirming(ui, armKey(w, 'adopt'), now2) ? `Confirm adopt ${w.name}` : 'Adopt'} onPress={scriptDecide(w, 'adopt')} />}
             {!!w && <Button key={`sr-${w.name}`} label={confirming(ui, armKey(w, 'reject'), now2) ? `Confirm reject ${w.name}` : 'Reject'} onPress={scriptDecide(w, 'reject')} />}
@@ -721,6 +748,19 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Box key={`wr-grant-${g.id}`} flexWrap="wrap" columnGap={1}>
               <Text dimColor wrap="wrap">{`${g.thread}: your instruction '${g.quote.slice(0, 80)}' allows ${g.kinds.join(', ')} on ${g.scope.replace(/^(Azure DevOps|GitHub) /, '')} (${g.used}/${g.cap} writes) until ${new Date(g.exp).toISOString().slice(11, 16)} UTC`}</Text>
               <Button key={`wr-revoke-${g.id}`} label="Revoke" onPress={revokeWritten(g.id)} />
+            </Box>
+          ))}
+        </Box>
+      ) : null
+    // ---- the threads the user let edit their worktree themselves (selfedit.ts): the user's words, and a Revoke button ----
+    const se = v?.selfEdit
+    const selfEditBlock =
+      se && se.grants.length > 0 ? (
+        <Box key="self-edit-grants" flexDirection="column">
+          {se.grants.map(g => (
+            <Box key={`se-grant-${g.id}`} flexWrap="wrap" columnGap={1}>
+              <Text dimColor wrap="wrap">{`${paneLine(g)} until ${new Date(g.exp).toISOString().slice(11, 16)} UTC`}</Text>
+              <Button key={`se-revoke-${g.id}`} label="Revoke" onPress={revokeSelfEditPress(g.id)} />
             </Box>
           ))}
         </Box>
@@ -871,6 +911,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {needsBlock}
         {standingBlock}
         {writtenBlock}
+        {selfEditBlock}
         <Box flexWrap="wrap" columnGap={1}>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}
           {doneThreads.length >= 2 && closable.length > 0 && (

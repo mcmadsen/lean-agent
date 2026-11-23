@@ -53,7 +53,10 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeSliceNote, takeStepNote } from './orchestrate'
+import { bindSelfEditAnswers, selfEditRoots, revokeSelfEditByWords } from './selfedit'
+import { bindDeliverAnswers } from './deliver'
+import { clearDenied, fallbackUsed, isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeSliceNote, takeStepNote } from './orchestrate'
+import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRec, worktreeRoots } from './denial'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
 import { runGet } from './forgeget'
@@ -174,7 +177,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk's own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the failing test names and the last 40 lines. Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
@@ -182,7 +185,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -190,6 +193,9 @@ const SCHEMA = {
     project: { type: 'string', description: 'new, project-*: a registered project' },
     id: { type: 'string', description: 'approve-action: the id from action-list, only after the USER chose Approve for exactly that request' },
     target: { type: 'object', description: 'allow-writes: the PR (number or URL) or work item (id) the USER named in their own words; the mod refuses without their recorded words. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
+    file: { type: 'string', description: 'deliver: absolute path of a file in the thread\'s scratch folder, a worktree or the desk reports folder' },
+    to: { type: 'string', description: 'deliver: Downloads | Desktop | Documents | a folder under the user\'s home (the mod copies only on the user\'s recorded words, else it returns the question to ask)' },
+    name: { type: 'string', description: 'deliver: optional file name (never overwrites)' },
     kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment; work item: comment, update)' },
     section: { type: 'string', description: 'report tN: one section of its last report (a heading or part of one), instead of the digest' },
     full: { type: 'boolean', description: 'report tN: the whole last report (reports reach you as a short digest)' },
@@ -530,7 +536,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -756,31 +762,36 @@ async function showSkew($: any): Promise<void> {
 }
 
 // (see the hooks in register: classic.PermissionDenied and classic.PostToolUseFailure)
-const DENIAL_TEXT = /(denied|blocked|refused|rejected)\b[^.\n]{0,80}\b(permission (check|system)|auto mode|classifier)|\b(permission (check|system)|auto mode|classifier)\b[^.\n]{0,80}\b(denied|blocked|refused|rejected)|\[Destructive or Unwanted Actions\]/i
-async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string): Promise<void> {
+// (the matcher is denial.ts classifierDenial: the engine's real text "Permission for this action was denied by the Claude Code auto mode classifier.
+// Reason: [<category>]. ...", any category, any lean-agent type; our own refusals never count. Three ways in: the PermissionDenied event, a failed Agent
+// result, and the Agent call's own error RESULT in tool.call: the 1.0.18 fallback saw only the first two, only for worker-*, only with an absolute path
+// in the brief, and then refused the thread's own worktree because lean state was "protected".)
+async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string, text = ''): Promise<void> {
   if (role.kind !== 'thread' || e?.agent_id || e?.agentId) return
   const input = e?.tool_input
-  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object') return
-  const stype = String(input.subagent_type ?? '')
-  const isWorker = /^(lean-agent:)?worker-/.test(stype)
-  const isReader = /^(lean-agent:)?reader-/.test(stype) || (isWorker && jobOf(input.prompt) === 'lookup') // a lookup is read-only whoever does it
-  if (!isWorker && !isReader) return
+  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !isLeanAgentType(input.subagent_type)) return
   const id = String(e?.tool_use_id ?? '')
   if (id && deniedSeen.has(id)) return
   if (id) { if (deniedSeen.size >= 200) deniedSeen.clear(); deniedSeen.add(id) }
   const host = hostOf($)
-  if (isReader) {
+  const prompt = String(input.prompt ?? '')
+  const category = [text, String(e?.reason ?? ''), String(e?.error ?? '')].map(t => classifierDenial(t)?.category).find(c => c && c !== 'unspecified') ?? 'unspecified' // the text of THIS event first
+  const stype = String(input.subagent_type ?? '')
+  const kind = /^(lean-agent:)?worker-/.test(stype) && jobOf(prompt) === 'lookup' ? 'reader' : denialKind(stype) // a lookup is read-only whoever does it
+  if (kind === 'reader') {
     // a denied reader is no reason to read everything oneself (orchestrate.ts): the engine's reason category, ONE retry with a narrower brief, then slices
-    const category = readerCategory(via === 'PermissionDenied' ? e?.reason : e?.error)
-    noteReaderDenied(`${threadsDir(await homeDir(host))}/${role.id}`, category)
-    await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the reader call (${via}): ${category}`, agent: stype, tool: String(e.tool_name), thread: role.id, version: VERSION })
-    return
+    noteReaderDenied(`${threadsDir(await homeDir(host))}/${role.id}`, category === 'unspecified' ? readerCategory(via === 'PermissionDenied' ? e?.reason : e?.error) : category)
   }
   const roots: string[] = []
-  for (const r of pathsOf(input.prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
+  if (kind !== 'reader') {
+    for (const r of pathsOf(prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
+    roots.push(...(await worktreeRoots(host, role.id, prompt).catch(() => [])))
+  }
   const key = `${threadsDir(await homeDir(host))}/${role.id}`
-  const recorded = noteDelegationDenied(key, roots)
-  await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the worker call (${via})${recorded ? '; the thread\'s own edit of its allow-edit paths is allowed now' : '; the call named no allow-edit path'}`, agent: String(input.subagent_type ?? ''), tool: String(e.tool_name), thread: role.id, version: VERSION })
+  const broad = broadBrief(prompt)
+  const recorded = noteDelegationDenied(key, roots, { category, kind, broad })
+  await noteDenialRec(host, role.id, { category, kind, agent: String(input.subagent_type ?? ''), roots: roots.slice(0, 12), ...(broad ? { broad } : {}) }).catch(() => undefined)
+  await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the ${kind === 'reader' ? 'reader' : 'worker'} call (${via}; reason ${category})${kind === 'reader' ? '; the thread was told to retry once or read in slices' : recorded ? '; the thread\'s own edit in its worktrees and the paths its brief named is allowed now' : '; no worktree or path to allow'}${broad ? `; ${broad}` : ''}`, agent: String(input.subagent_type ?? ''), tool: String(e.tool_name), thread: role.id, version: VERSION })
 }
 
 export const register: Register = on => {
@@ -788,6 +799,7 @@ export const register: Register = on => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
     const host = hostOf($)
     resetModState()
+    clearDenied() // a denied worker call allows the thread's own edits for the rest of THIS session only
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     await showSkew($)
@@ -902,12 +914,12 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e: any, next) => next(e))
   on('classic.PermissionDenied', async ($, e: any, next) => {
-    await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied').catch(() => undefined)
+    await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied', String(e?.reason ?? e?.message ?? '')).catch(() => undefined)
     return next(e) // never `retry`
   }).catch(($, e: any, next) => next(e))
   on('classic.PostToolUseFailure', async ($, e: any, next) => {
     const msg = String(e?.error ?? '')
-    if (!e?.is_interrupt && !/lean-agent/.test(msg) && DENIAL_TEXT.test(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result').catch(() => undefined) // our own refusals say lean-agent and are never evidence
+    if (!e?.is_interrupt && classifierDenial(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result', msg).catch(() => undefined) // our own refusals are never evidence (denial.ts)
     return next(e)
   }).catch(($, e: any, next) => next(e))
 
@@ -1100,6 +1112,8 @@ export const register: Register = on => {
     const host = hostOf($)
     try {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
+      // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
+      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
       if (notes.length) return { ...r, context: [...(r.context ?? []), ...notes.map(n => `[lean-agent] ${n}`)] }
     } catch {
       /* the answer is simply not recorded: the pane's Approve / Deny on the card is the other way */
@@ -1328,6 +1342,11 @@ export const register: Register = on => {
       return { deny: why } as any
     }
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
+    // the thread's own work let through by a fallback: after a denied worker call (`delegation-denied`) or under the user's grant (`self-edit-grant`): counted
+    if (octx && role.kind === 'thread' && !e.agentId && ['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob'].includes(String(e.tool))) {
+      const via = fallbackUsed({ ...octx, selfEdit: await selfEditRoots(host, role.id).catch(() => []) }, e)
+      if (via === 'self-edit-grant') await logRefusal(host, { role: 'thread', rule: via, text: `${via}: the thread's own ${e.tool} inside a worktree the user let it edit itself; the permission check still judges it`, tool: e.tool, thread: role.id, version: VERSION }).catch(() => undefined) // (the denied fallback is one row per denial, written when it was denied)
+    }
     // the thread's grants for the worker it spawns: recorded when the Agent call starts, bound to the subagent, released when the SUBAGENT ends
     // (a background launch returns at once; a foreground call is released at return)
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
@@ -1352,6 +1371,7 @@ export const register: Register = on => {
       launch = e.tool === 'Agent' || e.tool === 'Task' ? launchOf(r, texts(r?.result).join('\n')) : undefined
     } catch (err) {
       await noteMissingTool(host, gctx, rname, e, String((err as Error)?.message ?? err)) // a tool the session or worker does not have
+      if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && classifierDenial(String((err as Error)?.message ?? err))) await noteDenied($, role, cwd, deniedSeen, { tool_name: e.tool, tool_use_id: e.toolUseId, tool_input: { subagent_type: e.subagent_type, prompt: e.prompt } }, 'Agent call error', String((err as Error)?.message ?? err)).catch(() => undefined)
       throw err
     } finally {
       if (gcall) await releaseGrant(host, role, gcall, { ...gopts, async: launch?.async, agentId: launch?.agentId }).catch(() => undefined)
@@ -1360,6 +1380,11 @@ export const register: Register = on => {
     // the worker RAN (a real result, or a background launch accepted): one try of this brief is used; a denied, rejected or errored call uses none
     if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) orchRan(octx, e)
     if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
+    // the classifier's denial arrives as the Agent call's own error result: the thread's own work in its worktrees is allowed from now on (denial.ts)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && (r?.isError || r?.result?.isError)) {
+      const said = texts(r?.result).join('\n')
+      if (classifierDenial(said)) await noteDenied($, role, cwd, deniedSeen, { tool_name: e.tool, tool_use_id: e.toolUseId, tool_input: { subagent_type: e.subagent_type, prompt: e.prompt } }, 'Agent call result', said).catch(() => undefined)
+    }
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
@@ -1462,7 +1487,7 @@ export const register: Register = on => {
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
       const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
-      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) await revokeByWords(host, e.text).catch(() => undefined)
+      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {

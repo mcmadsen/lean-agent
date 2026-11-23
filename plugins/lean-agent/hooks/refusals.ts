@@ -80,12 +80,14 @@ const RULE_FIX: Record<string, string> = {
   'allow-mcp-missing': 'add `allow-mcp: <server>` to the worker brief (MCP is opt-in per job), or allowMcp on lean_thread new',
   'allow-mcp-other-server': 'the worker called a server its brief did not grant: grant that server, or keep the step to the granted ones',
   'allow-mcp-write-tool': 'a worker has read-only MCP access: the write goes through the thread and the desk\'s approval',
-  'delegation-denied': 'the permission check (auto mode classifier or a rule) denied the thread\'s worker call: the thread did that step itself (its own edit under the call\'s allow-edit paths is allowed, the permission check still judges it); not a lean-agent fault',
+  'delegation-denied': 'the permission check (auto mode classifier or a rule) denied the thread\'s worker call (the reason category is in the row): the thread may edit its registered worktrees and the paths its brief named itself for the rest of the session (the permission check still judges it), or retry with a narrower brief: one file plus its spec, the exact change, one test command, an additive step first; not a lean-agent fault',
+  'self-edit-grant': 'the thread edited / read / searched inside a worktree the user let it edit itself (a signed grant from the user\'s words or click; `lean_thread allow-self-edit`): counted, not a refusal',
   'context-limit': 'the thread reached threadTokens: its state is saved, a fresh session continues from the handover (end the turn; raise threadTokens in config.json if the limit is too small)',
   'run-refused': 'lean_run runs tests and builds only: push and forge commands are the desk\'s',
 }
 const RULES: [string, RegExp][] = [
   ['delegation-denied', /^delegation-denied:|^the permission check denied the worker call/],
+  ['self-edit-grant', /^self-edit-grant:/],
   ['retry-limit', /this exact job already ran (twice|once)/],
   ['desk-routing', /^the desk routes:/],
   ['why-sonnet-missing', /^haiku by default: add a prompt line/],

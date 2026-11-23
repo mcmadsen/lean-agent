@@ -56,6 +56,17 @@ for f in "$here/review/SKILL.md" "$root/templates/thread.md" "$root/hooks/review
 grep -qF 'pass `level: "full"` only for the review before "ready to push"' "$root/templates/thread.md" || fail "thread.md must say light at checkpoints and level full only before ready to push"
 grep -qF 'If the permission check denies a worker call, do that one step yourself' "$root/templates/thread.md" || fail "thread.md must say a thread does the step itself when the permission check denied the worker call"
 grep -qF 'Workers may read and edit' "$root/templates/thread.md" || fail "thread.md must say workers may read and edit (no grant lines)"
+# a classifier denial has no prompt: the desk calls allow-self-edit on the user's yes, asks otherwise, and never says "press Open" without a prompt; the thread retries narrowly and delivers through the desk
+for f in "$root/templates/front-desk.md" "$here/thread/SKILL.md"; do
+  grep -qF 'allow-self-edit' "$f" || fail "$(basename "$f") must tell the desk to call allow-self-edit when the user said yes to a thread blocked by denied workers"
+  grep -qF 'Let tN edit its worktree itself?' "$f" || fail "$(basename "$f") must tell the desk to ask with AskUserQuestion when allow-self-edit is refused"
+  grep -qiF 'press Open unless the report says a prompt exists' "$f" || fail "$(basename "$f") must say never tell the user to press Open unless the report says a prompt exists"
+  grep -qF 'deliver' "$f" || fail "$(basename "$f") must name the deliver action for files for the user's folders"
+done
+grep -qF 'retry once with a narrower brief: ONE file plus its spec' "$root/templates/thread.md" || fail "thread.md must give the narrower-brief remedy for a denied worker"
+grep -qF 'say nothing about pressing buttons' "$root/templates/thread.md" || fail "thread.md must say a denial report says nothing about pressing buttons"
+grep -qF 'ask the desk to deliver it' "$root/templates/thread.md" || fail "thread.md must say a deliverable goes to scratch/ and the desk delivers it"
+for c in allow-edit revoke-edit; do [ -f "$root/commands/$c.md" ] || fail "commands/$c.md is missing"; done
 # the tool's action is `list`: no file names a `threads` action
 if grep -rnE 'lean_thread[` ]+threads\b|`threads` (and|shows|says)|with threads`?[ ,.;]' "$root/templates" "$here" "$root/commands" "$root/../../README.md" "$root"/hooks/threads.ts >/dev/null 2>&1; then fail "a file names a \`threads\` action: the lean_thread action is \`list\`"; fi
 need scripts 'never executes'

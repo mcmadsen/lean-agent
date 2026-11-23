@@ -223,7 +223,7 @@ test('through the engine: the permission check denied a worker call: the thread 
   expect(r?.retry).toBeUndefined() // the event is only recorded: never `retry`, no permission changed
   const a: any = await $.tool.call(own)
   expect(a.deny).toBeUndefined()
-  expect((a.context ?? []).join('\n')).toContain('the permission check denied the worker call: do this one step yourself')
+  expect((a.context ?? []).join('\n')).toContain('the worker was denied (unspecified): your own edits in')
   expect(((await $.tool.call({ tool: 'Read', file_path: '/real/w/c.ts', limit: 20 } as any)) as any).deny).toBeUndefined() // a small read there
   expect(((await $.tool.call({ tool: 'Edit', file_path: '/real/elsewhere/c.ts' } as any)) as any).deny).toContain('one step for a small worker') // only the named paths
   expect(((await $.tool.call({ tool: 'Edit', file_path: '/h/.lean-agent/config.json' } as any)) as any).deny).toBeDefined()
