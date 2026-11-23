@@ -6,6 +6,7 @@ import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './del
 import type { DeskRec } from './delivery'
 import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
+import { HANDOVER_RULE, NOTES_FILE, listText, scratchList, scratchNotes } from './scratchnotes'
 import type { Inbox, Thread } from './threads'
 
 export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
@@ -126,7 +127,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const now = await h.clock.now()
   const snap = await readSnapshot(h, home, t.id)
   const pre = await preflightOf(h, home, t)
-  const inbox = `${deskState(home)}/inbox.jsonl`
+  const scratchNotesText = await scratchNotes(h, dir) // the reading the last session kept (scratchnotes.ts): a restart must not redo it
+  const scratchFiles = await scratchList(h, dir)
+  const inbox =`${deskState(home)}/inbox.jsonl`
   const wait = waiting ? waitingLead(recs) : null // restarted at the limit while waiting: the open question is the lead, nothing to carry on with
   // what the desk sent this thread after its last report (queued ones are in their own section): messages, also to a session that has ended, and the
   // results of the actions the desk made for it (the desk's tell). Newest last: facts from the desk are never lost at a restart.
@@ -145,6 +148,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
     { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
+    { name: 'scratchrule', body: scratchNotesText || scratchFiles.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
+    { name: 'scratchnotes', head: '## Your scratch notes (end of scratch/notes.md)', body: scratchNotesText, file: `${dir}/scratch/${NOTES_FILE}`, mode: 'tail' },
+    { name: 'scratchlist', head: '## Scratch files (name, size, first line)', body: scratchFiles.length ? listText(scratchFiles) : '', file: `${dir}/scratch`, mode: 'lines' },
     { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },
     { name: 'since', head: '## Since your last report (what the desk sent you and the results of its actions for you; newest last)', body: since, file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'queued', head: '## Messages from the desk that were queued for you', body: queued.length ? `${queued.slice(-QUEUED_MAX).map(m => `- ${m.from ? `[${m.from}] ` : ''}${cut(flat(m.text), QUEUED_EACH)}`).join('\n')}${queued.length > QUEUED_MAX ? `\n(${queued.length - QUEUED_MAX} older messages omitted)` : ''}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
@@ -166,7 +172,7 @@ export async function handoverTokens(h: Host, home: string): Promise<number> {
 
 export type Part = { name: string; head?: string; body: string; file?: string; mode: 'fixed' | 'head' | 'tail' | 'lines'; cut?: boolean }
 export const partText = (p: Part): string => (p.body ? (p.head ? `${p.head}\n${p.body}` : p.body) : '')
-const CUT_ORDER = ['remembered', 'notes', 'queued', 'reports', 'since', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
+const CUT_ORDER = ['remembered', 'scratchlist', 'notes', 'queued', 'reports', 'since', 'scratchnotes', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
 const FLOOR = 300 // a section is never cut below this many characters
 const noteOf = (p: Part) => `\n…(cut to fit the handover budget: full text in ${p.file ?? 'its source'})`
 const total = (parts: Part[]) => parts.reduce((n, p) => n + (p.body ? partText(p).length + 2 : 0), 0)

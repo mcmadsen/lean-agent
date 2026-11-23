@@ -125,6 +125,7 @@ export function orchReset(): void {
   slots.clear()
   stopped.clear()
   denied.clear()
+  readerDenied.clear()
   retryReset()
 }
 
@@ -270,7 +271,7 @@ function agentCallDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (p.length > c.briefChars) return `one step per job: the brief is ${p.length} chars, at most ${c.briefChars} (workers.briefChars); split it, one job per step`
   if (c.requireJob && !jobOf(p)) return 'the first line of the brief names the job: `job: lookup|edit|run|check` (workers.requireJob)'
   const k = key(ctx)
-  const hint = takeDeniedHint(k) // a worker call was denied by the permission check: said once, here or on the thread's next result
+  const hint = takeDeniedHint(k, true) // an edit worker call was denied by the permission check: said once, here or on the thread's next result
   if (hint) return hint
   const now = Date.now()
   for (const [id, sl] of slots) if (now - sl.at > c.grantTtlMin * 60_000) freeSlot(id) // a worker that never ended: its slot is not held forever
@@ -297,6 +298,8 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
     if (f && deniedEdit(ctx, e) && Number.isFinite(lim) && lim >= 1 && lim <= DIRECT_READ_LINES) return null // a small read of a path the denied call named: not counted
     if (!Number.isFinite(lim) || lim < 1 || lim > DIRECT_READ_LINES) return `${THREAD_STEP}; a direct read needs limit <= ${DIRECT_READ_LINES}${tried(`Read ${pathKind(ctx, f)}`)}`
     const k = key(ctx)
+    const rd = readerDenied.get(k)
+    if (rd) { rd.slices++; return null } // the fallback of a denied reader: a counted slice (<= 200 lines, checked above), not part of the per-turn cap
     const n = reads.get(k) ?? 0
     if (n >= c.directReads) return `${THREAD_STEP} (${c.directReads} direct reads per turn used)${tried(`Read ${pathKind(ctx, f)}`)}`
     reads.set(k, n + 1)
@@ -394,8 +397,43 @@ export function noteDelegationDenied(threadKey: string, roots: string[]): boolea
   return true
 }
 export const delegationDenied = (threadKey: string): boolean => denied.has(threadKey)
-// said once: the next refusal of a worker call, or else the next tool result of the thread
-export function takeDeniedHint(threadKey: string): string | null {
+// ---- a READER the permission check denied (1.0.26) -----------------------------------------------------------------------------------
+// A denied reader (a lookup job) is no reason to read everything oneself: the thread hears the engine's own reason category, retries ONCE with a
+// narrower brief, and when that is denied too reads only in slices of at most 200 lines, each finding written to scratch/notes.md at once. Those
+// fallback reads are not capped per turn (a denied lookup has to be read by someone) but they are counted; after READER_SLICES_WARN of them in a
+// session the next one carries "you are reading a long source yourself". Nothing here changes a permission.
+export const READER_SLICES_WARN = 10
+const readerDenied = new Map<string, { category: string; told: boolean; slices: number; said: boolean }>()
+// the reason category as the engine printed it: the `[Category]` of the denial text, else its first words
+export function readerCategory(reason: unknown): string {
+  const t = String(reason ?? '').replace(/\s+/g, ' ').trim()
+  const m = /\[([^\]]{2,60})\]/.exec(t)
+  return (m ? m[1]! : t.slice(0, 80)) || 'no reason given'
+}
+export function noteReaderDenied(threadKey: string, category: string): void {
+  const cur = readerDenied.get(threadKey)
+  readerDenied.set(threadKey, { category, told: false, slices: cur?.slices ?? 0, said: cur?.said ?? false })
+}
+export const readerDeniedHint = (category: string): string =>
+  `the permission check denied the reader call (${category}): retry ONCE with a narrower brief: one file or one section, one question; if that is denied too, read only what the step needs in slices of at most ${DIRECT_READ_LINES} lines and write each finding to scratch/notes.md at once; never read a whole long file into your context`
+export const SLICES_NOTE = 'you are reading a long source yourself: this is the most expensive way; split the task (report to the desk)'
+export const readerFallbackReads = (threadKey: string): number => readerDenied.get(threadKey)?.slices ?? 0
+// said once, on the result of the first slice past the limit
+export function takeSliceNote(threadKey: string): string | null {
+  const r = readerDenied.get(threadKey)
+  if (!r || r.said || r.slices <= READER_SLICES_WARN) return null
+  r.said = true
+  return SLICES_NOTE
+}
+
+// said once: the next refusal of a worker call (an edit worker: do the step yourself), or else the next tool result of the thread. The reader's
+// hint is for the tool result only: the retry it asks for must not be refused with it.
+export function takeDeniedHint(threadKey: string, refusal = false): string | null {
+  const r = readerDenied.get(threadKey)
+  if (!refusal && r && !r.told) {
+    r.told = true
+    return readerDeniedHint(r.category)
+  }
   const d = denied.get(threadKey)
   if (!d || d.told) return null
   d.told = true

@@ -10,6 +10,8 @@ import { findTranscript, readRecords } from './contextstat'
 import { readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { baseLine, readBase } from './base'
+import { partsTable, readParts } from './ctxparts'
+import { threadLimits } from './threadcontext'
 
 export const ROLES = ['desk', 'thread', 'worker-haiku', 'reader-haiku', 'reader-sonnet', 'worker-sonnet', 'reviewer', 'auditor'] as const
 export type RoleName = (typeof ROLES)[number]
@@ -103,7 +105,7 @@ export function shareText(s: Share, measured: number, role = 'desk'): string {
   if (!s.first) return 'transcript: no assistant request with usage in it'
   const rest = Math.max(0, s.first - measured)
   return [
-    `REAL base: the first request carried ${s.first} tokens (input + cache read + cache creation of the first assistant record), against the text estimate above (${role} row) of ${measured}`,
+    `first request: ${s.first} tokens (input + cache read + cache creation of the first assistant record: the fixed parts AND the first prompt), against the text estimate above (${role} row) of ${measured}`,
     `  the engine's system prompt + built-in and MCP tool schemas: about ${rest} (no file holds them; the built-in tool schemas alone are most of it, config threads.tools cuts them for threads)`,
     `  MCP named by the transcript: ${s.mcpServers.length} server(s)${s.mcpServers.length ? ` (${s.mcpServers.join(', ')})` : ''}, ${s.mcpTools} tool name(s) (~${s.mcpNameTokens} tokens of names), instructions ~${s.mcpInstructions} tokens`,
     `  built-in tool names seen: ${s.builtinTools} (a schema is far larger than its name: remove what a role never uses, see README "Fixed overhead")`,
@@ -128,6 +130,10 @@ export async function overheadReport(h: Host, root: string, o: { tools?: Tools; 
       if (file) recs = await readRecords(h, file)
     }
     if (recs) out.push(shareText(transcriptShare(recs), (by[thread ? 'thread' : 'desk']?.total ?? 0), thread ? 'thread' : 'desk'))
+    if (thread && o.home) { // the breakdown the thread's own mod recorded at its turn ends (ctxparts.ts), largest first, each with what shrinks it
+      const pr = await readParts(h, o.home, thread).catch(() => null)
+      out.push(pr ? partsTable(pr, (await threadLimits(h)).limit) : `no context breakdown recorded for ${thread} yet (its own mod writes it at the end of the session's first turn)`)
+    }
     const real = await readBase(h).catch(() => null)
     if (real && !thread) out.push(`newest thread session measured by the mod: ${baseLine(real)} (${real.thread})`)
     return out.join('\n')

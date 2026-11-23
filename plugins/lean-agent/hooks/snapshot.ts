@@ -6,6 +6,8 @@ import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
+import { listText, scratchList } from './scratchnotes'
+import type { ScratchFile } from './scratchnotes'
 
 export type SnapTask = { text: string; status: string }
 export type SnapPending = { agent: string; text: string }
@@ -25,6 +27,7 @@ export type Snapshot = {
   questions: string[] // asks of this thread newer than its last report
   tokens: number | null // the session's context size
   pending?: SnapPending[] // results of workers that finished after the context limit stopped the thread (recorded by script, not acted on)
+  scratch?: ScratchFile[] // the files of <thread folder>/scratch (name, size, first line): the reading a restart must not redo
 }
 
 const STATUS_MAX = 40
@@ -111,6 +114,7 @@ export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?
   const asks = recs.filter(r => r.kind === 'ask' && (!last || r.ts > last.ts))
   const lines = status ? status.split('\n') : []
   const statLines = stat ? stat.split('\n') : []
+  const scratch = await scratchList(h, `${threadsDir(home)}/${id}`)
   return {
     v: 1,
     id,
@@ -127,6 +131,7 @@ export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?
     questions: asks.slice(-5).map(a => cut(String(a.text ?? '').trim(), QUESTION_MAX)),
     tokens: typeof o.tokens === 'number' && Number.isFinite(o.tokens) ? Math.round(o.tokens) : null,
     ...(o.pending?.length ? { pending: o.pending.slice(-PENDING_MAX).map(p => ({ agent: cut(String(p.agent), 60), text: cut(String(p.text), PENDING_TEXT) })) } : {}),
+    ...(scratch.length ? { scratch } : {}),
   }
 }
 
@@ -162,6 +167,7 @@ export function snapshotText(s: Snapshot, now: number): string {
   if (s.lastReport) l.push(`last report (${s.lastReport.state}): ${s.lastReport.text.replace(/\s+/g, ' ')}`)
   if (s.questions.length) l.push(`open questions:\n${s.questions.map(q => `  - ${q.replace(/\s+/g, ' ')}`).join('\n')}`)
   if (s.pending?.length) l.push(`pending results (workers that finished after the context limit stopped the thread; read them, they were not acted on):\n${s.pending.map(p => `  - ${p.agent}: ${p.text.replace(/\s+/g, ' ')}`).join('\n')}`)
+  if (s.scratch?.length) l.push(`scratch files (threads/${s.id}/scratch; they replace re-reading their sources):\n${listText(s.scratch).split('\n').map(x => `  ${x}`).join('\n')}`)
   if (s.tokens !== null) l.push(`context at that time: ${s.tokens} tokens`)
   return l.join('\n')
 }

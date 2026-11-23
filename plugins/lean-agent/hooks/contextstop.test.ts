@@ -40,7 +40,7 @@ test('over the limit: ONE record per session, the snapshot, and never a second r
 test('the gate: every tool but lean_report is refused with the one line; a checkpoint notice is accepted once, then answered with the stop line', async () => {
   const h = setup()
   await hardStop(h.host, 't1', { sid: S1, tokens: 123_000, limit: 120_000, since: 0 })
-  const line = 'context limit reached (123k of 120k): your state is saved. End your turn now; a fresh session continues from the handover. Do not start workers or report again.'
+  const line = 'context limit reached (123k of 120k): your state is saved. End your turn now; a fresh session continues from the handover (your reading stays in scratch/notes.md and the scratch files). Do not start workers or report again.'
   expect(stopLine(123_000, 120_000)).toBe(line)
   for (const tool of ['Bash', 'Read', 'Edit', 'Agent', 'mcp__lean-agent__lean_run', 'mcp__lean-agent__lean_ask']) expect(await stopGate(h.host, 't1', st, { tool })).toEqual({ deny: line })
   const rep = { tool: 'mcp__lean-agent__lean_report' }

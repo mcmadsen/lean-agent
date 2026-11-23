@@ -16,6 +16,7 @@
 import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { readConfig, priceOf } from './budget'
+import { readParts } from './ctxparts'
 
 export const DEFAULT_LIMIT = 120_000
 export const DEFAULT_WARN = 100_000
@@ -78,8 +79,9 @@ export const levelOf = (tokens: number | null | undefined, l: Limits): Level =>
   typeof tokens !== 'number' ? 'unknown' : tokens > l.limit ? 'over' : tokens > l.warn ? 'warn' : 'ok'
 export const kTokens = (n: number) => `${Math.round(n / 1000)}k`
 // "ctx 108k/120k" | "ctx unknown"
-export const ctxText = (tokens: number | null | undefined, l: Limits, growth?: number | null) =>
-  typeof tokens === 'number' ? `ctx ${kTokens(tokens)}/${kTokens(l.limit)}${typeof growth === 'number' ? `, +${kTokens(growth)}/turn` : ''}` : 'ctx unknown'
+// (1.0.26: "ctx 96k/120k (fixed 28k), +3k/turn": the fixed parts of that session, when its breakdown was recorded; ctxparts.ts)
+export const ctxText = (tokens: number | null | undefined, l: Limits, growth?: number | null, fixed?: number | null) =>
+  typeof tokens === 'number' ? `ctx ${kTokens(tokens)}/${kTokens(l.limit)}${typeof fixed === 'number' && fixed > 0 ? ` (fixed ${kTokens(fixed)})` : ''}${typeof growth === 'number' ? `, +${kTokens(growth)}/turn` : ''}` : 'ctx unknown'
 
 // The mean growth per turn from the turn-end samples: the steps up (a drop is a compaction or a restart, left out), at least two of them, else null.
 export function growthPerTurn(hist: Sample[] | undefined): number | null {
@@ -95,13 +97,16 @@ export function growthPerTurn(hist: Sample[] | undefined): number | null {
 }
 
 // What the views read: the text, the level (dim under the warn level, yellow above it, red over the limit) and the size
-export type CtxView = { text: string; level: Level; tokens?: number }
-export function ctxView(rec: ContextRec | null, l: Limits): CtxView {
+export type CtxView = { text: string; level: Level; tokens?: number; fixed?: number }
+export function ctxView(rec: ContextRec | null, l: Limits, fixed?: number | null): CtxView {
   const tokens = rec?.tokens
-  return { text: ctxText(tokens, l, growthPerTurn(rec?.hist)), level: levelOf(tokens, l), ...(typeof tokens === 'number' ? { tokens } : {}) }
+  return { text: ctxText(tokens, l, growthPerTurn(rec?.hist), fixed), level: levelOf(tokens, l), ...(typeof tokens === 'number' ? { tokens } : {}), ...(typeof fixed === 'number' && fixed > 0 ? { fixed } : {}) }
 }
 export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string; sids?: string[]; lastWake?: number }, l?: Limits): Promise<CtxView> {
-  return ctxView(await readContext(h, home, t), l ?? (await threadLimits(h)))
+  const rec = await readContext(h, home, t)
+  const parts = rec ? await readParts(h, home, t.id).catch(() => null) : null
+  const fixed = parts && parts.sid === rec!.sid ? parts.first?.fixed : undefined // only the breakdown of the session the size belongs to
+  return ctxView(rec, l ?? (await threadLimits(h)), fixed)
 }
 
 // ---- the decision ----

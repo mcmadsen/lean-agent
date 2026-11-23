@@ -1,6 +1,6 @@
 ---
 name: review
-description: Every review runs through here: on the desk `/lean-agent:review <pr|branch|sha|url> [base]` starts a review thread; a thread reviews the diff with the reviewer agent and records a verdict (a green record of HEAD unlocks `git push`). Use for any review request, before any push.
+description: Every review runs through here: the desk `/lean-agent:review <pr|branch|sha|url> [base]` starts a review thread; a thread reviews the diff and records a verdict (green HEAD unlocks `git push`). Use for any review request, before any push.
 argument-hint: <pr | branch | sha | url> [base]
 roles: desk, thread
 ---

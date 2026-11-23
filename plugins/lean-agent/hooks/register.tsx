@@ -53,7 +53,7 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
+import { isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeSliceNote, takeStepNote } from './orchestrate'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -66,7 +66,9 @@ import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
-import { noteBase } from './base'
+import { attachParts, noteBase } from './base'
+import { partsOf, recordParts } from './ctxparts'
+import { takeWarn, warnedAlready } from './scratchnotes'
 import { threadToolsArgv } from './orchestrate'
 import { ANSWER_RULE, answersEnd, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
 import { handoverReport, setPreflight } from './handover'
@@ -296,7 +298,39 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
 // A thread's turn end, by script (no model turn): the context size record, the plan-window snapshot, the state snapshot and, over the
 // context limit with work left, the checkpoint the desk's timer restarts from (autorestart.ts). Observes only; every failure is silent.
 // No engine call of its own (session.measure hands it the figures it already read): turn.complete uses the last measured size.
-async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string): Promise<void> {
+// The context breakdown of a turn end (ctxparts.ts): `full` (the token-count API per tool and memory file) once per session at its first turn end,
+// `summary` (local estimates, no request) at every later one; recorded in the thread's folder. A failed full count is tried once more.
+// The warn line (scratchnotes.ts): the current size is the engine's own figure (`$.session.usage()` costs nothing), asked until the line was said.
+async function warnNote($: any, host: Host): Promise<string | null> {
+  try {
+    if (role.kind !== 'thread' || stopped) return null
+    const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+    if (!sid || warnedAlready(sid)) return null
+    const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
+    return takeWarn(sid, Number.isFinite(u) ? u : lastTokens, await threadLimits(host))
+  } catch {
+    return null
+  }
+}
+const partsTries = new Map<string, number>()
+const partsFull = new Set<string>()
+async function noteParts($: any, host: Host, id: string, sid: string): Promise<void> {
+  try {
+    if (!sid) return
+    const first = !partsFull.has(sid) && (partsTries.get(sid) ?? 0) < 2
+    if (first) partsTries.set(sid, (partsTries.get(sid) ?? 0) + 1)
+    const ask = async (d: 'full' | 'summary') => partsOf((await bounded($, Promise.resolve($.session.usage({ breakdown: d })), 'session.usage breakdown', 20_000).catch(() => null))?.context?.breakdown, d === 'full')
+    let p = first ? await ask('full') : null
+    if (p) { if (partsFull.size >= 200) partsFull.clear(); partsFull.add(sid) }
+    p ??= await ask('summary')
+    if (!p) return
+    await recordParts(host, id, sid, { parts: p })
+    if (p.full) await attachParts(host, id, p) // the start reply's "fixed base" reads it from base.json
+  } catch {
+    /* no breakdown: the first request stays "first request" */
+  }
+}
+async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>): Promise<void> {
   try {
     const tokens = typeof tokensIn === 'number' && Number.isFinite(tokensIn) ? tokensIn : null
     const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
@@ -304,6 +338,7 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string)
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
+    if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
   }
@@ -714,11 +749,22 @@ const DENIAL_TEXT = /(denied|blocked|refused|rejected)\b[^.\n]{0,80}\b(permissio
 async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string): Promise<void> {
   if (role.kind !== 'thread' || e?.agent_id || e?.agentId) return
   const input = e?.tool_input
-  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !/^(lean-agent:)?worker-/.test(String(input.subagent_type ?? ''))) return
+  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object') return
+  const stype = String(input.subagent_type ?? '')
+  const isWorker = /^(lean-agent:)?worker-/.test(stype)
+  const isReader = /^(lean-agent:)?reader-/.test(stype) || (isWorker && jobOf(input.prompt) === 'lookup') // a lookup is read-only whoever does it
+  if (!isWorker && !isReader) return
   const id = String(e?.tool_use_id ?? '')
   if (id && deniedSeen.has(id)) return
   if (id) { if (deniedSeen.size >= 200) deniedSeen.clear(); deniedSeen.add(id) }
   const host = hostOf($)
+  if (isReader) {
+    // a denied reader is no reason to read everything oneself (orchestrate.ts): the engine's reason category, ONE retry with a narrower brief, then slices
+    const category = readerCategory(via === 'PermissionDenied' ? e?.reason : e?.error)
+    noteReaderDenied(`${threadsDir(await homeDir(host))}/${role.id}`, category)
+    await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the reader call (${via}): ${category}`, agent: stype, tool: String(e.tool_name), thread: role.id, version: VERSION })
+    return
+  }
   const roots: string[] = []
   for (const r of pathsOf(input.prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
   const key = `${threadsDir(await homeDir(host))}/${role.id}`
@@ -886,7 +932,7 @@ export const register: Register = on => {
   on('turn.complete', async ($, e: any, next) => {
     if (!e.agentId) busySince = 0
     if (!e.agentId) inTurn = false
-    if (role.kind === 'thread' && !e.agentId && lastSid) await threadEnd(hostOf($), role.id, lastTokens, lastSid)
+    if (role.kind === 'thread' && !e.agentId && lastSid) await threadEnd(hostOf($), role.id, lastTokens, lastSid, () => noteParts($, hostOf($), role.id, lastSid))
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
@@ -917,7 +963,7 @@ export const register: Register = on => {
         await recordContext(host, id, sid, tokens)
         lastTokens = typeof tokens === 'number' ? tokens : null
         // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
-        if (!inTurn) await threadEnd(host, id, tokens, sid)
+        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid))
       } catch {
         /* the size stays unknown */
       }
@@ -1334,6 +1380,10 @@ export const register: Register = on => {
       if (batch) lines.push(batch)
       const hint = octx?.threadDir ? takeDeniedHint(octx.threadDir) : null // a worker call was denied by the permission check: said once
       if (hint) lines.push(hint)
+      const slices = octx?.threadDir ? takeSliceNote(octx.threadDir) : null // the 11th fallback slice of a denied reader: "you are reading a long source yourself"
+      if (slices) lines.push(slices)
+      const warn = await warnNote($, host) // the context is at the warn level: ONE line per session, "write what you have learned to scratch/notes.md" (scratchnotes.ts)
+      if (warn) lines.push(warn)
     } catch {
       /* delivery is retried at the next call */
     }
