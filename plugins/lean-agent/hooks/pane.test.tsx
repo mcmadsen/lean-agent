@@ -170,7 +170,7 @@ test('pane thread card shows the thread\'s model/effort badge', { timeoutMs: 20_
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /opus\/high · \w+ · no review/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'opus/high' })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -481,7 +481,7 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   const h = setup(on, [])
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
-  await feed($, 170_000) // 85 % of the default limit: the button is beside the bar
+  await feed($, 85_000) // 85 % of the default limit: the button is beside the bar
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   const ui = await $.ui.mount(DESKPANE as any)
   await ui.press({ key: 'restart-desk' })

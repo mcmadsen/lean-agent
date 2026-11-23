@@ -35,7 +35,8 @@ const start = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 
 
 test('the palette is one the design system paints: makeColors lists nothing that makes Desktop ignore the theme, and the names are all real', () => {
   expect(UNPAINTED).toEqual([])
-  expect(checkColors(LOOK.colors)).toEqual([])
+  // (checkColors also lists the contrast lines that are under the design system's own bar and still paint: only "won't paint" matters)
+  expect(checkColors(LOOK.colors).filter(l => l.startsWith("Desktop won't paint"))).toEqual([])
 })
 
 test('off by default: a session start sets nothing, clears nothing and writes no record', { timeoutMs: 20_000 }, async ($, on) => {

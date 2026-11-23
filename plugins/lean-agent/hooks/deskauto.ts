@@ -155,5 +155,5 @@ export async function retiredInfo(h: Host, sid: string): Promise<{ startedAt: nu
 
 export const retiredLine = (info: { startedAt: number }): string => {
   const line = `this desk was replaced by a newer one (started ${info.startedAt ? clockText(info.startedAt) : 'earlier'}): use the newer session`
-  return `[lean-agent] ${line[0].toUpperCase()}${line.slice(1)}. Answer this prompt with exactly this one line and nothing else (no tool call, no other text): "${line}"`
+  return `[lean-agent] ${line.charAt(0).toUpperCase()}${line.slice(1)}. Answer this prompt with exactly this one line and nothing else (no tool call, no other text): "${line}"`
 }

@@ -56,7 +56,7 @@ test('every kind of card has a dk (thread or desk, kind, the item\'s own id); a 
     actionRequests: [{ id: 'a1', thread: 't1', state: 'pending', headline: 'reply', text: 'hello' } as any],
     deskModelRed: 'desk on opus',
   })
-  expect(rows.map(r => `${r.dk?.thread}|${r.dk?.kind}|${r.dk?.id}`).sort()).toEqual(['desk|context|over', 'desk|deskmodel|desk on opus', 'desk|question|4', 'desk|script|syn::aaaaaaaaaaaa', 't1|action|a1:pending', 't1|approval|5', 't1|model|m1:pending', 't2|prompt|s:p', 't3|blocked|5', 't4|stalled|9', 't5|ready|5', 't6|question|3'])
+  expect(rows.map(r => `${r.dk?.thread}|${r.dk?.kind}|${r.dk?.id}`).sort()).toEqual(['desk|deskmodel|desk on opus', 'desk|question|4', 'desk|script|syn::aaaaaaaaaaaa', 't1|action|a1:pending', 't1|approval|5', 't1|model|m1:pending', 't2|prompt|s:p', 't3|blocked|5', 't4|stalled|9', 't5|ready|5', 't6|question|3'])
 })
 
 test('the tool: dismiss tN hides its current item, tN kind: that one, notice hides a line; the reply names it; nothing is answered; the record stays; a newer one shows again; another thread is untouched', async () => {

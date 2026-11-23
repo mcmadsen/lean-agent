@@ -17,7 +17,7 @@ import { ownFromGrant } from './ownpr'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
-import { registerLook } from './look'
+import { lookStep } from './look'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
@@ -870,6 +870,8 @@ export const register: Register = on => {
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     await showSkew($)
+    // the optional look (config pane.theme: on; off by default and then nothing is touched): sent once per session start (look.ts)
+    await soft($, 'look', async () => { await lookStep($, host) })
     // the ledger grows with every model request: a past month (or a file that starts with a 0.45 row) is renamed away, never rewritten
     let rotated: string[] = []
     await soft($, 'ledger rotation', async () => { rotated = await rotateLedger(host) })
@@ -1102,7 +1104,6 @@ export const register: Register = on => {
   })
 
   registerPane(on, () => role)
-  registerLook(on) // the optional look (config pane.theme: on; off by default, look.ts)
 
   // the desk pane's two companions, opened by its buttons (threadpane.tsx, newthread.tsx): one pane per thread and the new-thread form;
   // any other pane id goes on to the hook that draws it

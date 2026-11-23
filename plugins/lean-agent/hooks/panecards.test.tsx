@@ -343,10 +343,12 @@ test('every section empty: no Needs you, no Goals, an empty-state line for threa
 
 test('1.0.30: the rules cap and the old desk are ONE amber line each, never "error:"; a real failure stays "error:"', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on)
+  await inDesk($)
+  // (the notices are written after the session start: the start clears the rules-cap and old-desk ones it finds nothing behind)
   h.files.set(`${L}/notices/rules-cap.txt`, 'rules synthetic: 1 over the size cap, still loaded; learn synthetic --trim or lean_rules check\n')
   h.files.set(`${L}/notices/old-desk.txt`, `lean-agent: the old desk session synthetic-desk is not archived: ${'archive it in the app, '.repeat(12)}\n`)
   h.files.set(`${L}/notices/other.txt`, 'something is really broken\n')
-  await inDesk($)
+  resetViewCache()
   const ui = await $.ui.mount(PANE as any)
   const all = await texts(ui)
   const rules = all.filter(t => /over the size cap/.test(t))

@@ -7,7 +7,6 @@
 // says nothing, so none is written by hand.
 import type { ThemeSetArgs } from 'claude-code'
 import { makeColors } from './make-colors.js'
-import { hostOf } from './host'
 import { homeDir, leanDir, readJson, writeJson } from './state'
 import type { Host } from './state'
 
@@ -95,11 +94,4 @@ export async function lookRows(h: Host): Promise<string[]> {
   if (!rec || !rec.on) return ['note pane theme: on, sent at the next session start']
   if (rec.isDrawn) return ['ok   pane theme: on, drawn']
   return [`note pane theme: on, not drawn: ${rec.reason ?? 'no client that draws themes is attached'}`]
-}
-
-export function registerLook(on: any): void {
-  on('session.start', async ($: any, e: any, next: any) => {
-    await lookStep($, hostOf($)).catch(() => undefined) // a look that cannot be sent never stops a session
-    return next(e)
-  })
 }
