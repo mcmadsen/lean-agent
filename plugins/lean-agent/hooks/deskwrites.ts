@@ -21,7 +21,7 @@ import { macOf } from './reviews'
 import { parseOrigin } from './prhost'
 import type { PrHost } from './prhost'
 import { listProjects } from './projects'
-import { azureGet, claimAndSend, exclusive, logHistory, revokeGrant, rows, sound, standingView, targetOf, threadOk } from './deskactions'
+import { HUMAN_WI_STATES, STANDING_STATUSES, azureGet, claimAndSend, exclusive, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
 import type { ActionKind, Params, Plan } from './deskactions'
 import { recentPrompts } from './humanprompts'
 import { SOFT_WORDS, createIn, instructionIn, revokeIn } from './writeinstr'
@@ -34,7 +34,9 @@ export const CREATE_KINDS = ['create'] // a NEW work item has no id: the grant's
 // the table: which request kind a grant kind covers (a batch is never one kind: every item is looked at)
 const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'ado-workitem-create': 'create', 'ado-pr-workitem-link': 'link', 'gh-pr-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
 
-type WGrant = { id: string; thread: string; scope: string; kinds: string[]; quote: string; qts: number; cap: number; used: number; ts: number; exp: number; sig: string }
+// `statuses`: [] for the user's WORDS (any status of a covered kind); a grant of the dialog's fourth choice (writeHumanGrant) names the thread statuses (fixed,
+// closed, active) or the work item states it covers, and a reply with a status needs the `status` kind as well
+type WGrant = { id: string; thread: string; scope: string; kinds: string[]; statuses: string[]; quote: string; qts: number; cap: number; used: number; ts: number; exp: number; sig: string }
 type WSent = { ts: number; thread: string; text: string; grant?: string; since?: number /* an own-PR default send (ownpr.ts): grant is `own:<tN>`, `since` when the thread took ownership */ }
 // the own-PR default (ownpr.ts) is not a grant: the user takes it back by marking the thread (or all, '*') revoked from now on; owning a PR later (a newer `since`) is a new default
 const OWN_REVOKED = 'action.ownpr.revoked'
@@ -72,7 +74,7 @@ export async function revokeOwn(h: Host, by: { thread?: string; all?: boolean },
 const WGRANTS = 'action.writes.grants'
 const WSENT = 'action.writes.sent'
 const SENT_SHOWN_MS = 30 * 60 * 1000
-const wText = (g: Omit<WGrant, 'sig'>) => `desk-writes\n${g.id}\n${g.thread}\n${g.scope}\n${g.kinds.join(',')}\n${JSON.stringify(g.quote)}\n${g.qts}\n${g.cap}\n${g.used}\n${g.ts}\n${g.exp}`
+const wText = (g: Omit<WGrant, 'sig'>) => `desk-writes\n${g.id}\n${g.thread}\n${g.scope}\n${g.kinds.join(',')}\n${g.statuses.join(',')}\n${JSON.stringify(g.quote)}\n${g.qts}\n${g.cap}\n${g.used}\n${g.ts}\n${g.exp}`
 let wseq = 0
 export const resetWrites = () => {
   wseq = 0
@@ -83,7 +85,7 @@ async function grantRows(h: Host, now: number): Promise<WGrant[]> {
   const v = await h.store.get(WGRANTS).catch(() => null)
   const out: WGrant[] = []
   for (const g of Array.isArray(v) ? v : []) {
-    if (!g || typeof g.id !== 'string' || !threadOk(g.thread) || typeof g.scope !== 'string' || typeof g.quote !== 'string' || !Array.isArray(g.kinds) || !g.kinds.every((k: unknown) => typeof k === 'string')) continue
+    if (!g || typeof g.id !== 'string' || !threadOk(g.thread) || typeof g.scope !== 'string' || typeof g.quote !== 'string' || !Array.isArray(g.kinds) || !g.kinds.every((k: unknown) => typeof k === 'string') || !Array.isArray(g.statuses) || !g.statuses.every((k: unknown) => typeof k === 'string')) continue
     if (![g.qts, g.cap, g.used, g.ts, g.exp].every(Number.isFinite) || typeof g.sig !== 'string' || now > g.exp) continue
     const want = await macOf(h, wText(g), false)
     if (want && want.length === g.sig.length && want === g.sig) out.push(g)
@@ -278,10 +280,10 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   const cap = await capOf(h)
   return exclusive(async () => {
     const now = await h.clock.now()
-    const base = { id: `w${now}-${++wseq}`, thread, scope: tg.scope, kinds: want, quote: quoteOf(hit.text), qts: hit.ts, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
+    const base = { id: `w${now}-${++wseq}`, thread, scope: tg.scope, kinds: want, statuses: [] as string[], quote: quoteOf(hit.text), qts: hit.ts, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
     const g = await resign(h, base)
     if (!g) return { ok: false, text: 'no key to sign the grant with' }
-    const keep = (await grantRows(h, now)).filter(x => !(x.thread === thread && lc(x.scope) === lc(tg.scope)))
+    const keep = (await grantRows(h, now)).filter(x => !(x.thread === thread && lc(x.scope) === lc(tg.scope) && !x.statuses.length)) // (the words replace the words; a grant of the dialog's choice stays)
     await saveGrants(h, [...keep, g])
     await logHistory(h, thread, { kind: 'writes-granted', id: g.id, scope: g.scope, kinds: want, quote: g.quote, cap, hours: 24 })
     return { ok: true, text: `allowed ${thread} on ${label}: ${want.join(', ')} (up to ${cap} writes, 24 h or until ${thread} closes), resting on your words "${g.quote}". Revoke: the pane's Revoke button, /lean-agent:revoke ${thread}, or say "stop writes".${res.note ? ` Note: ${res.note}.` : ''} Tell the user this in one line` }
@@ -329,16 +331,57 @@ async function coverOf(h: Host, thread: string, kind: ActionKind, params: Params
   if (!grants.length) return null
   const first = items[0]!
   if (!GRANT_KIND[first.kind]) return null
-  const g = grants.find(x => lc(x.scope) === lc(targetOf(first.kind, first.params)))
-  if (!g) return null
+  const writes = plan.steps?.length ?? 1
+  for (const g of grants.filter(x => lc(x.scope) === lc(targetOf(first.kind, first.params)))) {
+    let ok = g.used + writes <= g.cap
+    for (const it of items) {
+      if (!ok) break
+      const gk = GRANT_KIND[it.kind]
+      if (!gk || !g.kinds.includes(gk) || lc(targetOf(it.kind, it.params)) !== lc(g.scope)) ok = false // a push, a delete, any other kind or another target: always asked
+      else if (g.statuses.length && !statusCovered(g, it)) ok = false
+      else if (it.kind === 'gh-pr-thread-resolve' && !(await verifyThread(h, String(it.params.repo), Number(it.params.pr), String(it.params.thread)))) ok = false
+    }
+    if (ok) return { g, writes }
+  }
+  return null
+}
+// a grant of the dialog's choice (statuses named): a thread status needs its status in the list, a reply with a status needs the `status` kind too, a work item update its state
+function statusCovered(g: WGrant, it: Item): boolean {
+  const p = it.params
+  if (it.kind === 'ado-pr-thread-status') return g.statuses.includes(String(p.status))
+  if (it.kind === 'ado-pr-reply' && p.status !== undefined) return g.kinds.includes('status') && g.statuses.includes(String(p.status))
+  if (it.kind === 'ado-workitem-update') {
+    const f = p.fields && typeof p.fields === 'object' ? (p.fields as { state?: unknown }) : null
+    return !!f && Object.keys(f).length === 1 && g.statuses.includes(lc(f.state)) // only the state, never a title or an assignee
+  }
+  return true
+}
+
+// The dialog's fourth choice for every kind but a thread status (deskactions.ts answerAction calls this through setHumanGrantWriter, only after the human pressed it):
+// a signed written approval of the request's own PR or work item, for exactly the kinds of the request, 24 h, at most 40 writes
+async function writeHumanGrant(h: Host, r: { id: string; thread: string; kind: ActionKind; params: Params }, now: number): Promise<boolean> {
+  const items = itemsOf(r.kind, r.params)
+  if (!items) return false
+  const kinds = new Set<string>()
+  let statuses = [...STANDING_STATUSES]
   for (const it of items) {
     const gk = GRANT_KIND[it.kind]
-    if (!gk || !g.kinds.includes(gk) || lc(targetOf(it.kind, it.params)) !== lc(g.scope)) return null // a push, a delete, any other kind or another target: always asked
-    if (it.kind === 'gh-pr-thread-resolve' && !(await verifyThread(h, String(it.params.repo), Number(it.params.pr), String(it.params.thread)))) return null
+    if (!gk) return false
+    kinds.add(gk)
+    if (it.kind === 'ado-pr-reply' && it.params.status !== undefined) kinds.add('status')
+    if (it.kind === 'ado-workitem-update') statuses = HUMAN_WI_STATES.map(lc)
   }
-  const writes = plan.steps?.length ?? 1
-  return g.used + writes <= g.cap ? { g, writes } : null
+  const scope = targetOf(items[0]!.kind, items[0]!.params)
+  const cap = await capOf(h)
+  // (called inside answerAction's gate: no `exclusive` here)
+  const base = { id: `w${now}-${++wseq}`, thread: r.thread, scope, kinds: [...kinds], statuses, quote: `you pressed "${standingLabelOf(r.kind === 'batch' ? String(items[0]!.kind) : r.kind)}" on request ${r.id}`, qts: now, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
+  const g = await resign(h, base)
+  if (!g) return false
+  const keep = (await grantRows(h, now)).filter(x => !(x.thread === r.thread && lc(x.scope) === lc(scope) && x.statuses.length && x.kinds.join() === g.kinds.join()))
+  await saveGrants(h, [...keep, g])
+  return true
 }
+setHumanGrantWriter(writeHumanGrant)
 
 // a request that was just made: when the user's written instruction covers it, the mod sends it at once (the same executor). null: the user is asked
 export async function runGranted(h: Host, id: string): Promise<{ sent: boolean; line: string } | null> {

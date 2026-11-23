@@ -48,7 +48,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
+export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; approval?: string; pending?: string /* "waiting for your Approve: reply to thread 7": a request for a remote write waits (the thread's state stays working, 1.0.28) */; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */ }
 export type ClosedRow = { id: string; title: string; last: string }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -60,7 +60,9 @@ import type { Waiting } from './scripts'
 // switch it (red)
 // action: a thread's request for the desk to send a typed remote write (deskactions.ts): Approve / Deny presses in the pane, or the desk's question
 // dk: what Dismiss records and the view hides by (dismissstore.ts); every card has one
-export type NeedKind = 'approval' | 'denial' | 'question' | 'push' | 'blocked' | 'script' | 'context' | 'model' | 'deskmodel' | 'action' | 'stalled'
+// "waiting for your Approve: reply to thread 7" (and how many more): the badge a thread with a pending request wears while its state stays working
+export const pendingText = (r: Pick<ActionView, 'headline'>, n = 1): string => `waiting for your Approve: ${r.headline.replace(/\s+/g, ' ').replace(/\s*\([^)]*\)\s*$/, '').slice(0, 70)}${n > 1 ? ` (+${n - 1})` : ''}`
+export type NeedKind ='approval' | 'denial' | 'question' | 'push' | 'blocked' | 'script' | 'context' | 'model' | 'deskmodel' | 'action' | 'stalled'
 export type NeedRow = { key: string; kind: NeedKind; thread?: string; text: string; notify: boolean; script?: Waiting; request?: ModelRequest; action?: ActionView; dk?: DItem }
 // one thread's inbox: unread rows first, then at most READ_SHOWN read ones (`read` holds every read row that is not archived)
 // a line at the top of the pane that comes from a notice file (budget alert, restart that gave up, old-desk reminder, ...); budget: an alert, not an error
@@ -405,6 +407,11 @@ export async function loadView(h: Host): Promise<View> {
   await guard('action requests', async () => {
     const open = new Set(v.threads.map(t => t.id))
     v.actionRequests = (await listActions(h)).filter(r => open.has(r.thread))
+    // the badge on the thread's row: a pending request does not block the thread (it stays `working`)
+    for (const t of v.threads) {
+      const p = v.actionRequests.find(r => r.thread === t.id && r.state === 'pending')
+      if (p) t.pending = pendingText(p, v.actionRequests.filter(r => r.thread === t.id && r.state === 'pending').length)
+    }
   })
   // the user's standing approvals: the lines "sent under your standing approval: ..." and their Revoke buttons
   await guard('standing approvals', async () => {

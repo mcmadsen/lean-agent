@@ -58,15 +58,17 @@ const tryNow = async (s: S, kind: string, params: Record<string, unknown>, threa
 }
 const history = (s: S, t = 't5') => s.h.files.get(`${L}/threads/${t}/history.jsonl`) ?? ''
 
-test('the third choice exists only for a status change (never for text); it is a human answer that stores the signed grant and logs it', { timeoutMs: 20_000 }, async () => {
+test('the fourth choice (1.0.28: every kind of the own-PR default and the status kinds, never another kind or a risky status); it is a human answer that stores the signed grant and logs it', { timeoutMs: 20_000 }, async () => {
   const s = setup()
   const v = await ask(s, 'ado-pr-thread-status', STATUS)
   expect(questionOf(v).options.map(o => o.label)).toEqual(['Approve', 'Deny', 'Edit first', STANDING_LABEL])
-  expect(STANDING_LABEL).toBe('Approve, and allow status changes on this PR for 24 h')
+  expect(STANDING_LABEL).toBe('Approve, and allow this kind on this PR for 24 h')
   expect(questionOf(await ask(s, 'ado-pr-thread-status', { ...STATUS, thread: 8, status: 'wontFix' }, 't6')).options).toHaveLength(3) // not a low-risk status
-  expect(questionOf(await ask(s, 'ado-pr-reply', REPLY)).options).toHaveLength(3)
-  expect(questionOf(await ask(s, 'ado-pr-reply', { ...REPLY, thread: 9, status: 'fixed' })).options).toHaveLength(3) // a reply carries text, even with a status
-  expect(questionOf(await ask(s, 'gh-pr-thread-resolve', RESOLVE, 't6')).options).toHaveLength(3) // its PR cannot be checked from the request: always asked
+  expect(questionOf(await ask(s, 'ado-pr-reply', REPLY)).options).toHaveLength(4)
+  expect(questionOf(await ask(s, 'ado-pr-reply', { ...REPLY, thread: 9, status: 'fixed' })).options).toHaveLength(4) // a reply WITH a status: a human choice
+  expect(questionOf(await ask(s, 'ado-pr-reply', { ...REPLY, thread: 10, status: 'wontFix' }, 't6')).options).toHaveLength(3) // not a low-risk status
+  expect(questionOf(await ask(s, 'ado-pr-comment', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42, body: 'hello' }, 't6')).options).toHaveLength(3) // not in the table of the choice
+  expect(questionOf(await ask(s, 'gh-pr-thread-resolve', RESOLVE, 't6')).options).toHaveLength(4) // the mod reads the PR of the thread before it sends under it
   expect((await standingView(s.host)).grants).toEqual([])
   expect((await human(s, v, 'Approve')).join(' ')).not.toContain('allowed status changes') // plain Approve: no grant
   expect((await standingView(s.host)).grants).toEqual([])
@@ -103,7 +105,7 @@ test('with a grant, a status change of the same thread on the same PR is sent at
   const rep = await threadTool(s.host, 't5', 'lean_report', { state: 'blocked', text: 'thread 9 is fixed', action: { kind: 'ado-pr-thread-status', params: { ...STATUS, thread: 9 } } })
   expect(rep.ok).toBe(true)
   expect(rep.text).toContain('sent under your standing approval: set thread 9 of PR 42 to fixed')
-  expect(rep.text).not.toContain('waits for the user\'s yes')
+  expect(rep.text).not.toContain('waits for the user\'s Approve')
   const row = JSON.parse((s.h.files.get(`${L}/desk/inbox.jsonl`) ?? '').trim().split('\n').pop()!)
   expect([row.state, row.action]).toEqual(['working', undefined])
   expect(s.writers()).toHaveLength(3)
@@ -117,18 +119,18 @@ test('with a grant, a status change of the same thread on the same PR is sent at
   expect(s.writers()).toHaveLength(3)
 })
 
-test('the pane\'s third press is the same human answer; a GitHub review thread resolve never carries a standing approval', { timeoutMs: 20_000 }, async () => {
+test('the pane\'s press is the same human answer; a request outside the table of the choice cannot carry it', { timeoutMs: 20_000 }, async () => {
   const s = setup()
   const v = await ask(s, 'ado-pr-thread-status', STATUS)
   expect((await answerAction(s.host, v.id, 'approve', 'pane', s.tell, true)).ok).toBe(true)
   expect((await approveAction(s.host, v.id, s.tell)).ok).toBe(true)
   expect(history(s)).toContain('"by":"user, in the pane"')
   expect((await standingView(s.host)).grants).toHaveLength(1)
-  const g = await ask(s, 'gh-pr-thread-resolve', RESOLVE)
+  const g = await ask(s, 'ado-pr-comment', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42, body: 'hello' })
   const refused = await answerAction(s.host, g.id, 'approve', 'pane', s.tell, true)
   expect(refused.ok).toBe(false)
   expect(refused.text).toContain('cannot carry a standing approval')
-  expect(await tryNow(s, 'gh-pr-thread-resolve', { ...RESOLVE, thread: 'PRRT_kwDOZzYyXx9' })).toBeNull()
+  expect(await tryNow(s, 'gh-pr-thread-resolve', { ...RESOLVE, thread: 'PRRT_kwDOZzYyXx9' })).toBeNull() // the 1.0.24 grant never covered a GitHub resolve
 })
 
 test('a grant covers only its thread, its PR, its kinds and statuses; text is never covered; a batch only when EVERY item is', { timeoutMs: 20_000 }, async () => {
@@ -208,7 +210,7 @@ test('no tool creates a grant: no action kind, no report, no forged row, no stan
     expect(r.ok, r.text).toBe(true)
     expect(r.text).toContain('waits for the user')
   }
-  const rep = await ask(s, 'ado-pr-reply', { ...REPLY, thread: 70 }, 't6')
+  const rep = await ask(s, 'ado-pr-comment', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 42, body: 'hello' }, 't6')
   expect((await answerAction(s.host, rep.id, 'approve', 'pane', s.tell, true)).text).toContain('cannot carry a standing approval')
   const st = await ask(s, 'ado-pr-thread-status', STATUS, 't6')
   expect((await answerAction(s.host, st.id, 'deny', 'pane', s.tell, true)).ok).toBe(false)
@@ -225,8 +227,8 @@ test('no tool creates a grant: no action kind, no report, no forged row, no stan
   const three = { question: q.question, options: q.options.slice(0, 3) }
   const fake = await bindAnswers(s.host, [three], { [q.question]: STANDING_LABEL }, s.tell)
   expect(fake.join(' ')).toContain('was NOT recorded')
-  const free = await bindAnswers(s.host, [{ question: q.question, options: q.options }], { [q.question]: 'yes, allow it for a day' }, s.tell)
-  expect(free).toEqual([])
+  const free = await bindAnswers(s.host, [{ question: q.question, options: q.options }], { [q.question]: 'tell me more first' }, s.tell)
+  expect(free.join(' ')).toContain("the user typed 'tell me more first': free text is not an approval for this request") // never dropped silently (1.0.28)
   expect((await standingView(s.host)).grants).toEqual([])
 })
 

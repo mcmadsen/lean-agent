@@ -17,6 +17,22 @@ export const COMMANDS = ['/lean-agent:allow', 'lean-agent:allow', '/allow', 'all
 // SOFT: a word that asks for the work when the user pasted the URL of the PR or work item and no verb of the table is there ("please get this done <url>")
 export const SOFT_WORDS = ['please', 'pls', 'get this done', 'get it done', 'get that done', 'lets get this done', "let's get this done", 'go ahead', 'go on', 'handle', 'handle it', 'finish', 'finish it', 'finish this', 'take it from here', 'carry on', 'proceed', 'do it', 'sort it']
 const FORGE_URL = /https?:\/\/[^\s<>"']*\/(?:pullrequest|pull|_workitems\/edit)\/\d{1,9}/i
+// A TYPED answer in the desk's dialog ("Other": the user's own words to that exact question, read from the tool result): a clear approval counts as the Approve
+// press for that request id. The text is refused as a whole when it carries any REFUSE word (a negation, a wish to change or wait) or is longer than TYPED_MAX;
+// "always" / "allow" in it is the fourth choice (allow this kind on this PR for 24 h). Anything else is free text: not an approval, and said so to the desk.
+export const APPROVE_WORDS = ['approve', 'approved', 'yes', 'yep', 'yeah', 'ok', 'okay', 'go ahead', 'do it', 'always approve', 'allow', 'allowed', 'fine', 'sure']
+export const ALWAYS_WORDS = ['always', 'allow']
+export const REFUSE_WORDS = ['not', "don't", 'dont', 'do not', "doesn't", "won't", "can't", 'cannot', 'no', 'never', 'deny', 'denied', 'reject', 'cancel', 'wait', 'stop', 'but', 'however', 'instead', 'except', 'change', 'edit', 'rewrite']
+export const TYPED_MAX = 120
+export function typedApproval(text: string): { approve: boolean; always: boolean } {
+  const t = text.replace(/[‘’]/g, "'").trim()
+  const no = { approve: false, always: false }
+  if (!t || t.length > TYPED_MAX) return no
+  if (new RegExp(`(?<![\\w'-])(${alt(REFUSE_WORDS)})(?![\\w'-])`, 'i').test(t)) return no
+  if (!new RegExp(`(?<![\\w-])(${alt(APPROVE_WORDS)})(?![\\w-])`, 'i').test(t)) return no
+  return { approve: true, always: new RegExp(`(?<![\\w-])(${alt(ALWAYS_WORDS)})(?![\\w-])`, 'i').test(t) }
+}
+
 // the user's own words that take a grant back (deskwrites.ts revokeByWords): "stop writes", "revoke", "revoke tN", "no more writes"
 export const REVOKE_WORDS = ['stop writes', 'stop the writes', 'stop writing', 'revoke', 'no more writes', 'no more replies', 'cancel the writes']
 export const REVOKE_COMMANDS = ['/lean-agent:revoke']

@@ -142,7 +142,9 @@ test('lean_report with an action stores a signed request, shows it in the inbox 
     return { isDelivered: true }
   })
   expect(r.ok).toBe(true)
-  expect(r.text).toContain('waits for the user\'s yes at the desk')
+  expect(r.text).toContain('waits for the user\'s Approve at the desk')
+  expect(r.text).toContain('Carry on with the other steps that do not need it')
+  expect(r.text).not.toContain('Stop and wait')
   expect(r.text).toContain('Do not try the write yourself')
   const list = await listActions(s.h.host)
   expect(list).toHaveLength(1)
@@ -150,7 +152,7 @@ test('lean_report with an action stores a signed request, shows it in the inbox 
   const inbox = s.h.files.get(`${L}/desk/inbox.jsonl`) ?? ''
   const row = JSON.parse(inbox.trim().split('\n').pop()!)
   expect(row.action).toEqual({ id: list[0]!.id, kind: 'ado-pr-reply', headline: list[0]!.headline })
-  expect(row.state).toBe('blocked')
+  expect(row.state).toBe('working') // a pending request does not block the thread: no red state, the Needs-you card carries the request
   expect(row.approval).toBeUndefined() // not a "needs your yes in its own session" card
   // the desk is told: ask the USER with the question from action-list, approve-action only after Approve
   expect(sent.join('\n')).toContain('lean_thread action-list')
@@ -165,16 +167,17 @@ test('lean_report with an action stores a signed request, shows it in the inbox 
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('ado-pr-reply')
   expect(bad.text).toContain('gh-pr-comment')
-  const wrongState = await threadTool(s.h.host, 't5', 'lean_report', { state: 'working', text: 'x', action: { kind: 'gh-pr-comment', params: PARAMS['gh-pr-comment'] } })
-  expect(wrongState.ok).toBe(false)
+  const wrongState = await threadTool(s.h.host, 't5', 'lean_report', { state: 'done', text: 'x', action: { kind: 'gh-pr-comment', params: PARAMS['gh-pr-comment'] } })
+  expect(wrongState.ok).toBe(false) // a done report ends the session: no request rides on it
+  expect(wrongState.text).toContain('Report state working with the action')
   expect((s.h.files.get(`${L}/desk/inbox.jsonl`) ?? '').length).toBe(before) // neither reported anything
   expect(await listActions(s.h.host)).toHaveLength(1)
   expect(THREAD_TOOLS.find(t => t.name === 'lean_report')!.inputSchema).toMatchObject({ properties: { action: { properties: { kind: { enum: Object.keys(ACTION_KINDS) } } } } })
 })
 
-test('only a blocked report with an action carries the hint; a thread cannot ask for more than five open requests', async () => {
+test('a report with an action (working: it does not block) carries the hint; a thread cannot ask for more than five open requests', async () => {
+  expect(actionHint({ kind: 'report', state: 'working', from: 't5', action: { id: 'a1-1', kind: 'gh-pr-comment', headline: 'comment' } })).toContain('approve-action a1-1')
   expect(actionHint({ kind: 'report', state: 'blocked', from: 't5', action: { id: 'a1-1', kind: 'gh-pr-comment', headline: 'comment' } })).toContain('approve-action a1-1')
-  expect(actionHint({ kind: 'report', state: 'working', from: 't5', action: { id: 'a1-1', kind: 'gh-pr-comment', headline: 'comment' } })).toBe('')
   expect(actionHint({ kind: 'report', state: 'blocked', from: 't5', action: { id: 'x; rm', kind: 'k', headline: 'h' } })).toBe('')
   expect(actionHint({ kind: 'report', state: 'blocked', from: 't5' })).toBe('')
   const s = setup()
@@ -303,13 +306,15 @@ test('a model-made approval is refused: no answer, a forged answer, a forged req
   await s.h.host.store.set('action.requests', [{ id: 'a1-9', thread: 't5', kind: 'gh-pr-comment', params: PARAMS['gh-pr-comment'], why: '', hash: hashOf('x'), ts: 1, exp: 9e15, sig: 'a'.repeat(64) }])
   expect((await approveAction(s.h.host, 'a1-9', s.tell)).ok).toBe(false)
   expect((await listActions(s.h.host))).toHaveLength(0)
-  // text the human typed under "Other" is no choice
+  // text the human typed under "Other" is no choice: a mixed or unclear one is no approval, and it is SAID (never dropped silently, 1.0.28); a clear typed approval
+  // is the Approve press (typedanswer.test.ts); nothing typed at all records nothing
   const s2 = setup()
   const v2 = await ask(s2, 'gh-pr-comment')
-  for (const label of ['approve', 'Approve it please', 'yes', 'Approve, Deny', '']) {
+  for (const label of ['Approve, Deny', 'tell me more first']) {
     const a = asked(v2, label)
-    expect(await bindAnswers(s2.h.host, a.questions, a.answers, s2.tell)).toEqual([])
+    expect((await bindAnswers(s2.h.host, a.questions, a.answers, s2.tell)).join(' ')).toContain('free text is not an approval for this request')
   }
+  expect(await bindAnswers(s2.h.host, asked(v2, '').questions, asked(v2, '').answers, s2.tell)).toEqual([])
   // an answer keyed to some other question text
   const a = asked(v2, 'Approve')
   expect(await bindAnswers(s2.h.host, a.questions, { 'another question?': 'Approve' }, s2.tell)).toEqual([])

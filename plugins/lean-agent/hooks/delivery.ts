@@ -91,7 +91,7 @@ export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.stat
 export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself, do not ask it with AskUserQuestion and do not send a yes (a relayed yes does not satisfy the permission check)]` : '')
 // what the desk is told about a thread's `action` request: ask the HUMAN with the question from action-list, then approve-action
 export const actionHint = (r: { kind: 'report' | 'ask'; state?: string; from: string; action?: DeskAction }): string =>
-  r.kind === 'report' && r.state === 'blocked' && r.action && /^a\d+-\d+$/.test(r.action.id) ? ` [${r.from} asks the desk to send: ${r.action.headline.replace(/\s+/g, ' ').slice(0, 160)} (request ${r.action.id}). Run lean_thread action-list, ask the USER with AskUserQuestion using the question it prints (it names the exact text), and only after their Approve call lean_thread approve-action ${r.action.id}. Never approve it yourself]` : ''
+  r.kind === 'report' && r.action && /^a\d+-\d+$/.test(r.action.id) ? ` [${r.from} asks the desk to send: ${r.action.headline.replace(/\s+/g, ' ').slice(0, 160)} (request ${r.action.id}). Run lean_thread action-list, ask the USER with AskUserQuestion using the question it prints (it names the exact text), and only after their Approve call lean_thread approve-action ${r.action.id}. Never approve it yourself]` : ''
 export type Tool = { name: string; description: string; inputSchema: unknown }
 
 // what a done report should carry so a fresh session can take over: the fields a text does not mention (a heuristic on words)
@@ -463,7 +463,8 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       let standing = '' // set when a standing approval sent the request: the report is a progress note, not a block
       let standingFail = ''
       if (i.action !== undefined) {
-        if (str(i.state) !== 'blocked') return { ok: false, text: 'lean_report action needs state blocked (you wait for the user\'s yes, given at the desk)' }
+        // a pending request does NOT block the thread (1.0.28): the report goes out as `working` with the request on the desk's Needs-you card; the result arrives as a message
+        if (str(i.state) === 'done') return { ok: false, text: 'lean_report action: a done report ends the session, the request would wait for nobody. Report state working with the action, carry on with other steps, and finish after the result message' }
         const made = await addActionRequest(h, id, i.action)
         if (!made.ok) {
           await logRefusal(h, { role: 'thread', rule: /^action kind /.test(made.text) ? 'action-unknown-kind' : 'action-refused', text: made.text.slice(0, 200), tool: 'lean_report', thread: id })
@@ -485,7 +486,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       const truth = !action && !standing && str(i.state) === 'blocked' ? await blockedTruth(h, id, str(i.text), approval0).catch(() => null) : null
       const approval = truth ? truth.approval : approval0
       const rText = standing ? `${str(i.text)}\n(${standing})` : truth?.category ? truth.text : str(i.text)
-      const rState = standing ? 'working' : str(i.state) || 'working'
+      const rState = standing || action ? 'working' : str(i.state) || 'working' // (a request waiting for the user is no "blocked": the thread goes on with what does not need it)
       const rec = { ts, from: id, kind: 'report', text: rText, state: rState, ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
       const failed = await writeReport(h, home, rec)
       if (failed) {
@@ -496,9 +497,9 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
-      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: rState, text: rText, ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true)
+      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: rState, text: rText, ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true || !!action) // (a request for the user's Approve reaches the desk at once, though the state is working)
       const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
-      const waits = standing ? ` ${standing}: nothing waits for the user, carry on.` : action ? `${standingFail ? ` ${standingFail}.` : ''} Request ${action.id} (${action.headline}) waits for the user's yes at the desk. Stop and wait: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
+      const waits = standing ? ` ${standing}: nothing waits for the user, carry on.` : action ? `${standingFail ? ` ${standingFail}.` : ''} Request ${action.id} (${action.headline}) waits for the user's Approve at the desk (your state stays working). Carry on with the other steps that do not need it (queue a run, tidy notes) and end your turn only when nothing else is left: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
       const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
       return { ok: true, text: isDone ? `${base}${base.endsWith('.') ? ' ' : '. '}${over}` : `${base}${waits ? (base.endsWith('.') ? '' : '.') + waits : ''}` }
     }

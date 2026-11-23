@@ -26,7 +26,7 @@ import { denyRequest, grantModelApproval, removeRequest } from './expensive'
 import type { ModelRequest } from './expensive'
 // answerAction is called from here and from the desk's AskUserQuestion hook (bindAnswers) and from nowhere else: only the user's press or the
 // user's answer to the desk's question approves a thread's remote write (deskactions.ts)
-import { STANDING_LABEL, answerAction, approveAction, revokeGrant } from './deskactions'
+import { answerAction, approveAction, revokeGrant, standingLabelOf } from './deskactions'
 import { revokeWrites } from './deskwrites'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
 import { NARROW as NARROW_BRIEF, RETRY_LABEL, selfEditLabel } from './denial'
@@ -537,7 +537,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         }
         const out = await approveAction(host, a.id, tellAction)
         resetViewCache()
-        sayModel(`${out.text}; status changes on this PR are allowed for 24 h (Revoke in the pane)`, !out.ok)
+        sayModel(`${out.text}; this kind of write on this ${a.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} is allowed for 24 h (Revoke in the pane)`, !out.ok)
         tell()
       })
     const revokeStanding = (grant: string) => async () => {
@@ -703,7 +703,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {!!mr && mr.state === 'denied' && <Button key={`model-dismiss-${mr.id}`} label="Dismiss" onPress={dismissModel(mr)} />}
             {n.kind === 'model' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!ar && !(ar.state === 'pending' && ar.text.length > 400) && <Button key={`action-approve-${ar.id}`} label={confirming(ui, `action:approve:${ar.id}`, now2) ? `Confirm: send this text for ${ar.thread}` : ar.state === 'approved' ? 'Send now' : 'Approve'} onPress={approveWrite(ar)} />}
-            {!!ar && ar.state === 'pending' && !!ar.standing && !(ar.text.length > 400) && <Button key={`action-standing-${ar.id}`} label={confirming(ui, `action:standing:${ar.id}`, now2) ? `Confirm: send, and allow status changes on this PR for 24 h` : STANDING_LABEL} onPress={approveWriteStanding(ar)} />}
+            {!!ar && ar.state === 'pending' && !!ar.standing && !(ar.text.length > 400) && <Button key={`action-standing-${ar.id}`} label={confirming(ui, `action:standing:${ar.id}`, now2) ? `Confirm: ${standingLabelOf(ar.kind).replace(/^Approve/, 'send')}` : standingLabelOf(ar.kind)} onPress={approveWriteStanding(ar)} />}
             {!!ar && ar.state === 'pending' && <Button key={`action-deny-${ar.id}`} label={confirming(ui, `action:deny:${ar.id}`, now2) ? `Confirm deny for ${ar.thread}` : 'Deny'} onPress={denyWrite(ar)} />}
             {!!ar && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {n.kind === 'stalled' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
@@ -795,6 +795,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Text bold color={sc.color}>{sc.word}</Text>
             {t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{` · ${t.costLine ?? `${t.costBadge} today`}`}</Text> : t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
             {t.ctx ? <Text color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{` · ${t.ctx}${t.keep ? ' · keep' : ''}`}</Text> : null}
+            {t.pending ? <Text color="warning">{` · ${t.pending}`}</Text> : null}
             {t.agents ? <Text dimColor>{` · ${t.agents}`}</Text> : null}
             {t.branch ? <Text dimColor>{` · ${t.branch}`}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>

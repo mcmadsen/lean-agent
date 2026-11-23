@@ -26,6 +26,7 @@ import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
 import { azureToken, oneLine } from './prhost'
+import { typedApproval } from './writeinstr'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -320,8 +321,34 @@ export type ActionView = { id: string; thread: string; kind: ActionKind; why: st
 export const STANDING_KINDS: ActionKind[] = ['ado-pr-thread-status']
 export const STANDING_STATUSES = ['fixed', 'closed', 'active']
 export const STANDING_TTL_MS = 24 * 60 * 60 * 1000
-export const STANDING_LABEL = 'Approve, and allow status changes on this PR for 24 h'
-export const standingEligible = (kind: ActionKind, p: Params): boolean => kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status))
+// 1.0.28 (the dialog's fourth choice): the same choice for every kind of the own-PR default's table (reply, GitHub comment, link of a PR, state of a work item) and for
+// the status kinds, as a HUMAN choice: replies WITH a status (fixed / closed / active) and a GitHub review thread resolve too. A thread status change keeps its
+// 1.0.24 grant (below); every other kind is a written approval of the same signed machinery as the user's words (deskwrites.ts writeHumanGrant: 24 h, the request's
+// own PR or work item, at most 40 writes, Revoke in the pane), made by the hook `setHumanGrantWriter` registered there.
+export const STANDING_LABEL = 'Approve, and allow this kind on this PR for 24 h'
+export const STANDING_LABEL_WI = 'Approve, and allow this kind on this work item for 24 h'
+export const standingLabelOf = (kind: string): string => (kind.startsWith('ado-workitem') ? STANDING_LABEL_WI : STANDING_LABEL)
+export const HUMAN_WI_STATES = ['Reviewing', 'Active', 'In Progress', 'Resolved']
+export const statusStanding = (kind: ActionKind, p: Params): boolean => kind === 'ado-pr-thread-status' && STANDING_STATUSES.includes(String(p.status))
+const itemEligible = (kind: unknown, p: Params): boolean => {
+  if (kind === 'ado-pr-thread-status') return statusStanding(kind, p)
+  if (kind === 'ado-pr-reply') return p.status === undefined || STANDING_STATUSES.includes(String(p.status))
+  if (kind === 'gh-pr-comment' || kind === 'ado-pr-workitem-link' || kind === 'gh-pr-thread-resolve') return true
+  if (kind === 'ado-workitem-update') {
+    const f = p.fields && typeof p.fields === 'object' ? (p.fields as Record<string, unknown>) : null
+    return !!f && Object.keys(f).length === 1 && typeof f.state === 'string' && HUMAN_WI_STATES.some(s => s.toLowerCase() === (f.state as string).toLowerCase())
+  }
+  return false
+}
+export const standingEligible = (kind: ActionKind, p: Params): boolean => {
+  if (kind !== 'batch') return itemEligible(kind, p)
+  const items = Array.isArray(p.items) ? (p.items as { kind?: unknown; params?: Params }[]) : []
+  return items.length > 0 && items.every(it => itemEligible(it?.kind, it?.params ?? {}))
+}
+let humanGrant: null | ((h: Host, r: ActionRequest, now: number) => Promise<boolean>) = null
+export const setHumanGrantWriter = (f: typeof humanGrant): void => {
+  humanGrant = f
+}
 
 const REQUESTS = 'action.requests'
 export const answerKey = (id: string) => `action.answer.${id}`
@@ -396,8 +423,8 @@ export async function listActions(h: Host, all = false): Promise<ActionView[]> {
 // ---- what the user is asked, word for word -----------------------------------------------------------------------------------------------
 export const OPTION_LABELS = ['Approve', 'Deny', 'Edit first'] as const
 export const checkCode = (hash: string): string => hash.slice(0, 12)
-export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean }): { question: string; options: { label: string; description: string }[] } {
-  const standing = v.standing ? [{ label: STANDING_LABEL, description: `the desk sends exactly this text, once; and ${v.thread}'s later status changes on this PR (fixed, closed, active) are sent without asking, for 24 h or until it closes (never a reply or any text)` }] : []
+export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean; kind?: string }):{ question: string; options: { label: string; description: string }[] } {
+  const standing = v.standing ? [{ label: standingLabelOf(v.kind ?? ''), description: `the desk sends exactly this text, once; and ${v.thread}'s later writes of this kind on this ${(v.kind ?? '').startsWith('ado-workitem') ? 'work item' : 'PR'} (statuses only fixed, closed, active) are sent without asking, for 24 h, at most 40, or until it closes (Revoke in the pane)` }] : []
   return {
     question: `${v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${v.text}\n---\nTarget: ${v.target}\nSend exactly this?`,
     options: [
@@ -459,12 +486,12 @@ export async function answerAction(h: Host, id: string, answer: 'approve' | 'den
     if (!(await sound(h, r))) return { ok: false as const, text: `request ${id} does not verify (not signed by this mod, or its text changed): refused` }
     const st = await stateOf(h, r, now)
     if (st !== 'pending') return { ok: false as const, text: `request ${id} is ${st}: no answer recorded` }
-    if (standing && (answer !== 'approve' || !standingEligible(r.kind, r.params))) return { ok: false as const, text: `request ${id} cannot carry a standing approval (only a thread status change to fixed, closed or active, or resolving a GitHub review thread): no answer recorded` }
+    if (standing && (answer !== 'approve' || !standingEligible(r.kind, r.params))) return { ok: false as const, text: `request ${id} cannot carry a standing approval (only a reply, a GitHub comment, a PR link, a thread status of fixed, closed or active, a GitHub thread resolve or a work item state of Reviewing, Active, In Progress or Resolved, or a batch of those): no answer recorded` }
     const base = { id: r.id, hash: r.hash, answer, by, ts: now }
     const sig = await macOf(h, answerText(base), true)
     if (!sig) return { ok: false as const, text: 'no key to sign the answer with' }
     await h.store.set(answerKey(r.id), { ...base, sig } satisfies Answer)
-    if (standing && !(await writeGrant(h, r, now))) return { ok: true as const, r, noGrant: true }
+    if (standing && !(statusStanding(r.kind, r.params) ? await writeGrant(h, r, now) : humanGrant ? await humanGrant(h, r, now) : false)) return { ok: true as const, r, noGrant: true }
     return { ok: true as const, r }
   })
   if (!rec.ok) return rec
@@ -472,10 +499,10 @@ export async function answerAction(h: Host, id: string, answer: 'approve' | 'den
   await logHistory(h, r.thread, { kind: `action-${answer}`, id, action: r.kind, hash: checkCode(r.hash), by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk' })
   if (standing && !('noGrant' in rec)) await logHistory(h, r.thread, { kind: 'standing-grant', id, action: r.kind, scope: targetOf(r.kind, r.params), statuses: r.kind === 'gh-pr-thread-resolve' ? undefined : STANDING_STATUSES, by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk', hours: 24 })
   if (answer === 'deny' && tell) await tell(r.thread, `The user denied your request ${id} (${r.kind}): nothing was sent. Denied: report blocked if you cannot go on, or continue without it. Do not send the same text again.`).catch(() => undefined)
-  return { ok: true, text: answer === 'approve' ? `the user approved ${id}${standing ? ` and allowed status changes of ${r.thread} on this PR for 24 h (or until it closes)` : ''}: call lean_thread approve-action ${id} to send it` : answer === 'deny' ? `the user denied ${id}; ${r.thread} was told` : `the user wants to edit ${id} first: nothing is sent; ask what to change, then tell ${r.thread} (send) to make a NEW request with the changed text` }
+  return { ok: true, text: answer === 'approve' ? `the user approved ${id}${standing ? ` and allowed ${statusStanding(r.kind, r.params) ? 'status changes' : 'this kind of write'} of ${r.thread} on this ${r.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} for 24 h (or until it closes)` : ''}: call lean_thread approve-action ${id} to send it` : answer === 'deny' ? `the user denied ${id}; ${r.thread} was told` : `the user wants to edit ${id} first: nothing is sent; ask what to change, then tell ${r.thread} (send) to make a NEW request with the changed text` }
 }
 
-const LABEL: Record<string, 'approve' | 'deny' | 'edit' | 'approve-standing'> = { Approve: 'approve', Deny: 'deny', 'Edit first': 'edit', [STANDING_LABEL]: 'approve-standing' }
+const LABEL: Record<string, 'approve' | 'deny' | 'edit' | 'approve-standing'> = { Approve: 'approve', Deny: 'deny', 'Edit first': 'edit', [STANDING_LABEL]: 'approve-standing', [STANDING_LABEL_WI]: 'approve-standing' }
 type Q = { question?: unknown; options?: unknown }
 // The desk's AskUserQuestion, after the user answered it: `questions` is what was asked, `answers` the tool result's (question text -> the
 // label chosen). An answer is recorded only for a question that names exactly ONE pending request, with its id, its check code and its exact
@@ -496,8 +523,22 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
       continue
     }
     const a = typeof given[text] === 'string' ? (given[text] as string).trim() : ''
-    const answer = Object.prototype.hasOwnProperty.call(LABEL, a) ? LABEL[a] : undefined
-    if (!answer) continue // free text, no choice: nothing is decided by it
+    let answer = Object.prototype.hasOwnProperty.call(LABEL, a) ? LABEL[a] : undefined
+    let typed = false
+    if (!answer && a) {
+      // free text is never dropped silently (1.0.28): a clear approval by the script table counts as the Approve press for exactly THIS request (the user's own words to
+      // this exact question; the canonical-question check below still applies), "always" / "allow" in it as the fourth choice; any other text is said to the desk
+      const t = typedApproval(a)
+      if (t.approve) {
+        answer = t.always ? 'approve-standing' : 'approve'
+        typed = true
+      } else {
+        const pr = r.params.pr ?? r.params.workitem ?? r.params.id
+        notes.push(`the user typed '${a.replace(/\s+/g, ' ').slice(0, 80)}': free text is not an approval for this request; ask again with the choices, or the user can type /lean-agent:allow ${r.thread} ${typeof pr === 'number' ? pr : '<PR number>'}`)
+        continue
+      }
+    }
+    if (!answer) continue // nothing was chosen or typed
     const v = await viewOf(h, r, now)
     // the question must be the canonical one (questionOf): the desk model may not frame the text or the options differently
     const canon = v ? questionOf(v) : null
@@ -507,8 +548,11 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
       notes.push(`the answer to the question about ${r.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`)
       continue
     }
-    const o = await answerAction(h, r.id, answer === 'approve-standing' ? 'approve' : answer, 'ask', tell, answer === 'approve-standing') // (the third choice exists only in the canonical question of an eligible request, checked above)
-    notes.push(o.text)
+    // a typed "always" counts as the fourth choice only where the request carries it; else it is the plain Approve of this one request (and says so)
+    const standing = answer === 'approve-standing' && (!typed || !!v.standing)
+    const o = await answerAction(h, r.id, answer === 'approve-standing' ? 'approve' : answer, 'ask', tell, standing) // (the fourth choice exists only in the canonical question of an eligible request, checked above)
+    notes.push(typed && answer === 'approve-standing' && !standing ? `${o.text} (the user typed '${a.slice(0, 80)}': it cannot be allowed for 24 h, only this request was approved)` : o.text)
+    if (typed && o.ok) await logHistory(h, r.thread, { kind: 'typed-approval', id: r.id, text: a.replace(/\s+/g, ' ').slice(0, 80), standing })
   }
   return notes
 }
