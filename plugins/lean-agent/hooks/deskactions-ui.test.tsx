@@ -95,6 +95,23 @@ test('the desk\'s AskUserQuestion: Approve in the result is recorded when the qu
   expect(w.curls()).toHaveLength(0) // approving only records the human's answer: the desk's approve-action sends
 })
 
+test('through the desk hook: text typed under "Other" is read from the result: a clear approval counts, anything else reaches the desk as one line (never dropped)', { timeoutMs: 20_000 }, async ($, on) => {
+  let want = ''
+  const w = await deskAsk($, on, e => ({ questions: e.questions, answers: { [e.questions[0].question]: want } }))
+  const v = await w.ask()
+  const q = questionOf(v)
+  const ask = () => $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: q.question, header: 'Send?', multiSelect: false, options: q.options }] } as any) as Promise<any>
+  want = 'maybe later, I want to read it again'
+  const free = await ask()
+  expect(JSON.stringify(free.context ?? [])).toContain("the user typed 'maybe later, I want to read it again': free text is not an approval for this request; ask again with the choices, or the user can type /lean-agent:allow t5 42")
+  expect((await listActions(w.host))[0]!.state).toBe('pending')
+  want = 'ALWAYS APPROVE THIS!'
+  const yes = await ask()
+  expect(JSON.stringify(yes.context ?? [])).toContain(`approve-action ${v.id}`)
+  expect((await listActions(w.host))[0]!.state).toBe('approved')
+  expect(w.curls()).toHaveLength(0) // a typed approval, like a pressed one, only records the human's answer
+})
+
 test('a question that does not carry the exact text records nothing, and a model that fills in `answers` is refused before the dialog', { timeoutMs: 20_000 }, async ($, on) => {
   let asks = 0
   let readable = true

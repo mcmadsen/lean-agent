@@ -352,7 +352,7 @@ function statusCovered(g: WGrant, it: Item): boolean {
   if (it.kind === 'ado-pr-reply' && p.status !== undefined) return g.kinds.includes('status') && g.statuses.includes(String(p.status))
   if (it.kind === 'ado-workitem-update') {
     const f = p.fields && typeof p.fields === 'object' ? (p.fields as { state?: unknown }) : null
-    return !!f && Object.keys(f).length === 1 && g.statuses.includes(lc(f.state)) // only the state, never a title or an assignee
+    return !!f && Object.keys(f).length === 1 && g.statuses.includes(lc(String(f.state ?? ''))) // only the state, never a title or an assignee
   }
   return true
 }
