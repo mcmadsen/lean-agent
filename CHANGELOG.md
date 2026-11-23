@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Approval in advance.** A thread's remote write (reply, thread status, comment; work item comment, update) goes out without a further question when the user's own written instruction to the desk covers it ("fix comments on PR 42"); otherwise the desk asks with AskUserQuestion as before. `lean_thread allow-writes` {tN, target {pr | workitem}, kinds?} makes a signed grant (exact target, kinds, 24 h or until the thread closes, cap 40 writes via `actions.maxWritesPerGrant`, the quote of the words) only when a recorded human prompt of the last 24 h names the target (digits as a whole token) and carries an instruction from the script table in `hooks/writeinstr.ts`; the desk model can propose, never decide. Covered requests are sent by the same executor, counted, logged with the grant id, reported to the thread and shown in the pane with the text sent and a Revoke button. GitHub `gh-pr-comment` is covered; `gh-pr-thread-resolve` only after a `gh api graphql` read shows the thread belongs to the granted PR. Pushes, merges, deletes, settings and other targets are always asked.
+- The mod keeps the user's own typed desk prompts of the last 24 h (`hooks/humanprompts.ts`): only the engine's `origin.kind` `composer` and `bridge`, never a relayed report, schedule, peer message, task notification or `isMeta` prompt, and none longer than 1500 characters (a paste).
+- `lean_thread revoke-writes`, `/lean-agent:allow <tN> <PR or wi id>` and `/lean-agent:revoke <tN>`; the user typing "stop writes" / "revoke" takes the grants back.
+- README section "Approvals: in advance or by question"; the desk guide and the thread skill say when to call `allow-writes` and to ask when it is refused.
+
 ## 1.0.24
 
 ### Added

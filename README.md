@@ -292,6 +292,49 @@ approval: set thread 7 of PR 42 to fixed" with a **Revoke** button for a grant (
 covered only when EVERY item is covered; one reply or comment in it, another PR, another thread (for a grant) or another status and the
 user is asked as usual. `lean_thread action-list` shows the active grants and the number of rules; the desk does not ask again.
 
+#### Approvals: in advance or by question
+
+A thread's remote write goes out in one of two ways, both the human's: **in advance** (a written accept of the user's own, below) or **by
+question** (the desk asks with AskUserQuestion, naming the exact text, as above). A request whose every write is inside a live written
+grant is sent at once; anything else is asked.
+
+- **The user's words, captured by the mod** (`hooks/humanprompts.ts`). In the desk session the `prompt.submit` hook keeps the user's own
+  prompts of the last 24 h (text, time) in the mod store. The engine says where a prompt came from (`origin.kind`, a closed set it sets itself,
+  which no hook can change; and `isMeta` for a prompt the person does not see as typed): only `composer` (the person's Enter, typed or queued,
+  or a click on a transcript link) and `bridge` (the person's message through Remote Control, phone or web) are recorded. A thread report
+  relayed into the desk (a plugin's own `$.prompt.submit`, origin `plugin`), a scheduled wake, a task notification, another session's
+  message, a channel, the SDK host, an `unclassified` turn and any `isMeta` prompt are never recorded, and a hook's added context is not part of the
+  text. An engine that sent no `origin` at all would be handled by "no `isMeta` flag means typed". The engine marks no paste (it is expanded into
+  the text), so a prompt longer than 1500 characters is not recorded: an instruction is short, a long one is a pasted document. Nothing a tool
+  call or a thread writes lands there.
+- **The advance accept.** `lean_thread allow-writes` {tN, target: {pr: number or URL | workitem: id}, kinds?} (or the user's command
+  `/lean-agent:allow <tN> <PR or wi <id>>`, whose text is the user's prompt and counts as the instruction itself). The desk model may PROPOSE the
+  scope; the mod creates the grant only if ONE recorded human prompt of the last 24 h (a) names that target (the PR number or its URL, the work
+  item id: digits match as a whole token, never inside 1042, 142, 42.5 or 1,042; a number after "work item" is not a PR) and (b) carries an
+  instruction for that work from the script table in `hooks/writeinstr.ts` (fix | resolve | address | answer | reply to | handle | respond to |
+  close | update ... comments | threads | review | feedback | PR | work item, or approve | allow | go ahead | yes ... writes | replies | comments; a
+  verb right after "don't" / "never" does not count). No model judges it. Otherwise: "no written instruction from the user covers <target>:
+  ask with AskUserQuestion", nothing is created.
+- **The grant** is signed (the mod's key) and holds the thread, the exact target (org / project / repo / pr or work item, read from the thread's
+  project remote when only a number was written; a URL proposed without the URL in the user's words must be the project's own repo), the kinds
+  (a PR: reply with its status, thread status, comment; a work item: comment, update), an expiry (24 h, or the thread closing), a cap of
+  writes (`actions.maxWritesPerGrant` in `config.json`, default 40; a reply with a status is two) and the quote of the words it rests on.
+  It replaces a grant of the same thread and target. The grant row is re-signed with each count, so a hand-edited row is no grant.
+- **Execution.** A request whose EVERY item is inside a live grant (same thread, same target, allowed kind; a batch only when all are) is sent by
+  the mod at once through the same executor as an approved one (signature, hash re-check, token on stdin), counted against the cap, logged in
+  `history.jsonl` (`writes-sent`, with the grant id), reported to the thread in the `lean_report` reply, and shown in the pane as "sent under your
+  instruction '<quote>': reply to PR thread 7 on PR 42 (...): <text> (write 3 of 40)" with a **Revoke** button. GitHub: `gh-pr-comment` is
+  covered like the Azure kinds (its repo and PR are in the request); `gh-pr-thread-resolve` only after the mod verified by a read (`gh api graphql`,
+  the thread node's pull request and repository) that the thread belongs to the granted PR, else it is asked. Never covered by any grant: pushes,
+  merges, deletes, permission or settings changes, kinds outside the table, a target the user did not name, another thread's request.
+- **Revoking** only takes power away: the pane's Revoke, `lean_thread revoke-writes` (tN or id), `/lean-agent:revoke <tN>`, or the user typing
+  "stop writes" / "revoke" (with a tN or a PR number it takes only those; alone it takes all, and the 1.0.24 status-only grants with them).
+  A closed thread keeps no grant. No `lean_report` action, thread text or tool call creates or extends a grant; only `allow-writes` with the
+  user's recorded words does.
+
+Not run live: the engine's `origin` stamps (specs drive the recorder with the documented values), the pane line and Revoke button on a real
+surface, and `gh api graphql` against GitHub (specs use canned output).
+
 Avoidable blocks: `lean_doctor refusals` groups the guard's recorded refusals by pattern with a count and a one-line fix, and the
 doctor shows a `note top refusals` row when one pattern repeats (config `refusals.repeat`, default 3). Every refusal of the execution model
 (desk routing, thread orchestrate, worker budgets, briefs, grants, `lean_run`, desk actions, trimmed results, the auto-restart guard, the review
