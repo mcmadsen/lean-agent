@@ -285,4 +285,65 @@ test('ado-pr-policy-queue: sent only after Approve; the own-PR default never cov
   expect(t.sends()).toHaveLength(0)
 })
 
+// ---- 5 ado-pr-workitem-unlink ----------------------------------------------------------------------------------------------------------
+const LINK_URL = `vstfs:///Git/PullRequestId/${PROJECT_ID}%2F${REPO_ID}%2F4321`
+const relations = (...rels: { rel: string; url: string }[]) => (url: string): Reply | null => (url.includes('/_apis/wit/workitems/1234?') ? { exitCode: 0, stdout: JSON.stringify({ id: 1234, relations: rels }) } : null)
+const OTHER = { rel: 'ArtifactLink', url: `vstfs:///Git/PullRequestId/${PROJECT_ID}%2F${REPO_ID}%2F9999` }
+const PARENT = { rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/acme/_apis/wit/workItems/1200' }
+
+test('ado-pr-workitem-unlink: a PATCH of the work item that removes the PR\'s link by position (a test op guards it); workItem is the same field as workitem', () => {
+  const c = checkAction({ kind: 'ado-pr-workitem-unlink', params: { ...BASE, workitem: 1234 } })
+  expect(c.ok).toBe(true)
+  if (!c.ok) return
+  expect([c.plan.method, c.plan.url, c.plan.contentType]).toEqual(['PATCH', 'https://dev.azure.com/acme/Shop%20App/_apis/wit/workitems/1234?api-version=7.1', 'application/json-patch+json'])
+  expect(JSON.parse(c.plan.body).map((o: { op: string }) => o.op)).toEqual(['test', 'remove'])
+  expect(c.plan.text).toBe('remove the link of PR 4321 of shop-api from work item 1234')
+  expect(c.params).toEqual({ ...BASE, workitem: 1234 })
+  const camel = checkAction({ kind: 'ado-pr-workitem-unlink', params: { ...BASE, workItem: '1234' } })
+  expect(camel.ok && camel.params.workitem).toBe(1234)
+  expect(camel.ok && renderingOf(camel.plan)).toBe(renderingOf(c.plan)) // the same request either way
+  for (const params of [{}, { workitem: 0 }, { workitem: 'x' }, { workitem: 1234, workItem: 99 }, { workitem: 1234, rel: 'x' }])
+    expect([JSON.stringify(params), checkAction({ kind: 'ado-pr-workitem-unlink', params: { ...BASE, ...params } }).ok]).toEqual([JSON.stringify(params), false])
+})
+
+test('ado-pr-workitem-unlink: the work item is read, the link found by its url (any case or encoding) and removed at its position, with the test op on that url; the token stays on stdin', { timeoutMs: 20_000 }, async () => {
+  const s = setup({ reads: relations(PARENT, OTHER, { rel: 'ArtifactLink', url: LINK_URL.replace(/%2F/g, '/').toLowerCase() }) })
+  const v = await ask(s, 'ado-pr-workitem-unlink', { ...BASE, workitem: 1234 })
+  expect((await approveAction(s.host, v.id, s.tell)).ok).toBe(false)
+  expect(s.sends()).toHaveLength(0)
+  expect((await approve(s, v)).ok).toBe(true)
+  const [w] = s.sends()
+  expect(w!.argv).toContain('PATCH')
+  expect(w!.argv[w!.argv.length - 1]).toBe('https://dev.azure.com/acme/Shop%20App/_apis/wit/workitems/1234?api-version=7.1')
+  expect(w!.stdin).toContain('Content-Type: application/json-patch+json')
+  const sent = JSON.parse(/data-binary = "(.*)"\n/.exec(w!.stdin!)![1]!.replace(/\\"/g, '"').replace(/\\\\/g, '\\'))
+  expect(sent).toEqual([{ op: 'test', path: '/relations/2/url', value: LINK_URL.replace(/%2F/g, '/').toLowerCase() }, { op: 'remove', path: '/relations/2' }])
+  const reads = s.h.calls.filter(c => c.argv[0] === 'curl' && c.argv[c.argv.indexOf('-X') + 1] === 'GET').map(c => c.argv[c.argv.length - 1])
+  expect(reads).toContain('https://dev.azure.com/acme/_apis/wit/workitems/1234?$expand=relations&api-version=7.1')
+  noToken(s)
+})
+
+test('ado-pr-workitem-unlink: no link to that PR, or an unreadable work item: nothing is written, and the other links are never touched', { timeoutMs: 20_000 }, async () => {
+  for (const reads of [relations(PARENT, OTHER), relations(), (url: string) => (url.includes('/wit/workitems/') ? { exitCode: 22, stdout: '', stderr: `HTTP 404 ${TOKEN}` } : null), (url: string) => (url.includes('/wit/workitems/') ? { exitCode: 0, stdout: 'nope' } : null)]) {
+    const s = setup({ reads })
+    const v = await ask(s, 'ado-pr-workitem-unlink', { ...BASE, workitem: 1234 })
+    const o = await approve(s, v)
+    expect(o.ok).toBe(false)
+    expect(o.text).toContain('nothing was written')
+    expect(o.text).not.toContain(TOKEN)
+    expect(s.sends()).toHaveLength(0)
+  }
+})
+
+test('ado-pr-workitem-unlink: the own-PR default covers it only for the owned PR AND an owned work item; any other is asked', { timeoutMs: 20_000 }, async () => {
+  const s = setup({ reads: relations(OTHER, { rel: 'ArtifactLink', url: LINK_URL }) })
+  const r = await own(s, 'ado-pr-workitem-unlink', { ...BASE, workitem: 1234 })
+  expect(r?.sent).toBe(true)
+  expect(r?.line).toContain('remove the link of PR 4321 of shop-api from work item 1234')
+  expect(s.sends()).toHaveLength(1)
+  expect(await own(s, 'ado-pr-workitem-unlink', { ...BASE, workitem: 777 })).toBeNull() // a work item the thread does not own
+  expect(await own(s, 'ado-pr-workitem-unlink', { ...BASE, pr: 9999, workitem: 1234 })).toBeNull() // not the owned PR
+  expect(s.sends()).toHaveLength(1)
+})
+
 // (more kinds below)

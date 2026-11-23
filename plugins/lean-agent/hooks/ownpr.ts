@@ -9,7 +9,8 @@
 // token, or the user's allow-writes named it. Digits in a branch name alone never count. Covered by default:
 //   ado-pr-reply / ado-pr-comment / gh-pr-comment on THAT PR, WITHOUT a status (the text is linted first)
 //   ado-workitem-update that sets only `state`, of a work item the thread owns, to a state of `actions.ownWorkItemStates` (default Reviewing | Active | In Progress | Resolved)
-//   ado-pr-workitem-link of the owned PR to an owned work item
+//   ado-pr-workitem-link / ado-pr-workitem-unlink of the owned PR to / from an owned work item
+//   ado-pr-vote with vote reset on the owned PR (1.0.30; approve / reject / wait-for-author are never covered), ado-pr-label on the owned PR
 // Never by default (asked, or covered by an explicit grant): a thread status (resolve / fixed / closed), a vote, a merge, a push, a delete, a create of a
 // work item, any write to a PR or work item the thread does not own, a reply to a thread of ANOTHER PR. A batch is covered only when EVERY item is.
 // Guard rails: at most `actions.ownPrMaxPerDay` (default 20) writes per owned PR per day; a text with an absolute path, an email address, a token-like string
@@ -186,7 +187,7 @@ function coveredItem(it: Item, pr: OwnPr, items: number[], states: string[]): Wh
     if (!f || Object.keys(f).length !== 1 || typeof f.state !== 'string') return no
     return states.some(s => lc(s) === lc(f.state)) ? { ok: true } : no
   }
-  if (it.kind === 'ado-pr-workitem-link') return pr.host === 'azure' && ownsPr(pr, p) && items.includes(Number(p.workitem)) ? { ok: true } : no
+  if (it.kind === 'ado-pr-workitem-link' || it.kind === 'ado-pr-workitem-unlink') return pr.host === 'azure' && ownsPr(pr, p) && items.includes(Number(p.workitem)) ? { ok: true } : no
   // 1.0.30: only a vote RESET on the owned PR (taking back the thread's own vote); approve, approve-with-suggestions, reject and wait-for-author are always the user's
   if (it.kind === 'ado-pr-vote') return pr.host === 'azure' && ownsPr(pr, p) && p.vote === 'reset' ? { ok: true } : no
   return no
