@@ -23,7 +23,7 @@ import type { PrHost } from './prhost'
 import { listProjects } from './projects'
 import { HUMAN_WI_STATES, STANDING_STATUSES, azureGet, claimAndSend, exclusive, hashOf, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
 import type { ActionKind, Params, Plan } from './deskactions'
-import { PLAIN_HINT, recentPrompts, seenSince } from './humanprompts'
+import { recentPrompts, seenSince } from './humanprompts'
 import { SOFT_WORDS, createIn, instructionIn, revokeIn, typedApproval } from './writeinstr'
 
 export const WRITES_TTL_MS = 24 * 60 * 60 * 1000
@@ -277,7 +277,8 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   }
   const hit = [...prompts].reverse().find(p => (tg.create ? createIn(p.text) : namesTarget(p.text, tg, remoteScope, scopes) && instructionIn(p.text)))
   if (!hit) {
-    const r = await refusalText(h, thread, tg, label, prompts, kinds !== undefined ? want : offerKindsFor(tg))
+    const named = tg.create ? prompts.filter(p => createIn(p.text)).length : prompts.filter(p => namesTarget(p.text, tg, remoteScope, scopes)).length
+    const r = await refusalText(h, thread, tg, label, prompts, kinds !== undefined ? want : offerKindsFor(tg), named)
     return { ok: false, text: r.text, ...(r.ask ? { ask: r.ask } : {}) }
   }
   const cap = await capOf(h)
@@ -293,10 +294,11 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   })
 }
 // the forms that count, said in the refusal (the field: nothing said which form counts or why one failed)
-export const FORMS = (thread: string) => `type to the DESK (not in a shell; a line starting with ! never reaches lean-agent): /lean-agent:allow ${thread} <PR number or URL> (also without the slash: allow ${thread} <PR number or URL>), or say 'fix the comments on PR <n>' (or paste the PR URL with 'please handle this')`
+export const FORMS = (thread: string) => `/lean-agent:allow ${thread} <PR number or URL> (also without the slash: allow ${thread} <PR number or URL>); plain words that count: 'fix the comments on PR <n>' (or paste the PR URL with 'please handle this')`
+const REFUSED = 'action.writes.refused'
 const SOFT_IN = new RegExp(`(?<![\\w-])(${SOFT_WORDS.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')).join('|')})(?![\\w-])`, 'i')
 const COMMAND_TRY =/(?:^|[\s!])\/?(?:lean-agent:)?allow\b/i
-async function refusalText(h: Host, thread: string, tg: Target, label: string, prompts: { text: string }[], offerKinds: string[]): Promise<{ text: string; ask?: Asked }> {
+async function refusalText(h: Host, thread: string, tg: Target, label: string, prompts: { text: string; ts: number }[], offerKinds: string[], named: number): Promise<{ text: string; ask?: Asked }> {
   const create = tg.create === true
   const last = prompts[prompts.length - 1]
   const tried = last && (/lean-agent:allow/i.test(last.text) || COMMAND_TRY.test(last.text.trim()) || instructionIn(last.text) || createIn(last.text) || SOFT_IN.test(last.text)) ? last.text.replace(/\s+/g, ' ').trim().slice(0, 60) : ''
@@ -304,8 +306,17 @@ async function refusalText(h: Host, thread: string, tg: Target, label: string, p
   // what the mod can SEE, and a ready-made canonical question (a signed offer) so the desk is never left with only a refusal
   const offer = await makeOffer(h, thread, tg, offerKinds).catch(() => null)
   const ask = offer ? offerQuestion(offer) : undefined
+  const what = create ? 'a new work item' : `${tg.type === 'pr' ? 'PR' : 'work item'} ${tg.n}`
+  const rec = `recorded prompts: ${prompts.length}, ${named ? `${named} name${named === 1 ? 's' : ''} ${what} but none asks for the work` : `none names ${what}`}`
+  const q = ask ? JSON.stringify(ask.question) : `(none: lean_thread allow-ask ${thread} makes it)`
+  const asked = `ask with AskUserQuestion (allow-ask), pasted exactly with exactly the options Allow, Not now; their Allow is the written yes: ${q}`
+  // the same refusal again with nothing new typed since: no generic text, the next step only
+  const key = `${thread}|${tg.scope.toLowerCase()}|${prompts.length}|${last ? last.ts : 0}`
+  const prev = await h.store.get(REFUSED).catch(() => null)
+  await h.store.set(REFUSED, key).catch(() => {})
+  if (prev === key) return { text: `refused again, nothing new was typed since (${rec}): ${asked}. Do not call allow-writes or the allow skill again. Ask with AskUserQuestion now. Nothing was created`, ...(ask ? { ask } : {}) }
   return {
-    text: `${miss}no message typed by you ${await seenSince(h)} names ${label}. ${PLAIN_HINT}, or answer this question (AskUserQuestion, pasted exactly with exactly the options Allow, Not now): ${ask ? JSON.stringify(ask.question) : `(none: lean_thread allow-ask ${thread} makes it)`}. The forms that count are: ${FORMS(thread)}. Nothing was created`,
+    text: `${miss}no message typed by you ${await seenSince(h)} names ${label} (${rec}; a line run in a shell box or by a Run button never reaches lean-agent, so it is not among them). To proceed, in order: (a) the USER writes ${create ? 'the new work item and the go' : 'the PR and the go'} as plain words in the CHAT box (e.g. ${create ? '"create the work items in this project"' : `"post the comments on PR ${tg.n}"`}), or types the slash command ${FORMS(thread)} in the CHAT box (never in a shell box, never in a code fence); (b) or ${asked}. Nothing was created`,
     ...(ask ? { ask } : {}),
   }
 }

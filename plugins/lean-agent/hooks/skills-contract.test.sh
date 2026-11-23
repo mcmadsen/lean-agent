@@ -191,6 +191,10 @@ for f in "$root/commands/allow.md" "$root/commands/allow-edit.md"; do
   grep -qF "NOT the user's accept" "$f" || fail "$(basename "$f") must say invoking the skill is NOT the user's accept (only a recorded prompt or a dialog answer is)"
   grep -qF 'Never put a slash command in a bash code fence' "$f" || fail "$(basename "$f") must say never to put a slash command in a bash code fence"
 done
+for f in "$root/commands/allow.md" "$root/templates/front-desk.md"; do
+  grep -qF 'the app turns it into a Run button that runs it in the shell; give it as plain text or ask with AskUserQuestion' "$f" || fail "$(basename "$f") must say a slash command in a code block becomes a Run button that runs in the shell: plain text or AskUserQuestion"
+done
+grep -qF 'the mod records only commands and words the user typed in the chat box' "$root/commands/allow.md" || fail "allow.md must say the mod records only what the user typed in the chat box"
 grep -qF 'allow-ask' "$root/commands/allow.md" || fail "allow.md must name allow-ask (the dialog answer as the written yes)"
 grep -qF 'Never put a slash command in a bash code fence' "$root/templates/front-desk.md" || fail "front-desk.md must say never to put a slash command in a bash code fence"
 grep -qF 'allow-ask' "$root/templates/front-desk.md" || fail "front-desk.md must name allow-ask"
