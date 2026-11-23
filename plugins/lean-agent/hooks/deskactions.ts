@@ -40,7 +40,7 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -74,6 +74,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
   'ado-pr-vote': `org, project, repo, pr, vote (${Object.keys(VOTES).join(' | ')}): the vote of the identity the token belongs to`,
   'ado-pr-update': 'org, project, repo, pr, title?, description?, draft? (true | false), status? (active | abandoned); never completing, auto-complete, merge options, bypass: the user does that by hand',
+  'ado-pr-reviewer': 'org, project, repo, pr, op (add | remove), reviewer (the id, or the unique email or display name the API takes), required? (true | false, add only)',
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -89,6 +90,7 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'gh-pr-thread-resolve': ['repo', 'pr', 'thread'],
   'ado-pr-vote': ['org', 'project', 'repo', 'pr', 'vote'],
   'ado-pr-update': ['org', 'project', 'repo', 'pr', 'title', 'description', 'draft', 'status'],
+  'ado-pr-reviewer': ['org', 'project', 'repo', 'pr', 'op', 'reviewer', 'required'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
@@ -139,7 +141,7 @@ const linkPlan = (base: string, org: string, project: string, repo: string, pr: 
 export const whereOf = (a: { file: string; line: number; endLine?: number; side: 'right' | 'left' }): string => `${a.file}:${a.line}${a.endLine !== undefined && a.endLine !== a.line ? `-${a.endLine}` : ''}${a.side === 'left' ? ' (removed line)' : ''}`
 
 // the review writes on ONE Azure DevOps PR (vote ...): repo + pr are common; each kind adds its own params. `bad` is the caller's refusal.
-const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update']
+const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer']
 // what a thread never does to a PR (the user does it by hand): completing, auto-complete, squash / merge options, bypassing policy, deleting the source branch
 const BY_HAND = /complet|squash|merge|bypass|deletesource|sourcebranch/
 const byHand = (what: string): Checked => refuse(`action ado-pr-update: ${what} is not something a thread does: the user does this by hand (completing the PR, auto-complete, squash / merge options, bypassing policy, deleting the source branch). A thread may change the title, the description, draft, and set the status to active or abandoned`)
@@ -176,6 +178,17 @@ function checkReview(k: ActionKind, p: Params, az: { org: string; project: strin
     if (!lines.length) return bad('give at least one of title, description, draft, status')
     for (const [key, v] of Object.entries({ title, description, draft, status })) if (v !== undefined) params[key] = v
     return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${prs}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify(body), headline: `update PR ${pr} (${where})`, text: lines.join('\n') } }
+  }
+  if (k === 'ado-pr-reviewer') {
+    const op = typeof p.op === 'string' ? p.op.trim().toLowerCase() : ''
+    const reviewer = typeof p.reviewer === 'string' ? p.reviewer.trim() : ''
+    const required = p.required === undefined ? undefined : typeof p.required === 'boolean' ? p.required : null
+    if ((op !== 'add' && op !== 'remove') || !reviewer || reviewer.length > FIELD_MAX || CONTROL.test(reviewer) || /^\.+$/.test(reviewer) || required === null) return bad('op must be add or remove, reviewer the id (or the unique email or display name) of the reviewer, required true or false')
+    if (op === 'remove' && required !== undefined) return bad('required goes with add only')
+    Object.assign(params, { op, reviewer, ...(required !== undefined ? { required } : {}) })
+    const url = `${prs}/reviewers/${enc(reviewer)}?api-version=7.1`
+    if (op === 'remove') return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'DELETE', url, contentType: '', body: '', headline: `remove reviewer ${reviewer} from PR ${pr} (${where})`, text: `remove reviewer ${reviewer} from PR ${pr} of ${repo}` } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url, contentType: 'application/json', body: JSON.stringify({ id: reviewer, isRequired: required ?? false }), headline: `add reviewer ${reviewer} to PR ${pr} (${where})`, text: `add reviewer ${reviewer} (${required ? 'required' : 'optional'}) to PR ${pr} of ${repo}` } }
   }
   return bad('not a review write')
 }

@@ -209,4 +209,52 @@ test('ado-pr-update: sent only after the user\'s Approve, with the exact PATCH; 
   expect(t.sends()).toHaveLength(0)
 })
 
+// ---- 3 ado-pr-reviewer -----------------------------------------------------------------------------------------------------------------
+test('ado-pr-reviewer: add is a PUT of the reviewer (required or not), remove a DELETE; the reviewer is named as the API takes it', () => {
+  const R = 'dev.reviewer@example.test'
+  const add = checkAction({ kind: 'ado-pr-reviewer', params: { ...BASE, op: 'add', reviewer: R, required: true } })
+  expect(add.ok).toBe(true)
+  if (add.ok) {
+    expect([add.plan.method, add.plan.url, add.plan.contentType]).toEqual(['PUT', `${PRS}/reviewers/${encodeURIComponent(R)}?api-version=7.1`, 'application/json'])
+    expect(JSON.parse(add.plan.body)).toEqual({ id: R, isRequired: true })
+    expect(add.plan.text).toBe(`add reviewer ${R} (required) to PR 4321 of shop-api`)
+  }
+  const opt = checkAction({ kind: 'ado-pr-reviewer', params: { ...BASE, op: 'ADD', reviewer: 'Dev Reviewer' } })
+  if (opt.ok) expect([JSON.parse(opt.plan.body), opt.plan.url.endsWith('/reviewers/Dev%20Reviewer?api-version=7.1')]).toEqual([{ id: 'Dev Reviewer', isRequired: false }, true])
+  const id = 'bbbbbbbb-1111-2222-3333-444444444444'
+  const rm = checkAction({ kind: 'ado-pr-reviewer', params: { ...BASE, op: 'remove', reviewer: id } })
+  expect(rm.ok).toBe(true)
+  if (rm.ok) {
+    expect([rm.plan.method, rm.plan.url, rm.plan.body]).toEqual(['DELETE', `${PRS}/reviewers/${id}?api-version=7.1`, ''])
+    expect(rm.plan.text).toBe(`remove reviewer ${id} from PR 4321 of shop-api`)
+  }
+  for (const params of [{ op: 'replace', reviewer: id }, { op: 'add' }, { op: 'add', reviewer: '' }, { op: 'add', reviewer: '..' }, { op: 'add', reviewer: 'a\u0007b' }, { op: 'add', reviewer: 'x'.repeat(201) }, { op: 'remove', reviewer: id, required: true }, { op: 'add', reviewer: id, required: 'yes' }, { op: 'add', reviewer: id, vote: 10 }, { reviewer: id }])
+    expect([JSON.stringify(params), checkAction({ kind: 'ado-pr-reviewer', params: { ...BASE, ...params } }).ok]).toEqual([JSON.stringify(params), false])
+  const slash = checkAction({ kind: 'ado-pr-reviewer', params: { ...BASE, op: 'add', reviewer: 'a/../b' } })
+  if (slash.ok) expect(slash.plan.url).toContain('/reviewers/a%2F..%2Fb?') // never a second path segment
+})
+
+test('ado-pr-reviewer: sent after Approve (PUT with the body, DELETE with no body), token on stdin; never covered by the own-PR default', { timeoutMs: 20_000 }, async () => {
+  const s = setup()
+  const id = 'bbbbbbbb-1111-2222-3333-444444444444'
+  const add = await ask(s, 'ado-pr-reviewer', { ...BASE, op: 'add', reviewer: id, required: true })
+  const rm = await ask(s, 'ado-pr-reviewer', { ...BASE, op: 'remove', reviewer: id })
+  expect((await approveAction(s.host, add.id, s.tell)).ok).toBe(false)
+  expect(s.sends()).toHaveLength(0)
+  expect((await approve(s, add)).ok).toBe(true)
+  expect((await approve(s, rm)).ok).toBe(true)
+  const [put, del] = s.sends()
+  expect(put!.argv).toContain('PUT')
+  expect(put!.argv[put!.argv.length - 1]).toBe(`${PRS}/reviewers/${id}?api-version=7.1`)
+  expect(put!.stdin).toContain(`data-binary = "{\\"id\\":\\"${id}\\",\\"isRequired\\":true}"`)
+  expect(del!.argv).toContain('DELETE')
+  expect(del!.argv[del!.argv.length - 1]).toBe(`${PRS}/reviewers/${id}?api-version=7.1`)
+  expect(del!.stdin).not.toContain('data-binary')
+  noToken(s)
+  const t = setup()
+  expect(await own(t, 'ado-pr-reviewer', { ...BASE, op: 'add', reviewer: id })).toBeNull()
+  expect(await own(t, 'ado-pr-reviewer', { ...BASE, op: 'remove', reviewer: id })).toBeNull()
+  expect(t.sends()).toHaveLength(0)
+})
+
 // (more kinds below)
