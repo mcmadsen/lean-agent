@@ -59,8 +59,8 @@ const human = (s: S, v: Parameters<typeof questionOf>[0], label: string) => {
 }
 
 // ---- the table -----------------------------------------------------------------------------------------------------------------
-test('the table has exactly eleven kinds (the plain five, a thread status, a GitHub thread resolve, a GitHub review comment, a work item create, a PR-work item link, a batch) and renders exactly what is sent', () => {
-  expect(Object.keys(ACTION_KINDS).sort()).toEqual(['ado-pr-comment', 'ado-pr-reply', 'ado-pr-thread-status', 'ado-pr-workitem-link', 'ado-workitem-comment', 'ado-workitem-create', 'ado-workitem-update', 'batch', 'gh-pr-comment', 'gh-pr-review-comment', 'gh-pr-thread-resolve'])
+test('the table has exactly twelve kinds (the plain five, a thread status, a GitHub thread resolve, a GitHub review comment, a work item create, a PR-work item link, a vote, a batch) and renders exactly what is sent', () => {
+  expect(Object.keys(ACTION_KINDS).sort()).toEqual(['ado-pr-comment', 'ado-pr-reply', 'ado-pr-thread-status', 'ado-pr-vote', 'ado-pr-workitem-link', 'ado-workitem-comment', 'ado-workitem-create', 'ado-workitem-update', 'batch', 'gh-pr-comment', 'gh-pr-review-comment', 'gh-pr-thread-resolve'])
   const want: Record<string, [string, string, string]> = {
     'ado-pr-reply': ['POST', 'https://dev.azure.com/acme/Shop%20App/_apis/git/repositories/shop-api/pullRequests/42/threads/7/comments?api-version=7.1', 'application/json'],
     'ado-pr-comment': ['POST', 'https://dev.azure.com/acme/Shop%20App/_apis/git/repositories/shop-api/pullRequests/42/threads?api-version=7.1', 'application/json'],

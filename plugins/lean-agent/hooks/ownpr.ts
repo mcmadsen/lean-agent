@@ -187,6 +187,8 @@ function coveredItem(it: Item, pr: OwnPr, items: number[], states: string[]): Wh
     return states.some(s => lc(s) === lc(f.state)) ? { ok: true } : no
   }
   if (it.kind === 'ado-pr-workitem-link') return pr.host === 'azure' && ownsPr(pr, p) && items.includes(Number(p.workitem)) ? { ok: true } : no
+  // 1.0.30: only a vote RESET on the owned PR (taking back the thread's own vote); approve, approve-with-suggestions, reject and wait-for-author are always the user's
+  if (it.kind === 'ado-pr-vote') return pr.host === 'azure' && ownsPr(pr, p) && p.vote === 'reset' ? { ok: true } : no
   return no
 }
 

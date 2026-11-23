@@ -9,7 +9,7 @@ import type { Host } from './state'
 
 // the kinds as one line, from the action table: `ado-pr-reply (optional status) | ado-pr-thread-status | ... | batch`
 export const kindsLine = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => (/optional status/.test(p) ? `${k} (optional status)` : k)).join(' | ')
-export const forgeRefusal = (): string => `forge writes go through the desk: lean_report with action {kind: ${kindsLine()}}; the user approves, the mod sends it. Reads: lean_run ci, or a reader.`
+export const forgeRefusal = (): string => `forge writes go through the desk: lean_report with action {kind: ${kindsLine().split(' | ').join('|')}}; the user approves, the mod sends it. Reads: lean_run ci, or a reader.`
 export const briefLintLine = (): string => `this brief asks for a forge write by script; a thread cannot: it must request an action kind (${kindsLine()})`
 export const RETIRED_NOTE = '(retired: forge writes go through action kinds)'
 // a remembered item (memory, handover) that describes a forge write by script is not passed on as it is: it becomes the retired note, counted

@@ -40,7 +40,7 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -52,6 +52,9 @@ export const COMMENT_TYPES: Record<string, number> = { text: 1, codechange: 2 }
 export const ANCHOR_NOTE = 'anchors checked against the PR diff'
 export const QUESTION_TEXT_MAX = 300 // a comment's text in the desk's question of a review batch (the card shows all of it)
 export const WI_TYPES = ['Bug', 'Task', 'User Story', 'Issue']
+// the review writes of 1.0.30 (vote, update, reviewer, policy queue, work item unlink, label): the REST value of each vote of `az repos pr set-vote`
+export const VOTES: Record<string, number> = { approve: 10, 'approve-with-suggestions': 5, reject: -10, reset: 0, 'wait-for-author': -5 }
+export const PH_ME = '<your reviewer id>' // the identity the token belongs to: read by a GET of connectionData right before it is sent (the user sees the placeholder)
 export const PH_PROJECT = '<project id>' // placeholders in a PR link's body: the mod reads the two ids by a GET right before it sends (the user sees the placeholders)
 export const PH_REPO = '<repository id>'
 export const PH_NEW = '<new id>' // the id of the work item a create step just made
@@ -69,6 +72,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'gh-pr-comment': 'repo (owner/name), pr, body',
   'gh-pr-review-comment': 'repo (owner/name), pr, file, line, body, optional endLine, side right|left: an inline comment on that line of the PR',
   'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
+  'ado-pr-vote': `org, project, repo, pr, vote (${Object.keys(VOTES).join(' | ')}): the vote of the identity the token belongs to`,
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -82,6 +86,7 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'gh-pr-comment': ['repo', 'pr', 'body'],
   'gh-pr-review-comment': ['repo', 'pr', 'file', 'line', 'body', 'endLine', 'side'],
   'gh-pr-thread-resolve': ['repo', 'pr', 'thread'],
+  'ado-pr-vote': ['org', 'project', 'repo', 'pr', 'vote'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
@@ -94,7 +99,8 @@ export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assi
 // `anchor`: an inline review comment: the mod reads the PR's diff and checks the line before it is shown and again before it is sent (anchor.ts)
 // `items`: a batch of PR comments, numbered, for the card and the question; `cont`: a failing item is reported and the rest still run
 export type ReviewItem = { n: number; file: string; where: string; text: string }
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
+// `me`: the write names the identity the token belongs to (PH_ME in the URL): read by a GET of connectionData right before it is sent
+export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
@@ -129,6 +135,24 @@ const linkPlan = (base: string, org: string, project: string, repo: string, pr: 
 
 // where an inline comment sits, as the renderings, the card and the question show it
 export const whereOf = (a: { file: string; line: number; endLine?: number; side: 'right' | 'left' }): string => `${a.file}:${a.line}${a.endLine !== undefined && a.endLine !== a.line ? `-${a.endLine}` : ''}${a.side === 'left' ? ' (removed line)' : ''}`
+
+// the review writes on ONE Azure DevOps PR (vote ...): repo + pr are common; each kind adds its own params. `bad` is the caller's refusal.
+const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote']
+function checkReview(k: ActionKind, p: Params, az: { org: string; project: string; base: string }, params: Params, bad: (what: string) => Checked): Checked {
+  const repo = typeof p.repo === 'string' && NAME.test(p.repo.trim()) ? p.repo.trim() : null
+  const pr = int(p.pr)
+  if (!repo || pr === null) return bad('repo must be a repository name and pr a number')
+  Object.assign(params, { repo, pr })
+  const where = `${az.org}/${az.project}/${repo}`
+  const prs = `${az.base}/_apis/git/repositories/${enc(repo)}/pullRequests/${pr}`
+  if (k === 'ado-pr-vote') {
+    const word = typeof p.vote === 'string' ? p.vote.trim().toLowerCase().replace(/[\s_]+/g, '-') : ''
+    if (!Object.prototype.hasOwnProperty.call(VOTES, word)) return bad(`vote must be one of ${Object.keys(VOTES).join(', ')}`)
+    params.vote = word
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url: `${prs}/reviewers/${enc(PH_ME)}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ vote: VOTES[word] }), headline: `vote "${word}" on PR ${pr} (${where})`, text: `vote "${word}" (${VOTES[word]}) on PR ${pr} of ${repo}, as the identity the desk's Azure DevOps login belongs to`, me: { org: az.org } } }
+  }
+  return bad('not a review write')
+}
 
 // the table's one door: a kind, exactly its params (no others), every value checked; the plan is what the mod will send
 export function checkAction(a: unknown): Checked {
@@ -216,6 +240,7 @@ export function checkAction(a: unknown): Checked {
   const az = azure()
   if (!az) return bad('org and project are required names')
   const where0 = `${az.org}/${az.project}`
+  if (REVIEW_KINDS.includes(k)) return checkReview(k, p, az, params, bad)
   if (k === 'ado-pr-workitem-link') {
     const repo = name('repo')
     const pr = num('pr')
@@ -872,6 +897,20 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
     return h.process.run(['curl', '-sS', '--fail-with-body', '--max-time', '60', '-X', method, '-K', '-', url], { stdin: config, timeoutMs: 70_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
   }
   let body = plan.body
+  let url = plan.url
+  if (plan.me) {
+    // a vote names the reviewer by id: the identity the token belongs to, read by a GET of connectionData (nothing is written yet, so a failure is a plain refusal)
+    const g = await call('GET', `https://dev.azure.com/${enc(plan.me.org)}/_apis/connectionData?api-version=7.1-preview.1`, '', null)
+    let me = ''
+    try {
+      const id = (JSON.parse(g.exitCode === 0 ? g.stdout : '{}') as { authenticatedUser?: { id?: unknown } }).authenticatedUser?.id
+      me = typeof id === 'string' ? id : ''
+    } catch {
+      me = ''
+    }
+    if (!GUID.test(me)) return { ok: false, text: `could not read who the login is${g.exitCode === 0 ? '' : ` (${scrub(oneLine(g.stderr || g.stdout, 120))})`}: nothing was written` }
+    url = url.split(enc(PH_ME)).join(me)
+  }
   if (plan.link) {
     // a PR link names the project and the repository by id: two reads (nothing is written yet, so a failure here is a plain refusal)
     const { org, project, repo } = plan.link
@@ -886,7 +925,7 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
     if (typeof rid === 'string') return { ok: false, text: rid }
     body = body.split(PH_PROJECT).join(pid.id).split(PH_REPO).join(rid.id)
   }
-  const r = await call(plan.method, plan.url, plan.contentType, body)
+  const r = await call(plan.method, url, plan.contentType, body === '' ? null : body)
   if (r.exitCode !== 0) {
     const why = scrub(oneLine(r.stderr || r.stdout, 200)) || `curl exit ${r.exitCode}`
     return UNKNOWN_EXIT.has(r.exitCode) ? { ok: false, unknown: true, text: `the connection broke after the request may have been sent (${why}): outcome unknown, check the target before asking again` } : { ok: false, text: `Azure DevOps refused or could not be reached: ${why}` }
