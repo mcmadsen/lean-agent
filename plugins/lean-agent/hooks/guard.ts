@@ -16,6 +16,7 @@ import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
 import type { Host } from './state'
 import type { Role } from './role'
+import { modSending } from './modsend'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
@@ -288,8 +289,11 @@ const DESK_BASH = 'Bash' // only the commands deskBashOk lists
 const DESK_FREE = new Set(['Skill', 'ToolSearch', 'TodoWrite', 'AskUserQuestion'])
 const LEAN_TOOLS = 'mcp__lean-agent__'
 export const DESK_TOOLS: readonly string[] = [...DESK_READ, DESK_BASH, ...DESK_FREE]
+// Tools the desk's MOD calls, never the model: the engine's `$.session.send` runs only when the session's tool pool has SendMessage ("this session has no
+// SendMessage tool", seen live), so the pool and the settings keep it (it is a deferred tool: a name in the listing) and deskDenial lets only the mod's own send use it
+export const DESK_MOD_TOOLS: readonly string[] = ['SendMessage']
 // can strict mode ever allow this tool (by name)? lean-agent's own tools always
-export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
+export const deskToolPossible = (name: string): boolean => DESK_TOOLS.includes(name) || DESK_MOD_TOOLS.includes(name) || name.startsWith(LEAN_TOOLS)
 
 export function deskBashOk(c: string): boolean {
   if (hasMeta(c)) return false
@@ -322,6 +326,7 @@ async function deskDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     return ROUTE
   }
   if (DESK_FREE.has(e.tool) || e.tool.startsWith(LEAN_TOOLS)) return null
+  if (DESK_MOD_TOOLS.includes(e.tool)) return modSending(e) ? null : `${ROUTE}: the desk does not message sessions itself; \`lean_thread send\` delivers a message to a thread (the mod sends it straight to the session)`
   return `${ROUTE}: ${e.tool} is not for the desk`
 }
 

@@ -19,8 +19,10 @@ import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, removeSession, requestsOf, sessionName, staleWorking, stallConfig, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
+import { aliveRow, answered, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
+import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
@@ -237,7 +239,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string }
+export type Input = { action: string; rewind?: number /* answer-restart only (the delivery tick) */; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -614,7 +616,43 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 // `explicit`: a wake the user or desk asked for by name (wake, resume): it also wakes an idle session with nothing queued (the prompt
 // then is the task) and replaces a STUCK one (queued messages unread for threads.stuckMinutes, no tool call or inbox read) with the
 // handover session. A plain send never replaces a stuck session: it says so and leaves the choice to wake or restart.
-async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; explicit?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string } = {}): Promise<Out> {
+// Direct delivery (deliver-to-thread.ts): the batch goes to the thread's live session with `$.session.send`, the inbox pointer moves only when it
+// resolved. null = not sent (no live session, no sender, a refused send): the caller's old path goes on (inbox + wake). A session with an open
+// permission prompt gets the plain refusal text as the answer (the message stays queued).
+// the `since` of the question the thread still waits on (nothing done since it), else null; (wake passes no activityAt to truthOf: a stall is not its business)
+async function waitingSinceOf(h: Host, home: string, t: Thread): Promise<number | null> {
+  const w = await readWaiting(h, home, t.id)
+  return w && stillWaiting(w, await lastActivity(h, home, t.id, t.lastWake)) ? w.since : null
+}
+// what the batch is (an FYI / status check, an answer to a waiting thread, an instruction): deliver-to-thread.ts kindOf
+async function kindFor(h: Host, home: string, t: Thread, msgs: Inbox[], kind?: MsgKind): Promise<MsgKind> {
+  if (kind) return kind
+  if (msgs.length && msgs.every(m => kindOf(m.text, false) === 'fyi')) return 'fyi'
+  return stillWaiting(await readWaiting(h, home, t.id), await lastActivity(h, home, t.id, t.lastWake)) ? 'answer' : 'instruction'
+}
+async function directOut(h: Host, home: string, t: Thread, row: AgentRow | undefined, u: { msgs: Inbox[]; upTo: number }, body: string, kind?: MsgKind): Promise<Out | null> {
+  if (!aliveRow(row) || !body) return null
+  const k = await kindFor(h, home, t, u.msgs, kind)
+  const d = await deliverToThread(h, home, t, row, { body, from: u.upTo - u.msgs.length, upTo: u.upTo, kind: k })
+  if (d.delivered) {
+    t.delivered = u.upTo
+    await save(h, home, t)
+    return { ok: true, text: d.text, data: { resumed: false, direct: true } }
+  }
+  if (d.text) {
+    lastDirectFailure = d.text
+    await appendJsonl(h, `${tpath(home, t.id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'direct-send', ok: false, why: d.text.slice(0, 240) }).catch(() => undefined)
+  }
+  return d.refused ? { ok: true, text: `${d.text}; ${u.msgs.length} message(s) queued`, data: { resumed: false } } : null
+}
+let lastDirectFailure = '' // the reason the last direct send fell back (appended to the old path's answer, so the desk and the user see why)
+const viaInbox = () => {
+  const s = lastDirectFailure
+  lastDirectFailure = ''
+  return s ? ` (${s})` : ''
+}
+
+async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; explicit?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string; kind?: MsgKind } = {}): Promise<Out> {
   if (t.state !== 'open') return { ok: true, text: `${t.id} is ${t.state}: message queued, no wake` }
   if (!t.sid) return { ok: true, text: `${t.id} has no session yet: queued; use start` }
   const u = await unconsumed(h, home, t.id) // one read: the messages and the position they end at
@@ -624,7 +662,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
   const row = listed.find(a => a.sid === t.sid)
   const now = await h.clock.now()
-  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, waitingSince: await waitingSinceOf(h, home, t) })
   const limited = !!opts.limit && isLimitRow(row)
   // A hard-stopped session (contextstop.ts: every tool call refused) can do nothing with a message, so one never queues behind it, whatever the
   // session shows (working, blocked, idle): the same forced stop as the pane's restart, then a fresh session with the message in its first prompt.
@@ -633,8 +671,19 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
     const r = await freshSession(h, opts.root ?? '', home, t, opts.current ?? '', `Its context was ${hs.tokens} tokens (limit ${hs.limit}) and the session was stopped there; this message starts a new session with the handover.`, {}, true)
     return fresh(r) ? { ...r, text: `${t.id} was at its context limit: started a new session with ${msgs.length ? 'your message' : 'the handover'} (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), resumed: false } } : r
   }
-  if (truth.word === 'running' && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
+  // a working session, or one that waits for its answer (it shows working): the message goes straight to it
+  if (!opts.limit && msgs.length && !t.finished && (liveOf(row) === 'working' || truth.word === 'waiting')) {
+    const d = await directOut(h, home, t, row, u, batchPrompt(msgs), opts.kind)
+    if (d) return d
+  }
+  // (a waiting thread whose session is IDLE ("blocked" + idle, no prompt) is not queued behind: it is woken below, with the message)
+  if ((truth.word === 'running' || (truth.word === 'waiting' && liveOf(row) !== 'idle')) && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}${viaInbox()}`, data: { resumed: false } }
   if (!msgs.length && !opts.force && truth.word !== 'idle' && !isStuck(truth.word)) return { ok: true, text: `${t.id}: nothing queued` }
+  // an idle session with old unread messages ("stuck": it never reads an inbox file): the direct send is what gets them to it
+  if (!opts.limit && msgs.length && isStuck(truth.word) && liveOf(row) === 'idle' && !t.finished && !(await doneSession(h, home, t))) {
+    const d = await directOut(h, home, t, row, u, batchPrompt(msgs), opts.kind)
+    if (d) return d
+  }
   // A stuck session that is still WORKING (one long tool call, a subagent wait: it reads nothing meanwhile) is replaced only by an
   // explicit restart (its current step is lost): wake never stops a working session. A stuck session whose turn ended (idle) is replaced by wake.
   const stuckWorking = isStuck(truth.word) && liveOf(row) === 'working'
@@ -672,6 +721,12 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   }
   // `claude --bg --resume` continues the session itself only once its process has exited; while the process still lives (finished,
   // idle) the same command starts a copy. So a finished-but-alive one is stopped first (never a working one), then resumed.
+  // an idle session whose process lives takes the message directly and starts a turn for it (no stop, no `--resume` copy); the task rides along when nothing is queued
+  if (!opts.limit && aliveRow(row)) {
+    const body = [msgs.length ? '' : opts.lead ?? resumeLead(await taskOf(h, home, t)), batchPrompt(msgs)].filter(Boolean).join('\n\n')
+    const d = await directOut(h, home, t, row, u, body, opts.kind)
+    if (d) return d
+  }
   if (row && row.pid > 0) {
     // (a working or unknown status was handled above: only a finished or dead session with a lingering process gets here)
     const stopped = await stopAlive(h, t, `${msgs.length} message(s)`, 'resumed', { limit: !!opts.limit })
@@ -682,6 +737,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   // lean_report while the work goes on, never as the whole turn)
   const lead = opts.lead ?? resumeLead(await taskOf(h, home, t))
   const prompt = [lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
+  const kind = msgs.length && !opts.limit ? await kindFor(h, home, t, msgs, opts.kind) : 'fyi' // (before the wake: the wake itself is activity)
   const r = await h.process.run(['claude', '--bg', '--resume', t.sid, ...(await threadToolsArgv(h)), '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   // safety net: the CLI prints "started a copy as <id>" when it forked after all; the thread follows the copy
@@ -695,6 +751,11 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   if (dec.act === 'resume' && dec.why === 'keep') delete t.finished // keep mode switched on after a finish: the session works again
   await save(h, home, t)
+  // the wake is watched like a direct send: a resumed session that shows no prompt or tool call within threads.answerWaitSeconds is replaced by a fresh one with the message
+  if (kind !== 'fyi' && t.sid) {
+    await watchDelivery(h, home, t.id, { sid: t.sid, from: upTo - msgs.length, upTo, kind })
+    await answered(h, home, t.id)
+  }
   // the name a resumed session keeps is the one it was started with (`--resume` takes no -n): read back, said when it is not the thread's
   const bad = nameProblem(after.find(a => a.sid === t.sid), sessionName(t.id, t.title, t.gen ?? 1))
   const named = bad ? ` · the app lists it as "${bad.slice(0, 60)}": Claude Code cannot rename a background session (the doctor says more)` : ''
@@ -707,7 +768,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
 export const LIST_LINE_MAX = 200
 const LAST_CHARS = 80
 export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean }): string {
-  const word = `${o.state === 'open' ? o.live || 'open' : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
+  const word = `${o.state === 'open' ? (o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
   return [`${o.id} ${word}`, o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
@@ -734,7 +795,7 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const q = queued.length
     const row = rows.find(a => a.sid === t.sid)
     // running | idle | stuck | done: from the session's own state and the queue, never from the thread's last report
-    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stall.minutes, activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null }) : null
+    const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stall.minutes, activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null }) : null
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
@@ -1066,6 +1127,21 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           if (t.state !== 'open') return err(`${id} is ${t.state}: no automatic restart`)
           const r = await freshSession(h, root, home, t, installed, i.reason ?? (i.action === 'stall-restart' ? 'Its previous session stalled: no tool call or report for a long time; restarted by script.' : 'Its context was over the limit: checkpointed and restarted by script.'), i, i.force === true)
           return fresh(r) ? { ...r, text: `${id} restarted ${i.action === 'stall-restart' ? 'after a stall' : 'at the context limit'} as a new session (old conversation kept read-only). ${r.text}` } : r
+        }
+        case 'answer-restart': {
+          // only the desk's delivery tick calls this (deliver-to-thread.ts; not in the tool's schema): a message sent straight to the session started no turn
+          // within threads.answerWaitSeconds. The inbox position is put back to where the batch began, the session is stopped (forced, as the pane's restart)
+          // and a NEW session starts whose first prompt carries the message (the handover's queued messages). Checked again here, inside the lock.
+          if (t.state !== 'open') return err(`${id} is ${t.state}: no restart for an unanswered message`)
+          if (typeof i.rewind !== 'number' || !Number.isInteger(i.rewind) || i.rewind < 0) return err(`${id}: answer-restart needs rewind (the inbox position the message batch began at)`)
+          const consumed = await readJson<{ n?: number }>(h, `${tpath(home, id)}/consumed.json`, {})
+          if (Number(consumed?.n) > i.rewind) await writeJson(h, `${tpath(home, id)}/consumed.json`, { n: i.rewind })
+          if ((t.delivered ?? 0) > i.rewind) {
+            t.delivered = i.rewind
+            await save(h, home, t)
+          }
+          const r = await freshSession(h, root, home, t, installed, i.reason ?? 'Its previous session did not react to a message from the desk; restarted by script.', i, true)
+          return fresh(r) ? { ...r, text: `${id} restarted as a new session with the message (old conversation kept read-only). ${r.text}` } : r
         }
         case 'start': {
           if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}; reopen it first`)

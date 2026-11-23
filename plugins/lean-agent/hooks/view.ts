@@ -14,7 +14,7 @@ import { NOTICE_SET, deskModelStatus, deskModelText, readDeskModel, readDeskSwit
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
@@ -75,11 +75,12 @@ export const READ_SHOWN = 5 // read rows drawn per thread until "show all"
 export const OVER_PCT = 80 // the desk context bar turns yellow, and Restart desk appears beside it, from here
 
 // ---- a thread's one-word state and its colour (theme keys) ----------------------------------------------------------------
-export type StateWord = 'parked' | 'paused' | 'restarting' | 'waiting' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
+export type StateWord = 'parked' | 'paused' | 'restarting' | 'waiting' | 'waiting for answer' | 'approval' | 'blocked' | 'asking' | 'stuck' | 'stalled' | 'working' | 'done (finishing)' | 'done' | 'idle'
 export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
   if (t.restarting) return { word: 'restarting', color: 'warning' } // never a red state that asks the user to act: the mod restarts it
+  if (t.live === 'waiting') return { word: 'waiting for answer', color: 'warning' } // it asked a question and did nothing since (threadstate.ts); the engine's `blocked` label is not a prompt
   if (t.needsYou) return { word: 'waiting', color: 'warning' }
   if (t.approval) return { word: 'approval', color: 'warning' }
   if (t.blocked) return { word: 'blocked', color: 'error' }
@@ -313,7 +314,7 @@ export async function loadView(h: Host): Promise<View> {
       const used = await agentsText(h, home, t.id).catch(() => '') // "agents 3/4" when config.json agents.cap is set
       // running | idle (N unread queued) | stuck | done | parked: from the session's own state and the queue; an unreadable listing says nothing
       const queued = (await unconsumed(h, home, t.id)).msgs
-      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null })
+      const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
@@ -487,7 +488,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true, dk: { thread: t.id, kind: 'ready', id: String(t.recTs) } })
   for (const t of v.threads) {
     if (t.approval || t.denial !== undefined || asking.has(t.id) || t.run === 'parked' || t.pausedUntil) continue
-    if (t.needsYou) out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
+    if (t.needsYou && t.live !== 'waiting') out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
     else if (t.blocked || t.blockedDismissed) out.push({ key: `blocked:${t.id}:${t.recTs}`, kind: 'blocked', thread: t.id, text: `${t.id} is blocked: ${t.lastReport.slice(0, 160)}`, notify: true, dk: { thread: t.id, kind: 'blocked', id: String(t.recTs) } })
     else if (t.stallId !== undefined) out.push({ key: `stalled:${t.id}:${t.stallId}`, kind: 'stalled', thread: t.id, text: `${t.id} is ${t.live}: ${t.liveNote || 'no progress'}`, notify: false, dk: { thread: t.id, kind: 'stalled', id: t.stallId } })
   }

@@ -15,7 +15,7 @@ import { costBadge, costLine, threadCostsToday } from './stats'
 import { homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { isRunning, isWorking, listAgents, needsYou } from './threads'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
 import type { AgentRow, Inbox, Thread } from './threads'
 import { ctxOf } from './threadcontext'
@@ -263,7 +263,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   await guard('live', async () => {
     if (!listed || !t.sid) return // (no listing, or no session yet: nothing is claimed)
     const q = (await unconsumed(h, home, id)).msgs
-    const truth = truthOf({ threadState: t.state, finished: d.finished, row: t.sid ? sessionRow : undefined, queued: q, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, stallMinutes: (await stallConfig(h, home)).minutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, id, t.lastWake) : null })
+    const truth = truthOf({ threadState: t.state, finished: d.finished, row: t.sid ? sessionRow : undefined, queued: q, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, stallMinutes: (await stallConfig(h, home)).minutes, activityAt: t.state === 'open' && t.sid ? await lastActivity(h, home, id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, id))?.since ?? null })
     d.live = truth.word
     const all = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask'))
     const last = all[all.length - 1]

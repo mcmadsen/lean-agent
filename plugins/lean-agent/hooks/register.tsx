@@ -72,6 +72,7 @@ import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
 import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
+import { deliveryTick, setThreadSender } from './deliver-to-thread'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
@@ -557,7 +558,17 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
     })
     await step('desk timers', async () => {
-      every($, 10_000, 'desk', host2 => deskSweep($, host2))
+      setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text })) // desk -> thread, direct (deliver-to-thread.ts)
+      // (same 10 s timer: the sweep, then) a message sent straight to a thread's session that started no turn within threads.answerWaitSeconds: the thread is
+      // restarted by script with the message (one notice); an open question unanswered for threads.waitReminderMinutes comes back once (deliver-to-thread.ts)
+      every($, 10_000, 'desk', async host2 => {
+        await deskSweep($, host2).catch(() => undefined)
+        const notes = await deliveryTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, rewind) => leanThread(host2, $.plugin.root, { action: 'answer-restart', tN: id, reason: why, rewind }) })
+        for (const n of notes) {
+          if (n.toast) $.ui.notify(n.text, { key: `lean-delivery-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
       // the chaser: a goal untouched for an hour gets one status message to its open thread
       every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
       // usage limit: a thread blocked by it is resumed once, two minutes after the reset (docs/usage-limit-resume.md; config desk.autoResume)
@@ -1118,6 +1129,7 @@ export const register: Register = on => {
     const r: any = await next(e)
     if (r?.deny !== undefined || r?.isError) return r
     const host = hostOf($)
+    setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text }))
     try {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
       // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
@@ -1133,6 +1145,7 @@ export const register: Register = on => {
     if (role.kind !== 'desk') await redetect($, undefined, true)
     if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: e.tool.replace('mcp__lean-agent__', ''), need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
     const host = hostOf($)
+    setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text }))
     // a session reads its parent folders' CLAUDE.md BEFORE the mod runs: a stale guide above the threads is cleared before a start
     if (['new', 'start', 'reopen', 'resume', 'wake', 'send', 'restart'].includes(String(e.action))) await guardParents(host).catch(() => [])
     const unused = unusedField(e) // a field the action does not use is refused by name, never dropped silently
@@ -1343,6 +1356,13 @@ export const register: Register = on => {
   // does not hand it over again. Everything is passed on unchanged.
   on('session.receive', async ($, e: any, next) => {
     if (role.kind === 'desk' && e?.origin?.plugin === 'lean-agent' && typeof e.text === 'string') await markDelivered(hostOf($), e.text).catch(() => false)
+    // thread: the desk's direct message arrived (deliver-to-thread.ts): its inbox lines are handed over (the mark in the text), and the arrival is activity
+    // (the desk's check "did it start a turn?" reads activity.json)
+    if (role.kind === 'thread' && typeof e?.text === 'string' && e.text.startsWith('[lean-agent] message from the desk')) {
+      const host = hostOf($)
+      await consumeWake(host, role.id, e.text).catch(() => false)
+      await touchActivity(host, await homeDir(host), role.id, 'prompt', true)
+    }
     return next(e)
   }).catch(($, e: any, next) => next(e))
 

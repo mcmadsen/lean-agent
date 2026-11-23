@@ -10,7 +10,7 @@ import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
 import { setNotice } from './notices'
-import { lastActivity, stallConfig, threadsConfig, truthOf } from './threadstate'
+import { lastActivity, readWaiting, stallConfig, threadsConfig, truthOf } from './threadstate'
 import type { AgentRow, Out, Thread } from './threads'
 
 export const MAX_STALL_TRIES = 3 // a failed stall restart: tried at most this often per stall, then ONE notice
@@ -58,7 +58,7 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     const now = await h.clock.now()
     const truth =
       t && t.state === 'open' && t.sid && !t.finished
-        ? truthOf({ threadState: t.state, row: rows.find(a => a.sid === t.sid), queued: (await unconsumed(h, home, id)).msgs, now, stuckMinutes, stallMinutes: cfg.minutes, activityAt: await lastActivity(h, home, id, t.lastWake) })
+        ? truthOf({ threadState: t.state, row: rows.find(a => a.sid === t.sid), queued: (await unconsumed(h, home, id)).msgs, now, stuckMinutes, stallMinutes: cfg.minutes, activityAt: await lastActivity(h, home, id, t.lastWake), waitingSince: (await readWaiting(h, home, id))?.since ?? null })
         : null
     if (!truth || truth.word !== 'stalled') {
       delete stalls[id] // not (or no longer) stalled: the next stall gets its own notice
