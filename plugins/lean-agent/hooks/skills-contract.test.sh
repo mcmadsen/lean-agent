@@ -204,4 +204,7 @@ vv=$(sed -n "s/^export const VERSION = '\([^']*\)'.*/\1/p" "$root/hooks/pane.tsx
 node "$root/hooks/skills-contract.mjs" || fail "skills roles (see above)"
 # 1.0.27: the context diet line, word for word, in the thread guide and the thread skill
 for f in "$root/templates/thread.md" "$here/thread/SKILL.md"; do grep -qF -- 'run the full test suite once per step, targeted runs in between; read diffs with --stat and one path; never read a notes file in full: headings first' "$f" || fail "$(basename "$f") lacks the context diet line"; done
+# 1.0.29: a thread near its cap restarts itself with the checkpoint call (never asks the desk or the user); the desk never restarts a thread for its context
+grep -qF 'call `lean_run {checkpoint: {next: "<the next step>"}}` and end your turn: the mod restarts you at once and you continue with it; never end your turn asking the desk or the user for a restart' "$root/templates/thread.md" || fail "thread.md lacks the checkpoint line"
+grep -qF 'Context restarts are the mod'"'"'s (the thread'"'"'s `lean_run checkpoint`, the limit, a stall): never restart a thread for its context; `restart` by hand only when the user asks' "$root/templates/front-desk.md" || fail "front-desk.md lacks the context-restart line"
 echo "ok skills-contract"

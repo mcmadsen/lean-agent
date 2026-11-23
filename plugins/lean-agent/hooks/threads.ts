@@ -862,7 +862,7 @@ export function threeLines(text: string): string {
 }
 
 // the actions whose `text` (or `message`) is the first instruction of the session they start (queued first, delivered last in its first prompt)
-const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume'])
+const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume', 'auto-restart']) // (auto-restart: the checkpoint restart's `next`, checkpoint.ts)
 
 // ---- the fields each action uses (the tool entry refuses the others: a dropped field is a lost instruction) ----------------------------------
 const TEXTY = ['text', 'message']

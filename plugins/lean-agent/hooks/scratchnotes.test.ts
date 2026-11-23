@@ -28,7 +28,7 @@ function setup() {
 test('the warn line: at the warn level ONE line per session, with the numbers and the file; under the level or a second time nothing', () => {
   warnReset()
   expect(takeWarn('s1', 100_000, LIM)).toBeNull() // at the level is not over it
-  expect(takeWarn('s1', 101_000, LIM)).toBe('context 101k of 120k: write what you have learned so far to scratch/notes.md now (one short section per source: what it says, what you still need); a restart resumes from it and the scratch files replace re-reading the sources')
+  expect(takeWarn('s1', 101_000, LIM)).toBe('ctx 101k of 120k: write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart') // 1.0.29: the line names the checkpoint call
   expect(takeWarn('s1', 107_000, LIM)).toBeNull() // under 90% of the limit (108k)
   expect(takeWarn('s1', 110_000, LIM)).toBe(warnLine(110_000, 120_000)) // 1.0.27: and once more at 90%
   expect(takeWarn('s1', 115_000, LIM)).toBeNull()
@@ -104,9 +104,9 @@ test('through the engine: a tool result of a thread at the warn level carries th
   const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? '' // (the thread's own folder: always allowed)
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 104_000
-  expect(await ctx()).toContain('context 104k of 120k: write what you have learned so far to scratch/notes.md now')
+  expect(await ctx()).toContain('ctx 104k of 120k: write what you learned to scratch/notes.md, then call lean_run checkpoint')
   expect(await ctx()).not.toContain('scratch/notes.md') // once per session at the warn level
   tokens = 110_000
-  expect(await ctx()).toContain('context 110k of 120k: write what you have learned') // and again at 90% of the limit
+  expect(await ctx()).toContain('ctx 110k of 120k: write what you learned') // and again at 90% of the limit
   expect(await ctx()).not.toContain('scratch/notes.md')
 })
