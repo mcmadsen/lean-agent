@@ -67,7 +67,7 @@ export async function addPrepNote(h: Host, project: string, n: PrepNote): Promis
 }
 const levelAt = (p: Pass, notes: PrepNote[]): string | undefined => notes.filter(n => n.ts <= p.ts0).sort((a, b) => b.ts - a.ts)[0]?.level
 
-async function ledgerTail(h: Host): Promise<string> {
+export async function ledgerTail(h: Host): Promise<string> {
   try {
     const file = `${leanDir(await homeDir(h))}/${LEDGER}`
     const size = await fileSize(h, file)

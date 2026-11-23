@@ -33,7 +33,8 @@ import { readConfig } from './budget'
 import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteCarried, noteSection, offeredTo, skillsCarried, skillsSeen, trimListing } from './skilltrim'
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
-import { jobOf, jobResult } from './jobs'
+import { jobOf, jobResult, retryCount } from './jobs'
+import { recordWorkerCall } from './workerruns'
 import { overheadReport } from './overhead'
 import { threadSkillsLean } from './threadlean'
 import { overheadProbe } from './probe'
@@ -1378,7 +1379,11 @@ export const register: Register = on => {
       if (octx) orchEnd(octx, e, launch) // a worker's slot (threads.workers) is free again, a background worker's when it ends
     }
     // the worker RAN (a real result, or a background launch accepted): one try of this brief is used; a denied, rejected or errored call uses none
-    if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) orchRan(octx, e)
+    if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) {
+      // the run record (workerruns.ts: stats by tier and job, the haiku record of a project); written before orchRan counts this try
+      if (role.kind === 'thread' && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '') && !launch?.async) await recordWorkerCall(host, { thread: role.id, project: await threadProject(host).catch(() => ''), agent: String(e.subagent_type), job: jobOf(e.prompt), text: texts(r?.result).join('\n'), retried: retryCount(role.id, e.prompt) >= 1 }).catch(() => undefined)
+      orchRan(octx, e)
+    }
     if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
     // the classifier's denial arrives as the Agent call's own error result: the thread's own work in its worktrees is allowed from now on (denial.ts)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && (r?.isError || r?.result?.isError)) {

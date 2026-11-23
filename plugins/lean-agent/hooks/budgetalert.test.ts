@@ -31,13 +31,13 @@ test('limitOf: a number, a numeric string, off, and the default for junk', () =>
   for (const junk of ['abc', {}, [], NaN, '']) expect(limitOf(junk, 25), String(junk)).toBe(25)
 })
 
-test('budgetLimits: 25 and 20 USD by default, from config.json budget, "off" allowed', async () => {
+test('budgetLimits: 25 and 15 USD by default, from config.json budget, "off" allowed', async () => {
   const h = setup()
-  expect(await budgetLimits(h.host)).toEqual({ daily: 25, thread: 20 })
+  expect(await budgetLimits(h.host)).toEqual({ daily: 25, thread: 15 })
   config(h, { budget: { daily: 10, threadDaily: 'off' } })
   expect(await budgetLimits(h.host)).toEqual({ daily: 10, thread: null })
   config(h, { budget: { daily: 'off' } })
-  expect(await budgetLimits(h.host)).toEqual({ daily: null, thread: 20 })
+  expect(await budgetLimits(h.host)).toEqual({ daily: null, thread: 15 })
 })
 
 test('a notice at 50% and another at 80% of the daily budget, once per day per level, with today\'s spend, the top 3 threads and their models', async () => {

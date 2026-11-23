@@ -65,6 +65,8 @@ export function retryDenial(thread: string, prompt: unknown): string | null {
   if (n === 1 && !WHY_SONNET.test(String(typeof prompt === 'string' ? prompt : ''))) return 'this exact job already ran once and did not settle it: change the brief (one line saying what the first answer lacked), or escalate once with a `why-sonnet: <reason>` line; a third identical try is refused'
   return null
 }
+// how many times this brief already ran in this thread (a second try is a run with count >= 1 before it)
+export const retryCount = (thread: string, prompt: unknown): number => tries.get(`${thread}|${jobHash(prompt)}`) ?? 0
 // a worker ran for this brief (the Agent call returned a real result, or a background launch was accepted): one try used
 export function retryRan(thread: string, prompt: unknown): void {
   const k = `${thread}|${jobHash(prompt)}`

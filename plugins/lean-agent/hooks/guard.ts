@@ -9,7 +9,8 @@ import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, mode
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
-import { jobOf } from './jobs'
+import { WHY_SONNET, jobOf } from './jobs'
+import { haikuRecord } from './workerruns'
 import { selfEditRoots } from './selfedit'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
@@ -1165,7 +1166,14 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const projs = own ? await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {}) : {}
     const projects = Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/')).map(norm)
     const selfEdit = own && ctx.role.kind === 'thread' ? await selfEditRoots($, ctx.role.id).catch(() => []) : undefined // the worktrees the user let this thread edit itself (selfedit.ts, signed, verified per call)
-    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects, selfEdit }, e)
+    // haiku first, measured: a worker-sonnet brief without `why-sonnet:` for a job type haiku has a good record on in this project is refused as before, and the refusal says so
+    let haiku = ''
+    if (own && ctx.role.kind === 'thread' && (e.tool === 'Agent' || e.tool === 'Task') && /^(lean-agent:)?worker-sonnet$/.test(String(e.subagent_type ?? '')) && !WHY_SONNET.test(String(e.prompt ?? ''))) {
+      const jb = jobOf(e.prompt)
+      const project = String((await readJson<{ project?: unknown }>($, `${threadsDir(home)}/${ctx.role.id}/thread.json`, {}))?.project ?? '')
+      if (jb && project) haiku = await haikuRecord($, project, jb)
+    }
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects, selfEdit, ...(haiku ? { haiku } : {}) }, e)
     if (o) return o
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {
