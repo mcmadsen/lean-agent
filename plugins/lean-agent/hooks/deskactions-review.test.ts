@@ -147,4 +147,66 @@ test('ado-pr-vote: the own-PR default covers ONLY a reset on the owned PR; appro
   expect(none.sends()).toHaveLength(0)
 })
 
+// ---- 2 ado-pr-update -------------------------------------------------------------------------------------------------------------------
+test('ado-pr-update: title, description, draft and status active | abandoned are one PATCH, rendered exactly', () => {
+  const c = checkAction({ kind: 'ado-pr-update', params: { ...BASE, title: 'Digest: retry on 429', description: 'Line one.\nLine two with "quotes".', draft: true, status: 'abandoned' } })
+  expect(c.ok).toBe(true)
+  if (!c.ok) return
+  expect([c.plan.method, c.plan.url, c.plan.contentType]).toEqual(['PATCH', `${PRS}?api-version=7.1`, 'application/json'])
+  expect(JSON.parse(c.plan.body)).toEqual({ title: 'Digest: retry on 429', description: 'Line one.\nLine two with "quotes".', isDraft: true, status: 'abandoned' })
+  expect(c.plan.text).toBe('title: Digest: retry on 429\ndescription: Line one.\nLine two with "quotes".\ndraft: true\nstatus: abandoned')
+  const one = checkAction({ kind: 'ado-pr-update', params: { ...BASE, draft: false } })
+  if (one.ok) expect(JSON.parse(one.plan.body)).toEqual({ isDraft: false }) // only what is named is sent
+  const re = checkAction({ kind: 'ado-pr-update', params: { ...BASE, status: 'Active' } })
+  if (re.ok) expect(JSON.parse(re.plan.body)).toEqual({ status: 'active' })
+  for (const params of [{}, { title: '' }, { title: 'x'.repeat(401) }, { description: 'x'.repeat(4001) }, { draft: 'yes' }, { status: 'pending' }, { status: 5 }, { title: 'a‮b' }, { title: 'ok', reviewers: ['x'] }])
+    expect([JSON.stringify(params), checkAction({ kind: 'ado-pr-update', params: { ...BASE, ...params } }).ok]).toEqual([JSON.stringify(params), false])
+})
+
+test('ado-pr-update: completing, auto-complete, squash / merge options, bypass-policy and delete-source-branch are refused with the reason: the user does this by hand', () => {
+  const hand = [
+    { status: 'completed' },
+    { status: 'Completed' },
+    { autoComplete: true },
+    { autoCompleteSetBy: { id: 'x' } },
+    { completionOptions: { mergeStrategy: 'squash', deleteSourceBranch: true } },
+    { mergeStrategy: 'squash' },
+    { squashMerge: true },
+    { bypassPolicy: true, bypassReason: 'urgent' },
+    { deleteSourceBranch: true },
+    { mergeCommitMessage: 'x' },
+    { title: 'fine', completionOptions: {} }, // a fine title does not carry the rest
+  ]
+  for (const extra of hand) {
+    const c = checkAction({ kind: 'ado-pr-update', params: { ...BASE, ...extra } })
+    expect([JSON.stringify(extra), c.ok]).toEqual([JSON.stringify(extra), false])
+    if (!c.ok) expect(c.text).toContain('the user does this by hand')
+  }
+  const other = checkAction({ kind: 'ado-pr-update', params: { ...BASE, title: 'x', reviewers: [] } })
+  expect(other.ok).toBe(false)
+  if (!other.ok) expect(other.text).toContain('unknown param "reviewers"') // an unknown param is the plain refusal
+  // not even inside a batch
+  const batch = checkAction({ kind: 'batch', items: [{ kind: 'ado-pr-update', params: { ...BASE, status: 'completed' } }] })
+  expect(batch.ok).toBe(false)
+  if (!batch.ok) expect(batch.text).toContain('the user does this by hand')
+})
+
+test('ado-pr-update: sent only after the user\'s Approve, with the exact PATCH; the own-PR default never covers it', { timeoutMs: 20_000 }, async () => {
+  const s = setup()
+  const v = await ask(s, 'ado-pr-update', { ...BASE, title: 'Digest: retry on 429', draft: false })
+  expect((await approveAction(s.host, v.id, s.tell)).ok).toBe(false)
+  expect(s.sends()).toHaveLength(0)
+  const o = await approve(s, v)
+  expect(o.ok, o.text).toBe(true)
+  const [w] = s.sends()
+  expect(w!.argv).toContain('PATCH')
+  expect(w!.argv[w!.argv.length - 1]).toBe(`${PRS}?api-version=7.1`)
+  expect(w!.stdin).toContain('data-binary = "{\\"title\\":\\"Digest: retry on 429\\",\\"isDraft\\":false}"')
+  noToken(s)
+  const t = setup()
+  expect(await own(t, 'ado-pr-update', { ...BASE, title: 'Own PR, still asked' })).toBeNull()
+  expect(await own(t, 'ado-pr-update', { ...BASE, status: 'abandoned' })).toBeNull()
+  expect(t.sends()).toHaveLength(0)
+})
+
 // (more kinds below)
