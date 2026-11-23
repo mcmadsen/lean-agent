@@ -688,14 +688,17 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Text dimColor wrap="wrap">{`${n.text} (dismissed: a newer one will show again)`}</Text>
           </Box>
         )
-      const tone = n.kind === 'blocked' || n.kind === 'deskmodel' || n.kind === 'stalled' ? 'error' : 'warning'
+      // red only when something is broken (a blocked thread, the desk's model); amber is the label and the chip, the body is the normal text color
+      const tone = n.kind === 'blocked' && !n.key.startsWith('waiting:') ? 'error' : n.kind === 'deskmodel' ? 'error' : 'warning'
+      const chipText = n.kind === 'question' ? 'question' : n.kind === 'push' ? 'ready to push' : n.kind === 'stalled' ? 'stalled' : n.kind === 'deskmodel' ? 'desk model' : n.kind === 'denial' || (n.kind === 'blocked' && !n.key.startsWith('waiting:')) ? 'blocked' : 'needs you'
       const t = n.thread ? v?.threads.find(x => x.id === n.thread) : undefined
       const w = n.script
       const mr = n.request
       const ar = n.action
       return (
-        <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} paddingX={1}>
+        <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} borderDimColor paddingX={1}>
           <Box flexWrap="wrap" columnGap={1}>
+            <Text bold color={tone}>{`[${chipText}]`}</Text>
             {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
             {n.kind === 'denial' && !!n.thread && <Button key={`denial-self-${n.thread}`} label={selfEditLabel(n.thread)} onPress={selfEditPress(n.thread)} />}
             {n.kind === 'denial' && !!n.thread && <Button key={`denial-retry-${n.thread}`} label={RETRY_LABEL} onPress={retryPress(n.thread)} />}
@@ -714,9 +717,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {n.kind === 'stalled' && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
             {!!n.dk && !(mr && mr.state === 'denied') && <Button key={`dismiss-${n.dk.thread}-${n.dk.kind}${['model', 'action', 'script'].includes(n.dk.kind) ? `-${n.dk.id.split(':')[0]}` : ''}`} label={confirming(ui, `dismiss:${n.key}`, now2) ? `Confirm dismiss ${n.thread ?? 'it'}` : 'Dismiss'} onPress={dismissCard(n)} />}
           </Box>
-          <Text color={tone} wrap="wrap">
-            {n.text}
-          </Text>
+          <Text wrap="wrap">{n.text}</Text>
           {!!ar && ar.state === 'pending' && ar.items && ar.items.length > 0 && reviewLines(ar)}
           {!!ar && ar.state === 'pending' && ar.text.length > ACTION_CARD_MAX && <Text color="warning" wrap="wrap">{`Approve in the desk question: this card cannot approve it (${ar.text.length} characters, the question shows all of it).`}</Text>}
           {!!ar && ar.state === 'pending' && (ar.items?.length || ar.text.length > ACTION_CARD_MAX) ? <Button key={`action-full-${ar.id}`} plain label={ui.rows[`full${ar.id}`] ? 'hide full text' : 'show full text'} onPress={toggleRow(`full${ar.id}`)} /> : null}
@@ -821,42 +822,79 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const threadCard = (t: ThreadRow) => {
       const sc = stateOf(t)
       const quiet = sc.word === 'done' || sc.word === 'idle' || sc.word === 'parked'
-      const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: 'error' } : { text: 'no review', color: undefined }
+      const done = sc.word === 'done' || sc.word === 'done (finishing)'
+      const more = ui.rows[`more${t.id}`] === true
+      // the status chip: working / waiting / needs you / done / restarting (amber is the chip, never the body)
+      const chipWord = ['waiting', 'approval', 'asking'].includes(sc.word) ? 'needs you' : sc.word
+      const chip = (
+        <Text bold color={sc.color}>
+          {`[${chipWord}]`}
+        </Text>
+      )
+      // red "review not green" only when it blocks (the thread is done and would be pushed); otherwise a dim line
+      const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
+      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{`$${t.cost.toFixed(2)} today`}</Text> : null
+      const cm = t.ctx ? /(\d+)k\/(\d+)k/.exec(t.ctx) : null
+      const ctxNode = cm ? (
+        <Progress key={`ctx-${t.id}`} label="ctx" value={Number(cm[1])} max={Math.max(1, Number(cm[2]))} valueText={`${cm[1]}k of ${cm[2]}k${t.keep ? ' · keep' : ''}`} color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : 'success'} />
+      ) : t.ctx ? (
+        <Text color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{`${t.ctx}${t.keep ? ' · keep' : ''}`}</Text>
+      ) : null
+      // ONE primary button per state: working / waiting: Open; done: Open | Resume; blocked: Restart; the rest behind "more"
+      const blockedWord = ['blocked', 'stuck', 'stalled'].includes(sc.word)
+      const openBtn = <Button key={`view-${t.id}`} label="Open" onPress={openPaneOne(t.id)} />
+      const resumeBtn = t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />
+      const restartBtn = t.state === 'open' && (
+        <Button
+          key={`restart-${t.id}`}
+          label={confirming(ui, `restart:${t.id}`, now2) ? (t.working ? `Confirm restart ${t.id} (it is working: the current step is lost)` : `Confirm restart ${t.id}`) : blockedWord ? 'Restart' : 'Restart from handover'}
+          onPress={restartOne(t.id)}
+        />
+      )
+      const closeBtn = !t.working && !t.needsYou && <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />
+      const startBtn = t.resumable && <Button key={`start-${t.id}`} label="Start new session" onPress={thread('start', t.id)} />
+      const moreBtn = <Button key={`more-${t.id}`} plain label={more ? 'less' : 'more'} onPress={toggleRow(`more${t.id}`)} />
+      const primary = blockedWord ? [restartBtn] : done || quiet ? [openBtn, resumeBtn] : [openBtn]
+      const rest = more ? (blockedWord ? [openBtn, resumeBtn, startBtn, closeBtn] : done || quiet ? [startBtn, restartBtn, closeBtn] : [resumeBtn, startBtn, restartBtn, closeBtn]) : []
+      // a done thread is ONE row: title, chip, cost, context, Open | Resume, more
+      if (done && !more)
+        return (
+          <Box key={`t-${t.id}`} flexWrap="wrap" columnGap={1} borderStyle="round" borderDimColor paddingX={1}>
+            <Text bold wrap="wrap">{`${t.id} ${t.title}`}</Text>
+            {chip}
+            {costNode}
+            {ctxNode}
+            {primary}
+            {moreBtn}
+          </Box>
+        )
       return (
-        <Box key={`t-${t.id}`} flexDirection="column" borderStyle="round" borderColor={sc.color} borderDimColor={quiet} paddingX={1}>
+        <Box key={`t-${t.id}`} flexDirection="column" borderStyle="round" borderColor={blockedWord ? sc.color : undefined} borderDimColor={!blockedWord} paddingX={1}>
           <Text bold wrap="wrap">
             {`${t.id} ${t.title}`}
           </Text>
-          <Text wrap="wrap">
-            {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''} · `}</Text> : null}
-            <Text bold color={sc.color}>{sc.word}</Text>
-            {t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{` · ${t.costLine ?? `${t.costBadge} today`}`}</Text> : t.cost > 0 ? <Text dimColor>{` · $${t.cost.toFixed(2)} today`}</Text> : null}
-            {t.ctx ? <Text color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{` · ${t.ctx}${t.keep ? ' · keep' : ''}`}</Text> : null}
-            {t.pending ? <Text color="warning">{` · ${t.pending}`}</Text> : null}
-            {t.keepGoing ? <Text color="cyan">{' · keep-going'}</Text> : null}
-            {t.agents ? <Text dimColor>{` · ${t.agents}`}</Text> : null}
-            {t.branch ? <Text dimColor>{` · ${t.branch}`}</Text> : null}
-            <Text color={review.color} dimColor={!review.color}>{` · ${review.text}`}</Text>
-          </Text>
-          {t.finished ? <Text dimColor>finished: next message starts a new session</Text> : null}
-          {t.liveNote ? <Text color={sc.word === 'stuck' || sc.word === 'stalled' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}
+          <Box flexWrap="wrap" columnGap={1}>
+            {chip}
+            {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''}`}</Text> : null}
+            {costNode}
+            {ctxNode}
+            {t.pending ? <Text color="warning">{t.pending}</Text> : null}
+            {t.keepGoing ? <Text color="cyan">keep-going</Text> : null}
+            {t.agents ? <Text dimColor>{t.agents}</Text> : null}
+            {t.branch ? <Text dimColor>{t.branch}</Text> : null}
+            <Text color={review.color} dimColor={!review.color}>{review.text}</Text>
+          </Box>
+          {t.finished && more ? <Text dimColor>finished: the next message starts a new session</Text> : null}
+          {t.liveNote ? <Text color={sc.word === 'stuck' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}
           {t.needsYou ? <Text color="warning">waiting for you: open it in the app</Text> : null}
           {t.pausedUntil ? <Text color="warning">{`paused until ${fmtUntil(t.pausedUntil, now2)}`}</Text> : null}
           <Text dimColor wrap="truncate-end">
             {short(t.lastReport, 200) || 'no report yet'}
           </Text>
           <Box flexWrap="wrap" columnGap={1}>
-            <Button key={`view-${t.id}`} label="Open" onPress={openPaneOne(t.id)} />
-            {t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />}
-            {t.resumable && <Button key={`start-${t.id}`} label="Start" onPress={thread('start', t.id)} />}
-            {t.state === 'open' && (
-              <Button
-                key={`restart-${t.id}`}
-                label={confirming(ui, `restart:${t.id}`, now2) ? (t.working ? `Confirm restart ${t.id} (it is working: the current step is lost)` : `Confirm restart ${t.id}`) : 'Restart'}
-                onPress={restartOne(t.id)}
-              />
-            )}
-            {!t.working && !t.needsYou && <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />}
+            {primary}
+            {rest}
+            {moreBtn}
           </Box>
         </Box>
       )
@@ -874,6 +912,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     if (setNote && !noteSeen.has(setNote)) noteSeen.set(setNote, now2)
     const showSetNote = !!setNote && now2 - (noteSeen.get(setNote) ?? now2) < NOTE_MS
     const chip = desk?.model ? `${desk.model}${desk.effort ? `/${desk.effort}` : ''}${v?.deskModel ? ' ≠ pin' : setNote && !showSetNote ? ' (set by lean-agent)' : ''}` : ''
+    // the plan window: a small bar with the number ("5h window: 83% used, resets ..."), the rest of the line dim (an amber line at 83 % looked like a warning)
+    const winM = /^([^:|]+):\s*(\d+)%( used)?,?\s*(.*)$/.exec(v?.window ?? '')
+    const winPct = winM ? Math.min(100, Number(winM[2])) : undefined
+    const winLabel = winM?.[1]?.trim() ?? ''
+    const winRest = winM?.[4] ?? ''
     const header = (
       <Box flexDirection="column">
         <Box flexWrap="wrap" columnGap={1}>
@@ -889,7 +932,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
         {!!v?.window && (!winGone || showHidden) && (
           <Box flexWrap="wrap" columnGap={1}>
-            <Text dimColor={!winAlert} color={winAlert ? 'warning' : undefined}>{v.window}</Text>
+            {winPct !== undefined ? (
+              <>
+                <Progress key="win" label={winLabel} value={winPct} max={100} valueText={`${winPct}%`} color={winPct >= 100 ? 'error' : winPct >= 90 ? 'warning' : 'success'} />
+                <Text dimColor>{winRest}</Text>
+              </>
+            ) : (
+              <Text dimColor>{v.window}</Text>
+            )}
             {winAlert && !winGone && <Button key="window-dismiss" label="Dismiss" onPress={dismissLine([winId])} />}
           </Box>
         )}

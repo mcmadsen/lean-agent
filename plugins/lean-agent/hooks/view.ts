@@ -335,7 +335,8 @@ export async function loadView(h: Host): Promise<View> {
       const dts = isBlocked ? await dismissedTs(h, home, t.id) : 0
       const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
       // hard-stopped at the context limit and the mod will restart it (its marker is pending: a give-up drops it): "restarting", amber, nothing for the user to do
-      const restarting = await isRestarting(h, home, t).catch(() => false)
+      // (1.0.30: also a thread that checkpointed itself: its checkpoint record names this session and the restart has not happened yet)
+      const restarting = (await isRestarting(h, home, t).catch(() => false)) || (t.state === 'open' && !!t.sid && (await readJson<{ reason?: string; sid?: string } | null>(h, `${threadsDir(home)}/${t.id}/checkpoint.json`, null).catch(() => null))?.sid === t.sid && !isDone)
       v.threads.push({
         ...(restarting ? { restarting: true } : {}),
         ...(cv && cv.tokens !== undefined ? (restarting ? { ctx: `${cv.text} · ${RESTARTING_TEXT}`, ctxLevel: 'warn' as Level } : { ctx: cv.text, ctxLevel: cv.level }) : {}), // (an unknown size says nothing on the card)
@@ -507,7 +508,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   for (const q of v.openQuestions) out.push({ key: `ask:${q.q}`, kind: 'question', thread: q.from, text: `${q.from ?? 'desk'} asks: ${flat(q.question ?? '')}`, notify: true, dk: { thread: q.from ?? 'desk', kind: 'question', id: String(q.q) } })
   for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true, dk: { thread: t.id, kind: 'ready', id: String(t.recTs) } })
   for (const t of v.threads) {
-    if (t.approval || t.denial !== undefined || asking.has(t.id) || t.run === 'parked' || t.pausedUntil) continue
+    if (t.approval || t.denial !== undefined || asking.has(t.id) || t.run === 'parked' || t.pausedUntil || t.restarting) continue // (a thread that restarts itself is a quiet "restarting" chip, not a card)
     if (t.needsYou && t.live !== 'waiting') out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
     else if (t.blocked || t.blockedDismissed) out.push({ key: `blocked:${t.id}:${t.recTs}`, kind: 'blocked', thread: t.id, text: `${t.id} is blocked: ${t.lastReport.slice(0, 160)}`, notify: true, dk: { thread: t.id, kind: 'blocked', id: String(t.recTs) } })
     else if (t.stallId !== undefined) out.push({ key: `stalled:${t.id}:${t.stallId}`, kind: 'stalled', thread: t.id, text: `${t.id} is ${t.live}: ${t.liveNote || 'no progress'}`, notify: false, dk: { thread: t.id, kind: 'stalled', id: t.stallId } })

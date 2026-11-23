@@ -32,6 +32,10 @@ function setup(on: any = null, rows: any[] = []) {
   if (on) on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   return h
 }
+// 1.0.30: a card's other actions (Close, Restart, Start) are behind its "more"; open it once (the open state is kept across mounts)
+const openMore = async (ui: any, id: string) => {
+  if (await ui.find({ type: 'Button', key: `more-${id}`, text: 'more' })) await ui.press({ key: `more-${id}` })
+}
 // a pane test runs in the desk unless it says otherwise
 const inDesk = ($: any, cwd = '/h/lean-agent-desk') => $.session.start({ cwd, surface: 'desktop', isInteractive: true } as any)
 
@@ -294,6 +298,7 @@ test('Close is two-step (arm, confirm within 10 s); it closes through lean_threa
   const h = setup(on, [])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openMore(ui, 't2')
   await ui.press({ key: 'close-t2' })
   expect(await ui.find({ type: 'Button', text: /Confirm close t2/ })).toBeTruthy()
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!).state).toBe('open') // armed only
@@ -301,6 +306,7 @@ test('Close is two-step (arm, confirm within 10 s); it closes through lean_threa
   await ui.unmount()
   const ui2 = await $.ui.mount(PANE as any)
   expect(await ui2.find({ type: 'Button', text: /Confirm close t2/ })).toBeFalsy()
+  await openMore(ui2, 't2')
   await ui2.press({ key: 'close-t2' })
   await ui2.press({ key: 'close-t2' })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!).state).toBe('closed')
@@ -320,6 +326,8 @@ test('a working thread has no Close (a busy label); needs-you shows for a sessio
   const h = setup(on, [{ sessionId: SID, name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1, waitingFor: 'permission prompt' }])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openMore(ui, 't1')
+  await openMore(ui, 't2')
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^waiting for you: open it in the app/ })).toBeTruthy() // on its card
   expect(await ui.find({ type: 'Text', text: /t1 waits on a prompt in its own session/ })).toBeTruthy() // and in "Needs you"
@@ -336,6 +344,7 @@ test('a session waiting on a prompt gets no Close; arming one Close then pressin
   rows.push({ sessionId: SID_OF(4), name: 'y', cwd: '/y', status: 'idle', state: 'done', startedAt: 1 })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  for (const id of ['t1', 't2', 't4']) await openMore(ui, id)
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // needs you: not offered
   expect(await ui.find({ type: 'Text', text: /waiting for you/ })).toBeTruthy()
   const st = (id: string) => JSON.parse(h.files.get(`/h/.lean-agent/threads/${id}/thread.json`)!).state
@@ -402,6 +411,7 @@ test('every open thread has Restart; it is two-step; the confirmed press stops t
   thr(h, 't5', { state: 'parked' })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  for (const id of ['t1', 't2', 't5']) await openMore(ui, id)
   expect(await ui.find({ type: 'Button', key: 'restart-t1' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-t2' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-t5' })).toBeFalsy() // parked: not open
@@ -426,6 +436,7 @@ test('Restart of a working thread warns that the current step is lost, and still
   restartable(h, rows)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openMore(ui, 't1')
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // a working thread cannot be closed ...
   await ui.press({ key: 'restart-t1' }) // ... but it can be restarted
   expect(await ui.find({ type: 'Button', text: /^Confirm restart t1 \(it is working: the current step is lost\)$/ })).toBeTruthy()
@@ -436,12 +447,18 @@ test('Restart of a working thread warns that the current step is lost, and still
   await ui.unmount()
 })
 
-test('a finished thread row says the next message starts a new session', { timeoutMs: 20_000 }, async ($, on) => {
+test('a finished thread is ONE row (chip done, Open); the "next message starts a new session" line is on its expand, not on every card', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   thr(h, 't6', { finished: 5 })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /finished: next message starts a new session/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /finished: the next message starts a new session/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: '[done]' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'view-t6' })).toBeTruthy()
+  for (const k of ['restart-t6', 'close-t6', 'start-t6']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // behind "more"
+  await ui.press({ key: 'more-t6' })
+  expect(await ui.find({ type: 'Text', text: /finished: the next message starts a new session/ })).toBeTruthy()
+  for (const k of ['restart-t6', 'close-t6']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   await ui.unmount()
 })
 

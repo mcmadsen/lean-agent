@@ -206,17 +206,72 @@ test('a thread card: id and the whole title, one state word, model, branch, verd
   const ui = await $.ui.mount(PANE as any)
   const all = await texts(ui)
   expect(all).toContain(`t1 ${title}`) // not cut
-  expect(all).toContain('sonnet/high · working · today $0.42 · feat/synthetic-x · review green') // ONE word for the state, then the cost badge, agents, branch, verdict
+  // 1.0.30: the meta line is split: a status chip, the model, the cost, the branch, the verdict (each its own piece)
+  for (const piece of ['[working]', 'sonnet/high', 'today $0.42', 'feat/synthetic-x', 'review green']) expect(all).toContain(piece)
   expect(all.some(t => /^busy$|\[running\]/.test(t))).toBe(false)
   expect(all).toContain('Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.') // the last report, one line
-  expect(all.some(t => /^idle · no review$/.test(t) || /idle · no review/.test(t))).toBe(true) // t2: no report, no model recorded
-  for (const k of ['view-t1', 'restart-t1', 'view-t2', 'restart-t2', 'close-t2', 'resume-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(all).toContain('[idle]') // t2: no report, no model recorded
+  expect(all).toContain('no review')
+  // one primary button per state: working = Open; idle = Open | Resume; the rest behind "more"
+  for (const k of ['view-t1', 'more-t1', 'view-t2', 'resume-t2', 'more-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  for (const k of ['restart-t1', 'close-t1', 'resume-t1', 'restart-t2', 'close-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy()
+  await ui.press({ key: 'more-t1' })
+  await ui.press({ key: 'more-t2' })
+  for (const k of ['restart-t1', 'restart-t2', 'close-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // working: no Close
-  expect(await ui.find({ type: 'Button', key: 'resume-t1' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'resume-t1' })).toBeFalsy() // a running session is not resumed
   await ui.press({ key: 'view-t1' })
   expect(byButton().map(o => o.id)).toEqual(['lean-agent-thread-t1']) // Open on a card opens that thread's pane, not another
   expect(byButton()[0]!.title).toContain('t1 · ')
   expect(await ui.find({ type: 'Text', text: /t1 opened in its own pane/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('1.0.30: a thread that checkpointed itself is a quiet [restarting] chip, not a blocked card; a blocked thread has Restart as its one button', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = world(on, [
+    { sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 },
+    { sessionId: SID(2), name: 'y', cwd: '/y', status: 'idle', state: 'done', startedAt: 1 },
+  ])
+  thr(h, 't1', { sid: SID(1) })
+  thr(h, 't2', { sid: SID(2) })
+  inbox(
+    h,
+    { ts: 100, from: 't1', kind: 'report', text: 'Context near the cap, asking the desk for a restart. Please restart t1', state: 'blocked' },
+    { ts: 110, from: 't2', kind: 'report', text: 'cannot go on: the credential is missing', state: 'blocked' },
+  )
+  h.files.set(`${L}/threads/t1/checkpoint.json`, JSON.stringify({ reason: 'checkpoint', ts: 90, sid: SID(1), tokens: 100_000, next: 'carry on', source: 'report', notes: false }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  expect(all).toContain('[restarting]')
+  expect(all).toContain('[blocked]')
+  expect(all.filter(t => /^t1 is blocked/.test(t))).toHaveLength(0) // no card for t1
+  expect(all.filter(t => /^t2 is blocked/.test(t))).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-t2' })).toBeTruthy() // blocked: Restart is the one button on the card
+  expect(await ui.find({ type: 'Button', key: 'view-t2' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy() // restarting: Open only
+  expect(await ui.find({ type: 'Button', key: 'restart-t1' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('1.0.30: a done thread is ONE row (title, chip, cost, Open | Resume, more); "review not green" is red only on a done thread, dim on a working one', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
+  thr(h, 't1', { sid: SID(1) })
+  inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Done. Branch: feat/synthetic-y, commit ${SHA.slice(0, 7)}.`, state: 'done' })
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 2.5 }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  const all = await texts(ui)
+  expect(all).toContain('t1 synthetic t1')
+  expect(all).toContain('[done]')
+  expect(all.some(t => /today \$2\.50/.test(t))).toBe(true)
+  expect(all.some(t => /^Done\. Branch/.test(t))).toBe(false) // the report line is not on the one-row form
+  for (const k of ['view-t1', 'resume-t1', 'more-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  for (const k of ['restart-t1', 'close-t1', 'start-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy()
+  await ui.press({ key: 'more-t1' })
+  for (const k of ['restart-t1', 'close-t1', 'start-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-t1', text: 'Restart from handover' })).toBeTruthy() // named by its effect
   await ui.unmount()
 })
 
@@ -256,7 +311,7 @@ test('a narrow body (24 columns) draws the same tree with the short forms: butto
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile']) {
     const ui = await $.ui.mount(withProps({ bodyColumns: 24, placement: 'inline' }, surface))
     expect(await texts(ui)).toContain(`t1 ${title}`)
-    expect(await ui.find({ type: 'Button', key: 'restart-t1' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy()
     expect(await ui.find({ type: 'Button', key: 'repair' })).toBeTruthy()
     const row = await ui.find({ type: 'Button', key: 'row-0' })
     expect(String(row?.text).length).toBeLessThan(40) // an inbox row is cut shorter
