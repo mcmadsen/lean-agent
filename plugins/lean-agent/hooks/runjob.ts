@@ -1,29 +1,15 @@
-// lean_run (execution model): a test / build command runs with its whole output in a file; the thread gets the exit code, the failing
-// test names and the last 40 lines, never the stream. Computed by script, no model reads the log.
+// lean_run (execution model): a test / build command runs with its whole output in a file; the thread gets the exit code, the runner's
+// totals and the failures (rundigest.ts), never the stream. Computed by script, no model reads the log.
 import { dirOf, leanDir, mkdirp } from './state'
 import type { Host } from './state'
 import { analyze } from './shell'
+import { digest } from './rundigest'
 
 export const RUN_TIMEOUT_MS = 600_000
-export type RunResult = { exit: number; failing: string[]; tail: string; file: string }
+export type RunResult = { exit: number; body: string; one: boolean; file: string } // body: rundigest.ts (1.0.27), one: a clean run, one line
 
-const FAIL = /^\s*(FAIL|✗|✖|not ok|FAILED|● )|\bfailed\b.*test|\btest.*\bfailed\b/i
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 const cut = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
-
-// pure: the failing test names (at most 20, unique, trimmed) and the last 40 lines of a log
-export function summarize(log: string): { failing: string[]; tail: string } {
-  const lines = log.split('\n')
-  const failing: string[] = []
-  for (const l of lines) {
-    if (!FAIL.test(l)) continue
-    const t = cut(l.trim(), 160)
-    if (!failing.includes(t)) failing.push(t)
-    if (failing.length >= 20) break
-  }
-  while (lines.length && !lines[lines.length - 1]!.trim()) lines.pop()
-  return { failing, tail: lines.slice(-40).map(l => cut(l, 300)).join('\n') }
-}
 
 export async function runSummary(h: Host, a: { command: string; cwd?: string; home: string }): Promise<RunResult> {
   const command = a.command.trim()
@@ -40,7 +26,7 @@ export async function runSummary(h: Host, a: { command: string; cwd?: string; ho
   } catch {
     log = r.stdout + r.stderr
   }
-  return { exit: r.exitCode, ...summarize(log), file }
+  return { exit: r.exitCode, ...digest(log, r.exitCode), file }
 }
 
 // ---- the read-only CI check: `lean_run {ci: {...}}` waits INSIDE the tool (a script polls, no model turn per check) -------------------------
@@ -224,5 +210,6 @@ function ciText(list: CiRun[], timedOut: boolean, wait: number, mins: number): O
 }
 
 export function runText(r: RunResult): string {
-  return [`exit ${r.exit}`, r.failing.length ? `failing:\n${r.failing.map(x => `  ${x}`).join('\n')}` : 'failing: none found', 'last 40 lines:', r.tail, `full log: ${r.file}`].join('\n')
+  if (r.one) return `exit ${r.exit} · ${r.body} · full log: ${r.file}`
+  return [`exit ${r.exit}`, ...(r.body ? [r.body] : []), `full log: ${r.file}`].join('\n')
 }

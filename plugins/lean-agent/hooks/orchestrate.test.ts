@@ -4,7 +4,8 @@ import { fakeHost } from './fake'
 import { decide } from './guard'
 import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, tried, triedWords } from './orchestrate'
 import { capTo } from './cap'
-import { RUN_TIMEOUT_MS, runSummary, runText, summarize } from './runjob'
+import { RUN_TIMEOUT_MS, runSummary, runText } from './runjob'
+import { digest } from './rundigest'
 import { preflightFor, preflightText } from './preflight'
 import { buildHandover, setPreflight } from './handover'
 import { bucketOf, contextStat, contextText } from './contextstat'
@@ -236,13 +237,11 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   expect(b.result.interrupted).toBe(false)
 })
 
-test('lean_run: summarize keeps failing names and the last 40 lines; runSummary runs the command with its output in a file', async () => {
+test('lean_run: an unknown runner keeps the last 15 lines; runSummary runs the command with its output in a file', async () => {
   const log = [...Array.from({ length: 100 }, (_, i) => `ok ${i}`), 'FAIL  a.test.ts > adds', '✗ b fails', 'FAIL  a.test.ts > adds', ...Array.from({ length: 50 }, (_, i) => `tail ${i}`)].join('\n')
-  const s = summarize(log)
-  expect(s.failing).toEqual(['FAIL  a.test.ts > adds', '✗ b fails'])
-  expect(s.tail.split('\n')).toHaveLength(40)
-  expect(s.tail).toContain('tail 49')
-  expect(summarize('all good\n').failing).toEqual([])
+  const s = digest(log, 1)
+  expect(s.body.split('\n')).toHaveLength(15)
+  expect(s.body).toContain('tail 49')
 
   const h = fakeHost(null)
   h.exec.handler = (argv: string[]) => {
@@ -258,7 +257,7 @@ test('lean_run: summarize keeps failing names and the last 40 lines; runSummary 
   expect(h.calls.at(-1)!.argv[2]).toContain("cd '/r/app' && ( npm test )")
   const t = runText(r)
   expect(t).toContain('exit 1')
-  expect(t).toContain('✗ b fails')
+  expect(t).toContain('tail 49')
   expect(t).toContain('full log:')
   expect(t).not.toContain('ok 0')
   await expect(runSummary(h.host, { command: 'git push origin main', home: '/h' })).rejects.toThrow('no push')
