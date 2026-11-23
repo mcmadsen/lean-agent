@@ -129,7 +129,7 @@ test('1.0.28: one result that jumps over the warn level inside a turn (two revie
   const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? ''
   expect(await ctx()).not.toContain('scratch/notes.md')
   answer = 'x'.repeat(400_000) // about 100k tokens in one result: 40k + 100k is over the warn level (100k) and 90% of the limit before the engine counts it
-  expect(await ctx()).toContain('write what you have learned so far to scratch/notes.md now')
+  expect(await ctx()).toContain('write what you learned to scratch/notes.md, then call lean_run checkpoint')
   answer = 'ok'
   tokens = 118_000 // the engine now holds it, over the 90% level too
   expect(await ctx()).not.toContain('scratch/notes.md') // the line was said once; both levels were part of it (one line when both are passed at once)
@@ -152,6 +152,6 @@ test('1.0.28: a jump nobody saw (the last call of a turn, the engine figure alon
   const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? ''
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 118_000 // from under the warn level to over 90% of the limit between two calls: both levels at once, one line
-  expect(await ctx()).toContain('context 118k of 120k: write what you have learned')
+  expect(await ctx()).toContain('ctx 118k of 120k: write what you learned')
   expect(await ctx()).not.toContain('scratch/notes.md')
 })
