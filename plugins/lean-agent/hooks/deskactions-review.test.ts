@@ -346,4 +346,65 @@ test('ado-pr-workitem-unlink: the own-PR default covers it only for the owned PR
   expect(s.sends()).toHaveLength(1)
 })
 
-// (more kinds below)
+// ---- 6 ado-pr-label --------------------------------------------------------------------------------------------------------------------
+test('ado-pr-label: add is a POST of the name, remove a DELETE of that label', () => {
+  const add = checkAction({ kind: 'ado-pr-label', params: { ...BASE, op: 'add', label: 'needs rebase' } })
+  expect(add.ok).toBe(true)
+  if (add.ok) {
+    expect([add.plan.method, add.plan.url, add.plan.contentType, JSON.parse(add.plan.body)]).toEqual(['POST', `${PRS}/labels?api-version=7.1`, 'application/json', { name: 'needs rebase' }])
+    expect(add.plan.text).toBe('add label "needs rebase" to PR 4321 of shop-api')
+  }
+  const rm = checkAction({ kind: 'ado-pr-label', params: { ...BASE, op: 'Remove', label: 'needs rebase' } })
+  expect(rm.ok).toBe(true)
+  if (rm.ok) expect([rm.plan.method, rm.plan.url, rm.plan.body]).toEqual(['DELETE', `${PRS}/labels/needs%20rebase?api-version=7.1`, ''])
+  for (const params of [{ op: 'toggle', label: 'x' }, { op: 'add' }, { op: 'add', label: '' }, { op: 'add', label: 'x'.repeat(41) }, { op: 'add', label: 'a/b' }, { op: 'remove', label: '..' }, { op: 'add', label: 'a\u0007b' }, { op: 'add', label: 5 }, { label: 'x' }, { op: 'add', label: 'x', color: 'red' }])
+    expect([JSON.stringify(params), checkAction({ kind: 'ado-pr-label', params: { ...BASE, ...params } }).ok]).toEqual([JSON.stringify(params), false])
+})
+
+test('ado-pr-label: sent after Approve (POST with the name, DELETE with no body), token on stdin', { timeoutMs: 20_000 }, async () => {
+  const s = setup({ owns: false })
+  const add = await ask(s, 'ado-pr-label', { ...BASE, op: 'add', label: 'ready' })
+  const rm = await ask(s, 'ado-pr-label', { ...BASE, op: 'remove', label: 'ready' })
+  expect((await approveAction(s.host, add.id, s.tell)).ok).toBe(false)
+  expect(s.sends()).toHaveLength(0)
+  expect((await approve(s, add)).ok).toBe(true)
+  expect((await approve(s, rm)).ok).toBe(true)
+  const [post, del] = s.sends()
+  expect(post!.argv).toContain('POST')
+  expect(post!.argv[post!.argv.length - 1]).toBe(`${PRS}/labels?api-version=7.1`)
+  expect(post!.stdin).toContain('data-binary = "{\\"name\\":\\"ready\\"}"')
+  expect(del!.argv).toContain('DELETE')
+  expect(del!.argv[del!.argv.length - 1]).toBe(`${PRS}/labels/ready?api-version=7.1`)
+  expect(del!.stdin).not.toContain('data-binary')
+  noToken(s)
+})
+
+test('ado-pr-label: the own-PR default covers a label on the owned PR, not on another PR and not for a thread that owns none', { timeoutMs: 20_000 }, async () => {
+  const s = setup()
+  const r = await own(s, 'ado-pr-label', { ...BASE, op: 'add', label: 'ready' })
+  expect(r?.sent).toBe(true)
+  expect(r?.line).toContain('add label "ready" to PR 4321 of shop-api')
+  expect(await own(s, 'ado-pr-label', { ...BASE, pr: 9999, op: 'add', label: 'ready' })).toBeNull()
+  expect(s.sends()).toHaveLength(1)
+  const none = setup({ owns: false })
+  expect(await own(none, 'ado-pr-label', { ...BASE, op: 'remove', label: 'ready' })).toBeNull()
+  expect(none.sends()).toHaveLength(0)
+})
+
+// ---- the table as a whole ---------------------------------------------------------------------------------------------------------------
+test('the six review writes: all asked (approval bound to the request id), batched like any kind, and a batch with an approve vote is never the own-PR default', { timeoutMs: 20_000 }, async () => {
+  for (const kind of ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue', 'ado-pr-workitem-unlink', 'ado-pr-label']) expect(Object.keys(ACTION_KINDS)).toContain(kind)
+  const items = [
+    { kind: 'ado-pr-label', params: { ...BASE, op: 'add', label: 'ready' } },
+    { kind: 'ado-pr-vote', params: { ...BASE, vote: 'approve' } },
+  ]
+  const b = checkAction({ kind: 'batch', items })
+  expect(b.ok).toBe(true)
+  const s = setup()
+  const made = await addActionRequest(s.host, 't5', { kind: 'batch', items, why: 'the review round' })
+  expect(made.ok, made.text).toBe(true)
+  expect(await runOwnPr(s.host, made.request!.id)).toBeNull() // one item the default does not cover: the user is asked about the whole batch
+  expect(s.sends()).toHaveLength(0)
+  const mixed = checkAction({ kind: 'batch', items: [items[0], { kind: 'ado-pr-label', params: { ...BASE, pr: 5, op: 'add', label: 'x' } }] })
+  expect(mixed.ok).toBe(false) // one batch is for ONE PR
+})

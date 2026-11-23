@@ -40,7 +40,7 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -78,6 +78,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-reviewer': 'org, project, repo, pr, op (add | remove), reviewer (the id, or the unique email or display name the API takes), required? (true | false, add only)',
   'ado-pr-policy-queue': 'org, project, repo, pr, evaluationId (the GUID of the policy evaluation to queue again)',
   'ado-pr-workitem-unlink': 'org, project, repo, pr, workitem (id): removes the link of the PR from that work item',
+  'ado-pr-label': 'org, project, repo, pr, op (add | remove), label (text of at most 40 characters)',
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -96,6 +97,7 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-reviewer': ['org', 'project', 'repo', 'pr', 'op', 'reviewer', 'required'],
   'ado-pr-policy-queue': ['org', 'project', 'repo', 'pr', 'evaluationId'],
   'ado-pr-workitem-unlink': ['org', 'project', 'repo', 'pr', 'workitem', 'workItem'],
+  'ado-pr-label': ['org', 'project', 'repo', 'pr', 'op', 'label'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
@@ -146,7 +148,7 @@ const linkPlan = (base: string, org: string, project: string, repo: string, pr: 
 export const whereOf = (a: { file: string; line: number; endLine?: number; side: 'right' | 'left' }): string => `${a.file}:${a.line}${a.endLine !== undefined && a.endLine !== a.line ? `-${a.endLine}` : ''}${a.side === 'left' ? ' (removed line)' : ''}`
 
 // the review writes on ONE Azure DevOps PR (vote ...): repo + pr are common; each kind adds its own params. `bad` is the caller's refusal.
-const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue', 'ado-pr-workitem-unlink']
+const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue', 'ado-pr-workitem-unlink', 'ado-pr-label']
 // what a thread never does to a PR (the user does it by hand): completing, auto-complete, squash / merge options, bypassing policy, deleting the source branch
 const BY_HAND = /complet|squash|merge|bypass|deletesource|sourcebranch/
 const byHand = (what: string): Checked => refuse(`action ado-pr-update: ${what} is not something a thread does: the user does this by hand (completing the PR, auto-complete, squash / merge options, bypassing policy, deleting the source branch). A thread may change the title, the description, draft, and set the status to active or abandoned`)
@@ -213,6 +215,15 @@ function checkReview(k: ActionKind, p: Params, az: { org: string; project: strin
     const url = `vstfs:///Git/PullRequestId/${PH_PROJECT}%2F${PH_REPO}%2F${pr}`
     const ops = [{ op: 'test', path: `/relations/${PH_INDEX}/url`, value: url }, { op: 'remove', path: `/relations/${PH_INDEX}` }]
     return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${az.base}/_apis/wit/workitems/${wi}?api-version=7.1`, contentType: 'application/json-patch+json', body: JSON.stringify(ops), headline: `unlink PR ${pr} from work item ${wi} (${where})`, text: `remove the link of PR ${pr} of ${repo} from work item ${wi}`, link: { org: az.org, project: az.project, repo, pr, unlink: wi } } }
+  }
+  if (k === 'ado-pr-label') {
+    const op = typeof p.op === 'string' ? p.op.trim().toLowerCase() : ''
+    const label = typeof p.label === 'string' ? p.label.trim() : ''
+    if ((op !== 'add' && op !== 'remove') || !label || label.length > 40 || CONTROL.test(label) || /[/\\]/.test(label) || /^\.+$/.test(label)) return bad('op must be add or remove and label text of at most 40 characters (no / or \\)')
+    Object.assign(params, { op, label })
+    const labels = `${prs}/labels`
+    if (op === 'remove') return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'DELETE', url: `${labels}/${enc(label)}?api-version=7.1`, contentType: '', body: '', headline: `remove label "${label}" from PR ${pr} (${where})`, text: `remove label "${label}" from PR ${pr} of ${repo}` } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'POST', url: `${labels}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ name: label }), headline: `add label "${label}" to PR ${pr} (${where})`, text: `add label "${label}" to PR ${pr} of ${repo}` } }
   }
   return bad('not a review write')
 }
