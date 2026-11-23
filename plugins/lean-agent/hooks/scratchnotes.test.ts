@@ -28,7 +28,11 @@ test('the warn line: at the warn level ONE line per session, with the numbers an
   warnReset()
   expect(takeWarn('s1', 100_000, LIM)).toBeNull() // at the level is not over it
   expect(takeWarn('s1', 101_000, LIM)).toBe('context 101k of 120k: write what you have learned so far to scratch/notes.md now (one short section per source: what it says, what you still need); a restart resumes from it and the scratch files replace re-reading the sources')
-  expect(takeWarn('s1', 110_000, LIM)).toBeNull()
+  expect(takeWarn('s1', 107_000, LIM)).toBeNull() // under 90% of the limit (108k)
+  expect(takeWarn('s1', 110_000, LIM)).toBe(warnLine(110_000, 120_000)) // 1.0.27: and once more at 90%
+  expect(takeWarn('s1', 115_000, LIM)).toBeNull()
+  expect(takeWarn('s4', 112_000, LIM)).toBe(warnLine(112_000, 120_000)) // both levels passed at once: one line
+  expect(takeWarn('s4', 113_000, LIM)).toBeNull()
   expect(takeWarn('s2', 99_000, LIM)).toBeNull()
   expect(takeWarn('s2', 105_000, LIM)).toBe(warnLine(105_000, 120_000))
   expect(takeWarn('', 110_000, LIM)).toBeNull()
@@ -100,5 +104,8 @@ test('through the engine: a tool result of a thread at the warn level carries th
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 104_000
   expect(await ctx()).toContain('context 104k of 120k: write what you have learned so far to scratch/notes.md now')
-  expect(await ctx()).not.toContain('scratch/notes.md') // once per session
+  expect(await ctx()).not.toContain('scratch/notes.md') // once per session at the warn level
+  tokens = 110_000
+  expect(await ctx()).toContain('context 110k of 120k: write what you have learned') // and again at 90% of the limit
+  expect(await ctx()).not.toContain('scratch/notes.md')
 })

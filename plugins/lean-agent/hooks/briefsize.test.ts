@@ -5,7 +5,7 @@ import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
 import { resetBase } from './base'
-import { DEFAULT_BASE, briefLint, fanWords, freeOf, freeText, lintLine, lintRoots, pathWords, sourceBytes } from './briefsize'
+import { BRIEF_SOFT, DEFAULT_BASE, briefHint, briefHintText, briefLint, fanWords, freeOf, freeText, lintLine, lintRoots, pathWords, sourceBytes } from './briefsize'
 
 const L = '/h/.lean-agent'
 const APP = '/w/app'
@@ -95,4 +95,18 @@ test('lean_thread send: an oversized brief gets the line in the reply and in the
   const r = await leanThread(h.host, '/p', { action: 'send', tN: 't1', text: 'read docs/history.md and write a plan' })
   expect(r.text).toContain('this task reads about 60k tokens of sources into a thread with 92k free: split it')
   expect(h.files.get(`${L}/threads/t1/inbox.jsonl`)).toContain('a READING thread that writes a summary file')
+})
+
+test('1.0.27: a worker brief over 1500 characters while the thread has scratch / notes files gets one soft hint naming the file; short briefs and threads without files get none', async () => {
+  const h = fakeHost(null)
+  const T = `${L}/threads/t1`
+  const long = 'restate the context '.repeat(100) // 2000 characters
+  expect(await briefHint(h.host, long, T)).toBeNull() // no files yet
+  h.files.set(`${T}/notes.md`, '# notes')
+  expect(await briefHint(h.host, long, T)).toBe(briefHintText(`${T}/notes.md`, long.length))
+  h.files.set(`${T}/scratch/notes.md`, '## living doc\nsays: x')
+  const hint = await briefHint(h.host, long, T)
+  expect(hint).toContain(`point at ${T}/scratch/notes.md instead of restating it (workers read files cheaply)`)
+  expect(await briefHint(h.host, 'x'.repeat(BRIEF_SOFT), T)).toBeNull() // at the limit is not over it
+  expect(await briefHint(h.host, 'short brief', T)).toBeNull()
 })

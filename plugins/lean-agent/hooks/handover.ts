@@ -267,7 +267,7 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const big = [...(ho.parts ?? [])].filter(p => p.body).sort((a, b) => tok(partText(b)) - tok(partText(a)))[0]
   const over = all > budget ? `over budget by ${all - budget} tokens: the largest section is ${big?.name ?? '?'} (~${big ? tok(partText(big)) : 0} tokens${big?.mode === 'fixed' ? ', a fixed line: never cut' : ''}); the desk's instructions and the fixed lines are never cut` : ''
   return [
-    `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}, reports ${sum('reports')}`,
+    `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}`,
     `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens, the whole prompt including reports)${over ? ` - ${over}` : ' - within budget'}`,
     'sections:',
     ...rows,

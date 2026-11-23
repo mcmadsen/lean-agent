@@ -54,12 +54,22 @@ export async function scratchNotes(h: Host, dir: string): Promise<string> {
 }
 
 // once per session: the line when the size is at or over the warn level (and the thread is not stopped: the stop has its own text)
+// (1.0.27: and once more at 90% of the limit; the register.tsx caller appends what fills the context, contextstat.ts breakdownText)
 const warned = new Set<string>()
-export const warnReset = () => warned.clear()
-export const warnedAlready = (sid: string): boolean => warned.has(sid)
+const warnedHigh = new Set<string>()
+export const HIGH_SHARE = 0.9
+export const warnReset = () => {
+  warned.clear()
+  warnedHigh.clear()
+}
+export const warnedAlready = (sid: string): boolean => warned.has(sid) && warnedHigh.has(sid)
 export function takeWarn(sid: string, tokens: number | null | undefined, l: { limit: number; warn: number }): string | null {
-  if (!sid || typeof tokens !== 'number' || tokens <= l.warn || warned.has(sid)) return null
+  if (!sid || typeof tokens !== 'number' || tokens <= l.warn) return null
+  const high = tokens > l.limit * HIGH_SHARE
+  if (warned.has(sid) && (!high || warnedHigh.has(sid))) return null // (one line when both levels are passed at once)
   if (warned.size >= 200) warned.clear()
+  if (warnedHigh.size >= 200) warnedHigh.clear()
   warned.add(sid)
+  if (high) warnedHigh.add(sid)
   return warnLine(tokens, l.limit)
 }

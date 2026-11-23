@@ -4,6 +4,7 @@
 import { readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { deskFile } from './delivery'
+import { readContext, threadLimits } from './threadcontext'
 
 export type Top = { tool: string; tokens: number; at: number }
 export type ContextStat = {
@@ -103,6 +104,88 @@ export function sourcesText(s: ContextStat): string {
   const total = Object.values(s.byTool).reduce((n, v) => n + v.tokens, 0)
   const top = topSources(s)
   return ['top sources:', ...(top.length ? top.map((t, i) => `  ${i + 1}. ${t.tool}: ${k(t.tokens)} in ${t.calls} result(s)${total ? ` (${Math.round((100 * t.tokens) / total)}%)` : ''} - fix: ${t.fix}`) : ['  none'])].join('\n')
+}
+
+// ---- what fills a THREAD's context, in one line (1.0.27) ------------------------------------------------------------------------------
+// The warn line (scratchnotes.ts) and `lean_doctor context tN` carry it; a thread can ask for it with `lean_run {context: true}`. By script from
+// the thread's own transcript, estimated as characters / 4; the kinds and sizes of the biggest results, never their text.
+export type ThreadBreakdown = { results: Record<string, number>; resultsTotal: number; inputs: Record<string, number>; inputsTotal: number; briefs: number; workers: number; first: number; top: { kind: string; tokens: number }[] }
+export const toolLabel = (t: string): string => (t.startsWith('mcp__') ? (t.split('__').pop() ?? t) : t)
+
+export function threadBreakdown(records: any[]): ThreadBreakdown {
+  const out: ThreadBreakdown = { results: {}, resultsTotal: 0, inputs: {}, inputsTotal: 0, briefs: 0, workers: 0, first: 0, top: [] }
+  const names = new Map<string, string>()
+  let seenAssistant = false
+  for (const r of records) {
+    const m = r?.message
+    if (!m || typeof m !== 'object' || r.isSidechain === true) continue
+    if (r.type === 'assistant') seenAssistant = true
+    const parts = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : []
+    for (const b of parts) {
+      if (!b || typeof b !== 'object') continue
+      if (b.type === 'tool_use' && typeof b.id === 'string') {
+        const tool = toolLabel(String(b.name ?? '?'))
+        names.set(b.id, tool)
+        const inp = b.input && typeof b.input === 'object' ? (b.input as any) : {}
+        const n = tokensOf(JSON.stringify(inp).length)
+        out.inputs[tool] = (out.inputs[tool] ?? 0) + n
+        out.inputsTotal += n
+        if (tool === 'Agent' || tool === 'Task') out.briefs += tokensOf(typeof inp.prompt === 'string' ? inp.prompt.length : 0)
+      } else if (b.type === 'tool_result') {
+        const tool = names.get(String(b.tool_use_id)) ?? '?'
+        const n = tokensOf(textLen(b.content))
+        if (tool === 'Agent' || tool === 'Task') out.workers += n
+        else {
+          out.results[tool] = (out.results[tool] ?? 0) + n
+          out.resultsTotal += n
+          out.top.push({ kind: tool, tokens: n })
+        }
+      } else if (b.type === 'text' && r.type === 'user' && !seenAssistant && typeof b.text === 'string') out.first += tokensOf(b.text.length) // the restart prompt
+    }
+  }
+  out.top.sort((a, b) => b.tokens - a.tokens)
+  out.top = out.top.slice(0, 2)
+  return out
+}
+
+const kk = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(n))
+// ONE fix, for the largest source
+export function largestFix(b: ThreadBreakdown): string {
+  const cands: [string, number][] = [...Object.entries(b.results), ['briefs', b.briefs], ['workers', b.workers], ['first', b.first]]
+  const top = cands.sort((a, c) => c[1] - a[1])[0]
+  if (!top || top[1] <= 0) return ''
+  const w = top[0]
+  const fix = w === 'Bash' || w === 'Read' ? 'read with --stat / a path / offset+limit, or have a reader summarise to scratch'
+    : w === 'lean_run' ? 'run targeted tests (the full suite once per step)'
+    : w === 'briefs' ? 'point at a notes file instead of restating it'
+    : w === 'workers' ? 'ask workers for the job schema only (path:line: fact)'
+    : w === 'first' ? 'the restart prompt is the base: keep brief.md short and put the rest in notes files'
+    : fixFor(w)
+  return `fix for the largest (${w === 'briefs' ? 'Agent briefs' : w === 'workers' ? 'worker answers' : w === 'first' ? 'first prompt' : w}): ${fix}`
+}
+export function breakdownText(tokens: number | null | undefined, limit: number, b: ThreadBreakdown): string {
+  const k0 = (n: number) => `${Math.round(n / 1000)}k`
+  const topTools = Object.entries(b.results).sort((a, c) => c[1] - a[1]).slice(0, 3)
+  const topIn = Object.entries(b.inputs).sort((a, c) => c[1] - a[1])[0]
+  const parts = [
+    b.resultsTotal > 0 && `tool results ${kk(b.resultsTotal)} (${topTools.map(([n, v]) => `${n} ${kk(v)}`).join(', ')})`,
+    b.inputsTotal > 0 && `your own tool inputs ${kk(b.inputsTotal)}${b.briefs > 0 ? ` (Agent briefs ${kk(b.briefs)})` : topIn ? ` (${topIn[0]} ${kk(topIn[1])})` : ''}`,
+    b.workers > 0 && `worker answers ${kk(b.workers)}`,
+    b.first > 0 && `first prompt ${kk(b.first)}`,
+  ].filter(Boolean)
+  if (!parts.length) return ''
+  const biggest = b.top.length ? `; biggest single results: ${b.top.map(t => `${t.kind} ${kk(t.tokens)}`).join(', ')} (never their text)` : ''
+  const fix = largestFix(b)
+  return `ctx ${typeof tokens === 'number' ? k0(tokens) : '?'} of ${k0(limit)}: ${parts.join(', ')}${biggest}${fix ? `. ${fix}` : ''}`
+}
+// for a session id: the line above from its transcript; '' when there is none (never throws)
+export async function sessionBreakdown(h: Host, home: string, sid: string, tokens: number | null | undefined, limit: number): Promise<string> {
+  try {
+    const file = sid ? await findTranscript(h, home, sid) : null
+    return file ? breakdownText(tokens, limit, threadBreakdown(await readRecords(h, file))) : ''
+  } catch {
+    return ''
+  }
 }
 
 // the transcript: <home>/.claude/projects/<folder>/<session>.jsonl, the named session or the newest one
@@ -247,8 +330,11 @@ export async function contextReport(h: Host, home: string, session?: string): Pr
     if (thread && !session) return `context: ${thread} has no session yet`
     const file = await findTranscript(h, home, session)
     if (!file) return `context: no session transcript found under ${home}/.claude/projects${session ? ` for ${session}` : ''}`
-    const stat = contextStat(await readRecords(h, file))
-    return [contextText(stat, `${thread ? `${thread} ` : ''}${file.split('/').pop()} `), ...(thread ? [sourcesText(stat)] : [])].join('\n')
+    const recs = await readRecords(h, file)
+    const stat = contextStat(recs)
+    // a thread: the same one-line breakdown its warn line carries (1.0.27)
+    const line = thread ? breakdownText((await readContext(h, home, { id: thread, sid: session }))?.tokens, (await threadLimits(h)).limit, threadBreakdown(recs)) : ''
+    return [contextText(stat, `${thread ? `${thread} ` : ''}${file.split('/').pop()} `), ...(thread ? [sourcesText(stat)] : []), ...(line ? [line] : [])].join('\n')
   } catch (err) {
     return `context failed: ${String((err as Error)?.message ?? err)}`
   }

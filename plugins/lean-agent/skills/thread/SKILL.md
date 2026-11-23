@@ -40,4 +40,5 @@ Rules:
 - Forge reads: a thread reads PR threads / builds / work items with its run tool (get, ci) or the allowed az / gh read commands; never a token in a shell command.
 - Done ends the session (the tick stops it, "tN finished"). Close a done thread when the user needs nothing more; never ask a thread to close itself.
 - `stuck` or "queued, session idle" means nobody read the message: `wake` (replaces a stuck session whose turn ended), or `restart` (the only way to replace a stuck session that still works: its step is lost, say so first). Never say "running" when the list says idle or stuck.
+- Context diet (a thread's guide says it; brief it the same): run the full test suite once per step, targeted runs in between; read diffs with --stat and one path; never read a notes file in full: headings first.
 - Skills a brief can name: `learn <project>`, `review-learn`, `compare`, `rules-pr` (branch `chore/claude-rules-<date>`, reviewed, then the usual approve-push with `pr.draft: true`; after the merge `send` the thread to run its last step).

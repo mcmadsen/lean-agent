@@ -60,7 +60,8 @@ import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRe
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
 import { runGet } from './forgeget'
-import { contextReport } from './contextstat'
+import { contextReport, sessionBreakdown } from './contextstat'
+import { briefHint } from './briefsize'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
@@ -180,7 +181,7 @@ const DOCTOR = 'lean_doctor'
 const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
-const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the runner's totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -317,7 +318,12 @@ async function warnNote($: any, host: Host): Promise<string | null> {
     const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
     if (!sid || warnedAlready(sid)) return null
     const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
-    return takeWarn(sid, Number.isFinite(u) ? u : lastTokens, await threadLimits(host))
+    const tokens = Number.isFinite(u) ? u : lastTokens
+    const limits = await threadLimits(host)
+    const line = takeWarn(sid, tokens, limits) // at the warn level and again at 90% of the limit
+    if (!line) return null
+    const what = await sessionBreakdown(host, await homeDir(host), sid, tokens, limits.limit) // what fills it, by script from the transcript (1.0.27)
+    return what ? `${line}. What fills it: ${what}` : line
   } catch {
     return null
   }
@@ -1256,6 +1262,13 @@ export const register: Register = on => {
     if (halted) return { result: halted.deny, isError: true } as any
     if (role.kind !== 'thread') await redetect($, undefined, true)
     if (role.kind !== 'thread') return { result: await roleReport(hostOf($), { tool: RUN, need: 'thread', role, startDir, sid: lastSid }), isError: true } as any
+    if (e.context === true && !e.agentId) {
+      // what fills this thread's context (the same line as the warn line, contextstat.ts), by script from its own transcript
+      const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
+      const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+      const text = await sessionBreakdown(hostOf($), await homeDir(hostOf($)), sid, Number.isFinite(u) ? u : lastTokens, (await threadLimits(hostOf($))).limit)
+      return { result: text || 'no transcript found for this session yet' } as any
+    }
     if (e.ci !== undefined) {
       // the read-only CI check (a thread and its workers): argv-only az / gh reads, waits inside the tool
       try {
@@ -1387,6 +1400,11 @@ export const register: Register = on => {
     }
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
+    // a worker brief over 1500 characters while the thread has notes / scratch files: one soft hint, point at the file (briefsize.ts)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && octx?.threadDir && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {
+      const hint = await briefHint(host, String(e.prompt ?? ''), octx.threadDir).catch(() => null)
+      if (hint) r = { ...r, context: [...(r?.context ?? []), hint] }
+    }
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
     if (octx && r?.deny === undefined && !e.agentId && !launch?.async) { // (an async launch has no report to cut yet)
       const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))

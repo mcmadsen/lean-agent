@@ -173,7 +173,7 @@ test('1.0.27: `lean_doctor handover` never hides an overrun: "over budget by N t
 test('lean_doctor handover: sections with their tokens and what is missing', async () => {
   const h = setup()
   const text = await handoverReport(h.host, '/h', 't1')
-  expect(text).toMatch(/^handover for t1: about \d+ tokens: brief \d+, corrections \d+, notes \d+, snapshot \d+, preflight \d+, reports \d+\n/)
+  expect(text).toMatch(/^handover for t1: about \d+ tokens: brief \d+, corrections \d+, notes \d+, snapshot \d+, preflight \d+\n/)
   expect(text).toContain('of a budget of 6000')
   expect(text).toContain('within budget')
   expect(text).toMatch(/brief\s+~\s*\d+ tokens/)
