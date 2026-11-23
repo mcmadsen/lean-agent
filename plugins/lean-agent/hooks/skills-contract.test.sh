@@ -149,6 +149,10 @@ grep -q 'decide yourself' "$root/templates/thread.md" || fail "thread.md must sa
 # approve-action; the five kinds are the same list everywhere (the table in hooks/deskactions.ts)
 grep -qF 'Use `action` instead' "$root/templates/thread.md" || fail "thread.md must tell a thread to use action instead of trying the write itself"
 grep -qF 'never try it with `az`, `gh api`, `curl`' "$root/templates/thread.md" || fail "thread.md must forbid trying the remote write with az / gh / curl"
+# 1.0.29: review comments are inline, on changed lines only (the mod checks the diff), several as one batch, no disclaimers: the same line in both guides
+review_line='review comments: ado-pr-comment / gh-pr-review-comment with file + line (only on lines the PR adds or changes: the mod checks), several as one batch; one issue per comment, no coverage disclaimers'
+grep -qiF "$review_line" "$root/templates/thread.md" || fail "thread.md must carry the review-comments line (inline on changed lines, one batch, one issue per comment)"
+grep -qiF "$review_line" "$here/thread/SKILL.md" || fail "the thread skill must carry the review-comments line (inline on changed lines, one batch, one issue per comment)"
 grep -qF 'ask the user with AskUserQuestion' "$root/templates/front-desk.md" || grep -qF 'Ask the user with AskUserQuestion' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk asks the user with AskUserQuestion for an action request"
 grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-desk.md" || fail "front-desk.md must name the three options"
 grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
