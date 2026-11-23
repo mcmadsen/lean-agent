@@ -24,14 +24,15 @@ import { listProjects } from './projects'
 import { claimAndSend, exclusive, logHistory, revokeGrant, rows, sound, standingView, targetOf, threadOk } from './deskactions'
 import type { ActionKind, Params, Plan } from './deskactions'
 import { recentPrompts } from './humanprompts'
-import { instructionIn, revokeIn } from './writeinstr'
+import { createIn, instructionIn, revokeIn } from './writeinstr'
 
 export const WRITES_TTL_MS = 24 * 60 * 60 * 1000
 export const WRITES_CAP = 40
-export const PR_KINDS = ['reply', 'status', 'comment']
+export const PR_KINDS = ['reply', 'status', 'comment', 'link']
 export const WI_KINDS = ['comment', 'update']
+export const CREATE_KINDS = ['create'] // a NEW work item has no id: the grant's target is `{workitem: 'new'}` and rests on the user's words asking for it
 // the table: which request kind a grant kind covers (a batch is never one kind: every item is looked at)
-const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'gh-pr-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
+const GRANT_KIND: Partial<Record<ActionKind, string>> = { 'ado-pr-reply': 'reply', 'ado-pr-thread-status': 'status', 'ado-pr-comment': 'comment', 'ado-workitem-comment': 'comment', 'ado-workitem-update': 'update', 'ado-workitem-create': 'create', 'ado-pr-workitem-link': 'link', 'gh-pr-comment': 'comment', 'gh-pr-thread-resolve': 'status' }
 
 type WGrant = { id: string; thread: string; scope: string; kinds: string[]; quote: string; qts: number; cap: number; used: number; ts: number; exp: number; sig: string }
 type WSent = { ts: number; thread: string; text: string; grant?: string }
@@ -66,7 +67,7 @@ async function resign(h: Host, g: Omit<WGrant, 'sig'>): Promise<WGrant | null> {
 
 // ---- the target the user named ---------------------------------------------------------------------------------------------------------------
 export type TargetIn = { pr?: unknown; workitem?: unknown }
-type Target = { scope: string; type: 'pr' | 'workitem'; n: number; url?: boolean }
+type Target = { scope: string; type: 'pr' | 'workitem'; n: number; url?: boolean; create?: boolean }
 const num = (v: unknown): number | null => {
   const n = typeof v === 'string' && /^\d{1,9}$/.test(v.trim()) ? Number(v.trim()) : v
   return typeof n === 'number' && Number.isInteger(n) && n > 0 && n < 1e9 ? n : null
@@ -114,6 +115,12 @@ export async function resolveTarget(h: Host, thread: string, t: unknown): Promis
   if (!x || keys.length !== 1 || (keys[0] !== 'pr' && keys[0] !== 'workitem')) return { ok: false, text: 'allow-writes needs target: {pr: <number or URL>} or {workitem: <id>} (exactly one)' }
   const type = keys[0] as 'pr' | 'workitem'
   const raw = x[type]
+  if (type === 'workitem' && typeof raw === 'string' && raw.trim().toLowerCase() === 'new') {
+    const host = await remoteOf(h, thread)
+    if (typeof host === 'string') return { ok: false, text: host }
+    if (host.kind !== 'azure') return { ok: false, text: `a work item can only be created on an Azure DevOps project (${thread}'s remote is GitHub)` }
+    return { ok: true, target: { scope: `Azure DevOps work item ${host.org}/${host.project}#new`, type, n: 0, create: true }, viaRemote: true }
+  }
   if (typeof raw === 'string' && /^https?:\/\//i.test(raw.trim())) {
     const u = scopeOfUrl(raw)
     if (!u || u.type !== type) return { ok: false, text: `${raw.slice(0, 100)} is not the URL of a ${type === 'pr' ? 'GitHub or Azure DevOps PR' : 'Azure DevOps work item'}` }
@@ -163,7 +170,7 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   const res = await resolveTarget(h, thread, target)
   if (!res.ok) return { ok: false, text: res.text }
   const { target: tg } = res
-  const allowed = tg.type === 'pr' ? PR_KINDS : WI_KINDS
+  const allowed = tg.create ? CREATE_KINDS : tg.type === 'pr' ? PR_KINDS : WI_KINDS
   let want = allowed
   if (kinds !== undefined) {
     const k = Array.isArray(kinds) ? kinds.map(x => (typeof x === 'string' ? x.trim().toLowerCase() : '')) : []
@@ -174,7 +181,7 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
   const label = tg.scope.replace(/^(Azure DevOps|GitHub) /, '')
   const remoteScope = res.viaRemote ? tg.scope : await remoteScopeOf(h, thread, tg)
   const prompts = await recentPrompts(h)
-  const hit = [...prompts].reverse().find(p => namesTarget(p.text, tg, remoteScope) && instructionIn(p.text))
+  const hit = [...prompts].reverse().find(p => (tg.create ? createIn(p.text) : namesTarget(p.text, tg, remoteScope) && instructionIn(p.text)))
   if (!hit) return { ok: false, text: `no written instruction from the user covers ${label}: ask with AskUserQuestion (the user's own typed words of the last 24 h must name the PR or work item and ask for the work, like "fix the comments on PR 42"), or ask the user to type /lean-agent:allow ${thread} <PR or work item>. Nothing was created` }
   const cap = await capOf(h)
   return exclusive(async () => {

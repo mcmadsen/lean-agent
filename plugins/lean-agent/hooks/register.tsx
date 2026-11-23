@@ -196,7 +196,7 @@ const SCHEMA = {
     file: { type: 'string', description: 'deliver: absolute path of a file in the thread\'s scratch folder, a worktree or the desk reports folder' },
     to: { type: 'string', description: 'deliver: Downloads | Desktop | Documents | a folder under the user\'s home (the mod copies only on the user\'s recorded words, else it returns the question to ask)' },
     name: { type: 'string', description: 'deliver: optional file name (never overwrites)' },
-    kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment; work item: comment, update)' },
+    kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment, link; work item: comment, update; {workitem: "new"}: create)' },
     section: { type: 'string', description: 'report tN: one section of its last report (a heading or part of one), instead of the digest' },
     full: { type: 'boolean', description: 'report tN: the whole last report (reports reach you as a short digest)' },
     verbose: { type: 'boolean', description: 'list: the long form (default: one short line per thread)' },

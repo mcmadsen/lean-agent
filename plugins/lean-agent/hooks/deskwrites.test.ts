@@ -59,7 +59,7 @@ test('a prompt that names the PR and asks to fix its comments makes a signed gra
   const o = await grantOn(s)
   expect(o.text).toContain('Revoke')
   const [g] = (await writesView(s.host)).grants
-  expect(g).toMatchObject({ thread: 't5', scope: SCOPE, kinds: ['reply', 'status', 'comment'], quote: 'please fix the comments on PR 42', used: 0, cap: 40 })
+  expect(g).toMatchObject({ thread: 't5', scope: SCOPE, kinds: ['reply', 'status', 'comment', 'link'], quote: 'please fix the comments on PR 42', used: 0, cap: 40 })
   expect(g!.exp - (await s.host.clock.now())).toBe(24 * HOUR)
   expect(history(s)).toContain('"kind":"writes-granted"')
   expect(await writesListText(s.host)).toContain('do not ask the user again')

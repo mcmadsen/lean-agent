@@ -37,6 +37,16 @@ export function instructionIn(text: string): string | null {
   return null
 }
 
+// the user asks for a NEW work item ("create a bug for the flaky test", "open a task for it"): the words a work item CREATE rests on (no id exists to name)
+export const CREATE_VERBS = ['create', 'creating', 'open', 'file', 'raise', 'add', 'make', 'log', 'write up']
+export const CREATE_OBJECTS = ['work item', 'workitem', 'work items', 'ticket', 'bug', 'task', 'user story', 'story', 'issue']
+const CREATE = new RegExp(`(?<![\\w-])(${alt(CREATE_VERBS)})(?![\\w-])[^.!?\\n]{0,${WORK_GAP}}?(?<![\\w-])(${alt(CREATE_OBJECTS)})(?![\\w-])`, 'gi')
+export function createIn(text: string): string | null {
+  CREATE.lastIndex = 0
+  for (let m = CREATE.exec(text); m; m = CREATE.exec(text)) if (!negated(text, m.index)) return m[0]
+  return null
+}
+
 export function revokeIn(text: string): boolean {
   const low = text.trim().toLowerCase()
   if (REVOKE_COMMANDS.some(c => low === c || low.startsWith(`${c} `))) return true

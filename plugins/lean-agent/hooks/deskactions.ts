@@ -34,8 +34,12 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'gh-pr-comment' | 'gh-pr-thread-resolve' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-thread-resolve' | 'batch'
 export const BATCH_MAX = 10
+export const WI_TYPES = ['Bug', 'Task', 'User Story', 'Issue']
+export const PH_PROJECT = '<project id>' // placeholders in a PR link's body: the mod reads the two ids by a GET right before it sends (the user sees the placeholders)
+export const PH_REPO = '<repository id>'
+export const PH_NEW = '<new id>' // the id of the work item a create step just made
 // the thread statuses a PR thread may be set to: what the thread says -> the REST value of PATCH .../threads/<id>
 export const THREAD_STATUS: Record<string, string> = { active: 'active', fixed: 'fixed', wontfix: 'wontFix', closed: 'closed', bydesign: 'byDesign', pending: 'pending' }
 export const STATUS_NAMES = Object.values(THREAD_STATUS).join(', ')
@@ -45,6 +49,8 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-comment': 'org, project, repo, pr, body',
   'ado-workitem-comment': 'org, project, id, body',
   'ado-workitem-update': 'org, project, id, fields (state, assignedTo, tags, title; strings)',
+  'ado-workitem-create': `org, project, type (${WI_TYPES.join(' | ')}), title, description?, area?, iteration?, assignedTo?, parent? (id), links? [{pr}] with repo`,
+  'ado-pr-workitem-link': 'org, project, repo, pr, workitem (id)',
   'gh-pr-comment': 'repo (owner/name), pr, body',
   'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item); one approval covers the list, run in order, stopped at the first failure`,
@@ -55,6 +61,8 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-comment': ['org', 'project', 'repo', 'pr', 'body'],
   'ado-workitem-comment': ['org', 'project', 'id', 'body'],
   'ado-workitem-update': ['org', 'project', 'id', 'fields'],
+  'ado-workitem-create': ['org', 'project', 'type', 'title', 'description', 'area', 'iteration', 'assignedTo', 'parent', 'links', 'repo'],
+  'ado-pr-workitem-link': ['org', 'project', 'repo', 'pr', 'workitem'],
   'gh-pr-comment': ['repo', 'pr', 'body'],
   'gh-pr-thread-resolve': ['repo', 'pr', 'thread'],
   'batch': ['items'],
@@ -65,7 +73,8 @@ export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assi
 
 // what is sent: tool 'azure' = curl with a bearer token, 'github' = gh api
 // `steps` (a batch, or a reply with a status): the writes the mod makes in order, flat, each with its tag ("1", "2 reply", "2 status"); the hash covers all of them
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[] }
+// `link`: a PR link (PATCH of a work item with a vstfs artifact link): the ids of the project and the repository are read by two GETs right before it is sent
+export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number } }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
@@ -85,6 +94,18 @@ const int = (v: unknown): number | null => {
   const n = typeof v === 'string' && /^\d{1,9}$/.test(v.trim()) ? Number(v.trim()) : v
   return typeof n === 'number' && Number.isInteger(n) && n > 0 && n < 1e9 ? n : null
 }
+
+// a PR linked to a work item (REST: an ArtifactLink on the work item); `wi` is the work item's number, or PH_NEW inside a create
+const linkPlan = (base: string, org: string, project: string, repo: string, pr: number, wi: string): Plan => ({
+  tool: 'azure',
+  method: 'PATCH',
+  url: `${base}/_apis/wit/workitems/${wi}?api-version=7.1`,
+  contentType: 'application/json-patch+json',
+  body: JSON.stringify([{ op: 'add', path: '/relations/-', value: { rel: 'ArtifactLink', url: `vstfs:///Git/PullRequestId/${PH_PROJECT}%2F${PH_REPO}%2F${pr}`, attributes: { name: 'Pull Request' } } }]),
+  headline: `link PR ${pr} to work item ${wi === PH_NEW ? 'it made' : wi} (${org}/${project}/${repo})`,
+  text: `link PR ${pr} of ${repo} to work item ${wi === PH_NEW ? 'the new one' : wi}`,
+  link: { org, project, repo, pr },
+})
 
 // the table's one door: a kind, exactly its params (no others), every value checked; the plan is what the mod will send
 export function checkAction(a: unknown): Checked {
@@ -140,6 +161,63 @@ export function checkAction(a: unknown): Checked {
   }
   const az = azure()
   if (!az) return bad('org and project are required names')
+  const where0 = `${az.org}/${az.project}`
+  if (k === 'ado-pr-workitem-link') {
+    const repo = name('repo')
+    const pr = num('pr')
+    const wi = num('workitem')
+    if (!repo || pr === null || wi === null) return bad('repo must be a repository name, pr a number and workitem a work item number')
+    Object.assign(params, { repo, pr, workitem: wi })
+    return { ok: true, kind: k, params, plan: linkPlan(az.base, az.org, az.project, repo, pr, String(wi)) }
+  }
+  if (k === 'ado-workitem-create') {
+    const type = typeof p.type === 'string' ? WI_TYPES.find(t => t.toLowerCase() === (p.type as string).trim().toLowerCase()) : undefined
+    const str = (key: string, max: number): string | null | undefined => {
+      if (p[key] === undefined) return undefined
+      const v = typeof p[key] === 'string' ? (p[key] as string).replace(/\r\n?/g, '\n').trim() : ''
+      return v && v.length <= max && !CONTROL.test(v.replace(/[\n\t]/g, '')) ? v : null
+    }
+    const title = str('title', 255)
+    if (!type || !title) return bad(`type must be one of ${WI_TYPES.join(', ')} and title non-empty text of at most 255 characters`)
+    params.type = type
+    params.title = title
+    const ops: { op: string; path: string; value: unknown }[] = [{ op: 'add', path: '/fields/System.Title', value: title }]
+    const lines = [`${type}: ${title}`]
+    for (const [key, field, max] of [['description', 'System.Description', BODY_MAX], ['area', 'System.AreaPath', FIELD_MAX], ['iteration', 'System.IterationPath', FIELD_MAX], ['assignedTo', 'System.AssignedTo', FIELD_MAX]] as const) {
+      const v = str(key, max)
+      if (v === null) return bad(`${key} must be non-empty text of at most ${max} characters`)
+      if (v === undefined) continue
+      params[key] = v
+      ops.push({ op: 'add', path: `/fields/${field}`, value: v })
+      lines.push(`${key}: ${v}`)
+    }
+    const parent = p.parent === undefined ? undefined : num('parent')
+    if (parent === null) return bad('parent must be a work item number')
+    if (parent !== undefined) {
+      params.parent = parent
+      ops.push({ op: 'add', path: '/relations/-', value: { rel: 'System.LinkTypes.Hierarchy-Reverse', url: `https://dev.azure.com/${enc(az.org)}/_apis/wit/workItems/${parent}` } })
+      lines.push(`parent: work item ${parent}`)
+    }
+    const prs: number[] = []
+    if (p.links !== undefined) {
+      const list = Array.isArray(p.links) ? p.links : null
+      for (const l of list ?? []) {
+        const keys = l && typeof l === 'object' ? Object.keys(l) : []
+        const n = keys.length === 1 && keys[0] === 'pr' ? int((l as { pr?: unknown }).pr) : null
+        if (n === null) return bad('links must be a list of {pr: <number>}')
+        prs.push(n)
+      }
+      if (!list || !prs.length || prs.length > 3) return bad('links must be one to three {pr: <number>}')
+      params.links = prs.map(pr => ({ pr }))
+    }
+    const repo = p.repo === undefined ? undefined : name('repo')
+    if (repo === null || (prs.length && !repo) || (repo && !prs.length)) return bad('repo (a repository name) goes with links, and only with them')
+    if (repo) params.repo = repo
+    const create: Plan = { tool: 'azure', method: 'POST', url: `${az.base}/_apis/wit/workitems/$${enc(type)}?api-version=7.1`, contentType: 'application/json-patch+json', body: json(ops), headline: `create a ${type} work item (${where0})`, text: lines.join('\n'), tag: 'create' }
+    if (!prs.length) return { ok: true, kind: k, params, plan: create }
+    const steps = [create, ...prs.map(pr => ({ ...linkPlan(az.base, az.org, az.project, repo!, pr, PH_NEW), tag: `link PR ${pr}` }))]
+    return { ok: true, kind: k, params, plan: { ...create, url: steps.map(s => s.url).join(' ; '), headline: `create a ${type} work item and link it to PR ${prs.join(', ')} (${where0}/${repo})`, text: `${create.text}\nthen link it to PR ${prs.join(', ')} of ${repo}`, tag: undefined, steps } }
+  }
   if (k === 'ado-workitem-comment' || k === 'ado-workitem-update') {
     const id = num('id')
     if (id === null) return bad('id must be a work item number')
@@ -196,7 +274,7 @@ export function checkAction(a: unknown): Checked {
 
 // a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
 export const targetOf = (kind: ActionKind, p: Params): string =>
-  kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
+  kind === 'ado-workitem-create' ? `Azure DevOps work item ${p.org}/${p.project}#new` : kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
 function checkBatch(x: Record<string, unknown>): Checked {
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
   if (p) for (const key of Object.keys(p)) if (key !== 'items') return refuse(`action batch: unknown param "${key.slice(0, 30)}" (the batch takes items)`)
@@ -603,7 +681,16 @@ export async function dropGrants(h: Host, thread: string): Promise<void> {
 
 // ---- the desk sends ---------------------------------------------------------------------------------------------------------------------------
 const UNKNOWN_EXIT = new Set([28, 52, 55, 56]) // curl: timeout, empty reply, send / receive failure: the request may have arrived
-type Sent = { ok: boolean; text: string; unknown?: boolean }
+type Sent = { ok: boolean; text: string; unknown?: boolean; id?: string }
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const idIn = (out: string): string | undefined => {
+  try {
+    const id = (JSON.parse(out) as { id?: unknown }).id
+    return typeof id === 'number' || typeof id === 'string' ? String(id).slice(0, 40) : undefined
+  } catch {
+    return undefined
+  }
+}
 
 async function send(h: Host, plan: Plan): Promise<Sent> {
   if (plan.tool === 'github') {
@@ -618,13 +705,31 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
   const scrub = (s: string) => s.split(token).join('***')
   // the token and the body go to curl as a config on STDIN (`-K -`): nothing secret is in an argument list or a process listing
   const q = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')}"`
-  const config = [`header = ${q(`Authorization: Bearer ${token}`)}`, `header = ${q(`Content-Type: ${plan.contentType}`)}`, `header = ${q('Accept: application/json')}`, `data-binary = ${q(plan.body)}`, ''].join('\n')
-  const r = await h.process.run(['curl', '-sS', '--fail-with-body', '--max-time', '60', '-X', plan.method, '-K', '-', plan.url], { stdin: config, timeoutMs: 70_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
+  const call = async (method: string, url: string, contentType: string, body: string | null) => {
+    const config = [`header = ${q(`Authorization: Bearer ${token}`)}`, ...(body === null ? [] : [`header = ${q(`Content-Type: ${contentType}`)}`]), `header = ${q('Accept: application/json')}`, ...(body === null ? [] : [`data-binary = ${q(body)}`]), ''].join('\n')
+    return h.process.run(['curl', '-sS', '--fail-with-body', '--max-time', '60', '-X', method, '-K', '-', url], { stdin: config, timeoutMs: 70_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
+  }
+  let body = plan.body
+  if (plan.link) {
+    // a PR link names the project and the repository by id: two reads (nothing is written yet, so a failure here is a plain refusal)
+    const { org, project, repo } = plan.link
+    const get = async (url: string, what: string): Promise<{ id: string } | string> => {
+      const g = await call('GET', url, '', null)
+      const id = g.exitCode === 0 ? idIn(g.stdout) : undefined
+      return id && GUID.test(id) ? { id } : `could not read the id of ${what}${g.exitCode === 0 ? '' : ` (${scrub(oneLine(g.stderr || g.stdout, 120))})`}: nothing was written`
+    }
+    const pid = await get(`https://dev.azure.com/${enc(org)}/_apis/projects/${enc(project)}?api-version=7.1`, `project ${project}`)
+    if (typeof pid === 'string') return { ok: false, text: pid }
+    const rid = await get(`https://dev.azure.com/${enc(org)}/${enc(project)}/_apis/git/repositories/${enc(repo)}?api-version=7.1`, `repository ${repo}`)
+    if (typeof rid === 'string') return { ok: false, text: rid }
+    body = body.split(PH_PROJECT).join(pid.id).split(PH_REPO).join(rid.id)
+  }
+  const r = await call(plan.method, plan.url, plan.contentType, body)
   if (r.exitCode !== 0) {
     const why = scrub(oneLine(r.stderr || r.stdout, 200)) || `curl exit ${r.exitCode}`
     return UNKNOWN_EXIT.has(r.exitCode) ? { ok: false, unknown: true, text: `the connection broke after the request may have been sent (${why}): outcome unknown, check the target before asking again` } : { ok: false, text: `Azure DevOps refused or could not be reached: ${why}` }
   }
-  return { ok: true, text: scrub(resultOf(r.stdout, 'url')) }
+  return { ok: true, text: scrub(resultOf(r.stdout, 'url')), id: idIn(r.stdout) }
 }
 // a batch or a reply with a status: the writes in order, stopped at the first failure, each reported (done / failed with the reason / not run)
 type Ran = { sent: Sent; progress: boolean }
@@ -634,15 +739,18 @@ async function runSteps(h: Host, plan: Plan): Promise<Ran> {
   let stopped = false
   let progress = false
   let unknown = false
-  for (const s of steps) {
-    const tag = s.tag ?? '?'
+  let made: string | undefined // the id of the work item a create step made: the link steps after it name it
+  for (const s0 of steps) {
+    const tag = s0.tag ?? '?'
     if (stopped) {
       parts.push(`${tag}: not run`)
       continue
     }
+    const s = s0.url.includes(PH_NEW) ? { ...s0, url: made ? s0.url.split(PH_NEW).join(made) : s0.url } : s0
     let one: Sent
     try {
-      one = await send(h, s)
+      one = s.url.includes(PH_NEW) ? { ok: false, text: 'the work item it should link has no id (the create step reported none)' } : await send(h, s)
+      if (one.ok && /(^|\s)create$/.test(s0.tag ?? '')) made = one.id // a batch tags it "2 create"
     } catch (e) {
       one = { ok: false, unknown: true, text: `sending failed after it may have started: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
     }
