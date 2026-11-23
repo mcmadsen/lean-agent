@@ -112,7 +112,24 @@ export async function askText(h: Host, home: string, id: string, question: strin
 }
 
 // ---- report ----------------------------------------------------------------------------------------------------------------------
-export async function reportText(h: Host, home: string, id: string): Promise<Out> {
+// a heading line of a report: `## Title`, `**Title**` or `Title:` alone on its line; level = the number of #s (the others count as 1)
+const HEADING = /^\s{0,3}(?:(#{1,6})\s+(.+?)\s*#*|\*\*(.+?)\*\*:?|([A-Z][\w /&()-]{0,50}):)\s*$/
+const headingOf = (line: string): { level: number; title: string } | null => {
+  const m = HEADING.exec(line)
+  return m ? { level: m[1] ? m[1].length : 1, title: (m[2] ?? m[3] ?? m[4] ?? '').trim() } : null
+}
+// the lines under the heading that contains `want` (case-insensitive), up to the next heading of the same or a higher level; null = none
+export function sectionOf(text: string, want: string): { title: string; body: string } | { titles: string[] } {
+  const lines = text.split('\n')
+  const heads = lines.map((l, i) => ({ i, h: headingOf(l) })).filter((x): x is { i: number; h: { level: number; title: string } } => !!x.h)
+  const w = want.trim().toLowerCase()
+  const at = heads.find(x => x.h.title.toLowerCase().includes(w))
+  if (!at || !w) return { titles: heads.map(x => x.h.title) }
+  const next = heads.find(x => x.i > at.i && x.h.level <= at.h.level)
+  return { title: at.h.title, body: lines.slice(at.i + 1, next ? next.i : lines.length).join('\n').trim() }
+}
+
+export async function reportText(h: Host, home: string, id: string, o: { section?: string; full?: boolean } = {}): Promise<Out> {
   const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
   if (!t) return { ok: false, text: `no thread ${id}` }
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask') && !(r as { mod?: boolean }).mod)
@@ -120,6 +137,13 @@ export async function reportText(h: Host, home: string, id: string): Promise<Out
   const asks = recs.filter(r => r.kind === 'ask')
   const last = reports[reports.length - 1]
   const lastAsk = asks[asks.length - 1]
+  // more on demand: the newest report's whole text, or one section of it (the digest the desk got names this call)
+  if (o.full || o.section) {
+    if (!last) return { ok: false, text: `${id} has no report yet` }
+    if (o.full) return { ok: true, text: `${id} report (${last.state || 'working'}), full text:\n${last.text.trim()}` }
+    const s = sectionOf(last.text, o.section!)
+    return 'body' in s ? { ok: true, text: `${id} report, section "${s.title}":\n${s.body || '(empty)'}` } : { ok: false, text: `${id}'s last report has no section "${o.section}"${s.titles.length ? `; its sections: ${s.titles.slice(0, 15).join(' | ')}` : ' (it has no headings: use full: true)'}` }
+  }
   const open = asks.filter(a => !last || a.ts > last.ts)
   const snap = await readSnapshot(h, home, id)
   const ctx = await readContext(h, home, t)

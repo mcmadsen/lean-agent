@@ -231,7 +231,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[] }
+export type Input = { action: string; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -774,7 +774,7 @@ const USES: Record<string, string[]> = {
   close: [],
   park: [],
   reopen: [...TEXTY, 'model', 'effort', 'reason', 'needs'],
-  list: [],
+  list: ['verbose'],
   resume: [...TEXTY, 'model', 'effort', 'reason'],
   start: [...TEXTY, 'model', 'effort', 'reason', 'keep', 'needs'],
   restart: [...TEXTY, 'model', 'effort', 'reason'],
@@ -794,7 +794,7 @@ const USES: Record<string, string[]> = {
   keep: ['on'],
   find: TEXTY,
   ask: TEXTY,
-  report: [],
+  report: ['section', 'full'],
   dismiss: ['kind', 'notice'],
 }
 const FIELDS = new Set([...Object.values(USES).flat(), 'action', 'tN'])
@@ -824,7 +824,7 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       const home = await homeDir(h)
       if (i.action === 'find') return await findText(h, home, i.text ?? '')
       if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
-      return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!)
+      return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!, { section: typeof i.section === 'string' ? i.section : undefined, full: i.full === true })
     }
     if (i.message !== undefined && i.text === undefined) i = { ...i, text: i.message } // `message` is an alias of `text`
     // The text given to restart / reopen / start / wake / resume is the first instruction of the session that call starts: it is queued (flagged) before

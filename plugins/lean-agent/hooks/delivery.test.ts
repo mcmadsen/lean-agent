@@ -263,8 +263,8 @@ test('a long report is sent cut WITH its row key: it arrives once, the full text
   const line = lines[0]!
   expect(line).toMatch(/<!-- lean:r=\d+:t1:report -->$/) // keyed, like a short one
   const ts = /lean:r=(\d+):t1:report/.exec(line)![1]!
-  expect(line).toContain(`(cut: the full text is in /h/.lean-agent/desk/reports/${ts}-t1-report.md: Read it; the pane's Answers list has it too)`)
-  expect(line.length).toBeLessThan(DIRECT_MAX + 400)
+  expect(line).toContain(`(cut: full text /h/.lean-agent/desk/reports/${ts}-t1-report.md; lean_thread report t1 full: true, or section: "<heading>")`) // the digest (reportdigest.ts)
+  expect(line.length).toBeLessThan(DIRECT_MAX / 2)
   // the file the pointer names holds the whole report as plain lines the desk can Read
   expect(h.files.get(`/h/.lean-agent/desk/reports/${ts}-t1-report.md`)).toBe(`# Report from t1 (done)\n\n${long.trim()}\n`)
   // the desk hook marks it delivered; no prompt and no relay hands the full report over a second time
@@ -400,7 +400,7 @@ test('one decision to cut: comment markers cannot make the line longer than the 
   h.clock.t += 10
   await threadTool(h.host, 'odd name', 'lean_report', { text: 'z'.repeat(2000), state: 'done' }, ok)
   expect(lines[3]).not.toContain('lean:r=')
-  expect(lines[3]).toContain('(cut: the full report is in the desk inbox / pane)')
+  expect(lines[3]).toContain('(cut: the full report is in the desk inbox;')
   expect([...h.files.keys()].some(k => k.includes('reports/') && k.includes('odd'))).toBe(false)
   expect((await unreadReports(h.host)).recs.map(x => x.from)).toContain('odd name')
 })
