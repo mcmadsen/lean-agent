@@ -26,7 +26,7 @@ function setup(installed = '1.0.11') {
     if (a[0] === 'agents') return { exitCode: 0, stdout: JSON.stringify(state.rows) }
     return { exitCode: 0, stdout: '' }
   }
-  return { h, state, call: (i: any) => leanThread(h.host, ROOT, i) }
+  return { h, state, call: (i: any) => leanThread(h.host, ROOT, i.action === 'list' ? { verbose: true, ...i } : i) } // (the long list form)
 }
 const rec = (h: any) => JSON.parse(String(h.files.get(TJ)))
 

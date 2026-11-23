@@ -150,11 +150,11 @@ test('stall-restart through leanThread: the working session is stopped and a fre
 test('lean_thread list names a stalled thread and the time of its last activity; a busy one with fresh activity is running', async () => {
   const h = setup({ unread: [] })
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify([{ sessionId: S1, name: '', cwd: T1, status: 'busy', state: 'working', startedAt: 1, pid: 42, id: 'abcd1234' }]) } : { exitCode: 0, stdout: '' })
-  const r = await leanThread(h.host, '/p', { action: 'list' })
+  const r = await leanThread(h.host, '/p', { action: 'list', verbose: true })
   expect(r.text).toMatch(/t1 · fix login · app \[open, stalled: no tool call or report for 25 min \(last activity \d\d:\d\d\)\]/)
   expect((r.data as any[])[0]).toMatchObject({ live: 'stalled' })
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: T0 - MIN, kind: 'worker' }))
-  expect((await leanThread(h.host, '/p', { action: 'list' })).text).toContain('[open, running]')
+  expect((await leanThread(h.host, '/p', { action: 'list', verbose: true })).text).toContain('[open, running]')
 })
 
 test('the pane word: stalled is red, and ranks below the user\'s own waits', () => {

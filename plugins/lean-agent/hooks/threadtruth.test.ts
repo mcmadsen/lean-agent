@@ -59,7 +59,7 @@ function world(o: { rows?: Row[]; thread?: Row; inbox?: string; config?: unknown
   const starts = () => h.claudeCalls().filter(x => x[0] === '--bg' && !x.includes('--resume'))
   const resumes = () => h.claudeCalls().filter(x => x[0] === '--bg' && x.includes('--resume'))
   const thread = () => JSON.parse(h.files.get(`${T1}/thread.json`)!)
-  return { h, st, calls, starts, resumes, thread, run: (i: any) => leanThread(h.host, ROOT, i) }
+  return { h, st, calls, starts, resumes, thread, run: (i: any) => leanThread(h.host, ROOT, i.action === 'list' ? { verbose: true, ...i } : i) } // (the long list form)
 }
 
 // ---- 1. the truth about "running" ----------------------------------------------------------------------------------------

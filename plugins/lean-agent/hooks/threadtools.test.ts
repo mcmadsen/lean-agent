@@ -80,5 +80,5 @@ test('the measured base: written once per session from the first request, shown 
   expect(baseLine(b)).toBe('measured base 47k tokens on every request, before any work (full built-in tool set; config threads.tools can cut it)')
   expect(await overheadReport(h.host, ROOT, { home: '/h', transcript: [] })).toContain('newest thread session measured by the mod: measured base 47k tokens')
   const r = await leanThread(h.host, ROOT, { action: 'auto-restart', tN: 't1', reason: 'context' })
-  expect(r.text).toContain('measured base 47k tokens on every request')
+  expect(r.text).toContain('base 47k') // short: the long sentence is the doctor's, not repeated in every start reply
 })

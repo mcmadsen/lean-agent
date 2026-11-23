@@ -25,7 +25,7 @@ test('trimListing handles the plain, backticked and star-bullet shapes and says 
 
 // the mod's own state is read the way a user does: through the doctor's check output
 const stat = async ($: any) => {
-  const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'check' } as any)
+  const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'check', verbose: true } as any)
   return String(r?.result ?? r?.text ?? r)
 }
 

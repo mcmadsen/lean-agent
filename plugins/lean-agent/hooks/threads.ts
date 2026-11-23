@@ -30,7 +30,7 @@ import { dismissAction } from './dismiss'
 import { loadView } from './view'
 import { threadToolsArgv } from './orchestrate'
 import { threadSpendLine } from './stats'
-import { baseLine, readBase } from './base'
+import { readBase } from './base'
 import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedText, threadLimits } from './threadcontext'
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
@@ -425,7 +425,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   const { notes: settled, ended } = sid ? await settle(h, home, t, { sid, old, name }) : { notes: [] as string[], ended: false }
   const started = ended ? ENDED_AT_ONCE : 'started' // loud: the head of the reply says it
   const base = await readBase(h).catch(() => null)
-  const lt = (base ? ` · ${baseLine({ ...base, tools: (await threadToolsArgv(h))[1] ?? '' })}` : '') + (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
+  const lt = (base ? ` · base ${Math.round(base.tokens / 1000)}k` : '') + (note ? ` · ${note}` : '') + (restricted(loaded) ? ` · ${loadedText(loaded)}` : '') + (skew === UNREPORTED ? ` · ${t.id} ${UNREPORTED}` : skew ? ` · ${skew}${SKEW_ADVICE}` : '') + menv.lines.map(l => ` · ${l}`).join('') + settled.map(l => ` · ${l}`).join('')
   return sid ? { ok: true, text: `${t.id} ${started} (${sid}) · ${how}${lt}`, data: { fresh: true, ...(ended ? { ended: true } : {}) } } : { ok: true, text: `${t.id} started · ${how}, but its session id was not found; list will retry${lt}`, data: { fresh: true } }
 }
 
@@ -695,7 +695,16 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   return { ok: true, data: { resumed: true }, text: `${t.id} woken with ${msgs.length} message(s)${copied ? `; the CLI started a copy, the thread now follows session ${copied.slice(0, 8)}` : copy ? `; the CLI started a copy as ${copy}, which ${hits.length > 1 ? 'matches several sessions' : 'is not in the session list yet'}: the thread keeps its old session id, check ${t.id} with lean_thread list` : ''}${named}${kept}` }
 }
 
-async function list(h: Host, home: string, root = ''): Promise<Out> {
+// the desk's default list: one short line per thread (id, state word, context, today's cost, the first 80 characters of its last report); the long form
+// is `verbose: true`. The desk's conversation keeps every reply, so the default stays small (a spec pins the size).
+export const LIST_LINE_MAX = 200
+const LAST_CHARS = 80
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean }): string {
+  const word = `${o.state === 'open' ? o.live || 'open' : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
+  const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
+  return [`${o.id} ${word}`, o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+}
+async function list(h: Host, home: string, root = '', verbose = false): Promise<Out> {
   const listed = await agents(h)
   const rows = listed ?? []
   const installed = await installedVersion(h, root)
@@ -734,9 +743,9 @@ async function list(h: Host, home: string, root = ''): Promise<Out> {
     const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
     const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
-    out.push({ id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
@@ -760,6 +769,17 @@ async function profileAction(h: Host, home: string, i: Input): Promise<Out> {
   }
   if (i.fill === true) return await fillProfile(h, home, project)
   return { ok: true, text: await profileText(h, home, project) }
+}
+
+// the desk's conversation keeps every reply: a start / restart / send reply is at most 3 lines (the rest joins the third, cut) unless it failed
+export const SHORT_REPLY = new Set(['new', 'start', 'restart', 'reopen', 'resume', 'wake', 'send'])
+export const REPLY_LINES = 3
+export const REPLY_TAIL_MAX = 300
+export function threeLines(text: string): string {
+  const lines = text.split('\n').filter(l => l.trim())
+  if (lines.length <= REPLY_LINES) return lines.join('\n')
+  const rest = lines.slice(REPLY_LINES - 1).join(' · ')
+  return [...lines.slice(0, REPLY_LINES - 1), rest.length > REPLY_TAIL_MAX ? `${rest.slice(0, REPLY_TAIL_MAX - 1)}…` : rest].join('\n')
 }
 
 // the actions whose `text` (or `message`) is the first instruction of the session they start (queued first, delivered last in its first prompt)
@@ -859,7 +879,8 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       const why = (data: unknown) => ((data as { pending?: boolean } | undefined)?.pending ? 'the call was held for the user\'s approval' : (out.text.split('\n')[0] ?? '').slice(0, 140))
       out = { ...out, text: left ? `${out.text} · text not delivered: ${why(out.data)}; it is queued (${carried.chars} chars) and the next start carries it` : fresh(out) ? `${out.text} · new session; your text (${carried.chars} chars) is its first instruction` : `${out.text} · your text (${carried.chars} chars) was delivered to the session as its message` }
     }
-    return lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
+    const full = lint && out.ok ? { ...out, text: `${out.text}\n${lint}` } : out
+    return full.ok && SHORT_REPLY.has(i.action) ? { ...full, text: threeLines(full.text) } : full // a failure keeps every line it has
   } catch (e) {
     return err(`${i.action} failed: ${(e as Error)?.message ?? e}`)
   }
@@ -869,7 +890,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
   try {
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
-    if (i.action === 'list') return await list(h, home, root)
+    if (i.action === 'list') return await list(h, home, root, i.verbose === true)
     if (i.action === 'profile') return await profileAction(h, home, i)
     // typed remote writes a thread asked for with lean_report `action` (deskactions.ts): the desk lists them, asks the USER, and sends
     // only a request the user approved; the thread is told the outcome through its inbox

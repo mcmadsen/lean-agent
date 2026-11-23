@@ -20,7 +20,7 @@ function setup(on: any = null) {
     if (a0 === 'agents' && a1 === '--json') return { exitCode: 0, stdout: JSON.stringify(state.rows) }
     return { exitCode: 0, stdout: '' }
   }
-  const call = (i: any) => leanThread(h.host, ROOT, i)
+  const call = (i: any) => leanThread(h.host, ROOT, i.action === 'list' ? { verbose: true, ...i } : i) // (the long list form)
   return { h, state, call }
 }
 
