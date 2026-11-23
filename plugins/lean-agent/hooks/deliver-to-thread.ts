@@ -63,19 +63,30 @@ export async function deliverToThread(h: Host, home: string, t: Thread, row: Age
   const line = `[lean-agent] message from the desk:\n${o.body}\n${wakeMark(o.upTo)}`
   // the message is WATCHED (delivery.json) whether the send resolved or not: a refused send (the engine: "this session has no SendMessage tool", a stale id, ...)
   // leaves it queued in the inbox, which a thread that waits never reads, so the same activity check and the same restart apply
-  const watch = () => (o.kind === 'fyi' ? Promise.resolve() : h.clock.now().then(at => writeJson(h, recFile(home, t.id), { at, sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind } satisfies DeliveryRec)).catch(() => undefined))
+  // (a message still pending for the same session keeps its ORIGINAL time: the desk's sweep sends the unread inbox again every few seconds, and a restarted
+  // clock would never reach threads.answerWaitSeconds)
+  const watch = async (again: boolean) => {
+    if (o.kind === 'fyi') return
+    try {
+      const old = again ? await readRec(h, home, t.id) : null // (only a RE-send after a refusal keeps the clock; a message that went through starts its own)
+      const keep = old && old.sid === row.sid
+      await writeJson(h, recFile(home, t.id), { at: keep ? old.at : await h.clock.now(), sid: row.sid, from: keep ? Math.min(old.from, o.from) : o.from, upTo: o.upTo, kind: keep && old.kind === 'answer' ? 'answer' : o.kind, ...(keep && old.tries ? { tries: old.tries } : {}) } satisfies DeliveryRec)
+    } catch {
+      /* the watch is best effort */
+    }
+  }
   try {
     const r = await send(row.sid, line)
     if (r && r.isDelivered === false) {
-      await watch()
+      await watch(true)
       return { delivered: false, text: `direct send to ${t.id} refused (${String(r.reason ?? 'no reason').replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
     }
   } catch (e) {
-    await watch()
+    await watch(true)
     return { delivered: false, text: `direct send to ${t.id} failed (${String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
   }
   if (o.kind !== 'fyi') {
-    await watch()
+    await watch(false)
     await clearWaiting(h, home, t.id) // the answer (or an instruction) is in: it no longer waits
     await setNotice(h, `wait-${t.id}`, null).catch(() => undefined)
   }

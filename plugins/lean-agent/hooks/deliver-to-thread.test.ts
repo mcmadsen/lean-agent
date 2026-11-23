@@ -170,6 +170,9 @@ test('tick: the engine refuses the send ("this session has no SendMessage tool",
   const r = await send(h, 'sqlite')
   expect(r.text).toContain('this session has no SendMessage tool')
   expect(thread(h).delivered).toBe(0)
+  h.clock.t = T0 + 20_000
+  await leanThread(h.host, ROOT, { action: 'wake', tN: 't1' }) // the desk's sweep sends the unread inbox again: the clock must NOT restart
+  expect(recOf(h).at).toBe(T0)
   h.clock.t = T0 + 46_000
   const notes = await deliveryTick(h.host, deps)
   expect(restarts).toEqual([{ id: 't1', why: expect.stringContaining('did not react'), rewind: 0 }])
