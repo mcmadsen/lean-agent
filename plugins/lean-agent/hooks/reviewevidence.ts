@@ -4,6 +4,7 @@
 // register.tsx calls reviewReport before threadTool's lean_report; other reports pass unchanged. A failure of the gate itself refuses.
 import type { Host } from './state'
 import { readReview } from './reviews'
+import { areasOf } from './reviewarea'
 import { markerOf, reviewedBy } from './reviewkind'
 
 export type Gate = { ok: true; text: string } | { ok: false; text: string }
@@ -21,6 +22,9 @@ export async function reviewReport(h: Host, thread: string, stateIn: string, tex
     if ((rec.ts ?? 0) < seen.ts) return refuse(`the record for ${seen.sha.slice(0, 12)} is older than your last prepare: record the review you just ran`)
     if (rec.level !== 'full') return refuse(`the record for ${seen.sha.slice(0, 12)} is ${rec.level === 'light' ? 'a light pass (one pass, a checkpoint)' : 'not a full-level review record (no reviewer result was recorded)'}: prepare again with level "full" and record the reviewer's JSON`)
     if (!rec.verdicts?.length) return refuse(`the record for ${seen.sha.slice(0, 12)} carries no reviewer verdict`)
+    // a PR reviewed by area (reviewarea.ts): every area the prepare listed must have its record
+    const left = (await areasOf(h, seen.project, seen.sha)).filter(n => !rec.areas?.[n])
+    if (left.length) return refuse(`the PR is reviewed by area and ${left.join(', ')} ${left.length === 1 ? 'has' : 'have'} no record yet (lean_review prepare with scope, the reviewer pass, lean_review record with the same scope)`)
     const counts = Object.entries(rec.counts ?? {}).map(([k, n]) => `${n} ${k}`).join(', ')
     const evidence = [
       '--- review evidence (appended by the mod from the review store) ---',
@@ -28,6 +32,7 @@ export async function reviewReport(h: Host, thread: string, stateIn: string, tex
       `level: ${rec.level}${rec.mode === 'external' ? ', external (not a push-gate record)' : rec.green ? ', green' : ', not green'}`,
       `passes: ${rec.passes ?? rec.verdicts.length}${rec.model ? `, model ${rec.model}` : ''}`,
       `verdicts: ${rec.verdicts.join(', ')}`,
+      ...(rec.areas ? [`areas: ${Object.entries(rec.areas).map(([n, a]) => `${n} ${a.verdict} (${a.open} open)`).join('; ')}`] : []),
       `findings: ${counts || (rec.findings?.length ? `${rec.findings.length} open` : 'none open')}`,
     ].join('\n')
     return { ok: true, text: `${text.trimEnd()}\n\n${evidence}` }

@@ -14,6 +14,8 @@ Bash runs any read command that writes nothing, like the readers: `git diff|log|
 
 ## The brief
 
+Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it. Read the changed files first, other files only to understand a caller or a definition used in the change.
+
 The brief gives the project path, the diff range (base and full sha), the stated goal, and lists found by a script, not a model: **new symbols and files**, **edited tests** (assertions renamed, flipped, deleted, skipped), **new parameters with defaults**, **new module-level state**, **changed or removed exported symbols**; the project's **lessons** (review checklist, shared helpers), the user's **declines** (do not raise a matching finding again) and, for a re-review, only the open findings and the diff since the last reviewed sha. Treat every list as a floor: check each entry, and add what the lists missed. A **second opinion** (a cheap search-only pass) may list reuse candidates: you confirm or reject EACH one (it goes in `reuse` with your own verdict); never copy it unread. For a high-risk diff the thread runs TWO independent reviewers with the same brief and the tool merges their blocks (a finding both raised is marked `[2/2]`, the union counts): review as if you were the only one, never hold a finding back because the other run may have it.
 
 ## Passes

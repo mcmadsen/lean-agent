@@ -3,4 +3,5 @@ Review {{label}} of project {{project}} (ref: {{ref}}{{baseNote}}) through the l
 2. lean_review prepare with ref "{{ref}}"{{baseArg}} at level "full". Run the reviewer passes it asks for, exactly as it says (the reviewer agent, two runs when it says so).
 3. lean_review record with mode "external" and the head sha that prepare printed.
 4. lean_report done: the verdict and the findings by severity, one line each. The mod appends the evidence (record sha, level, passes, verdicts, findings by severity) from its own store.
+Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it.
 Read only: edit nothing, push nothing, post no comment on the PR unless the user asks.

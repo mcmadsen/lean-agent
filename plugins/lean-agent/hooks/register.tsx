@@ -315,13 +315,15 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
 // The context breakdown of a turn end (ctxparts.ts): `full` (the token-count API per tool and memory file) once per session at its first turn end,
 // `summary` (local estimates, no request) at every later one; recorded in the thread's folder. A failed full count is tried once more.
 // The warn line (scratchnotes.ts): the current size is the engine's own figure (`$.session.usage()` costs nothing), asked until the line was said.
-async function warnNote($: any, host: Host): Promise<string | null> {
+async function warnNote($: any, host: Host, addedChars = 0): Promise<string | null> {
   try {
     if (role.kind !== 'thread' || stopped) return null
     const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
     if (!sid || warnedAlready(sid)) return null
     const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
-    const tokens = Number.isFinite(u) ? u : lastTokens
+    const base = Number.isFinite(u) ? u : lastTokens
+    // the engine's figure does not hold THIS result yet: one result that jumps over the warn level (two reviewer passes, a diff) says so in its own reply
+    const tokens = typeof base === 'number' ? base + Math.ceil(Math.max(0, addedChars) / 4) : base
     const limits = await threadLimits(host)
     const line = takeWarn(sid, tokens, limits) // at the warn level and again at 90% of the limit
     if (!line) return null
@@ -1489,7 +1491,7 @@ export const register: Register = on => {
       if (hint) lines.push(hint)
       const slices = octx?.threadDir ? takeSliceNote(octx.threadDir) : null // the 11th fallback slice of a denied reader: "you are reading a long source yourself"
       if (slices) lines.push(slices)
-      const warn = await warnNote($, host) // the context is at the warn level: ONE line per session, "write what you have learned to scratch/notes.md" (scratchnotes.ts)
+      const warn = await warnNote($, host, texts(r?.result).join('').length) // the context is at the warn level: ONE line per session, "write what you have learned to scratch/notes.md" (scratchnotes.ts)
       if (warn) lines.push(warn)
     } catch {
       /* delivery is retried at the next call */

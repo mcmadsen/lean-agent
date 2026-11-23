@@ -192,4 +192,6 @@ for f in "$root/templates/thread.md" "$here/thread/SKILL.md"; do grep -qF -- 'ru
 # 1.0.28: a request for the user's answer or approval is lean_ask or lean_report with `action`, never prose in a working report
 grep -qF -- "A request that needs the user's answer or approval goes out as \`lean_ask\` or \`lean_report\` with \`action\`, never as plain prose in a working report" "$root/templates/thread.md" || fail "thread.md lacks the prose-request line"
 grep -qF -- "A request that needs the user's answer or approval goes out as a question or an \`action\` request, never as plain prose in a working report" "$here/thread/SKILL.md" || fail "the thread skill lacks the prose-request line"
+# 1.0.28: a review covers only changed code (the reviewer agent, the review brief, the review skill)
+for f in "$root/agents/reviewer.md" "$root/templates/review-brief.md" "$here/review/SKILL.md"; do grep -qF -- 'report nothing about a file or line outside the changed hunks' "$f" || fail "$(basename "$f") lacks the changed-code-only line"; done
 echo "ok skills-contract"

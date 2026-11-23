@@ -10,7 +10,7 @@ import { sha256 } from './sha'
 
 // level / mode / verdicts / counts are display data for the evidence a review thread's report carries (reviewevidence.ts); only project, sha
 // and green are signed. mode 'external': a review of someone else's branch or PR (reviewext.ts): never green, never counts for the push gate.
-export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; base?: string; branch?: string; model?: string; level?: 'light' | 'full'; mode?: 'external'; verdicts?: string[]; counts?: Record<string, number>; ts?: number; sig?: string }
+export type Review = { green: boolean; sha: string; project: string; passes?: number; findings?: string[]; base?: string; branch?: string; model?: string; level?: 'light' | 'full'; mode?: 'external'; verdicts?: string[]; counts?: Record<string, number>; areas?: Record<string, { verdict: string; open: number; counts?: Record<string, number> }> /* a PR reviewed by area (reviewarea.ts): one entry per area record */; ts?: number; sig?: string }
 export const reviewFile = (home: string, project: string, sha: string) => `${leanDir(home)}/${project}/reviews/${sha}.json`
 const KEY = 'review.key'
 const LEGACY = (home: string) => `${leanDir(home)}/review.key`

@@ -232,3 +232,17 @@ test('in a plain session nothing is cut', { timeoutMs: 20_000 }, async ($, on) =
   expect(a.result.stdout.length).toBeGreaterThanOrEqual(60_000 - 1)
   expect(outFiles(h).length).toBe(0)
 })
+
+test('1.0.28: a thread\'s own lean-agent tool results (lean_review, lean_run ...) are capped at 8000 with the full text in the output folder; lean_report / lean_ask and a worker\'s call are not', async () => {
+  const h = fakeHost(null)
+  const res = { result: { content: [{ type: 'text', text: big(30_000) }], isError: false } }
+  const cut: any = await capResult(h.host, 't1', 'mcp__lean-agent__lean_review', res)
+  expect(cut).not.toBe(res)
+  expect(cut.result.content[0].text.length).toBeLessThan(DEFAULT_THREAD_CAP + 600)
+  expect(cut.result.content[0].text).toContain(`the full text is in ${OUT}/`)
+  expect(outFiles(h).length).toBe(1)
+  expect(await capResult(h.host, 't1', 'mcp__lean-agent__lean_run', { result: { content: [{ type: 'text', text: big(7_000) }] } })).toMatchObject({ result: { content: [{ text: expect.any(String) }] } })
+  for (const t of ['lean_report', 'lean_ask']) expect(await capResult(h.host, 't1', `mcp__lean-agent__${t}`, res)).toBe(res)
+  expect(await capResult(h.host, 't1', 'mcp__lean-agent__lean_review', res, { worker: true })).toBe(res)
+  expect(await capResult(h.host, 'desk', 'mcp__lean-agent__lean_review', res)).toBe(res)
+})

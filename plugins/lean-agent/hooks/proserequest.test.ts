@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { readJsonl } from './state'
-import { threadTool } from './delivery'
+import { recordDeskSid, threadTool } from './delivery'
 import { requestSentence, PROSE_REPLY } from './proserequest'
 import { readWaiting } from './threadstate'
 
@@ -24,6 +24,7 @@ test('prose requests are found, ordinary and negated sentences are not', () => {
 
 test('a working report with a request in its prose makes a desk question and a waiting record', async () => {
   const h = fakeHost(null)
+  await recordDeskSid(h.host, 'desk-sid')
   const sent: string[] = []
   const r = await threadTool(h.host, 't1', 'lean_report', { text: 'Review recorded. One batch of PR comments for approval; nothing is posted until you approve.', state: 'working' }, async (_s, t) => void sent.push(t))
   expect(r.ok).toBe(true)

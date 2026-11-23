@@ -27,6 +27,8 @@ The desk never reviews itself (it has no reviewer agents and no review tool): it
 
 ## Thread
 
+Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it (the tool drops findings outside the changed lines and counts them).
+
 Run in a thread, in the repo or worktree to push. With no argument, or only a base, review this worktree as below. With a PR, branch, sha or
 URL of someone else's work (a review thread the desk started has one in its brief), follow "External review" below, then the steps 2 to 9
 with `ref`. A push needs `lean_review` to have recorded a green verdict for the

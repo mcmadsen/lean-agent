@@ -110,3 +110,48 @@ test('through the engine: a tool result of a thread at the warn level carries th
   expect(await ctx()).toContain('context 110k of 120k: write what you have learned') // and again at 90% of the limit
   expect(await ctx()).not.toContain('scratch/notes.md')
 })
+
+test('1.0.28: one result that jumps over the warn level inside a turn (two reviewer passes, a diff) carries the line at once, once; a jump that went unseen is said at the next call', { timeoutMs: 20_000 }, async ($, on) => {
+  warnReset()
+  resetLocks()
+  const h = fakeHost(on, { orchestrate: true })
+  let tokens = 40_000
+  let answer = 'ok'
+  on('tool.call', () => ({ result: answer }) as any)
+  on('clock.after', () => new Promise(() => {}))
+  on('session.usage', (() => ({ value: { context: { tokens, window: 200_000, percent: 50 }, rateLimits: [] } })) as any) // (the engine's figure does not hold the result being returned)
+  on('session.id', () => ({ value: 'sess-y' }))
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ ...THREAD, sid: 'sess-y' }))
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)
+  const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? ''
+  expect(await ctx()).not.toContain('scratch/notes.md')
+  answer = 'x'.repeat(400_000) // about 100k tokens in one result: 40k + 100k is over the warn level (100k) and 90% of the limit before the engine counts it
+  expect(await ctx()).toContain('write what you have learned so far to scratch/notes.md now')
+  answer = 'ok'
+  tokens = 118_000 // the engine now holds it, over the 90% level too
+  expect(await ctx()).not.toContain('scratch/notes.md') // the line was said once; both levels were part of it (one line when both are passed at once)
+})
+
+test('1.0.28: a jump nobody saw (the last call of a turn, the engine figure alone) is said by the next turn\'s first result', { timeoutMs: 20_000 }, async ($, on) => {
+  warnReset()
+  resetLocks()
+  const h = fakeHost(on, { orchestrate: true })
+  let tokens = 40_000
+  on('tool.call', () => ({ result: 'ok' }) as any)
+  on('clock.after', () => new Promise(() => {}))
+  on('session.usage', (() => ({ value: { context: { tokens, window: 200_000, percent: 50 }, rateLimits: [] } })) as any)
+  on('session.id', () => ({ value: 'sess-z' }))
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ ...THREAD, sid: 'sess-z' }))
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)
+  const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? ''
+  expect(await ctx()).not.toContain('scratch/notes.md')
+  tokens = 118_000 // from under the warn level to over 90% of the limit between two calls: both levels at once, one line
+  expect(await ctx()).toContain('context 118k of 120k: write what you have learned')
+  expect(await ctx()).not.toContain('scratch/notes.md')
+})
