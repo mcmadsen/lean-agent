@@ -7,6 +7,7 @@ import { projectDir, rulesStats, unverifiedLine } from './rules'
 import { deskDir, homeDir, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { deskChoice, modelFamily, threadChoice } from './models'
+import { loadOrch } from './orchestrate'
 import { appChoseText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
@@ -154,7 +155,7 @@ export async function threadChoices(h: Host, home: string, tme: Dim, threadUsd: 
   const out = table(`by thread model/effort (${n}d; the thread's own choice, rows since effort was recorded)`, named)
   const split = rows.reduce((s, r) => s + r.a[0], 0)
   if (threadUsd - split > 0.005) out.push(`  (+ ${usd(threadUsd - split)} of thread spend from before model and effort were recorded: not split)`)
-  const def = await threadChoice(h, home, {})
+  const def = await threadChoice(h, home, {}, undefined, (await loadOrch(h).catch(() => undefined))?.on !== false)
   if (typeof def !== 'string') {
     const key = `${family(def.model)}/${def.effort}`
     const mine = rows.filter(r => r.group === key).map(r => r.a[0]).sort((a, b) => a - b)
@@ -331,7 +332,7 @@ export async function modelRows(h: Host): Promise<{ fix: string[]; info: string[
   if (sw && sw.count && sw.count > 1 && dayOf(sw.at) === dayOf(now)) info.push(`${appChoseText(sw.from, sw.count, desk)} (today, last session)${sw.blind ? "; the engine cannot tell the app's choice from its model menu, so lean-agent asks once per session and reapplies the pin: pick " + desk.charAt(0).toUpperCase() + desk.slice(1) + " in the app's model menu to stop it" : ''}`)
   else if (sw?.blind && dayOf(sw.at) === dayOf(now)) info.push(`the desk's model switch is asked once per session: the engine cannot tell the app's choice from its model menu (source "sdk" for both)`)
   const allowed = new Set<string>()
-  const def = await threadChoice(h, home, {})
+  const def = await threadChoice(h, home, {}, undefined, (await loadOrch(h).catch(() => undefined))?.on !== false)
   if (typeof def !== 'string') allowed.add(family(def.model))
   const sids = new Map<string, { id: string; model?: string }>()
   for (const e of (await h.fs.list(threadsDir(home)).catch(() => [])).filter(x => /^t\d+$/.test(x.name))) {

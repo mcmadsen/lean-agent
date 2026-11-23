@@ -35,14 +35,19 @@ export async function deskChoice(h: Host, home: string): Promise<Choice> {
 }
 
 // a thread's choice: the call's, else the thread's recorded one, else config.json, else the default; a bad value is an error
-export async function threadChoice(h: Host, home: string, given: { model?: string; effort?: string }, recorded?: Partial<Choice>): Promise<Choice | string> {
+// With `orchestrate` (lean.orchestrate on: the thread only briefs workers) the default effort is medium, not high; the call's effort, a recorded effort
+// the call NAMED (`effortSet`) and config `threads.effort` still win, so fresh starts, restarts and auto restarts follow one rule. High stays for
+// design and refactoring work the desk names (`lean_thread new effort: high`).
+export const ORCHESTRATE_EFFORT = 'medium'
+export async function threadChoice(h: Host, home: string, given: { model?: string; effort?: string }, recorded?: Partial<Choice> & { effortSet?: boolean }, orchestrate = false): Promise<Choice | string> {
   if (given.model !== undefined && !okModel(given.model)) return `model must be one of ${MODELS.join(', ')}`
   if (given.effort !== undefined && !okEffort(given.effort)) return `effort must be one of ${EFFORTS.join(', ')}`
   const c = await cfg(h, home, 'threads')
   const pick = (g: string | undefined, r: string | undefined, conf: unknown, ok: (x: unknown) => boolean, d: string) => g ?? (ok(r) ? r! : ok(conf) ? (conf as string) : d)
+  const keep = !orchestrate || recorded?.effortSet === true // an orchestrating thread's recorded effort counts only when a call named it (a recorded default is recomputed)
   return {
     model: pick(given.model, recorded?.model, c.model, okModel, THREAD_DEFAULT.model),
-    effort: pick(given.effort, recorded?.effort, c.effort, okEffort, THREAD_DEFAULT.effort),
+    effort: pick(given.effort, keep ? recorded?.effort : undefined, c.effort, okEffort, orchestrate ? ORCHESTRATE_EFFORT : THREAD_DEFAULT.effort),
   }
 }
 
