@@ -505,21 +505,22 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   await ui.unmount()
   await feed($, 40_000)
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: /40k of 200k/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /40k of 100k/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // under 80 %: the footer button, not the header's
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
   await ui.unmount()
-  await feed($, 170_000)
+  await feed($, 85_000)
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: /170k of 200k/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /85k of 100k/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'desk context 85k of 100k: restart the desk soon (the handover is ready)' })).toBeTruthy() // the amber line, with the button next to it
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy() // still under the limit: not yet a need
   await ui.unmount()
-  await feed($, 210_000)
+  await feed($, 105_000)
   ui = await $.ui.mount(DESKPANE as any)
   expect(await ui.find({ type: 'Text', text: /Needs you \(1\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /desk context 210k is over its limit \(200k\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /desk context 105k is over its limit \(100k\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeTruthy() // the button on the need's own card
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy() // and beside the bar
   await ui.press({ key: 'restart-desk-top' })

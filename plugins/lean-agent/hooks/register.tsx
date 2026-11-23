@@ -23,7 +23,7 @@ import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
 import { autoMigrate, check, checkReply, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
-import { bounded, setupFix, setupText } from './setup'
+import { bounded, openDesk, setupFix, setupText } from './setup'
 import { checkDeskModel, decideSwitch, deskModelStatus, forgetUserChoice, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
 import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
 import { isExpensiveModel } from './expensive'
@@ -47,7 +47,7 @@ import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed,
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
-import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
+import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, sessionId } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
@@ -514,7 +514,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         })
         for (const line of did) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
       })
-      // the desk's own context: idle and over config deskTokens (default 200000) it compacts itself (fixed instructions); a veto or a
+      // the desk's own context: idle and over config deskTokens (default 100000; the handover is written from 80%) it compacts itself (fixed instructions); a veto or a
       // failure is recorded with its reason and tried again when the turn ends; when it is not possible the mod writes desk/handover.md
       // and says so in the status line (deskcompact.ts)
       every($, 30_000, 'desk', async host2 => void (await compactDesk($, host2)))
@@ -866,7 +866,12 @@ export const register: Register = on => {
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
     // later (deskcompact.ts)
-    if (role.kind === 'desk' && !e.agentId) deskTurnEnded()
+    if (role.kind === 'desk' && !e.agentId) {
+      deskTurnEnded()
+      // config desk.autoRestart (default false): over its limit and no question to the user open, the mod opens the new desk itself (deskcompact.ts)
+      const host = hostOf($)
+      void autoRestartDesk(host, { tokens: contextSize(), restart: () => restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host) }) }).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -1363,6 +1368,8 @@ export const register: Register = on => {
         more = await takeReports(host)
         const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts
         if (stalled) more = more ? `${more}\n${stalled}` : stalled
+        const lim = limitLineOnce() // the desk reached its limit: its reply starts with one line saying so, once (deskcompact.ts)
+        if (lim) more = more ? `${more}\n${lim}` : lim
         const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks
         if (tip) more = more ? `${more}\n${tip}` : tip
       }
