@@ -9,6 +9,7 @@ import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, mode
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
 import { jobOf } from './jobs'
+import { selfEditRoots } from './selfedit'
 import { mcpDecision, isMcpTool } from './mcpgrant'
 import { isOwn, serverOf } from './profile'
 import type { Host } from './state'
@@ -1142,7 +1143,8 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     const own = ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId // (the project folders only name a refused path's kind in the record: threads' own calls)
     const projs = own ? await readJson<Record<string, { path?: unknown }>>($, `${leanDir(home)}/projects.json`, {}) : {}
     const projects = Object.values(projs && typeof projs === 'object' ? projs : {}).map(x => x?.path).filter((x): x is string => typeof x === 'string' && x.startsWith('/')).map(norm)
-    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects }, e)
+    const selfEdit = own ? await selfEditRoots($, ctx.role.id).catch(() => []) : undefined // the worktrees the user let this thread edit itself (selfedit.ts, signed, verified per call)
+    const o = orchDecide(orch, { kind: ctx.role.kind === 'thread' ? 'thread' : ctx.role.kind === 'desk' ? 'desk' : 'other', agentType: ctx.agentType, agentId: ctx.agentId, job, home, cwd: ctx.cwd, threadDir: ctx.role.kind === 'thread' ? `${threadsDir(home)}/${ctx.role.id}` : undefined, projects, selfEdit }, e)
     if (o) return o
   }
   if (ctx.role.kind === 'desk' && !ctx.agentType && !ctx.agentId) {

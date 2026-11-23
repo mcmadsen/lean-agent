@@ -14,6 +14,7 @@ import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
 import { fillProfile, profileText } from './profile'
 import { readRegistry, registerOwn, staleEntries } from './worktreereg'
 import { notePending } from './approvals'
+import { blockedTruth } from './denial'
 import { ACTION_KINDS, addActionRequest, runStanding } from './deskactions'
 import { runGranted } from './deskwrites'
 import { logRefusal } from './feedback'
@@ -467,8 +468,11 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
           action = { id: made.request!.id, kind: made.request!.kind, headline: made.request!.headline }
         }
       }
-      const approval = !action && str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
-      const rText = standing ? `${str(i.text)}\n(${standing})` : str(i.text)
+      const approval0 = !action && str(i.state) === 'blocked' ? str(i.approval).replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '' // only a blocked report can wait for the user's yes
+      // a classifier / rule denial has no permission prompt (denial.ts): the mod rewrites the thread's "press Open" into what is true and drops the approval
+      const truth = !action && !standing && str(i.state) === 'blocked' ? await blockedTruth(h, id, str(i.text), approval0).catch(() => null) : null
+      const approval = truth ? truth.approval : approval0
+      const rText = standing ? `${str(i.text)}\n(${standing})` : truth?.category ? truth.text : str(i.text)
       const rState = standing ? 'working' : str(i.state) || 'working'
       const rec = { ts, from: id, kind: 'report', text: rText, state: rState, ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
       const failed = await writeReport(h, home, rec)

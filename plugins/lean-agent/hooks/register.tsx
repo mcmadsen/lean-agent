@@ -53,7 +53,10 @@ import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
-import { isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
+import { bindSelfEditAnswers, selfEditRoots, revokeSelfEditByWords } from './selfedit'
+import { bindDeliverAnswers } from './deliver'
+import { clearDenied, fallbackUsed, isSmall, launchOf, loadOrch, noteDelegationDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, takeDeniedHint, takeStepNote } from './orchestrate'
+import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRec, worktreeRoots } from './denial'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
 import { contextReport } from './contextstat'
@@ -178,7 +181,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id, like t3 (every action except new, list and project-*)' },
     message: { type: 'string', description: 'alias of text (restart / reopen / start / wake / resume / send / new)' },
     text: { type: 'string', description: 'restart / reopen / start / wake / resume: NEW INSTRUCTIONS and facts for the session this call starts: they are the last part of its first prompt, after the handover, and win where they differ (put them here, never in a separate send); new: the brief; send: the message; goal-set: the goal line; find: the words, PR, branch or project to look for; ask: the question (answered from the store, never by waking the old session)' },
@@ -186,6 +189,9 @@ const SCHEMA = {
     project: { type: 'string', description: 'new / project-*: a registered project (see projects)' },
     id: { type: 'string', description: 'approve-action: the request id from action-list (like a1700000000000-1), only after the USER chose Approve for exactly that request in AskUserQuestion (or pressed Approve in the pane)' },
     target: { type: 'object', description: 'allow-writes (tN + this): the PR or work item the USER named in their own typed words: exactly one of pr (number or URL) or workitem (id). The mod makes the grant only when a recorded prompt of the user, not older than 24 h, names it and asks for the work (fix / resolve / answer ... the comments); else it refuses and you ask with AskUserQuestion. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
+    file: { type: 'string', description: 'deliver: the absolute path of the file, inside that thread\'s scratch folder, one of its worktrees or the desk reports folder' },
+    to: { type: 'string', description: 'deliver: Downloads | Desktop | Documents | an absolute folder under the user\'s home. The mod copies only when the user\'s recorded words name the folder or say save / put it in; else it returns the AskUserQuestion to ask' },
+    name: { type: 'string', description: 'deliver: optional file name in the folder (an existing file is never overwritten: -2, -3)' },
     kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: optional narrower list; a PR: reply, status, comment (default all three); a work item: comment, update' },
     sha: { type: 'string', description: 'approve-push / push: the full commit sha the user approved pushing (only after the user said so in the chat, naming this sha and branch)' },
     reason: { type: 'string', description: 'approve-push: why, in a few words. new/start/reopen/restart/resume with an expensive model (opus): why sonnet is not enough (required; the thread does NOT start, the request waits in the pane for the user\'s Approve)' },
@@ -483,7 +489,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once; approval in advance: when the user\'s own words name a PR or work item and ask for the work, allow-writes (tN, target {pr | workitem}, kinds?) lets the mod send that thread\'s writes on that target without asking (refused unless the user\'s recorded words carry it), revoke-writes (tN or id) takes it back. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (background sessions): new, send, wake, close, park, reopen, list, resume, restart (stop the session, start a NEW one with the handover: only on the user\'s request), keep (tN + on true/false: keep mode, or keep: true on new/start: a done thread is resumed for follow-ups until its context passes the limit; any thread whose recorded context is over the limit gets a new session with the handover at its next message), start (new/start/reopen take needs: MCP servers or plugins that thread needs on top of its project profile); and projects: projects (list), project-add, project-remove (unregister only), project-private, profile (a project\'s MCP/plugin allow-list: show, set mcp/plugins, fill from usage, on: false removes); goals: goal-set, goal-clear (tN); pushes: approve-push (tN + full sha, only after the user said yes in the chat to that sha and branch) then push (tN + same sha, optional pr {title, body, base, draft}: the desk itself runs git push and gh pr create (az repos pr create for an Azure DevOps remote) from the thread\'s worktree, once per approval; a thread never pushes); remote writes a thread asked for with lean_report action (a PR reply or comment, a work item comment or update): action-list (each waiting request with the exact question to ask the USER), then after the user\'s Approve approve-action (id): the desk itself sends exactly the approved text, once; approval in advance: when the user\'s own words name a PR or work item and ask for the work, allow-writes (tN, target {pr | workitem}, kinds?) lets the mod send that thread\'s writes on that target without asking (refused unless the user\'s recorded words carry it), revoke-writes (tN or id) takes it back; a thread whose worker call the classifier denied (no permission prompt exists): allow-self-edit (tN) lets it edit its own worktree itself, only on the user\'s recorded words that name it (refused otherwise: ask with AskUserQuestion), revoke-self-edit (tN or id); files for the user\'s folders: deliver (tN, file in its scratch folder, to Downloads | Desktop | Documents | a folder, name?). A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -709,20 +715,31 @@ async function showSkew($: any): Promise<void> {
 }
 
 // (see the hooks in register: classic.PermissionDenied and classic.PostToolUseFailure)
-const DENIAL_TEXT = /(denied|blocked|refused|rejected)\b[^.\n]{0,80}\b(permission (check|system)|auto mode|classifier)|\b(permission (check|system)|auto mode|classifier)\b[^.\n]{0,80}\b(denied|blocked|refused|rejected)|\[Destructive or Unwanted Actions\]/i
-async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string): Promise<void> {
+// (the matcher is denial.ts classifierDenial: the engine's real text "Permission for this action was denied by the Claude Code auto mode classifier.
+// Reason: [<category>]. ...", any category, any lean-agent type; our own refusals never count. Three ways in: the PermissionDenied event, a failed Agent
+// result, and the Agent call's own error RESULT in tool.call: the 1.0.18 fallback saw only the first two, only for worker-*, only with an absolute path
+// in the brief, and then refused the thread's own worktree because lean state was "protected".)
+async function noteDenied($: any, role: any, cwd: string, deniedSeen: Set<string>, e: any, via: string, text = ''): Promise<void> {
   if (role.kind !== 'thread' || e?.agent_id || e?.agentId) return
   const input = e?.tool_input
-  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !/^(lean-agent:)?worker-/.test(String(input.subagent_type ?? ''))) return
+  if ((e?.tool_name !== 'Agent' && e?.tool_name !== 'Task') || !input || typeof input !== 'object' || !isLeanAgentType(input.subagent_type)) return
   const id = String(e?.tool_use_id ?? '')
   if (id && deniedSeen.has(id)) return
   if (id) { if (deniedSeen.size >= 200) deniedSeen.clear(); deniedSeen.add(id) }
   const host = hostOf($)
+  const prompt = String(input.prompt ?? '')
+  const category = classifierDenial(`${text}\n${String(e?.reason ?? '')}\n${String(e?.error ?? '')}`)?.category ?? 'unspecified'
+  const kind = denialKind(input.subagent_type)
   const roots: string[] = []
-  for (const r of pathsOf(input.prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
+  if (kind !== 'reader') {
+    for (const r of pathsOf(prompt)) roots.push(await deepReal(host, r, cwd).catch(() => r), ...(r.startsWith('/') ? [r] : []))
+    roots.push(...(await worktreeRoots(host, role.id, prompt).catch(() => [])))
+  }
   const key = `${threadsDir(await homeDir(host))}/${role.id}`
-  const recorded = noteDelegationDenied(key, roots)
-  await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the worker call (${via})${recorded ? '; the thread\'s own edit of its allow-edit paths is allowed now' : '; the call named no allow-edit path'}`, agent: String(input.subagent_type ?? ''), tool: String(e.tool_name), thread: role.id, version: VERSION })
+  const broad = broadBrief(prompt)
+  const recorded = noteDelegationDenied(key, roots, { category, kind, broad })
+  await noteDenialRec(host, role.id, { category, kind, agent: String(input.subagent_type ?? ''), roots: roots.slice(0, 12), ...(broad ? { broad } : {}) }).catch(() => undefined)
+  await logRefusal(host, { role: 'thread', rule: 'delegation-denied', text: `delegation-denied: the permission check denied the ${kind === 'reader' ? 'reader' : 'worker'} call (${via}; reason ${category})${kind === 'reader' ? '; the thread was told to retry once or read in slices' : recorded ? '; the thread\'s own edit in its worktrees and the paths its brief named is allowed now' : '; no worktree or path to allow'}${broad ? `; ${broad}` : ''}`, agent: String(input.subagent_type ?? ''), tool: String(e.tool_name), thread: role.id, version: VERSION })
 }
 
 export const register: Register = on => {
@@ -730,6 +747,7 @@ export const register: Register = on => {
     // $ is only ever spelled $.noun.event(...): the helpers get this thin host instead of $ itself
     const host = hostOf($)
     resetModState()
+    clearDenied() // a denied worker call allows the thread's own edits for the rest of THIS session only
     const root = await bounded($, Promise.resolve($.session.root()), 'session.root').catch(() => '')
     const ctx = await serial(() => settle($, host, e.cwd, typeof root === 'string' ? root : ''))
     await showSkew($)
@@ -817,12 +835,12 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e: any, next) => next(e))
   on('classic.PermissionDenied', async ($, e: any, next) => {
-    await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied').catch(() => undefined)
+    await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied', String(e?.reason ?? e?.message ?? '')).catch(() => undefined)
     return next(e) // never `retry`
   }).catch(($, e: any, next) => next(e))
   on('classic.PostToolUseFailure', async ($, e: any, next) => {
     const msg = String(e?.error ?? '')
-    if (!e?.is_interrupt && !/lean-agent/.test(msg) && DENIAL_TEXT.test(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result').catch(() => undefined) // our own refusals say lean-agent and are never evidence
+    if (!e?.is_interrupt && classifierDenial(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result', msg).catch(() => undefined) // our own refusals are never evidence (denial.ts)
     return next(e)
   }).catch(($, e: any, next) => next(e))
 
@@ -1005,6 +1023,8 @@ export const register: Register = on => {
     const host = hostOf($)
     try {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
+      // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
+      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
       if (notes.length) return { ...r, context: [...(r.context ?? []), ...notes.map(n => `[lean-agent] ${n}`)] }
     } catch {
       /* the answer is simply not recorded: the pane's Approve / Deny on the card is the other way */
@@ -1220,6 +1240,11 @@ export const register: Register = on => {
       return { deny: why } as any
     }
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
+    // the thread's own work let through by a fallback: after a denied worker call (`delegation-denied`) or under the user's grant (`self-edit-grant`): counted
+    if (octx && role.kind === 'thread' && !e.agentId && ['Edit', 'Write', 'NotebookEdit', 'Read', 'Grep', 'Glob'].includes(String(e.tool))) {
+      const via = fallbackUsed({ ...octx, selfEdit: await selfEditRoots(host, role.id).catch(() => []) }, e)
+      if (via === 'self-edit-grant') await logRefusal(host, { role: 'thread', rule: via, text: `${via}: the thread's own ${e.tool} inside a worktree the user let it edit itself; the permission check still judges it`, tool: e.tool, thread: role.id, version: VERSION }).catch(() => undefined) // (the denied fallback is one row per denial, written when it was denied)
+    }
     // the thread's grants for the worker it spawns: recorded when the Agent call starts, bound to the subagent, released when the SUBAGENT ends
     // (a background launch returns at once; a foreground call is released at return)
     const g = role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') ? parseGrants(e.prompt) : null
@@ -1243,6 +1268,7 @@ export const register: Register = on => {
       launch = e.tool === 'Agent' || e.tool === 'Task' ? launchOf(r, texts(r?.result).join('\n')) : undefined
     } catch (err) {
       await noteMissingTool(host, gctx, rname, e, String((err as Error)?.message ?? err)) // a tool the session or worker does not have
+      if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && classifierDenial(String((err as Error)?.message ?? err))) await noteDenied($, role, cwd, deniedSeen, { tool_name: e.tool, tool_use_id: e.toolUseId, tool_input: { subagent_type: e.subagent_type, prompt: e.prompt } }, 'Agent call error', String((err as Error)?.message ?? err)).catch(() => undefined)
       throw err
     } finally {
       if (gcall) await releaseGrant(host, role, gcall, { ...gopts, async: launch?.async, agentId: launch?.agentId }).catch(() => undefined)
@@ -1251,6 +1277,11 @@ export const register: Register = on => {
     // the worker RAN (a real result, or a background launch accepted): one try of this brief is used; a denied, rejected or errored call uses none
     if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) orchRan(octx, e)
     if (r?.isError || r?.result?.isError) await noteMissingTool(host, gctx, rname, e, texts(r?.result).join(' ')) // the tool failure: not available / not connected
+    // the classifier's denial arrives as the Agent call's own error result: the thread's own work in its worktrees is allowed from now on (denial.ts)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && (r?.isError || r?.result?.isError)) {
+      const said = texts(r?.result).join('\n')
+      if (classifierDenial(said)) await noteDenied($, role, cwd, deniedSeen, { tool_name: e.tool, tool_use_id: e.toolUseId, tool_input: { subagent_type: e.subagent_type, prompt: e.prompt } }, 'Agent call result', said).catch(() => undefined)
+    }
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     await feedbackOf(host, e, r).catch(() => undefined)
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
@@ -1349,7 +1380,7 @@ export const register: Register = on => {
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
       const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
-      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) await revokeByWords(host, e.text).catch(() => undefined)
+      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {

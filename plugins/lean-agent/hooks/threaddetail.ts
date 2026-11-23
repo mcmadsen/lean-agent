@@ -4,6 +4,7 @@
 // run five `claude agents` listings or five git diffs per refresh.
 import { approvalOf, deskState, unconsumed } from './delivery'
 import { liveApproval } from './approvals'
+import { denialCard, noPromptText, sessionAlive } from './denial'
 import type { DeskRec } from './delivery'
 import { dayOf, syncRollup } from './ledger'
 import type { Rollup } from './ledger'
@@ -50,6 +51,7 @@ export type ThreadDetail = {
   keep?: boolean // keep mode (threadcontext.ts)
   ctx?: CtxView // the context size of the current session: text "ctx 108k/120k" | "ctx unknown", level (dim ok, yellow warn, red over)
   approval: string
+  denial?: string // "no permission prompt exists for tN: the auto-mode classifier denied ..." (denial.ts), instead of an approval
   worktree?: { path: string; branch?: string; exists: boolean }
   head?: string
   diff?: DiffStat
@@ -243,6 +245,14 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
       .reverse()
     const last = all[all.length - 1]
     if (last && t.state === 'open') d.approval = await liveApproval(h, id, approvalOf(last), last.ts, d.run !== 'unknown' && d.working).catch(() => approvalOf(last)) // only while it is really blocked (approvals.ts)
+    // no permission prompt behind a classifier / rule denial: said plainly, never an "Open" (denial.ts)
+    if (last && last.kind === 'report' && last.state === 'blocked' && t.state === 'open') {
+      const den = await denialCard(h, id, { blocked: true, approval: d.approval, noPrompt: listed && sessionAlive(sessionRow) && !d.needsYou, reportTs: last.ts, working: d.run !== 'unknown' && d.working, text: last.text }).catch(() => null)
+      if (den) {
+        d.denial = noPromptText(id, den.category)
+        d.approval = ''
+      }
+    }
   })
   await guard('queued', async () => {
     const q: Inbox[] = (await unconsumed(h, home, id)).msgs
