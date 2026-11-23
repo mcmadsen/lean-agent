@@ -155,6 +155,9 @@ grep -qF 'never curl / az / gh a forge write' "$here/thread/SKILL.md" || fail "t
 grep -qF 'Never brief a thread to curl / az / gh a forge write' "$root/templates/front-desk.md" || fail "front-desk.md must say never brief a thread to curl / az / gh a forge write; name the action kind"
 grep -qF 'with a standing approval' "$root/templates/front-desk.md" || grep -qF 'With a standing approval' "$root/templates/front-desk.md" || fail "front-desk.md must say that with a standing approval the desk does not ask the user again"
 grep -qF '`restart` takes `text`' "$here/thread/SKILL.md" || fail "the thread skill must say restart takes text (new instructions go there)"
+grep -qF 'Approval in advance' "$root/templates/front-desk.md" && grep -qF 'allow-writes' "$root/templates/front-desk.md" && grep -qF 'Never invent a target the user did not write' "$root/templates/front-desk.md" || fail "front-desk.md must tell the desk to call allow-writes only for a target the user wrote, and to ask when refused"
+grep -qF 'allow-writes' "$here/thread/SKILL.md" && grep -qF 'Never a target the user did not write' "$here/thread/SKILL.md" && grep -qF 'do not ask the user again for what it covers' "$here/thread/SKILL.md" || fail "the thread skill must document allow-writes (user's words only, never ask again for what it covers)"
+[ -f "$root/commands/allow.md" ] && [ -f "$root/commands/revoke.md" ] && grep -qF 'allow-writes' "$root/commands/allow.md" && grep -qF 'revoke-writes' "$root/commands/revoke.md" || fail "commands allow.md and revoke.md must call allow-writes / revoke-writes"
 grep -qF 'it takes `text`' "$root/templates/front-desk.md" || fail "front-desk.md must say restart takes text"
 grep -qF 'standing approvals' "$here/thread/SKILL.md" || fail "the thread skill must say action-list shows the standing approvals"
 # standing approval is model-proof: the grant is written in ONE place (deskactions.ts writeGrant, called by answerAction only: the pane press and the
