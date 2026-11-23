@@ -76,7 +76,7 @@ import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { deliveryTick, directUnavailable, setThreadSender } from './deliver-to-thread'
-import { continueTick, noteTurnEnd } from './continuepending'
+import { announcedNext, continueTick, noteTurnEnd } from './continuepending'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
@@ -85,7 +85,8 @@ import { threadToolsArgv } from './orchestrate'
 import { ANSWER_RULE, answersEnd, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
-import { currentTasks, noteEdited, noteTasks, resetEdited } from './snapshot'
+import { currentTasks, noteEdited, noteTasks, resetEdited, takeEdited } from './snapshot'
+import { asksRestart, checkpointTick, noteWarn, requestCheckpoint } from './checkpoint'
 import { recordWindows, windowTick } from './windows'
 
 setPreflight(preflightFor) // handover.ts includes the preflight pack (hooks/preflight.ts); a hooks module cannot import() lazily
@@ -188,7 +189,7 @@ const DOCTOR = 'lean_doctor'
 const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
-const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight'], description: 'INSTEAD of command: read a part of your restart store (the pull list of your first prompt); no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight a word' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight'], description: 'INSTEAD of command: read a part of your restart store (the pull list of your first prompt); no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight a word' }, checkpoint: { type: 'object', description: 'INSTEAD of command: restart yourself at once (context near the cap): after writing scratch/notes.md, {next: "<the next step, 1-3 sentences>"}; end your turn after the answer, a fresh session continues with it', properties: { next: { type: 'string' } }, required: ['next'] }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
 const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
@@ -332,6 +333,7 @@ async function warnNote($: any, host: Host, addedChars = 0): Promise<string | nu
     const limits = await threadLimits(host)
     const line = takeWarn(sid, tokens, limits) // at the warn level and again at 90% of the limit
     if (!line) return null
+    if (role.kind === 'thread') await noteWarn(host, role.id, sid) // the time of the warn line: the checkpoint wants notes newer than it
     const what = await sessionBreakdown(host, await homeDir(host), sid, tokens, limits.limit) // what fills it, by script from the transcript (1.0.27)
     return what ? `${line}. What fills it: ${what}` : line
   } catch {
@@ -635,6 +637,15 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await autoRestartTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, force) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force }) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-autorestart-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a thread that called lean_run {checkpoint} (or announced / asked for a restart) is restarted by script 10 s after its turn ended, with its `next` as the
+      // last instruction of the fresh session (checkpoint.ts): one desk line, no desk model turn
+      every($, 10_000, 'desk', async host2 => {
+        const notes = await checkpointTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, force, text) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force, text }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-checkpoint-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -1340,6 +1351,14 @@ export const register: Register = on => {
       const text = await sessionBreakdown(hostOf($), await homeDir(hostOf($)), sid, Number.isFinite(u) ? u : lastTokens, (await threadLimits(hostOf($))).limit)
       return { result: text || 'no transcript found for this session yet' } as any
     }
+    if (e.checkpoint !== undefined && !e.agentId) {
+      // the thread restarts itself (checkpoint.ts): snapshot, notes check, marker; the desk's timer starts the fresh session with `next` as its last instruction
+      const c = e.checkpoint && typeof e.checkpoint === 'object' && !Array.isArray(e.checkpoint) ? e.checkpoint : {}
+      const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+      const u = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
+      const r = await requestCheckpoint(hostOf($), role.id, { sid, next: String(c.next ?? ''), source: 'call', tokens: Number.isFinite(u) ? u : lastTokens ?? undefined, snapshot: { edited: takeEdited(), tasks: currentTasks() } })
+      return { result: r.text, ...(r.ok ? {} : { isError: true as const }) } as any
+    }
     if (e.pull !== undefined && !e.agentId) {
       // the pull list of a core restart prompt (pull.ts): a section of the reports / notes / brief / snapshot / preflight, never the whole store
       return { result: await pullText(hostOf($), await homeDir(hostOf($)), role.id, String(e.pull), typeof e.section === 'string' ? e.section : '') } as any
@@ -1404,7 +1423,14 @@ export const register: Register = on => {
       await ensureGitHooks(hostOf($)).catch(() => undefined) // lean_* tools may change projects.json
       // a thread that reports done is asked once per session whether a step could have been a script (never a worker's call)
       const ask = t.name === 'lean_report' && out.ok && e.state === 'done' && !e.agentId ? doneQuestion(role.id) : null
-      return { result: [out.text, ask].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
+      // a report that asks the desk for a restart is one: the mod makes the checkpoint restart itself (checkpoint.ts; the desk gets one line when it is done)
+      let cp = ''
+      if (t.name === 'lean_report' && out.ok && !e.agentId && e.state !== 'done' && e.state !== 'blocked' && asksRestart(e.text) && !String(e.text).trim().endsWith('?')) {
+        const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
+        const r = await requestCheckpoint(hostOf($), role.id, { sid, next: announcedNext(String(e.text)) ?? 'continue your task from scratch/notes.md and your last report', source: 'report', tokens: lastTokens ?? undefined, snapshot: { edited: takeEdited(), tasks: currentTasks() } })
+        cp = r.text
+      }
+      return { result: [out.text, ask, cp].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
 

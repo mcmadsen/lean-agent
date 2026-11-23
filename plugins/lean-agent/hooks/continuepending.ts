@@ -8,6 +8,7 @@
 // (the desk's `send`, deliver-to-thread.ts): "Do the next step now: <text>. Do not report again before you have made progress." (kind 'next') or "Continue with the
 // next step of your task." (kind 'keep'). Limits (continue-state.json, the desk's file): 'next' at most 3 in a row without a tool call between them, then ONE desk notice
 // "t5 keeps stopping after 'next:'" and the stall state (stall.ts reads `halted`); 'keep' at most 30 per hour, then ONE notice per hour.
+// A 'next' text that says the thread wants a fresh session / a restart / that its context is near the cap is not continued: it is a checkpoint restart (checkpoint.ts, 1.0.29).
 // Config: threads.autoContinue (default true; false = no 'next' continues), threads.continueSeconds (default 20). Every check is repeated when the tick acts:
 // only an OPEN thread whose session is the recorded one (never parked, closed, finished) is continued.
 import { homeDir, readJson, readJsonl, threadsDir, writeJson, leanDir } from './state'
@@ -19,6 +20,7 @@ import { turnState } from './autorestart'
 import { readStop } from './contextstop'
 import { liveOf, readActivity, readWaiting, stillWaiting } from './threadstate'
 import { NEXT_LINE, NEXT_SENTENCE } from './nextwords'
+import { announcesRestart, requestCheckpoint } from './checkpoint'
 import type { AgentRow, Out, Thread } from './threads'
 
 export const CONTINUE_SECONDS = 20
@@ -180,6 +182,14 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       continue
     }
     if (row.waitingFor || liveOf(row) === 'working') continue // an open prompt is the user's; a working session is re-checked
+    // a turn that announces a restart ("my context is near its cap, a fresh session continues ...") IS one (1.0.29, checkpoint.ts): the checkpoint restart from
+    // the announced step, never "do the next step now" into the full session. Refused (restarted a moment ago): the thread is told so instead.
+    if (p.kind === 'next' && announcesRestart(p.text)) {
+      const r = await requestCheckpoint(h, id, { sid: t.sid, next: p.text, source: 'announce' })
+      await clearPending(h, home, id)
+      if (!r.ok) await deps.send(id, r.text)
+      continue
+    }
     // limits
     if (p.kind === 'next' && (cs.consec ?? 0) >= MAX_CONSECUTIVE) {
       await clearPending(h, home, id)

@@ -14,7 +14,7 @@ export const SCRATCH_NOTES_MAX = 3_000 // chars of notes.md the handover carries
 
 // the one line, said once per session (register.tsx), in the next tool result at or over the warn level
 export const warnLine = (tokens: number, limit: number): string =>
-  `context ${kTokens(tokens)} of ${kTokens(limit)}: write what you have learned so far to scratch/notes.md now (one short section per source: what it says, what you still need); a restart resumes from it and the scratch files replace re-reading the sources`
+  `ctx ${kTokens(tokens)} of ${kTokens(limit)}: write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart`
 
 // said by the hard stop in a few words
 export const STOP_NOTES = 'your reading is kept in scratch/notes.md and the scratch files'
