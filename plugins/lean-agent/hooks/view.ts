@@ -80,11 +80,11 @@ export const stateOf = (t: ThreadRow): { word: StateWord; color: string } => {
   if (t.run === 'parked') return { word: 'parked', color: 'inactive' }
   if (t.pausedUntil) return { word: 'paused', color: 'warning' }
   if (t.restarting) return { word: 'restarting', color: 'warning' } // never a red state that asks the user to act: the mod restarts it
+  if (t.live === 'waiting') return { word: 'waiting for answer', color: 'warning' } // it asked a question and did nothing since (threadstate.ts); the engine's `blocked` label is not a prompt
   if (t.needsYou) return { word: 'waiting', color: 'warning' }
   if (t.approval) return { word: 'approval', color: 'warning' }
   if (t.blocked) return { word: 'blocked', color: 'error' }
   if (t.asking) return { word: 'asking', color: 'warning' }
-  if (t.live === 'waiting') return { word: 'waiting for answer', color: 'warning' } // it asked a question and did nothing since (threadstate.ts): not "working"
   if (t.live === 'stuck') return { word: 'stuck', color: 'error' }
   if (t.live === 'stalled') return { word: 'stalled', color: 'error' } // alive and working, no tool call or report for threads.stallMinutes (stall.ts)
   if (t.finishing) return { word: 'done (finishing)', color: 'inactive' } // reported done, the session only waits for a background worker's notification
@@ -488,7 +488,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   for (const t of v.threads) if (t.ready) out.push({ key: `push:${t.id}:${t.sha}`, kind: 'push', thread: t.id, text: `${t.id} ${title(t.id) ? `${flat(title(t.id)).slice(0, 60)} ` : ''}is ready to push (${t.sha}${t.branch ? ` on ${t.branch}` : ''}, review green): ask the desk to push`, notify: true, dk: { thread: t.id, kind: 'ready', id: String(t.recTs) } })
   for (const t of v.threads) {
     if (t.approval || t.denial !== undefined || asking.has(t.id) || t.run === 'parked' || t.pausedUntil) continue
-    if (t.needsYou) out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
+    if (t.needsYou && t.live !== 'waiting') out.push({ key: `waiting:${t.id}`, kind: 'blocked', thread: t.id, text: `${t.id} waits on a prompt in its own session`, notify: true, dk: { thread: t.id, kind: 'prompt', id: t.waitId ?? '0' } })
     else if (t.blocked || t.blockedDismissed) out.push({ key: `blocked:${t.id}:${t.recTs}`, kind: 'blocked', thread: t.id, text: `${t.id} is blocked: ${t.lastReport.slice(0, 160)}`, notify: true, dk: { thread: t.id, kind: 'blocked', id: String(t.recTs) } })
     else if (t.stallId !== undefined) out.push({ key: `stalled:${t.id}:${t.stallId}`, kind: 'stalled', thread: t.id, text: `${t.id} is ${t.live}: ${t.liveNote || 'no progress'}`, notify: false, dk: { thread: t.id, kind: 'stalled', id: t.stallId } })
   }

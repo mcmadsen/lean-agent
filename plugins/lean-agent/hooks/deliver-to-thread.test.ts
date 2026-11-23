@@ -9,6 +9,7 @@ import { resetThreadCache } from './threaddetail'
 import { resetActivity, truthOf } from './threadstate'
 import { stateOf } from './view'
 import { threadTool } from './delivery'
+import { deskSettings, mergeDeskSettingsFile } from './leantools'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const NEW = '99999999-8888-7777-6666-555555555555'
@@ -111,8 +112,9 @@ test('a refused or failed send falls back to the old path and moves nothing', as
   const refused = setup({ row: { status: 'busy', state: 'working' }, send: async () => ({ isDelivered: false, reason: 'no live session on this machine has id abc' }) })
   const r = await send(refused.h, 'hello')
   expect(r.text).toContain('is running')
+  expect(r.text).toContain('direct send to t1 refused (no live session on this machine has id abc)') // the reason is said, not swallowed
   expect(thread(refused.h).delivered).toBe(0)
-  expect(refused.h.files.get(`${T1}/delivery.json`)).toBeUndefined()
+  expect(recOf(refused.h)).toMatchObject({ sid: S1, from: 0, upTo: 1, kind: 'instruction' }) // still watched: the queued message is escalated if the thread does nothing
   const threw = setup({ row: { status: 'busy', state: 'working' }, send: async () => { throw new Error('socket closed') } })
   expect((await send(threw.h, 'hello')).text).toContain('is running')
   expect(thread(threw.h).delivered).toBe(0)
@@ -158,6 +160,20 @@ test('tick: no activity within 45 s after an answer to a waiting thread: escalat
   expect(recOf(h).sid).toBeUndefined() // dropped
   expect(await deliveryTick(h.host, deps)).toEqual([]) // once
   expect(restarts).toHaveLength(1)
+  after(() => 0)
+})
+
+test('tick: the engine refuses the send ("this session has no SendMessage tool", the desk denies it): the queued answer to a waiting thread still ends in a restart by script', async () => {
+  const { h, deps, restarts } = setup({ row: { status: 'idle', state: 'blocked' }, send: async () => ({ isDelivered: false, reason: 'this session has no SendMessage tool' }) })
+  activity(h, T0 - 60_000)
+  waits(h, T0 - 60_000)
+  const r = await send(h, 'sqlite')
+  expect(r.text).toContain('this session has no SendMessage tool')
+  expect(thread(h).delivered).toBe(0)
+  h.clock.t = T0 + 46_000
+  const notes = await deliveryTick(h.host, deps)
+  expect(restarts).toEqual([{ id: 't1', why: expect.stringContaining('did not react'), rewind: 0 }])
+  expect(notes[0]!.text).toBe('t1 did not react to your answer within 45 s: restarted it with the answer; its notes are kept')
   after(() => 0)
 })
 
@@ -264,6 +280,17 @@ test('waiting state: a question with no activity since is `waiting` (not running
   await send(h, 'sqlite')
   expect(json(h, `${T1}/waiting.json`).since).toBeUndefined()
   after(() => 0)
+})
+
+test('the desk keeps the SendMessage tool (the engine gates the mod\'s direct send on it); an older settings file that denied it is fixed by the doctor merge', async () => {
+  expect(deskSettings().permissions.deny).not.toContain('SendMessage')
+  expect(deskSettings().permissions.deny).toContain('ScheduleWakeup')
+  const h = fakeHost(null)
+  h.files.set('/d/.claude/settings.json', JSON.stringify({ permissions: { deny: ['Agent', 'SendMessage'] } }))
+  expect(await mergeDeskSettingsFile(h.host, '/d/.claude/settings.json')).toBe(true)
+  const deny = JSON.parse(h.files.get('/d/.claude/settings.json')!).permissions.deny
+  expect(deny).toContain('Agent')
+  expect(deny).not.toContain('SendMessage')
 })
 
 test('waiting reminder: an open question unanswered for waitReminderMinutes comes back ONCE as a notice', async () => {

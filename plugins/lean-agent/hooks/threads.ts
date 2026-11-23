@@ -627,7 +627,17 @@ async function directOut(h: Host, home: string, t: Thread, row: AgentRow | undef
     await save(h, home, t)
     return { ok: true, text: d.text, data: { resumed: false, direct: true } }
   }
+  if (d.text) {
+    lastDirectFailure = d.text
+    await appendJsonl(h, `${tpath(home, t.id)}/history.jsonl`, { ts: await h.clock.now(), kind: 'direct-send', ok: false, why: d.text.slice(0, 240) }).catch(() => undefined)
+  }
   return d.refused ? { ok: true, text: `${d.text}; ${u.msgs.length} message(s) queued`, data: { resumed: false } } : null
+}
+let lastDirectFailure = '' // the reason the last direct send fell back (appended to the old path's answer, so the desk and the user see why)
+const viaInbox = () => {
+  const s = lastDirectFailure
+  lastDirectFailure = ''
+  return s ? ` (${s})` : ''
 }
 
 async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; explicit?: boolean; lead?: string; installed?: string; limit?: boolean; root?: string; current?: string; kind?: MsgKind } = {}): Promise<Out> {
@@ -654,7 +664,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
     const d = await directOut(h, home, t, row, u, batchPrompt(msgs), opts.kind)
     if (d) return d
   }
-  if ((truth.word === 'running' || truth.word === 'waiting') && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}`, data: { resumed: false } }
+  if ((truth.word === 'running' || truth.word === 'waiting') && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}${viaInbox()}`, data: { resumed: false } }
   if (!msgs.length && !opts.force && truth.word !== 'idle' && !isStuck(truth.word)) return { ok: true, text: `${t.id}: nothing queued` }
   // an idle session with old unread messages ("stuck": it never reads an inbox file): the direct send is what gets them to it
   if (!opts.limit && msgs.length && isStuck(truth.word) && liveOf(row) === 'idle' && !t.finished && !(await doneSession(h, home, t))) {

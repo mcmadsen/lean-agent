@@ -61,14 +61,21 @@ export async function deliverToThread(h: Host, home: string, t: Thread, row: Age
   const send = sender
   if (!send) return { delivered: false, text: '' }
   const line = `[lean-agent] message from the desk:\n${o.body}\n${wakeMark(o.upTo)}`
+  // the message is WATCHED (delivery.json) whether the send resolved or not: a refused send (the engine: "this session has no SendMessage tool", a stale id, ...)
+  // leaves it queued in the inbox, which a thread that waits never reads, so the same activity check and the same restart apply
+  const watch = () => (o.kind === 'fyi' ? Promise.resolve() : h.clock.now().then(at => writeJson(h, recFile(home, t.id), { at, sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind } satisfies DeliveryRec)).catch(() => undefined))
   try {
     const r = await send(row.sid, line)
-    if (r && r.isDelivered === false) return { delivered: false, text: `direct send to ${t.id} refused (${String(r.reason ?? 'no reason').replace(/\s+/g, ' ').slice(0, 120)}): queued in its inbox` }
+    if (r && r.isDelivered === false) {
+      await watch()
+      return { delivered: false, text: `direct send to ${t.id} refused (${String(r.reason ?? 'no reason').replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
+    }
   } catch (e) {
-    return { delivered: false, text: `direct send to ${t.id} failed (${String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 120)}): queued in its inbox` }
+    await watch()
+    return { delivered: false, text: `direct send to ${t.id} failed (${String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
   }
   if (o.kind !== 'fyi') {
-    await writeJson(h, recFile(home, t.id), { at: await h.clock.now(), sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind } satisfies DeliveryRec).catch(() => undefined)
+    await watch()
     await clearWaiting(h, home, t.id) // the answer (or an instruction) is in: it no longer waits
     await setNotice(h, `wait-${t.id}`, null).catch(() => undefined)
   }

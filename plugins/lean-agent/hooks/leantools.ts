@@ -53,8 +53,11 @@ const THREAD_ENV: Record<string, string> = {
 const uniq = (l: string[]) => [...new Set(l)]
 
 // the desk may call DESK_TOOLS (guard.ts) and lean-agent's own tools; everything else built in is removed
+// SendMessage is the engine's gate for the mod's own `$.session.send` (deliver-to-thread.ts, desk -> thread): a session whose deny list removes the tool is refused with
+// "this session has no SendMessage tool" (seen live), so the desk keeps it. The desk MODEL still never calls it (guard.ts deskDenial denies every tool outside DESK_TOOLS).
+export const DESK_MOD_TOOLS: readonly string[] = ['SendMessage']
 export function deskSettings(): ToolsSettings {
-  return { permissions: { deny: BUILTIN_TOOLS.filter(t => !DESK_TOOLS.includes(t)) }, env: { ...DESK_ENV }, enableAllProjectMcpServers: false }
+  return { permissions: { deny: BUILTIN_TOOLS.filter(t => !DESK_TOOLS.includes(t) && !DESK_MOD_TOOLS.includes(t)) }, env: { ...DESK_ENV }, enableAllProjectMcpServers: false }
 }
 
 // `mcp`: the project's profile.mcp (profile.ts), `extraDeny`: tools the user dropped (config.json tools.thread.drop style names)
@@ -92,6 +95,8 @@ export async function mergeDeskSettingsFile(h: Host, path: string): Promise<bool
     if (!cur || typeof cur !== 'object' || Array.isArray(cur)) return false
   }
   await mkdirp(h, dirOf(path))
-  await atomicWrite(h, path, JSON.stringify(mergeSettings(cur, deskSettings()), null, 2) + '\n')
+  const merged = mergeSettings(cur, deskSettings())
+  merged.permissions.deny = merged.permissions.deny.filter((x: string) => !DESK_MOD_TOOLS.includes(x)) // an older file denied SendMessage: the mod's direct delivery needs it
+  await atomicWrite(h, path, JSON.stringify(merged, null, 2) + '\n')
   return true
 }
