@@ -220,6 +220,18 @@ while the thread is really blocked: not working, and no tool call since its repo
 only for what the permission check denied, never for something it decides itself (a subagent cap, a model choice). An expensive model
 is the pane's Approve, a push the desk's `approve-push`.
 
+### When Claude Code's permission check denies a worker (no prompt exists)
+
+Claude Code's auto-mode classifier can deny a thread's worker call ("Permission for this action was denied by the Claude Code auto mode classifier. Reason: [Destructive or Unwanted Actions]"). In a background session that is a denial, not a question: **there is no permission prompt and nothing to press**. lean-agent says so (the pane card and the desk text read "no permission prompt exists for tN: the auto-mode classifier denied a worker call (reason ...)") and never shows an `Open tN` button unless the session list (`claude agents --json`) shows a real prompt. What helps:
+
+1. **The thread does the step itself.** After a denied worker call the thread's own Edit / Write / NotebookEdit / Read / Grep / Glob are allowed in its registered worktrees (plus the worktree folders and absolute paths the denied brief named) for the rest of that session, never in lean-agent's own state. The engine's own permission check still judges each edit. Logged as `delegation-denied` with the reason category.
+2. **Retry with a narrower brief.** A broad brief ("remove all legacy code across several packages and docs") looks destructive to the classifier; a small additive step does not. ONE file plus its spec, the exact change, one test command, an additive step first, your own words quoted as the authority (the mod gives the thread the ones it recorded), never one worker for a repo-wide removal or rewrite. A script checks the denied brief and says "this brief is broad: split it" with the counts.
+3. **Let the thread edit its worktree itself (your word).** Say it in the chat ("let tN edit its worktree itself", "go ahead, do it yourself"), press the pane's **Let tN edit its worktree itself** button, or answer the desk's question: the mod makes a signed grant (the thread's registered worktrees only, 24 h or until the thread closes) and shows your words in the pane ("tN may edit its worktree itself (your words: '...')") with a **Revoke** button. The mod only accepts words you typed that name the thread and carry an instruction; no tool action or thread text creates a grant. `/lean-agent:allow-edit <tN>`, `/lean-agent:revoke-edit <tN>`, or type "stop editing" / "revoke". Counted as `self-edit-grant`.
+
+### Files for your folders: `lean_thread deliver`
+
+A thread never writes to Downloads, Desktop or Documents itself (a worker gets EPERM on macOS, and a hook refuses it). It writes the file you asked for to its `scratch/` folder and the desk calls `deliver` (tN, file, to, name?): the mod copies it (never overwriting: `name-2`, `name-3`) when your recorded words of the last 24 h name the folder or say "save" / "put it in"; otherwise the desk asks you with a question that names the file and the folder. If macOS blocks the Claude app from the folder, the reply says exactly where to allow it: System Settings > Privacy & Security > Files and Folders (or Full Disk Access).
+
 ### Remote writes go through the desk (typed actions)
 
 A thread may not make a remote write itself (Claude Code's permission check or classifier denies it, and the user would have to answer
@@ -823,6 +835,29 @@ cost. So a thread's context is capped, at turn end, and a thread can opt in to k
   the cache. No model computes anything.
 - **Config** (`~/.lean-agent/config.json`, tokens, whole numbers of at least 10000; anything else, a string included, is ignored and the
   default applies): `threadTokens` (default 120000), `threadWarnTokens` (default 100000).
+
+### Where a thread's context goes, and keeping it small
+
+`lean_doctor overhead tN` prints what a thread session's context is made of, by part, largest first, each with the one config line or action that shrinks it (the thread's own mod records the engine's context breakdown in its folder, `context-parts.json`: counted at the first turn end, estimated at every later one). The start reply says "fixed base F k (tools, MCP tools, skills, memory ...) + first prompt P k = first request N k" and "free context M k (limit L k, base B k)"; the pane and list show "ctx 96k/120k (fixed 28k)". The fixed base is what every request carries (system prompt, built-in tools, MCP tool schemas, the skills listing, memory files, custom agents); the first prompt is the brief or handover, and the messages are the work.
+
+Four things keep the messages small. Readers and workers write findings longer than a few lines to `<thread folder>/scratch/<job>-<short id>.md` and answer with the path and at most 5 lines (`workers.answerChars`, default 1200: a longer final answer is sent back once, a second one is counted as `answer-too-long`). At the warn level the thread is told once to write what it has learned to `scratch/notes.md`; a restart's handover carries those notes and the scratch file list and says not to re-read the sources they cover. A reader the permission check denied is retried once with one file and one question, then read in counted slices of 200 lines. And `lean_thread new` / `start` / `send` warn the desk, by script, when a brief names sources over half of the thread's free context: split it into a READING thread that writes a summary file and a WRITING thread that reads only that file.
+
+The fixed base shrinks too: a thread's skills listing holds only the lean-agent skills a thread uses (listing budget thread <= 1.5k tokens, desk <= 2.5k, `threads.skills: all` turns the trim off), and lean-agent's own tool schemas are short (thread <= 4.5k tokens, desk <= 6k; `lean_rules`, `lean_compare`, `lean_worktree` and `lean_profile` load through ToolSearch when a skill needs them). Both budgets are pinned by specs.
+
+### Keeping the desk's conversation small
+
+The desk only routes work, so its conversation should stay small, and the mod makes it so by script. A thread's report reaches the desk as a digest: the thread id and state, the first 400 characters cut at a sentence end, one line each for the sha, branch and review verdict, and the path of the full report file (`lean_thread report tN` returns more: `section: "<heading>"` or `full: true`). A question, an approval request and a blocked report keep their full text. `lean_thread list` is one short line per thread (`verbose: true` for the long form), a start / restart / send reply is at most 3 lines, and `lean_doctor check` prints the FIX rows and a count (`verbose: true` for every row). To see what a desk's Messages are made of, ask `lean_doctor context`: tokens by source, the ten largest items (kind and time, never the text) and the growth per turn.
+
+The desk cannot compact itself in the app, so it has a limit instead: `deskTokens` (default 100000). From 80% the handover is written and the pane header says "desk context N k of L k: restart the desk soon (the handover is ready)" with the Restart desk button next to it; at the limit the desk's next reply starts with one line saying so. With `desk.autoRestart: true` (default false) the mod opens the new desk itself at the end of the turn when no question to you is open. The handover carries the open questions, pending requests, grants and what each open thread is doing, and is at most 3k tokens. Config: `desk.reportChars` (default 400; 0 = the full text), `deskTokens`, `desk.autoRestart`.
+
+### What a restarted thread receives
+
+A thread that starts again (reopen, restart, a resume that must start fresh) gets a handover built by script from the store, never from the old conversation. `lean_doctor handover tN` previews it and starts with one header line: "handover for tN: about X tokens: brief B, corrections C, notes N, snapshot S, preflight P".
+
+- **The brief is the oldest word.** Directly after it comes "Corrections since the brief" ("These came after the brief and win where they differ:"): every desk message to the thread after its start, queued or delivered, including the text given to a restart / wake / resume, newest last, each with its time. A path in the brief that points into another thread's folder is flagged, because the thread cannot count on reading it.
+- **Notes are found where the thread kept them**: `notes.md`, `notes/*.md` and `scratch/*.md` (newest first, at most 6 files). The text of `notes.md` and `notes/progress.md` (else the newest notes file) is carried within the handover budget, the rest by name, size and first line with "read these before re-reading sources". With no goal set, the goal is the first line of the brief. The doctor preview lists the files it used and those it found but left out (reason: budget).
+- **One account of the checkout.** The state snapshot and the preflight section read one computation of `git status` and `git diff --stat HEAD`: a snapshot younger than 60 s is reused ("as of <time>"), an older one is recomputed once and written back. The handover states the commit and whether the worktree was dirty, and prints one diff number per file.
+- **Open tasks are the thread's own.** The preflight lists only open to-do items that carry the thread's id, branch or worktree, or PR / work item, or share at least two significant words with its goal or title (stop words: `hooks/stopwords.ts`): at most 5, then a count of the others ("N more tasks not about this thread"), never the rest. With none linked it says "open tasks: none linked to this thread".
 
 ## The store is the memory
 
