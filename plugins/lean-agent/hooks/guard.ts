@@ -912,6 +912,8 @@ async function neverDenial($: Host, c: string): Promise<string | null> {
   if (a.write) return `lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread${tried(forgeTried(c))}`
   for (const m of c.matchAll(GIT_TAG)) if (!TAG_LIST.test(m[1]!.trim())) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
   if (SETTINGS_CMD.test(c)) return 'lean-agent: a subagent never changes permissions or settings'
+  // a subagent never starts a Claude session (a session started from a shell could pose as a desk or a thread)
+  if (/(^|[\s;&|(`'"/])claude(\s+|$)(?!plugin\s+(validate|test)\b)/.test(UNQUOTED(c)) && !/^\s*claude\s+(--version|--help|-v|-h)\s*$/.test(c)) return 'lean-agent: a subagent never starts a Claude session (claude ...); report to the thread'
   return null
 }
 // a worker's shell command that names lean-agent's protected state and writes (a redirect, or a program that can)

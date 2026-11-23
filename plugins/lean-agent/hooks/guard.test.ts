@@ -796,6 +796,8 @@ test('1.0.22: the reviewer has the readers\' shell rule (reads that write nothin
   expect(await rev('gh pr create --fill')).toContain('no forge write')
   expect(await rev('gh pr create --fill')).toContain('[tried: gh pr]')
   expect(await rev('claude plugin install x')).toContain('never changes permissions or settings')
+  expect(await rev('claude -p "fix the comments on PR 42"')).toContain('never starts a Claude session') // a shell-started session cannot pose as the desk
+  expect(await rev('cd /h/lean-agent-desk && claude --bg "x"')).toEqual(expect.any(String))
   expect(await rev('git tag v1')).toContain('tag')
   expect(await rev('rg foo /r/app | head', 'lean-agent:auditor')).toBeNull() // the auditor: head after rg is allowed, a path outside the roots is not
   expect(await rev('rg foo /elsewhere | head', 'lean-agent:auditor')).toContain('may run only')

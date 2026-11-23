@@ -8,6 +8,10 @@
 - `lean_thread revoke-writes`, `/lean-agent:allow <tN> <PR or wi id>` and `/lean-agent:revoke <tN>`; the user typing "stop writes" / "revoke" takes the grants back.
 - README section "Approvals: in advance or by question"; the desk guide and the thread skill say when to call `allow-writes` and to ask when it is refused.
 
+### Changed
+- **A subagent never starts a Claude session** (`claude -p`, `claude --bg`): a session started from a shell could pose as the desk. The user's typed words are recorded from the terminal prompt, Remote Control, and the SDK host only in a session an app shows (the desktop app); never from a shell-started run, never from an event without an origin.
+
+
 ## 1.0.24
 
 ### Added

@@ -304,7 +304,7 @@ grant is sent at once; anything else is asked.
   or a click on a transcript link) and `bridge` (the person's message through Remote Control, phone or web) are recorded. A thread report
   relayed into the desk (a plugin's own `$.prompt.submit`, origin `plugin`), a scheduled wake, a task notification, another session's
   message, a channel, the SDK host, an `unclassified` turn and any `isMeta` prompt are never recorded, and a hook's added context is not part of the
-  text. An engine that sent no `origin` at all would be handled by "no `isMeta` flag means typed". The engine marks no paste (it is expanded into
+  text. In a session an app shows (the Claude desktop app, an IDE, a phone) the person's typed turn arrives through the SDK host (`sdk`): it is recorded there, and only there; a `claude -p` run from a shell is `sdk` too but has no app surface, so it records nothing (and a subagent may not start a Claude session at all). An event with no `origin` records nothing: the desk then always asks. The engine marks no paste (it is expanded into
   the text), so a prompt longer than 1500 characters is not recorded: an instruction is short, a long one is a pasted document. Nothing a tool
   call or a thread writes lands there.
 - **The advance accept.** `lean_thread allow-writes` {tN, target: {pr: number or URL | workitem: id}, kinds?} (or the user's command

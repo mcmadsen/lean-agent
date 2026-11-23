@@ -1348,7 +1348,8 @@ export const register: Register = on => {
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
-      if (!e.agentId && (await recordHumanPrompt(host, e).catch(() => false))) await revokeByWords(host, e.text).catch(() => undefined)
+      const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
+      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) await revokeByWords(host, e.text).catch(() => undefined)
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {

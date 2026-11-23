@@ -21,8 +21,12 @@ test('an injected prompt is never recorded: a plugin\'s relay, a schedule, a pee
   expect(await recentPrompts(h.host)).toEqual([])
 })
 
-test('an engine without origin: no isMeta flag is taken as typed; a long (pasted) prompt is not recorded', { timeoutMs: 20_000 }, async () => {
-  expect(isHumanPrompt({ text: 'fix PR 42 comments' })).toBe(true)
+test('an event without origin is never typed; the SDK host turn counts only in an app session; a long (pasted) prompt is not recorded', { timeoutMs: 20_000 }, async () => {
+  expect(isHumanPrompt({ text: 'fix PR 42 comments' })).toBe(false)
+  expect(isHumanPrompt({ text: 'fix PR 42 comments' }, true)).toBe(false)
+  expect(isHumanPrompt({ text: 'fix PR 42 comments', origin: { kind: 'sdk' } })).toBe(false) // claude -p from a shell
+  expect(isHumanPrompt({ text: 'fix PR 42 comments', origin: { kind: 'sdk' } }, true)).toBe(true) // typed in the desktop app
+  expect(isHumanPrompt({ text: 'fix PR 42 comments', origin: { kind: 'plugin' } }, true)).toBe(false)
   expect(isHumanPrompt({ text: 'fix PR 42 comments', isMeta: true })).toBe(false)
   expect(isHumanPrompt({ text: 'x'.repeat(PROMPT_MAX + 1), origin: { kind: 'composer' } })).toBe(false)
 })

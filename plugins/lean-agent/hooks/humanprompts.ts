@@ -7,7 +7,7 @@
 // 'projects-relay', 'coordinator'), a channel ('channel'), the SDK host ('sdk'), an 'unclassified' turn, and any prompt flagged `isMeta`
 // (a prompt the person does not see as typed). A hook's added context (`e.context`) is never part of `e.text`. Nothing a tool call or a thread
 // writes lands here: the only caller is the hook, and the engine, not any hook, sets `origin`.
-// An engine that sends no `origin` at all (an old one): a prompt with no `isMeta` flag is taken as typed (the README says so).
+// An engine that sends no `origin` at all (an old one) records nothing: the desk then always asks.
 // A pasted block is expanded into `text` and the engine marks no paste, so a prompt longer than PROMPT_MAX is not recorded (an instruction is
 // short; a long one is a pasted document, and its words are not the user's instruction).
 import type { Host } from './state'
@@ -19,11 +19,14 @@ const KEY = 'desk.human.prompts'
 export type HumanPrompt = { text: string; ts: number }
 
 const HUMAN_ORIGINS = new Set(['composer', 'bridge'])
-export function isHumanPrompt(e: unknown): boolean {
+// `inApp`: the session is shown by an app (the Claude desktop app, an IDE, a phone), not a terminal. There the person's typed turn arrives
+// through the SDK host (origin 'sdk'): it counts as typed ONLY in such a session. A `claude -p` run (also 'sdk') has no app surface, so a
+// session somebody started from a shell can never plant "the user's words". An event with no `origin` at all is never recorded.
+export function isHumanPrompt(e: unknown, inApp = false): boolean {
   const x = e as { text?: unknown; isMeta?: unknown; origin?: { kind?: unknown } | null } | null
   if (!x || typeof x.text !== 'string' || !x.text.trim() || x.text.length > PROMPT_MAX || x.isMeta === true) return false
-  if (x.origin === undefined || x.origin === null) return true // an engine without `origin`: no synthetic marker, so typed
-  return typeof x.origin.kind === 'string' && HUMAN_ORIGINS.has(x.origin.kind)
+  if (!x.origin || typeof x.origin.kind !== 'string') return false
+  return HUMAN_ORIGINS.has(x.origin.kind) || (inApp && x.origin.kind === 'sdk')
 }
 
 export async function recentPrompts(h: Host): Promise<HumanPrompt[]> {
@@ -33,8 +36,8 @@ export async function recentPrompts(h: Host): Promise<HumanPrompt[]> {
 }
 
 // the desk's prompt.submit hook calls this with the event; returns whether the prompt was recorded
-export async function recordHumanPrompt(h: Host, e: unknown): Promise<boolean> {
-  if (!isHumanPrompt(e)) return false
+export async function recordHumanPrompt(h: Host, e: unknown, inApp = false): Promise<boolean> {
+  if (!isHumanPrompt(e, inApp)) return false
   const keep = await recentPrompts(h)
   await h.store.set(KEY, [...keep, { text: (e as { text: string }).text.trim(), ts: await h.clock.now() }].slice(-KEEP))
   return true
