@@ -323,11 +323,14 @@ test('stopped while waiting (last report blocked / a question): marker, restart 
     expect(await autoRestartTick(h.host, deps)).toHaveLength(1)
     expect(JSON.parse(h.files.get(`${T1}/thread.json`)!).sid).toBe(NEW)
     const p = promptOf(h)
-    expect(p).toContain(`You were restarted at the context limit while WAITING for: 500-t1-${last.kind}: ${QUESTION}`)
-    expect(p).toContain('If not, do nothing: end your turn without a report and wait.')
+    expect(p).toContain(`You were waiting for the desk's answer to 500-t1-${last.kind}: ${QUESTION}. The desk has it open.`)
+    expect(p).toContain('write ONE report with state `waiting`')
+    expect(p).not.toContain('do nothing')
     expect(p).not.toContain('Resume the work now')
-    expect(inbox(h)).toHaveLength(1) // not asked again, not dropped
+    expect(inbox(h)).toHaveLength(2) // the open item is put back to the desk by script (same id), not dropped
     expect(inbox(h)[0]).toMatchObject({ ts: 500, from: 't1', text: QUESTION })
+    expect(inbox(h)[1]).toMatchObject({ from: 't1', kind: 'ask', mod: true, requeued: `500-t1-${last.kind}`, since: 500 })
+    expect(JSON.parse(h.files.get(`${T1}/waiting.json`)!)).toMatchObject({ since: 500, restarted: expect.any(Number) })
   }
 })
 
@@ -360,7 +363,7 @@ test('an approval result (a send from the desk) to a thread stopped while waitin
   const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'approved: push of abc1234 is allowed' })
   expect(r.text).toContain('was at its context limit: started a new session with your message')
   const p = promptOf(h)
-  expect(p).toContain('WAITING for: 500-t1-report')
+  expect(p).toContain("waiting for the desk's answer to 500-t1-report")
   expect(p).toContain('approved: push of abc1234 is allowed')
 })
 

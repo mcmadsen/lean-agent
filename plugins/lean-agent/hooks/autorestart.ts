@@ -19,6 +19,7 @@ import type { DeskRec } from './delivery'
 import { buildSnapshot, takeEdited, writeSnapshot } from './snapshot'
 import { kTokens, readContext, recordContext, threadLimits } from './threadcontext'
 import { readStop, stopRecordText, writeStop } from './contextstop'
+import { holdSilentEnd } from './waitrestart'
 import { isWorking } from './threads'
 import type { AgentRow, Out, Thread } from './threads'
 
@@ -56,7 +57,7 @@ export async function stopGraceMs(h: Host, home: string): Promise<number> {
 export function workLeft(recs: DeskRec[], id: string, since: number): boolean {
   const mine = recs.filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask') && !(r as any).mod && r.ts >= since)
   const last = mine[mine.length - 1]
-  return !last || (last.kind !== 'ask' && last.state !== 'done' && last.state !== 'blocked')
+  return !last || (last.kind !== 'ask' && last.state !== 'done' && last.state !== 'blocked' && last.state !== 'waiting')
 }
 
 // How the turn that just ended left the thread (1.0.22): 'done' (finished: its next message starts a fresh session), 'waiting' (its last report was
@@ -65,7 +66,7 @@ export function turnState(recs: DeskRec[], id: string, since: number): 'work' | 
   const mine = recs.filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask') && !(r as any).mod && r.ts >= since)
   const last = mine[mine.length - 1]
   if (!last) return 'work'
-  if (last.kind === 'ask' || last.state === 'blocked') return 'waiting'
+  if (last.kind === 'ask' || last.state === 'blocked' || last.state === 'waiting') return 'waiting' // (`waiting`: the restarted thread's own report, 1.0.28)
   return last.state === 'done' ? 'done' : 'work'
 }
 
@@ -113,6 +114,7 @@ export async function threadTurnEnd(h: Host, id: string, o: TurnEnd): Promise<Tu
   const out: TurnOut = { snapshot: false, action: 'none' }
   try {
     const home = await homeDir(h)
+    await holdSilentEnd(h, home, id).catch(() => false) // a restarted thread that ends its turn without its `waiting` report: the mod writes it (waitrestart.ts)
     const stopped = o.sid ? await readStop(h, home, id, o.sid) : null
     out.snapshot = await writeSnapshot(h, home, await buildSnapshot(h, home, id, { sid: o.sid, tokens: o.tokens, edited: takeEdited(), tasks: o.tasks, pending: stopped?.pending }))
     if (o.tokens === null) return out

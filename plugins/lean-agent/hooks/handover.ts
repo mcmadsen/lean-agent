@@ -2,8 +2,9 @@
 // session runs older lean-agent code). Built by the mod from what lean-agent already keeps; the old conversation is never resumed.
 import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
-import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './delivery'
+import { deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
+import { leadOf, openItemOf, restartWaiting } from './waitrestart'
 import { GIT_LINE, readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
 import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
@@ -69,15 +70,13 @@ export async function taskOf(h: Host, home: string, t: Thread): Promise<string> 
   return taskLine(goal, typeof brief === 'string' ? brief : '', t.title)
 }
 
-// The prompt of a thread restarted at the context limit while it WAITED (its last report was blocked or a question): script-built from the
-// store, the open question / request verbatim with its id. null = the last report is not an open question (nothing to wait for).
-export const OPEN_MAX = 2000
+// The prompt of a thread restarted while it WAITED (its last report was blocked or a question, waiting.json, or a request in prose): script-built
+// from the store (waitrestart.ts, 1.0.28): the open item with its id (first 200 characters), "the desk has it open", ONE `waiting` report and the
+// end of the turn; no open item in the store: "re-send the request now". null = the thread did not wait.
 export function waitingLead(recs: DeskRec[]): string | null {
-  const last = recs[recs.length - 1]
-  if (!last || !(last.kind === 'ask' || last.state === 'blocked')) return null
-  const ap = approvalOf(last)
-  const body = `${last.text.length > OPEN_MAX ? `${last.text.slice(0, OPEN_MAX)} [cut]` : last.text}${ap ? ` [needs the user's yes: ${ap}]` : ''}`
-  return `You were restarted at the context limit while WAITING for: ${last.ts}-${last.from}-${last.kind}: ${body}. If the answer is in the messages below, act on it. If not, do nothing: end your turn without a report and wait.`
+  const id = recs.find(r => r.from)?.from ?? ''
+  const { item } = openItemOf(recs, id)
+  return item ? leadOf(item) : null
 }
 
 // A text the desk gave to restart / reopen / start / wake / resume (threads.ts queues it flagged `instr`) is the LAST part of the first prompt, after
@@ -127,7 +126,7 @@ export async function handoverMode(h: Host, home: string): Promise<HandoverMode>
 }
 const lastLine = (s: string) => s.split('\n').map(l => l.trim()).filter(Boolean).pop() ?? ''
 
-export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false, modeIn?: HandoverMode): Promise<Handover> {
+export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false, modeIn?: HandoverMode, preview = false): Promise<Handover> {
   const mode = modeIn ?? (await handoverMode(h, home))
   const dir = `${threadsDir(home)}/${t.id}`
   const instr = queuedAll.filter(m => m.instr)
@@ -162,7 +161,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const scratchNotesText = await scratchNotes(h, dir) // the reading the last session kept (scratchnotes.ts): a restart must not redo it
   const scratchFiles = await scratchList(h, dir)
   const inbox =`${deskState(home)}/inbox.jsonl`
-  const wait = waiting ? waitingLead(recs) : null // restarted at the limit while waiting: the open question is the lead, nothing to carry on with
+  const wait = await restartWaiting(h, home, t.id, recs, waiting, !preview) // restarted while waiting: the open item (or "re-send it") is the lead, nothing to carry on with; the open item goes back to the desk by script
   // everything the desk sent this thread after its start (queued, delivered, to a session that has ended, the text of a restart / wake / resume, the
   // results of the actions the desk made for it), newest last, right after the brief: it is newer than the brief and wins where they differ.
   const corr = corrections(await readJsonl<Inbox>(h, `${dir}/inbox.jsonl`), queuedAll, Number.isFinite(t.created) ? t.created : 0)
@@ -306,8 +305,8 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   if (!t || typeof t !== 'object') return `no thread ${id}`
   const queued = (await unconsumed(h, home, id).catch(() => ({ msgs: [] as Inbox[] }))).msgs
   const mode = await handoverMode(h, home)
-  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode)
-  const other = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode === 'core' ? 'full' : 'core')
+  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode, true)
+  const other = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode === 'core' ? 'full' : 'core', true)
   const budget = mode === 'core' ? CORE_TOKENS : await handoverTokens(h, home)
   const tok = (s: string) => Math.ceil(s.length / 4)
   const sizes = `modes (config handover.mode, now "${mode}"): core ~${tok((mode === 'core' ? ho : other).prompt)} tokens (budget ${CORE_TOKENS}) · full ~${tok((mode === 'full' ? ho : other).prompt)} tokens (budget ${await handoverTokens(h, home)})`

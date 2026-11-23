@@ -35,7 +35,7 @@ test('a working report with a request in its prose makes a desk question and a w
   const inbox = await readJsonl<{ kind: string; text: string; report?: string }>(h.host, `${HOME}/desk/inbox.jsonl`)
   expect(inbox.map(x => x.kind)).toEqual(['report', 'ask']) // the report is delivered as usual, then the question item
   expect(inbox[1]!.report).toBe(qs[0]!.report)
-  const w = await readWaiting(h.host, HOME, 't1')
+  const w = await readWaiting(h.host, '/h', 't1')
   expect(w?.text).toContain('seems to wait for your answer')
   expect(sent.some(t => t.includes('asking'))).toBe(true) // the desk is told directly, like a lean_ask
 })

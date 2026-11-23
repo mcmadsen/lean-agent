@@ -189,4 +189,7 @@ vv=$(sed -n "s/^export const VERSION = '\([^']*\)'.*/\1/p" "$root/hooks/pane.tsx
 node "$root/hooks/skills-contract.mjs" || fail "skills roles (see above)"
 # 1.0.27: the context diet line, word for word, in the thread guide and the thread skill
 for f in "$root/templates/thread.md" "$here/thread/SKILL.md"; do grep -qF -- 'run the full test suite once per step, targeted runs in between; read diffs with --stat and one path; never read a notes file in full: headings first' "$f" || fail "$(basename "$f") lacks the context diet line"; done
+# 1.0.28: a request for the user's answer or approval is lean_ask or lean_report with `action`, never prose in a working report
+grep -qF -- "A request that needs the user's answer or approval goes out as \`lean_ask\` or \`lean_report\` with \`action\`, never as plain prose in a working report" "$root/templates/thread.md" || fail "thread.md lacks the prose-request line"
+grep -qF -- "A request that needs the user's answer or approval goes out as a question or an \`action\` request, never as plain prose in a working report" "$here/thread/SKILL.md" || fail "the thread skill lacks the prose-request line"
 echo "ok skills-contract"
