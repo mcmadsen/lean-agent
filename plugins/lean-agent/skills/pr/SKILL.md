@@ -59,7 +59,9 @@ with the token in the header, read from an environment variable and never printe
   deleted comments, bare approvals and typo fixes already dropped and counted. For GitHub it runs `gh pr view <n> --json reviews,comments`
   and `gh api repos/{owner}/{repo}/pulls/<n>/comments`; for Azure DevOps `az repos pr show --id <n>` and REST
   `.../pullRequests/<n>/threads` with a bearer token from `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`
-  (never a PAT, never printed). Use the CLI forms by hand only when the tool is missing.
+  (never a PAT, never printed). Use the CLI forms by hand only when the tool is missing. To re-read the threads later (a status check after
+  a write): `lean_run` `get` `{host: "ado", org, project, repo, pr, threads: true}` = one line per thread (id, status, first words), or a `get` path
+  with `select`; GitHub `{host: "github", path: "repos/<owner>/<repo>/pulls/<n>/comments"}`; no token in a shell.
 - **update status** (thread only): `az repos pr update --id <n> --status abandoned|active|completed`; github: the user does it, or `gh pr ready` / `gh pr close`.
 - Merging, completing, closing and deleting remote branches are the user's call. thread: ask first with `lean_ask`; desk: ask with AskUserQuestion,
   then `send` the decision to the thread.

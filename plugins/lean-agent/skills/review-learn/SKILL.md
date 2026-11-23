@@ -20,7 +20,7 @@ roles: desk, thread
    user, `az account show --query user.name`; the last completed PRs, `az repos pr list --status completed --top <N> --target-branch
    <base>`, then PRs into other targets when fewer than N; the threads from REST `.../pullRequests/<n>/threads` with a bearer token from
    `az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798`: never a PAT, never printed). Any other host: the tool
-   says it is not supported.
+   says it is not supported. To look at one PR's threads again by hand: `lean_run` `get` (`threads: true`, or a `path` with `select`).
 2. The tool has already dropped what is never a lesson, each counted in its first lines: the owner's own comments (Only the owner's own
    comments are excluded; other humans and bots such as Copilot or CI reviewers are learned from), system threads (votes, policy results,
    ref updates, reviewer changes), deleted comments, bare approvals ("LGTM") and one-off typo fixes. Fallback only when the owner could
