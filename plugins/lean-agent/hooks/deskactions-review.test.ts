@@ -257,4 +257,32 @@ test('ado-pr-reviewer: sent after Approve (PUT with the body, DELETE with no bod
   expect(t.sends()).toHaveLength(0)
 })
 
+// ---- 4 ado-pr-policy-queue -------------------------------------------------------------------------------------------------------------
+const EVAL = 'cccccccc-1111-2222-3333-444444444444'
+test('ado-pr-policy-queue: a PATCH of the policy evaluation, the id must be a GUID', () => {
+  const c = checkAction({ kind: 'ado-pr-policy-queue', params: { ...BASE, evaluationId: EVAL.toUpperCase() } })
+  expect(c.ok).toBe(true)
+  if (c.ok) {
+    expect([c.plan.method, c.plan.url, c.plan.contentType, c.plan.body]).toEqual(['PATCH', `https://dev.azure.com/acme/Shop%20App/_apis/policy/evaluations/${EVAL}?api-version=7.1-preview.1`, 'application/json', '{}'])
+    expect(c.plan.text).toBe(`queue policy evaluation ${EVAL} of PR 4321 of shop-api again`)
+  }
+  for (const evaluationId of ['', '12', '../x', `${EVAL}/../y`, `${EVAL}?x=1`, 5, undefined]) expect([String(evaluationId), checkAction({ kind: 'ado-pr-policy-queue', params: { ...BASE, evaluationId } }).ok]).toEqual([String(evaluationId), false])
+  expect(checkAction({ kind: 'ado-pr-policy-queue', params: { ...BASE, evaluationId: EVAL, policyId: 'x' } }).ok).toBe(false)
+})
+
+test('ado-pr-policy-queue: sent only after Approve; the own-PR default never covers it', { timeoutMs: 20_000 }, async () => {
+  const s = setup()
+  const v = await ask(s, 'ado-pr-policy-queue', { ...BASE, evaluationId: EVAL })
+  expect((await approveAction(s.host, v.id, s.tell)).ok).toBe(false)
+  expect(s.sends()).toHaveLength(0)
+  expect((await approve(s, v)).ok).toBe(true)
+  const [w] = s.sends()
+  expect(w!.argv).toContain('PATCH')
+  expect(w!.argv[w!.argv.length - 1]).toContain(`/_apis/policy/evaluations/${EVAL}?api-version=7.1-preview.1`)
+  noToken(s)
+  const t = setup()
+  expect(await own(t, 'ado-pr-policy-queue', { ...BASE, evaluationId: EVAL })).toBeNull()
+  expect(t.sends()).toHaveLength(0)
+})
+
 // (more kinds below)

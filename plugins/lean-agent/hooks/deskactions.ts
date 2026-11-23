@@ -40,7 +40,7 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -75,6 +75,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-vote': `org, project, repo, pr, vote (${Object.keys(VOTES).join(' | ')}): the vote of the identity the token belongs to`,
   'ado-pr-update': 'org, project, repo, pr, title?, description?, draft? (true | false), status? (active | abandoned); never completing, auto-complete, merge options, bypass: the user does that by hand',
   'ado-pr-reviewer': 'org, project, repo, pr, op (add | remove), reviewer (the id, or the unique email or display name the API takes), required? (true | false, add only)',
+  'ado-pr-policy-queue': 'org, project, repo, pr, evaluationId (the GUID of the policy evaluation to queue again)',
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -91,6 +92,7 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-vote': ['org', 'project', 'repo', 'pr', 'vote'],
   'ado-pr-update': ['org', 'project', 'repo', 'pr', 'title', 'description', 'draft', 'status'],
   'ado-pr-reviewer': ['org', 'project', 'repo', 'pr', 'op', 'reviewer', 'required'],
+  'ado-pr-policy-queue': ['org', 'project', 'repo', 'pr', 'evaluationId'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
@@ -141,7 +143,7 @@ const linkPlan = (base: string, org: string, project: string, repo: string, pr: 
 export const whereOf = (a: { file: string; line: number; endLine?: number; side: 'right' | 'left' }): string => `${a.file}:${a.line}${a.endLine !== undefined && a.endLine !== a.line ? `-${a.endLine}` : ''}${a.side === 'left' ? ' (removed line)' : ''}`
 
 // the review writes on ONE Azure DevOps PR (vote ...): repo + pr are common; each kind adds its own params. `bad` is the caller's refusal.
-const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer']
+const REVIEW_KINDS: ActionKind[] = ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue']
 // what a thread never does to a PR (the user does it by hand): completing, auto-complete, squash / merge options, bypassing policy, deleting the source branch
 const BY_HAND = /complet|squash|merge|bypass|deletesource|sourcebranch/
 const byHand = (what: string): Checked => refuse(`action ado-pr-update: ${what} is not something a thread does: the user does this by hand (completing the PR, auto-complete, squash / merge options, bypassing policy, deleting the source branch). A thread may change the title, the description, draft, and set the status to active or abandoned`)
@@ -189,6 +191,13 @@ function checkReview(k: ActionKind, p: Params, az: { org: string; project: strin
     const url = `${prs}/reviewers/${enc(reviewer)}?api-version=7.1`
     if (op === 'remove') return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'DELETE', url, contentType: '', body: '', headline: `remove reviewer ${reviewer} from PR ${pr} (${where})`, text: `remove reviewer ${reviewer} from PR ${pr} of ${repo}` } }
     return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url, contentType: 'application/json', body: JSON.stringify({ id: reviewer, isRequired: required ?? false }), headline: `add reviewer ${reviewer} to PR ${pr} (${where})`, text: `add reviewer ${reviewer} (${required ? 'required' : 'optional'}) to PR ${pr} of ${repo}` } }
+  }
+  if (k === 'ado-pr-policy-queue') {
+    // queue a policy evaluation of the PR again (REST: PATCH policy/evaluations/<id>, the project in the path; the PR is named for the card and the batch target)
+    const ev = typeof p.evaluationId === 'string' ? p.evaluationId.trim().toLowerCase() : ''
+    if (!GUID.test(ev)) return bad('evaluationId must be the GUID of a policy evaluation of the PR')
+    params.evaluationId = ev
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PATCH', url: `${az.base}/_apis/policy/evaluations/${ev}?api-version=7.1-preview.1`, contentType: 'application/json', body: '{}', headline: `queue policy evaluation ${ev} of PR ${pr} again (${where})`, text: `queue policy evaluation ${ev} of PR ${pr} of ${repo} again` } }
   }
   return bad('not a review write')
 }

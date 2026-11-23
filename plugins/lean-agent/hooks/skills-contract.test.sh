@@ -183,7 +183,7 @@ users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --inc
 [ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
-[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "14" ] || fail "the action table (PARAM_KEYS) must hold exactly fourteen kinds (eleven + ado-pr-vote, ado-pr-update, ado-pr-reviewer)"
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "15" ] || fail "the action table (PARAM_KEYS) must hold exactly fifteen kinds (eleven + ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue)"
 # the user's dialog answer as the written yes (1.0.28): a grant offer is signed and stored only in deskwrites.ts, and only the desk's AskUserQuestion hook reads the
 # answer (bindOfferAnswers); a skill the desk invokes is never the user's accept; no slash command in a bash code fence (its Run button runs it in a shell)
 callers=$(grep -rlE "bindOfferAnswers\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
