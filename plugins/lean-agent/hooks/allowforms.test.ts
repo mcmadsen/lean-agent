@@ -113,7 +113,7 @@ test('a refusal lists the forms that count and quotes the near miss: the last me
   const none = setup()
   const a = await allowWrites(none.host, 't5', { pr: 4321 })
   expect(a.ok).toBe(false)
-  expect(a.text).toContain('type to the DESK (not in a shell')
+  expect(a.text).toContain('in the CHAT box (never in a shell box')
   expect(a.text).toContain('/lean-agent:allow t5 <PR number or URL>')
   expect(a.text).toContain("fix the comments on PR <n>")
   expect(a.text).not.toContain('your last message') // nothing was typed: no near miss

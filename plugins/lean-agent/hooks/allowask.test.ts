@@ -39,7 +39,9 @@ test('a refusal says what the mod can see (the time of the last recorded prompt)
   const none = await allowWrites(s.host, 't5', { pr: 42 })
   expect(none.ok).toBe(false)
   expect(none.text).toContain('no message typed by you in the last 24 h names PR acme/Shop App/shop-api#42')
-  expect(none.text).toContain('Give the command as PLAIN TEXT, never in a code block with a Run button (a Run button runs it in a shell, where lean-agent does not see it)')
+  expect(none.text).toContain('To proceed, in order: (a) the USER writes the PR and the go as plain words in the CHAT box (e.g. "post the comments on PR 42")')
+  expect(none.text).toContain('(never in a shell box, never in a code fence); (b) or ask with AskUserQuestion (allow-ask)')
+  expect(none.text).toContain('recorded prompts: 0, none names PR 42')
   expect(none.ask!.question).toMatch(/^Allow t5 to post replies and comments and link work items on PR 42 and move its own work item to Reviewing for 24 h\? \[offer o\d+-\d+, check [0-9a-f]{12}\]$/)
   expect(none.ask!.options.map(o => o.label)).toEqual(['Allow', 'Not now'])
   expect(none.text).toContain(JSON.stringify(none.ask!.question)) // the same reply carries it: the desk is never left with only a refusal
@@ -53,6 +55,27 @@ test('a refusal says what the mod can see (the time of the last recorded prompt)
   // asking again is the same offer
   expect((await allowWrites(s.host, 't5', { pr: 42 })).ask!.question).toBe(some.ask!.question)
   expect((await writesView(s.host)).grants).toEqual([])
+})
+
+test('a refusal lists what was recorded; the same refusal twice with nothing new typed says "ask with AskUserQuestion now"; a new prompt gets the full text again', { timeoutMs: 20_000 }, async () => {
+  const s = setup()
+  await recordHumanPrompt(s.host, { text: 'thanks, looks fine', origin: { kind: 'composer' } })
+  await recordHumanPrompt(s.host, { text: 'PR 42 looks big', origin: { kind: 'composer' } })
+  const a = await allowWrites(s.host, 't5', { pr: 42 })
+  expect(a.text).toContain('recorded prompts: 2, 1 names PR 42 but none asks for the work')
+  expect(a.text).toContain('To proceed, in order')
+  const b = await allowWrites(s.host, 't5', { pr: 42 })
+  expect(b.ok).toBe(false)
+  expect(b.text).toContain('refused again, nothing new was typed since (recorded prompts: 2')
+  expect(b.text).toContain('Ask with AskUserQuestion now')
+  expect(b.text).not.toContain('To proceed, in order')
+  expect(b.ask!.question).toBe(a.ask!.question) // the same canonical question: the Allow answer is the written yes
+  await recordHumanPrompt(s.host, { text: 'and the second one', origin: { kind: 'composer' } })
+  expect((await allowWrites(s.host, 't5', { pr: 42 })).text).toContain('To proceed, in order')
+  // the offered question is the one allow-writes granted by: an Allow answer makes the grant through the dialog path
+  const r = await answer(s, b.ask!, 'Allow')
+  expect(r.granted.length).toBe(1)
+  expect((await writesView(s.host)).grants.length).toBe(1)
 })
 
 test('allow-ask returns the canonical question; an Allow answer creates the grant (24 h, cap, history "by the user in a dialog"); nothing else does', { timeoutMs: 20_000 }, async () => {

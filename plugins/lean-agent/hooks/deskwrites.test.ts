@@ -77,8 +77,9 @@ test('refused, nothing created: another PR, older than 24 h, no instruction verb
     await setupFn(s)
     const o = await allowWrites(s.host, 't5', { pr: 42 })
     expect(o.ok).toBe(false)
-    expect(o.text).toContain('names PR acme/Shop App/shop-api#42. Give the command as PLAIN TEXT, never in a code block with a Run button')
-    expect(o.text).toContain('or answer this question (AskUserQuestion')
+    expect(o.text).toContain('names PR acme/Shop App/shop-api#42 (recorded prompts: ')
+    expect(o.text).toContain('never in a shell box, never in a code fence')
+    expect(o.text).toContain('(b) or ask with AskUserQuestion (allow-ask)')
     expect((await writesView(s.host)).grants).toEqual([])
   }
   await refused(async s => void (await s.say('fix the comments on PR 43')))
