@@ -21,6 +21,7 @@ function setup(o: { thread?: Record<string, unknown>; inbox?: string | null; row
   resetFinish()
   const h = fakeHost(null)
   h.clock.t = 10_000_000
+  h.files.set('/h/.lean-agent/config.json', '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'haiku', effort: 'medium', ...o.thread }))

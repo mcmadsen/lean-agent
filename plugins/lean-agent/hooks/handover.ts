@@ -113,7 +113,22 @@ export function corrections(rows: Inbox[], queued: Inbox[], created: number): { 
   return { lines: all.slice(-CORRECTIONS_MAX).map(line), older: Math.max(0, all.length - CORRECTIONS_MAX) }
 }
 
-export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false): Promise<Handover> {
+// ---- the pull mode (1.0.27): config.json `handover.mode` ---------------------------------------------------------------------------------
+// "core" (default): the first prompt holds ONLY what changes behaviour (about CORE_TOKENS), script-built; the rest is a pull list of one-line
+// commands with sizes (pull.ts: `lean_run {pull}` returns a section, not the whole store). "full": the bounded prompt (handoverTokens).
+export type HandoverMode = 'core' | 'full'
+export const CORE_TOKENS = 1_500
+export const CORE_BRIEF = 600 // characters of the brief in the core prompt
+export const CORE_CORRECTIONS = 5
+const CORE_EACH = 240 // characters of one correction
+export async function handoverMode(h: Host, home: string): Promise<HandoverMode> {
+  const cfg = await readJson<{ handover?: { mode?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
+  return cfg?.handover?.mode === 'full' ? 'full' : 'core'
+}
+const lastLine = (s: string) => s.split('\n').map(l => l.trim()).filter(Boolean).pop() ?? ''
+
+export async function buildHandover(h: Host, home: string, t: Thread, why: string, queuedAll: Inbox[], waiting = false, modeIn?: HandoverMode): Promise<Handover> {
+  const mode = modeIn ?? (await handoverMode(h, home))
   const dir = `${threadsDir(home)}/${t.id}`
   const instr = queuedAll.filter(m => m.instr)
   const text = async (p: string) => {
@@ -151,6 +166,39 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   // everything the desk sent this thread after its start (queued, delivered, to a session that has ended, the text of a restart / wake / resume, the
   // results of the actions the desk made for it), newest last, right after the brief: it is newer than the brief and wins where they differ.
   const corr = corrections(await readJsonl<Inbox>(h, `${dir}/inbox.jsonl`), queuedAll, Number.isFinite(t.created) ? t.created : 0)
+  if (mode === 'core') {
+    // only what changes behaviour; every other source is one line in the pull list, with its size
+    const last3 = recs.slice(-REPORT_DIGESTS)
+    const nonePaths = await ensureReportFiles(h, home, last3)
+    const digestPaths = last3.map(r => (nonePaths.has(r) ? `${deskState(home)}/inbox.jsonl (ts ${r.ts})` : reportFile(home, r)))
+    const open = wait ? '' : waitingLead(recs) ?? '' // an open question / blocked request with its id, verbatim (when the lead is not already it)
+    const diffLine = snap?.diffStat ? lastLine(snap.diffStat) : ''
+    const git = snap && (snap.branch || snap.head) ? `branch ${snap.branch || '?'} · HEAD ${snap.head ? snap.head.slice(0, 10) : '?'} · dirty: ${snap.status.length ? `yes (${snap.status.length} paths)` : 'no'}${diffLine ? ` · ${diffLine}` : ''}` : ''
+    const nextTask = snap?.tasks.find(x => x.status === 'in_progress') ?? snap?.tasks.find(x => x.status === 'pending')
+    const noteLines = (notes ? notes.split('\n').length : 0) + (scratchNotesText ? scratchNotesText.split('\n').length : 0)
+    const pull = [
+      brief.length > CORE_BRIEF && `- brief in full: read ${dir}/brief.md (${brief.split('\n').length} lines; headings first: lean_run {pull: "brief"})`,
+      recs.length > 0 && `- earlier reports: lean_run {pull: "reports"} lists ${recs.length}, {pull: "reports", section: "<n>"} reads one; last ${last3.length} digests: ${digestPaths.join(', ')}`,
+      (notes || scratchNotesText || nl.listed.length) && `- notes: ${dir}/notes.md${scratchNotesText ? `, ${dir}/scratch/${NOTES_FILE}` : ''} (${noteLines} lines${nl.listed.length ? `, +${nl.listed.length} more files in ${dir}` : ''}): headings only first: lean_run {pull: "notes"}, then {pull: "notes", section: "<heading>"}`,
+      snap && `- state snapshot: ${snapshotFile(home, t.id)} (${snapshotText(snap, now).length} characters; fields: lean_run {pull: "snapshot", section: "status,tasks,report,pending"})`,
+      pre && `- preflight: lean_run {pull: "preflight"} (${pre.length} characters; section: "<word>" keeps the lines with it)`,
+    ].filter((x): x is string => !!x)
+    const core: Part[] = [
+      { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
+      { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; this prompt holds only what changes your behaviour.`, mode: 'fixed' },
+      { name: 'brief', head: `## Brief (first ${CORE_BRIEF} characters)`, body: cut(flagForeignPaths(brief, t.id), CORE_BRIEF), file: `${dir}/brief.md`, mode: 'head' },
+      { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
+      { name: 'open', head: '## Open', body: open, mode: 'fixed' },
+      { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
+      { name: 'git', head: '## Git', body: git, mode: 'fixed' },
+      { name: 'next', head: '## Next step (your task list)', body: nextTask ? `[${nextTask.status}] ${cut(nextTask.text, 300)}` : '', mode: 'fixed' },
+      { name: 'pull', head: '## Pull list', body: pull.length ? `Read only what the next step needs from the pull list; a pull returns a section, not the whole store.\n${pull.join('\n')}` : '', mode: 'fixed' },
+    ]
+    const ctail = instrBlock(instr)
+    const csized = fitParts(core, Math.max(2_000, CORE_TOKENS * 4 - (ctail ? ctail.length + 2 : 0)))
+    const cbase = cutPrompt(csized.map(partText).filter(Boolean).join('\n\n'))
+    return { prompt: ctail ? `${cbase}\n\n${ctail}` : cbase, worktree: wt?.path, branch: wt?.branch, parts: ctail ? [...csized, { name: 'instructions', head: INSTR_HEAD, body: ctail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : csized, missing: [!goalText && 'no goal (goal-set tN "<line>")', !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x) }
+  }
   const parts: Part[] = [
     { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
@@ -231,7 +279,7 @@ let preflight: PreflightFn | null = null
 export const setPreflight = (fn: PreflightFn | null) => {
   preflight = fn
 }
-async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
+export async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
   try {
     const s = preflight ? await preflight(h, home, t) : ''
     return typeof s === 'string' ? s.trim() : ''
@@ -257,9 +305,12 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
   if (!t || typeof t !== 'object') return `no thread ${id}`
   const queued = (await unconsumed(h, home, id).catch(() => ({ msgs: [] as Inbox[] }))).msgs
-  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued)
-  const budget = await handoverTokens(h, home)
+  const mode = await handoverMode(h, home)
+  const ho = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode)
+  const other = await buildHandover(h, home, t, 'This is a preview of the handover.', queued, false, mode === 'core' ? 'full' : 'core')
+  const budget = mode === 'core' ? CORE_TOKENS : await handoverTokens(h, home)
   const tok = (s: string) => Math.ceil(s.length / 4)
+  const sizes = `modes (config handover.mode, now "${mode}"): core ~${tok((mode === 'core' ? ho : other).prompt)} tokens (budget ${CORE_TOKENS}) · full ~${tok((mode === 'full' ? ho : other).prompt)} tokens (budget ${await handoverTokens(h, home)})`
   const rows = (ho.parts ?? []).filter(p => p.body).map(p => `  ${p.name.padEnd(10)} ~${String(tok(partText(p))).padStart(5)} tokens${p.cut ? `  (cut: full text in ${p.file})` : ''}`)
   const all = tok(ho.prompt)
   const sum = (...names: string[]) => (ho.parts ?? []).filter(p => names.includes(p.name)).reduce((n, p) => n + tok(partText(p)), 0)
@@ -268,7 +319,8 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const over = all > budget ? `over budget by ${all - budget} tokens: the largest section is ${big?.name ?? '?'} (~${big ? tok(partText(big)) : 0} tokens${big?.mode === 'fixed' ? ', a fixed line: never cut' : ''}); the desk's instructions and the fixed lines are never cut` : ''
   return [
     `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}`,
-    `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens, the whole prompt including reports)${over ? ` - ${over}` : ' - within budget'}`,
+    `${t.title}: ~${all} tokens of a budget of ${budget} (${mode === 'core' ? 'core mode' : 'config handoverTokens'}, the whole prompt)${over ? ` - ${over}` : ' - within budget'}`,
+    sizes,
     'sections:',
     ...rows,
     ...notesRows(ho, `${threadsDir(home)}/${id}`),

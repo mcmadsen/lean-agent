@@ -331,6 +331,7 @@ test('a thread (a review thread too) keeps what the store-as-memory, review and 
 
 test('the preflight pack is in the handover once connected (setPreflight(preflightFor) in register.tsx): the thread\'s project checkout is read, nothing explores', async () => {
   const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/config.json', '{"handover":{"mode":"full"}}') // (the full prompt carries the preflight section; core only lists it)
   h.git.handler = (a: string[]) => (a.includes('rev-parse') ? { exitCode: 0, stdout: 'fix-x\n' } : { exitCode: 1, stdout: '' })
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ app: { path: '/r/app' } }))
   const t: any = { id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }

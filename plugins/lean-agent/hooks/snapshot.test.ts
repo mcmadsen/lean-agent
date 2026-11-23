@@ -16,7 +16,7 @@ function setup(o: { git?: boolean; config?: unknown } = {}) {
   h.files.set(`${T1}/thread.json`, JSON.stringify(THREAD))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
   h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { path: '/w/app', branch: 'fix-x', thread: 't1' } }))
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' }, ...((o.config as object | undefined) ?? {}) })) // (these specs read the full prompt; core is the default since 1.0.27)
   if (o.git !== false) {
     h.git.handler = a => {
       const cmd = a.slice(2).join(' ')

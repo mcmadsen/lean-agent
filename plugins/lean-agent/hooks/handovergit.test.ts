@@ -13,6 +13,7 @@ const THREAD = { id: 't1', title: 'fix login', project: 'app', state: 'open', si
 function world() {
   const h = fakeHost(null)
   h.clock.t = 1_000_000
+  h.files.set('/h/.lean-agent/config.json', '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${T1}/thread.json`, JSON.stringify(THREAD))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
   h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { path: '/w/app', branch: 'fix-x', thread: 't1' } }))

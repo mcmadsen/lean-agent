@@ -10,6 +10,7 @@ const ROOT = '/p'
 function setup(on: any = null) {
   resetLocks()
   const h = fakeHost(on)
+  h.files.set('/h/.lean-agent/config.json', on ? '{"lean":{"orchestrate":false},"handover":{"mode":"full"}}' : '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   // a scripted `claude`: --bg prints the sid; `agents --json` answers from `rows`

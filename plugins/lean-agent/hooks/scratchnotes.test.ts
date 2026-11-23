@@ -15,6 +15,7 @@ const LIM = { limit: 120_000, warn: 100_000 }
 function setup() {
   const h = fakeHost(null)
   h.clock.t = 1_000_000
+  h.files.set(`${L}/config.json`, '{"handover":{"mode":"full"}}') // (these specs read the full prompt; core is the default since 1.0.27)
   h.files.set(`${T1}/thread.json`, JSON.stringify(THREAD))
   h.files.set(`${T1}/brief.md`, 'write the plan\n')
   h.files.set(`${T1}/scratch/notes.md`, '## living doc\nsays: the plan has 4 phases\nstill need: phase 3 owner\n')
@@ -71,7 +72,7 @@ test('the state snapshot lists the scratch files and the handover carries scratc
 test('the handover budget cuts the scratch list before the notes, and the notes before the brief', async () => {
   const h = setup()
   for (let i = 0; i < 20; i++) h.files.set(`${T1}/scratch/r${String(i).padStart(2, '0')}.md`, `# summary ${i} ${'y'.repeat(120)}`)
-  h.files.set(`${L}/config.json`, JSON.stringify({ handoverTokens: 500 }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ handoverTokens: 500, handover: { mode: 'full' } }))
   const ho = await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])
   const parts = ho.parts!
   const list = parts.find(p => p.name === 'scratchlist')!.body // (at most 6 files in all: scratch/notes.md has its own section, 5 are listed at most, the rest is one line)

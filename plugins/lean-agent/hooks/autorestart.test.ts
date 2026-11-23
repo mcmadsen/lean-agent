@@ -31,7 +31,7 @@ function setup(o: { config?: unknown; row?: Record<string, unknown> } = {}) {
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: 0, delivered: 0, model: 'sonnet', effort: 'medium' }))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' }, ...((o.config as object | undefined) ?? {}) })) // (these specs read the full prompt; core is the default since 1.0.27)
   const st = { rows: [{ sessionId: S1, name: 't1 · fix login', cwd: T1, status: 'idle', state: 'idle', startedAt: 1, pid: 42, id: 'abcd1234', ...o.row }] as any[] }
   h.claude.handler = (a: string[]) => {
     if (a[0] === '--bg') return { exitCode: 0, stdout: `started ${NEW}\n` }
