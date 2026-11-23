@@ -60,15 +60,12 @@ test('lean_doctor handover: lists the notes files it used and those it found but
   expect(lookup.listed).toHaveLength(5) // at most 6 files in all
   expect(lookup.left.map(f => f.path)).toEqual(['scratch/r5.md', 'scratch/r6.md', 'scratch/r7.md', 'scratch/r8.md'])
   const text = await handoverReport(h.host, '/h', 't85')
+  expect(text.split('\n')[0]).toMatch(/^handover for t85: about \d+ tokens: brief [1-9]\d*, corrections 0, notes [1-9]\d*, snapshot 0, preflight 0$/) // each part's size
   expect(text).toContain('notes used: notes.md; by name (read these before re-reading sources): scratch/r0.md, scratch/r1.md, scratch/r2.md, scratch/r3.md, scratch/r4.md')
   expect(text).toContain('notes found but left out: scratch/r5.md (budget: only the newest 6 notes files are listed')
   expect(text).toContain('scratch/r8.md (budget')
-  // the order of the files: newest first (a newer file is listed before an older one)
-  const mt = (path: string, mtimeMs: number) => {
-    const real = h.host.fs.stat
-    h.host.fs.stat = async (p: string) => (p === path ? { ...(await real(p)), mtimeMs } : real(p))
-  }
-  mt(`${T}/scratch/r8.md`, 9_000)
+  // the order of the files: newest first (the host reports no mtimes: `ls -1td` orders them; here r8 is the newest)
+  h.exec.handler = argv => (argv[0] === 'ls' && argv[1] === '-1td' ? { exitCode: 0, stdout: [...argv.slice(2)].sort((a, b) => (a.endsWith('/r8.md') ? -1 : b.endsWith('/r8.md') ? 1 : 0)).join('\n') + '\n' } : { exitCode: 1, stdout: '' })
   const again = await lookupNotes(h.host, T)
-  expect(again.listed[0]!.path).toBe('scratch/r8.md')
+  expect(again.listed.map(f => f.path)).toEqual(['scratch/r8.md', 'scratch/r0.md', 'scratch/r1.md', 'scratch/r2.md', 'scratch/r3.md'])
 })

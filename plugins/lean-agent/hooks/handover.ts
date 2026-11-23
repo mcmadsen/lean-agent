@@ -116,15 +116,10 @@ export const timeText = (ts: number): string => (Number.isFinite(ts) ? `${new Da
 // `rows`: the thread's inbox.jsonl, `queued`: what is queued now (not yet in the file when the caller runs before the write); `instr`: the texts of
 // THIS start, which the prompt carries whole at its end (a pointer here, not a second copy).
 export function corrections(rows: Inbox[], queued: Inbox[], created: number): { lines: string[]; older: number } {
-  const seen = new Set<string>()
-  const all: Inbox[] = []
-  for (const m of [...rows, ...queued]) {
-    if (!m || typeof m.text !== 'string' || !Number.isFinite(m.ts) || m.ts < created) continue
-    const k = `${m.ts}|${m.text}`
-    if (seen.has(k)) continue
-    seen.add(k)
-    all.push(m)
-  }
+  const ok = (m: Inbox) => !!m && typeof m.text === 'string' && Number.isFinite(m.ts) && m.ts >= created
+  const all: Inbox[] = rows.filter(ok) // (the file's rows all count, also equal ones)
+  const inFile = new Set(all.map(m => `${m.ts}|${m.text}`))
+  for (const m of queued) if (ok(m) && !inFile.has(`${m.ts}|${m.text}`)) all.push(m) // queued and not yet in the file: once
   all.sort((a, b) => a.ts - b.ts)
   const now = new Set(queued.filter(m => m.instr).map(m => `${m.ts}|${m.text}`))
   const line = (m: Inbox) => `- ${timeText(m.ts)} ${m.from ? `[${m.from}] ` : ''}${now.has(`${m.ts}|${m.text}`) ? '(the text given to this start: at the END of this prompt)' : `${m.instr ? '(text given to a restart / wake) ' : ''}${cut(flat(m.text), QUEUED_EACH)}`}`
@@ -173,7 +168,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
     { name: 'check', body: wait ? '' : `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
     { name: 'brief', head: '## Brief', body: cut(flagForeignPaths(brief, t.id), BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
-    { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}`, body: corr.lines.length ? `${corr.older ? `(${corr.older} older messages omitted: ${dir}/inbox.jsonl)\n` : ''}${corr.lines.join('\n')}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
+    { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
     { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now, { git: !gitInPre, scratch: false }) : '', file: snapshotFile(home, t.id), mode: 'head' },
@@ -279,11 +274,13 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const tok = (s: string) => Math.ceil(s.length / 4)
   const rows = (ho.parts ?? []).filter(p => p.body).map(p => `  ${p.name.padEnd(10)} ~${String(tok(partText(p))).padStart(5)} tokens${p.cut ? `  (cut: full text in ${p.file})` : ''}`)
   const all = tok(ho.prompt)
+  const sum = (...names: string[]) => (ho.parts ?? []).filter(p => names.includes(p.name)).reduce((n, p) => n + tok(partText(p)), 0)
   return [
-    `handover for ${id} (${t.title}): ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
+    `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}`,
+    `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
     'sections:',
     ...rows,
-    ...notesRows(ho, dir),
+    ...notesRows(ho, `${threadsDir(home)}/${id}`),
     ho.missing?.length ? `missing: ${ho.missing.join('; ')}` : 'missing: nothing',
     '--- the prompt, as a fresh session gets it ---',
     ho.prompt,

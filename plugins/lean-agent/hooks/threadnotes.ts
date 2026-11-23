@@ -22,7 +22,24 @@ async function describe(h: Host, dir: string, rel: string): Promise<NoteFile | n
     const text = String(await h.fs.read(`${dir}/${rel}`).catch(() => ''))
     first = (text.split('\n').find(l => l.trim()) ?? '').replace(/\s+/g, ' ').trim().slice(0, 100)
   }
-  return { path: rel, size, mtime: Number(st.mtimeMs) || 0, first }
+  return { path: rel, size, mtime: 0, first }
+}
+
+// The host reports no modification times: `ls -1td <files>` (the same on Linux, macOS and BSD) lists the given files newest first. A file the
+// answer does not name (ls failed, or not available) gets no rank and falls back to name order.
+async function rankByTime(h: Host, dir: string, files: NoteFile[]): Promise<void> {
+  if (files.length < 2) return
+  try {
+    const r = await h.process.run(['ls', '-1td', ...files.map(f => `${dir}/${f.path}`)], { timeoutMs: 5_000 })
+    if (r.exitCode !== 0) return
+    const order = r.stdout.split('\n').map(l => l.trim()).filter(Boolean)
+    for (const f of files) {
+      const i = order.indexOf(`${dir}/${f.path}`)
+      f.mtime = i < 0 ? 0 : order.length - i // bigger = newer
+    }
+  } catch {
+    /* no ranks: name order */
+  }
 }
 
 const newestFirst = (a: NoteFile, b: NoteFile) => b.mtime - a.mtime || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -40,8 +57,10 @@ async function mdIn(h: Host, dir: string, sub: string): Promise<NoteFile[]> {
 export async function lookupNotes(h: Host, dir: string): Promise<NotesLookup> {
   try {
     const top = await describe(h, dir, 'notes.md')
-    const notes = (await mdIn(h, dir, 'notes')).sort(newestFirst)
+    const notes = await mdIn(h, dir, 'notes')
     const scratch = await mdIn(h, dir, 'scratch')
+    await rankByTime(h, dir, [...notes, ...scratch])
+    notes.sort(newestFirst)
     const progress = notes.find(f => f.path === 'notes/progress.md') ?? notes[0]
     const content = [top, progress].filter((f): f is NoteFile => !!f)
     // scratch/notes.md has its own section (scratchnotes.ts); it is not listed twice

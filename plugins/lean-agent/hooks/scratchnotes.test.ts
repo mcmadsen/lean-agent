@@ -70,7 +70,9 @@ test('the handover budget cuts the scratch list before the notes, and the notes 
   h.files.set(`${L}/config.json`, JSON.stringify({ handoverTokens: 500 }))
   const ho = await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])
   const parts = ho.parts!
-  expect(parts.find(p => p.name === 'scratchlist')?.cut).toBe(true)
+  const list = parts.find(p => p.name === 'scratchlist')!.body // (at most 6 files in all: scratch/notes.md has its own section, 5 are listed at most, the rest is one line)
+  expect(list.split('\n').filter(l => l.startsWith('- scratch/')).length).toBeLessThanOrEqual(5)
+  expect(list).toContain('(+16 older, not listed: scratch/r')
   expect(parts.find(p => p.name === 'scratchnotes')?.body).toContain('phase 3 owner')
   expect(parts.find(p => p.name === 'brief')?.cut).toBeFalsy()
 })
