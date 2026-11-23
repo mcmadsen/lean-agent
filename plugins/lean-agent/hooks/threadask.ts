@@ -98,7 +98,7 @@ export async function askText(h: Host, home: string, id: string, question: strin
   const cfg = await readJson<{ ask?: { model?: unknown; effort?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
   const model = typeof cfg?.ask?.model === 'string' && cfg.ask.model ? cfg.ask.model : 'haiku'
   const effort = typeof cfg?.ask?.effort === 'string' && cfg.ask.effort ? cfg.ask.effort : 'low'
-  const ho = await buildHandover(h, home, t, `A question about the thread is answered from this handover; no work is continued.`, [])
+  const ho = await buildHandover(h, home, t, `A question about the thread is answered from this handover; no work is continued.`, [], false, undefined, true)
   const prompt = `Answer this question about thread ${id} in at most 5 lines, as a short report, using only the handover below (name the file when you cite one). If the handover does not say, answer "not in the store" and name what to read. Do not edit anything and do not start work.\n\nQuestion: ${q}\n\n--- handover of ${id} ---\n${ho.prompt}`
   const cwd = `${deskState(home)}/ask`
   await mkdirp(h, cwd).catch(() => undefined)

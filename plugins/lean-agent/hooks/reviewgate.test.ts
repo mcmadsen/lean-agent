@@ -251,7 +251,7 @@ test('lean_review re-review: the second round gets the open findings and the del
   const first = newFileDiff('src/cache.ts', 'export class Cache {}')
   const delta = ['diff --git a/src/cache.ts b/src/cache.ts', '--- a/src/cache.ts', '+++ b/src/cache.ts', '@@ -1 +1,2 @@', ' export class Cache {}', '+// fixed'].join('\n') + '\n'
   const h = setup({ '*': first, [H1]: delta }, { '*': 'A\tsrc/cache.ts\n', [H1]: '' })
-  const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', green: true, review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries', category: 'correctness' })], verdict: 'changes-requested' } })
+  const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', green: true, review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries', category: 'correctness', path: 'src/cache.ts', line: 1 })], verdict: 'changes-requested' } })
   expect(r1.ok).toBe(false)
   expect(r1.text).toContain('open major')
   const p = await tool(h, { action: 'prepare', base: 'main', branch: 'feat', level: 'full' })
@@ -422,8 +422,13 @@ test('lean_review record: a high-risk diff needs TWO reviewer runs: one block is
   const m = await tool(h, { action: 'merge', reviews: [runA, runB] })
   expect(m.ok).toBe(true)
   expect(m.text).toContain('1 found by both [2/2]')
-  const block = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(m.text)![1]!)
+  // 1.0.28: the reply is compact (counts, the top findings, the path of the full merged JSON), never the block itself
+  expect(m.text).not.toContain('```json')
+  expect(m.text).toMatch(/verdict: .*; \d+ /)
+  const path = /in (\/\S+review-merged-[0-9a-f]+\.json)/.exec(m.text)![1]!
+  const block = JSON.parse(h.files.get(path)!)
   expect(block.runs).toBe(2)
+  expect((await tool(h, { sha: H2, base: 'main', green: true, review: path })).ok).toBe(true) // the path, unchanged
   expect((await tool(h, { sha: H2, base: 'main', green: true, review: block })).ok).toBe(true)
   expect((await tool(h, { sha: H2, base: 'main', green: true, review: { ...block, goal: 'edited after the merge' } })).ok).toBe(false)
   expect((await tool(h, { action: 'merge', reviews: [runA, runA] })).ok).toBe(false)
@@ -498,7 +503,7 @@ test('lean_review: a light pass is the "last reviewed sha" of the next light pas
   const delta = ['diff --git a/src/cache.ts b/src/cache.ts', '--- a/src/cache.ts', '+++ b/src/cache.ts', '@@ -1 +1,2 @@', ' export class Cache {}', '+// fixed'].join('\n') + '\n'
   const h = setup({ '*': first, [H1]: delta }, { '*': 'A\tsrc/cache.ts\n', [H1]: '' })
   await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // (head H2 prepared light)
-  const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries' })], verdict: 'changes-requested' } })
+  const r1 = await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: { ...base, reuse: [{ symbol: 'Cache', candidate: '', verdict: 'justified-new', why: 'there is no other cache in this module at all' }], findings: [finding({ text: 'the cache never expires entries', path: 'src/cache.ts', line: 1 })], verdict: 'changes-requested' } })
   expect(r1.ok).toBe(true)
   h.files.set(`${L}/config.json`, JSON.stringify({ review: { minLines: 0 } })) // (a one-line delta is under the default 60: specced below)
   const light = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' })

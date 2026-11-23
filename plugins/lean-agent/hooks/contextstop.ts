@@ -50,14 +50,14 @@ export const RESTARTING_TEXT = 'context limit, the mod restarts it'
 const NOTICE = /\b(check-?point(ed|ing)?|restart me|context (size|limit|window|is|at|over|reached)|over (the|my) (context )?limit|\d+\s?k(\s+tokens)?\b[^.\n]{0,40}\b(context|limit))/i
 export const isNotice = (text: unknown, state: unknown): boolean => {
   const t = typeof text === 'string' ? text.trim() : ''
-  return !!t && t.length <= 400 && NOTICE.test(t) && state !== 'done' && state !== 'blocked'
+  return !!t && t.length <= 400 && NOTICE.test(t) && state !== 'done' && state !== 'blocked' && state !== 'waiting'
 }
 
 // exempt from the stop: the last report or question of the thread is a question to the user, or `blocked` (it waits for an answer)
 export async function isExempt(h: Host, home: string, id: string): Promise<boolean> {
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask') && !(r as any).mod)
   const last = recs[recs.length - 1]
-  return !!last && (last.kind === 'ask' || last.state === 'blocked')
+  return !!last && (last.kind === 'ask' || last.state === 'blocked' || last.state === 'waiting')
 }
 
 const nameOf = (tool: unknown) => String(tool ?? '').replace(/^mcp__lean-agent__/, '')

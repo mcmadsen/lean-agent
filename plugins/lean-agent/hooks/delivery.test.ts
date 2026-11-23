@@ -451,7 +451,7 @@ test('the registered lean_review tool accepts level (light | full) and worktree,
 
 test('lean_report has no checkpoint state; a done report says the session is over once the turn ends, other reports do not', async () => {
   const rep: any = THREAD_TOOLS.find(t => t.name === 'lean_report')
-  expect(rep.inputSchema.properties.state.enum).toEqual(['working', 'blocked', 'done'])
+  expect(rep.inputSchema.properties.state.enum).toEqual(['working', 'blocked', 'done', 'waiting']) // (waiting: only after a restart while the desk holds its open item, waitrestart.ts)
   expect(rep.description).not.toMatch(/state: checkpoint|checkpoint \(/i)
   expect(rep.description).toContain('Never report a checkpoint or your context size: the mod does it')
   const { h } = setup()

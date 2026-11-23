@@ -2,7 +2,7 @@
 // over config.json `toolResultChars` (default 20000, 0 = off; for a thread's OWN results `threadToolResultChars`, default 8000, 1.0.27;
 // a worker's keep 20000) keeps its head and tail (a `git diff` / `git show` result also gets a hint line: --stat first); the full text is saved in the one output
 // folder (~/.lean-agent/output/, output.ts; the Bash line squeeze saves there too) and one line says where (Read it if it is needed). Never touched: Edit and Write results, errors, the
-// desk, a subagent's results, lean-agent's own tools. A result that cannot be saved in full is never cut. Every cut is counted
+// desk, a subagent's results, lean_report / lean_ask (a thread's other lean-agent tools are capped like any MCP result, 1.0.28). A result that cannot be saved in full is never cut. Every cut is counted
 // (capped.jsonl) for `lean_doctor stats` ("saved 140k chars in 12 results").
 //
 // The result keeps the shape the engine gave (it validates a hook's answer against the tool's output schema): Bash's `{ stdout, stderr, ... }`
@@ -63,8 +63,12 @@ export function mapTexts(v: unknown, f: (t: string) => string): unknown {
   return v
 }
 
-// a tool whose result may be cut: Bash and MCP tools (lean-agent's own are small and carry answers)
-const cappable = (tool: string) => tool === 'Bash' || (tool.startsWith('mcp__') && !tool.startsWith('mcp__lean-agent__'))
+// a tool whose result may be cut: Bash and MCP tools. lean-agent's own tools too since 1.0.28 for a THREAD's own call (lean_review, lean_run,
+// lean_thread ... can return a whole diff or review into its context: the 8000 cap, the full text in the output folder); never lean_report / lean_ask
+// (small, they carry answers) and never a worker's call
+const OWN_SMALL = new Set(['lean_report', 'lean_ask'])
+const OWN = 'mcp__lean-agent__'
+const cappable = (tool: string, worker = false) => tool === 'Bash' || (tool.startsWith('mcp__') && (!tool.startsWith(OWN) || (!worker && !OWN_SMALL.has(tool.slice(OWN.length)))))
 
 let seq = 0
 export const resetCap = (): void => {
@@ -75,7 +79,7 @@ export const resetCap = (): void => {
 // `r` is what `next(e)` resolved to. Returns it unchanged unless a text of it is over the cap.
 // `o.worker`: the result is a worker's (its own context: the 20000 cap); `o.command`: the Bash command, named in the cut text
 export async function capResult(h: Host, thread: string, tool: string, r: any, o: { worker?: boolean; command?: string } = {}): Promise<any> {
-  if (!r || r.deny !== undefined || r.isError || !cappable(tool) || !/^t\d+$/.test(thread)) return r
+  if (!r || r.deny !== undefined || r.isError || !cappable(tool, o.worker) || !/^t\d+$/.test(thread)) return r
   const res = r.result
   if (!res || (typeof res === 'object' && !Array.isArray(res) && res.isError === true)) return r
   const bash = tool === 'Bash'

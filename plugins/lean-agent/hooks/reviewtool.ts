@@ -1,14 +1,16 @@
 // `lean_review` actions beyond the plain record: prepare (the script-computed brief, model and second-opinion advice), record (the
 // reviewer's JSON checked by reviewgate.ts before a green is signed) and decline. The HMAC signing stays in reviews.ts.
 import type { Host } from './state'
-import { homeDir } from './state'
+import { atomicWrite, homeDir, leanDir, threadsDir } from './state'
 import { readConfig } from './budget'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
 import { noteReviewed } from './reviewkind'
 import type { Review } from './reviews'
-import { capPrep, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
+import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
+import { changeScope, changedText, droppedText } from './reviewchange'
+import { areaOf, areasOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
 import { STEPS_BY_JOB, stepBudget } from './jobs'
 import { loadOrch } from './orchestrate'
 import type { Range } from './reviewprep'
@@ -66,6 +68,7 @@ export const REVIEW_EXTRA_PROPS = {
   ref: { type: 'string', description: 'prepare: review someone else\'s work (PR number or URL, branch or sha), read-only; record it with mode "external"' },
   mode: { type: 'string', enum: ['external'], description: 'record: the review of a ref (never green, never for the push gate)' },
   worktree: { type: 'string', description: 'prepare, record: absolute path of a registered worktree to review (default: this thread\'s own)' },
+  scope: { type: 'string', description: 'prepare, record: one area (area-1 ...) of a PR too large for one review, as the prepare text lists them; an area record is never green' },
 }
 
 // The checkout a review reads: the calling thread's own registered worktree of this project (its HEAD is the work under review), else the
@@ -174,7 +177,18 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const branch = str(i.branch)
   const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
-  if (!ext && !str(i.since)) { // (a `since` the caller names is an explicit delta request: always prepared)
+  // a diff over 300 files or 20000 lines (generated files out) is not reviewed in one: counts only, and the areas to review one by one (reviewarea.ts)
+  const scopeArg = str(i.scope)
+  const whole = perFileStats(diff)
+  const areasAll = partition(whole)
+  if (!scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))) {
+    await noteAreas(h, project, range.head, areasAll.map(a => a.name))
+    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head })}\n${bigText(whole, ctx.prep, areasAll)}` }
+  }
+  const area = scopeArg ? areaOf(areasAll, scopeArg) : undefined
+  if (scopeArg && !area) return { ok: false, text: `prepare: scope ${JSON.stringify(scopeArg.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'the diff has no changed files'}); run prepare without scope to see the areas` }
+  const keep = (p: string) => !area || inArea(p, area, areasAll)
+  if (!ext && !scopeArg && !str(i.since)) { // (a `since` the caller names is an explicit delta request: always prepared)
     const skip = await alreadyReviewed(h, project, range.head, level, earlier ? ctx.delta?.lines ?? null : null, earlier?.sha ?? '')
     if (skip) return { ok: true, text: skip + (await costNote(h, project, thread, range.head)) }
   }
@@ -183,7 +197,9 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   // The reviewer is sonnet (twice for a high-risk diff, on the full level). A model that config.json review.model or the brief names is
   // used only when it is cheap, or an expensive one the user approved for THIS thread in the pane; otherwise sonnet runs and the request
   // waits in the pane. The light level is always ONE sonnet pass.
-  const runs = light ? { runs: 1 as const, why: 'light review' } : requiredRuns(ctx.prep, diff, rereview)
+  const areaDiff = area ? keepSections(rereview && deltaDiff !== null ? deltaDiff : diff, keep) : rereview && deltaDiff !== null ? deltaDiff : diff // (the text the reviewer's reading plan counts)
+  const prepFor = area ? scopedPrep(ctx.prep, keep, keepSections(diff, keep)) : ctx.prep
+  const runs = light ? { runs: 1 as const, why: 'light review' } : requiredRuns(prepFor, area ? keepSections(diff, keep) : diff, rereview)
   let model = 'sonnet'
   let nRuns: 1 | 2 = runs.runs
   let why = runs.why
@@ -199,16 +215,18 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
       held = `a review on ${want.model} (${want.why}) needs the user's approval for this thread (a request is in the pane's "Needs you", Approve there); sonnet runs meanwhile.`
     }
   }
-  const brief = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
-  const second = !light && !rereview && wantSecondOpinion(ctx.prep)
+  const brief0 = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
+  const brief = area ? scopedPrep(brief0, keep, areaDiff) : brief0
+  const second = !light && !rereview && wantSecondOpinion(prepFor)
   const spent = await costNote(h, project, thread, range.head) // what the passes of an earlier prepare of this sha already cost (before this prepare is noted)
   await noteLevel(h, project, range.head, level)
   await addPrepNote(h, project, { ts: await h.clock.now(), sha: range.head, level })
   // generated files stay out of the diff the reviewer reads (its own `git diff` takes the pathspecs as written)
   const specs = excludeSpecs(brief.excluded)
-  const cut = specs ? ` -- . ${specs}` : ''
+  const cut = area ? ` -- ${pathspecs(area).join(' ')}${specs ? ` ${specs}` : ''}` : specs ? ` -- . ${specs}` : ''
   const co = range.path
   const lines: string[] = []
+  if (area) lines.push(`AREA REVIEW ${area.name} of ${areasAll.length} (${area.files} files, ${area.lines} lines: ${area.keys.map(keyLabel).join(', ')}). The PR is too large for one review: review ONLY the changed files under these paths (the other areas are separate passes); every git diff below is limited to them. Record with lean_review record and scope "${area.name}" (an area record is never green); keep your answer short.`)
   if (ext) lines.push(`EXTERNAL REVIEW of ${ext.label} (someone else's work, read read-only from a scratch repository; the user's tree is never touched). Record it with mode: "external" and the head sha below: it is recorded NOT green and never counts for the push gate. Do not edit anything and do not push.`)
   lines.push(ext ? `Scratch repository (every git command is git -C this path, never cd): ${co}` : `Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
   lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${co} diff ${range.mb}...${range.head}${cut} (code before the change: git -C ${co} show ${range.mb}:<path>)`)
@@ -222,14 +240,15 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     lines.push(earlier!.carry.open.length ? `Open findings from the last review:\n${earlier!.carry.open.map(findingLine).join('\n')}` : 'Open findings from the last review: none.')
   }
   const orch = await loadOrch(h).catch(() => undefined)
-  const plan = statsText(rereview && deltaDiff !== null ? deltaDiff : diff, orch ? stepBudget('check', orch.steps, orch.stepsByJob) : STEPS_BY_JOB.check)
+  const plan = statsText(areaDiff, orch ? stepBudget('check', orch.steps, orch.stepsByJob) : STEPS_BY_JOB.check)
   if (plan) lines.push(plan)
+  lines.push(changedText(brief)) // the changed files and their changed line ranges: the reviewer reports on these only (reviewchange.ts); the area split counts changed files only
   lines.push(prepText(capPrep(brief)))
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
   const exp = await expectedReviewCost(h, project, nRuns, level)
-  const meta = { level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
+  const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
@@ -256,21 +275,73 @@ function twoRuns(v: unknown): TwoRuns | string {
 // a block as the thread will hand it back (a JSON round trip), so its digest is the same on both sides
 const roundTrip = (v: unknown): unknown => JSON.parse(JSON.stringify(v))
 
-async function doMerge(h: Host, project: string, i: any): Promise<Out> {
+// The thread's scratch folder (the output folder for a caller that is no thread): a full text kept out of the conversation, with its path in the reply
+async function spill(h: Host, thread: string, name: string, text: string): Promise<string | null> {
+  const home = await homeDir(h)
+  const path = /^t\d+$/.test(thread) ? `${threadsDir(home)}/${thread}/scratch/${name}` : `${leanDir(home)}/output/${name}`
+  try {
+    await atomicWrite(h, path, text)
+    return path
+  } catch {
+    return null
+  }
+}
+// a review block given as the path of a file this tool wrote (merge's reply): its text; anything else is given back as it is
+async function blockOf(h: Host, thread: string, v: unknown): Promise<unknown> {
+  if (typeof v !== 'string' || !/^\/\S+review-merged-[0-9a-f]+\.json$/.test(v.trim())) return v
+  const home = await homeDir(h)
+  const p = v.trim()
+  if (p.includes('..') || !(p.startsWith(`${threadsDir(home)}/${thread}/scratch/`) || p.startsWith(`${leanDir(home)}/output/`))) return v
+  const t = await h.fs.read(p).catch(() => null)
+  return typeof t === 'string' ? t : v
+}
+
+// The changed files and line ranges of the range a merge or record is about (best effort: null when the range cannot be read)
+async function changePrep(h: Host, project: string, i: any, thread: string): Promise<Context['prep'] | null> {
+  try {
+    const sha = str(i.sha)
+    const external = str(i.mode) === 'external'
+    const ext = external && sha ? await externalOf(h, project, sha) : null
+    if (external && !ext) return null
+    const checkout = ext ? ext.path : await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
+    const range = ext ? await resolveRange(h, project, ext.base, sha, ext.path) : await resolveRange(h, project, str(i.base) || undefined, sha || undefined, checkout)
+    if (typeof range === 'string') return null
+    const { ctx, failed } = await loadContext(h, project, range, str(i.branch), '', undefined, true)
+    return failed ? null : ctx.prep
+  } catch {
+    return null
+  }
+}
+
+async function doMerge(h: Host, project: string, i: any, thread = ''): Promise<Out> {
   const two = twoRuns(i.reviews)
   if (typeof two === 'string') return { ok: false, text: `merge: ${two}` }
   const { result, info } = mergeRuns(normalize(two.a), normalize(two.b))
+  // only changed code counts: a finding outside the change is dropped and counted (reviewchange.ts); no range to read = nothing dropped here, record does it
+  const prep = await changePrep(h, project, i, thread)
+  let droppedNote = ''
+  if (prep) {
+    const cs = changeScope(result.findings, prep)
+    result.findings = cs.kept
+    droppedNote = droppedText(cs.dropped)
+  }
   const block = roundTrip(result)
-  await rememberMerged(h, project, digestOf(block))
-  return { ok: true, text: `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).\nPass this block, unchanged, as review to lean_review record (or pass the two blocks as reviews):\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\`` }
+  const digest = digestOf(block)
+  await rememberMerged(h, project, digest)
+  const head = `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).${droppedNote ? ` ${droppedNote}.` : ''}`
+  const file = await spill(h, thread, `review-merged-${digest.slice(0, 12)}.json`, JSON.stringify(block))
+  // COMPACT (1.0.28): counts by severity, the top 10 findings, the path of the full merged JSON; never the whole list into the thread's context
+  if (file) return { ok: true, text: `${head}\nverdict: ${result.verdict || 'none'}; ${countsText(result.findings) || 'no findings'}.${result.findings.length ? `\ntop ${Math.min(10, result.findings.length)} of ${result.findings.length}:\n${topRows(result.findings).join('\n')}` : ''}\nThe full merged JSON (every finding, the lists) is in ${file}: pass that path, unchanged, as review to lean_review record (or pass the two blocks as reviews). Read it only for the findings you must fix.` }
+  return { ok: true, text: `${head}\nPass this block, unchanged, as review to lean_review record (or pass the two blocks as reviews):\n\`\`\`json\n${JSON.stringify(block)}\n\`\`\`` }
 }
 
 async function doRecord(h: Host, project: string, i: any, thread: string): Promise<Out> {
   const sha = str(i.sha)
   if (!/^[0-9a-f]{40,64}$/.test(sha)) return { ok: false, text: 'review needs the full commit sha (git rev-parse HEAD)' }
   const external = str(i.mode) === 'external'
-  const wantGreen = i.green === true && !external // an external review (someone else's ref) is never green, and says so below
-  const extNote = external ? ' [external review: recorded NOT green by design; it never counts for the push gate]' : ''
+  const scope = str(i.scope) // one area of a PR reviewed by area (reviewarea.ts): never green, an external-style record
+  const wantGreen = i.green === true && !external && !scope // an external review (someone else's ref) is never green, and says so below
+  const extNote = external ? ' [external review: recorded NOT green by design; it never counts for the push gate]' : scope ? ` [area ${scope}: recorded NOT green by design; it never counts for the push gate]` : ''
   let raw: unknown
   let merged: string | null = null
   let verdicts: string[] | undefined
@@ -284,7 +355,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
     raw = roundTrip(m.result)
     verdicts = [normalize(two.a).verdict, normalize(two.b).verdict]
     merged = `merged from 2 reviewer runs (${m.info.both} finding(s) by both [2/2], ${m.info.only} by one run [1/2])`
-  } else raw = parseResult(i.review)
+  } else raw = parseResult(await blockOf(h, thread, i.review)) // (a path of the file merge wrote is read here)
   const strings = Array.isArray(i.findings) ? i.findings.filter((x: unknown): x is string => typeof x === 'string') : undefined
   const rec: Review = { project, sha, green: false, passes: Number(i.passes) || undefined, findings: strings, ...(external ? { mode: 'external' as const } : {}) }
   const model = str(i.model)
@@ -315,13 +386,31 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const second = Array.isArray(i.second) ? i.second.filter((x: any) => x && typeof x.symbol === 'string').map((x: any) => ({ symbol: String(x.symbol), candidate: typeof x.candidate === 'string' ? x.candidate : '' })) : undefined
   // a light pass never records green: said by the call (level: "light") or by the last prepare of this sha (the mod's store)
   const light = str(i.level).toLowerCase() === 'light' || (await preparedLevel(h, project, sha)) === 'light'
-  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
+  const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
+  // only changed code counts (reviewchange.ts): a finding about a file the change does not touch, or a line outside every changed hunk (+-3), is dropped and counted
+  const cs = failed ? null : changeScope(res.findings, ctx.prep)
+  if (cs) res.findings = cs.kept
+  const droppedNote = cs ? droppedText(cs.dropped) : ''
+  // an area record: the checks (new symbols, edited tests) cover this area's files only
+  let area: ReturnType<typeof areaOf>
+  let areasAll: ReturnType<typeof partition> = []
+  if (scope) {
+    areasAll = partition(perFileStats(diff))
+    area = areaOf(areasAll, scope)
+    if (!area) {
+      const file = await writeReview(h, rec)
+      return { ok: true, text: `recorded not green: scope ${JSON.stringify(scope.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'no changed files'}); recorded NOT green in ${file}` }
+    }
+    const keep = (p: string) => inArea(p, area!, areasAll)
+    ctx.prep = scopedPrep(ctx.prep, keep, keepSections(diff, keep))
+    if (ctx.delta) ctx.delta = scopedPrep(ctx.delta, keep, keepSections(deltaDiff ?? '', keep))
+  }
   const v = enforce(res, ctx)
   // a high-risk diff needs TWO independent runs: the two blocks (`reviews`), or the one block the merge action returned, unchanged
   // (its digest was remembered in the mod's store; a block that merely says `runs: 2` is one pass)
   const git = async (...a: string[]) => h.process.run(['git', '-C', range.path, ...a], { timeoutMs: 15_000 }).catch(() => null)
   const need = requiredRuns(ctx.prep, diff, !!earlier)
-  if (need.runs === 2 && !merged && !light) {
+  if (need.runs === 2 && !merged && !light && !scope) {
     const rawRuns = (raw as { runs?: unknown }).runs
     if (rawRuns === 2 && (await wasMerged(h, project, digestOf(roundTrip(raw))))) merged = 'the merged block of 2 reviewer runs'
     else {
@@ -348,12 +437,27 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   rec.base = ext ? ext.base : base || range.base
   if (branch) rec.branch = branch
   rec.findings = v.open.map(findingLine)
+  if (area) {
+    // an area record joins the earlier ones of this sha (one record per sha): the area's verdict, its findings tagged with the area, summed counts
+    const prev = await readReview(h, project, sha)
+    const areas = { ...(prev?.areas ?? {}), [area.name]: { verdict: res.verdict || 'none', open: v.open.length, counts: { ...rec.counts } } }
+    const mine = (s: string) => s.startsWith(`[${area!.name}] `)
+    rec.areas = areas
+    rec.findings = [...(prev?.findings ?? []).filter(s => !mine(s)), ...v.open.map(f => `[${area!.name}] ${findingLine(f)}`)]
+    rec.verdicts = Object.entries(areas).map(([n, a]) => `${n}: ${a.verdict}`)
+    rec.counts = {}
+    for (const a of Object.values(areas)) for (const [k, n] of Object.entries(a.counts ?? {})) rec.counts[k] = (rec.counts[k] ?? 0) + n
+  }
   const file = await writeReview(h, rec)
-  if (!ext) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
-  const tail = [v.open.length ? `open findings:\n${v.open.map(findingLine).join('\n')}` : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : ''].filter(Boolean).join('\n')
+  if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
+  // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
+  const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', droppedNote].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
+  const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
+  const areaLine = area ? `\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
-  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${spent}` }
+  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
 }
 
 async function doDecline(h: Host, project: string, i: any): Promise<Out> {
@@ -382,7 +486,7 @@ async function reviewToolRun(h: Host, project: string, i: any, thread = ''): Pro
   const les = await lessonsTool(h, project, i) // the learned lessons (reviewlessons.ts): lessons, learn, lessons-list/-rm/-undo/-verify
   if (les) return les
   if (action === 'prepare') return doPrepare(h, project, i, thread)
-  if (action === 'merge') return doMerge(h, project, i)
+  if (action === 'merge') return doMerge(h, project, i, thread)
   if (action === 'prs') {
     // the PR comments of a project's recent PRs (or one), from the host in its origin URL: prhost.ts, the one fetch the pr and review-learn skills share
     const num = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) ? v : undefined)

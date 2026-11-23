@@ -56,6 +56,9 @@ export const readActivity = async (h: Host, home: string, id: string): Promise<A
 export async function lastActivity(h: Host, home: string, id: string, lastWake?: number): Promise<number | null> {
   const a = await readActivity(h, home, id)
   const at = Math.max(a?.at ?? 0, Number(lastWake) || 0)
+  // a restarted thread that reported `waiting` (held): everything up to that report is the restarted session reading its handover, not work
+  const w = at > 0 ? await readJson<Partial<Waiting> | null>(h, waitingFile(home, id), null) : null
+  if (w && Number(w.since) > 0 && Number(w.held) > 0 && at <= Number(w.held) + WAIT_EPS_MS) return Number(w.since)
   return at > 0 ? at : null
 }
 const touched = new Map<string, number>() // in-process throttle: a busy thread writes the file at most every 5 s (a report always)
@@ -77,7 +80,9 @@ export async function touchActivity(h: Host, home: string, id: string, kind: str
 // instruction is delivered (deliver-to-thread.ts). A session is WAITING (word `waiting`, "waiting for your answer") while that record exists and its last
 // activity is the question itself (no activity newer than since + WAIT_EPS_MS): it shows `working` in `claude agents`, but it waits for the
 // user, not for work. (A separate file, not thread.json: the desk rewrites thread.json whole, the thread's mod must not race it.)
-export type Waiting = { since: number; text?: string; q?: number; reminded?: boolean; tries?: number }
+// restarted: when a restart at the context limit found the thread waiting (waitrestart.ts); held: when the restarted session reported `waiting`
+// (its own report or the mod's, at the end of its turn): its activity up to then is not "it carried on" (lastActivity)
+export type Waiting = { since: number; text?: string; q?: number; reminded?: boolean; tries?: number; restarted?: number; held?: number }
 export const WAIT_EPS_MS = 5_000 // the activity writes of the question's own tool call are at most this far from `since` (touchActivity throttles at 5 s)
 export const waitingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/waiting.json`
 export async function readWaiting(h: Host, home: string, id: string): Promise<Waiting | null> {
@@ -123,7 +128,7 @@ export function truthOf(o: { threadState: string; finished?: boolean; row: Agent
   const lastAt = typeof o.activityAt === 'number' && o.activityAt > 0 ? o.activityAt : undefined
   const text =
     word === 'idle' ? `idle${unread ? `, ${unread} unread queued` : ''}`
-    : word === 'waiting' ? `waiting for your answer (asked ${hhmm(o.waitingSince!)}, nothing done since)${unread ? `, ${unread} unread queued` : ''}`
+    : word === 'waiting' ? `waiting on the desk since ${hhmm(o.waitingSince!)} (waiting for your answer or approval; nothing done since)${unread ? `, ${unread} unread queued` : ''}`
     : word === 'stuck' ? `stuck: ${unread} unread queued for ${min} min, no tool call or inbox read`
     : word === 'stalled' ? `stalled: no tool call or report for ${smin} min${lastAt ? ` (last activity ${hhmm(lastAt)})` : ''}${unread ? `, ${unread} unread queued` : ''}`
     : word

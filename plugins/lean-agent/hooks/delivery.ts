@@ -8,7 +8,8 @@ import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
-import { markWaiting } from './threadstate'
+import { markWaiting, readWaiting } from './threadstate'
+import { PROSE_REPLY, proseRequest } from './proserequest'
 import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
 import { dupSummary, prPlanTool, retireUpstreamed } from './rulespr'
@@ -89,7 +90,7 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 // thread's own session (the pane shows "tN needs your yes in its own session" with an Open tN button; the desk never performs it)
 // action: a request for the desk to send one of the typed remote writes (deskactions.ts) once the user said yes at the desk
 export type DeskAction = { id: string; kind: string; headline: string }
-export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string; action?: DeskAction }
+export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string; action?: DeskAction; report?: string /* a question the mod made from the prose of this report (proserequest.ts) */; prose?: boolean; requeued?: string /* a mod row that puts an open item back to the desk (waitrestart.ts) */ }
 export const APPROVAL_MAX = 300
 export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
 export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself, do not ask it with AskUserQuestion and do not send a yes (a relayed yes does not satisfy the permission check)]` : '')
@@ -153,7 +154,7 @@ export const THREAD_TOOLS: Tool[] = [
       last: { type: 'number', description: 'prs: how many completed PRs (default 10, at most 30)' },
     }, ['project']),
   },
-  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done. Never report a checkpoint or your context size: the mod does it. A done report is the handover for whoever continues (branch, worktree, last commit, pushed or not, open items, next step) and ends this session.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done'] }, superseded: { type: 'boolean', description: 'true: a later message from the user supersedes the brief (say which in text)' }, important: { type: 'boolean', description: 'true: a working report the desk should see at once' }, approval: { type: 'string', description: 'blocked only: the exact command the permission check denied and the user must approve in YOUR session' }, action: { type: 'object', description: 'blocked only: a remote write you may not make, for the DESK to send after the user said yes (kinds and params: your guide). You get the result as a message', properties: { kind: { type: 'string', enum: Object.keys(ACTION_KINDS) }, params: { type: 'object' }, items: { type: 'array', description: 'batch: up to 10 {kind, params}', items: { type: 'object' } }, why: { type: 'string', description: 'one line: why' } }, required: ['kind'] } }, ['text']) },
+  { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done | waiting (only when restarted while the desk still holds your open question: "still waiting on <id>"). Never report a checkpoint or your context size: the mod does it. A request that needs the user\'s answer or approval goes out as lean_ask or lean_report with `action`, never as plain prose in a working report. A done report is the handover for whoever continues (branch, worktree, last commit, pushed or not, open items, next step) and ends this session.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done', 'waiting'] }, superseded: { type: 'boolean', description: 'true: a later message from the user supersedes the brief (say which in text)' }, important: { type: 'boolean', description: 'true: a working report the desk should see at once' }, approval: { type: 'string', description: 'blocked only: the exact command the permission check denied and the user must approve in YOUR session' }, action: { type: 'object', description: 'blocked only: a remote write you may not make, for the DESK to send after the user said yes (kinds and params: your guide). You get the result as a message', properties: { kind: { type: 'string', enum: Object.keys(ACTION_KINDS) }, params: { type: 'object' }, items: { type: 'array', description: 'batch: up to 10 {kind, params}', items: { type: 'object' } }, why: { type: 'string', description: 'one line: why' } }, required: ['kind'] } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
   { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
@@ -499,10 +500,20 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       }
       await clearReportFailure(h, home, id)
       if (rState === 'blocked' && !approval && !action) await markWaiting(h, home, id, { since: ts, text: rText.slice(0, 300) }) // a blocked report with a question for the user (no approval or action card)
+      if (rState === 'waiting') { // restarted while it waited (waitrestart.ts): the desk has the open item; the thread's word stays `waiting` from the original time
+        const w = await readWaiting(h, home, id)
+        await markWaiting(h, home, id, { ...(w ?? {}), since: w?.since ?? ts, text: w?.text ?? rText.slice(0, 300), held: ts })
+      }
       if (approval) await notePending(h, id, ts).catch(() => undefined) // the card lasts until this session makes its next tool call (approvals.ts)
       const isDone = str(i.state) === 'done'
       const missing = isDone ? handoverGaps(str(i.text)) : []
-      const sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: rState, text: rText, ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true || !!action) // (a request for the user's Approve reaches the desk at once, though the state is working)
+      let sent = await tellDesk(h, home, send, { ts, from: id, kind: 'report', state: rState, text: rText, ...(approval ? { approval } : {}), ...(action ? { action } : {}) }, i.important === true || !!action) // (a request for the user's Approve reaches the desk at once, though the state is working)
+      // a request to the user in the PROSE of the report (no action, no lean_ask): the mod makes the question item and the waiting record (proserequest.ts)
+      const prose = await proseRequest(h, home, id, { text: rText, state: rState, ts, hasAction: !!action, hasApproval: !!approval, standing: !!standing }).catch(() => null)
+      if (prose) {
+        await tellDesk(h, home, send, { ts, from: id, kind: 'ask', text: prose.question }, true)
+        sent += `\n${PROSE_REPLY}`
+      }
       const base = missing.length >= 3 ? `reported to the desk${sent}. Reminder: a done report is the handover (the next session of this thread starts from it): also say ${missing.join(', ')}.` : `reported to the desk${sent}`
       const waits = standing ? ` ${standing}: nothing waits for the user, carry on.` : action ? `${standingFail ? ` ${standingFail}.` : ''} Request ${action.id} (${action.headline}) waits for the user's Approve at the desk (your state stays working). Carry on with the other steps that do not need it (queue a run, tidy notes) and end your turn only when nothing else is left: the desk messages you the result, or "denied" (then continue without it). Do not try the write yourself.` : ''
       const over = 'This session is over once your turn ends (a later message starts a new session from this report): finish only what is left, then stop.'
