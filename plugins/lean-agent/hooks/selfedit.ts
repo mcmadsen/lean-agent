@@ -15,7 +15,7 @@ import type { Host } from './state'
 import { macOf } from './reviews'
 import { readRegistry } from './worktreereg'
 import { exclusive, logHistory, threadOk } from './deskactions'
-import { recentPrompts } from './humanprompts'
+import { PLAIN_HINT, recentPrompts, seenSince } from './humanprompts'
 import { DISMISS_LABEL, RETRY_LABEL, selfEditLabel } from './denial'
 
 export const SELF_EDIT_TTL_MS = 24 * 60 * 60 * 1000
@@ -137,7 +137,7 @@ export async function allowSelfEdit(h: Host, thread: string): Promise<{ ok: bool
   const u = await usable(h, thread)
   if (!('w' in u)) return { ok: false, text: u.text }
   const hit = [...(await recentPrompts(h))].reverse().find(p => namesThread(p.text, u.w) && selfEditInstruction(p.text))
-  if (!hit) return { ok: false, text: `no written instruction from the user covers ${thread}: ask with AskUserQuestion: '${selfEditQuestion(thread).question}' (the options must be exactly the ones lean_thread names). Nothing was created` }
+  if (!hit) return { ok: false, text: `no message typed by you ${await seenSince(h)} names ${thread}. ${PLAIN_HINT}, or answer this question: ask with AskUserQuestion: '${selfEditQuestion(thread).question}' (the options must be exactly the ones lean_thread names). Nothing was created` }
   return make(h, u.w, hit.text, hit.ts, 'words')
 }
 // a human's press (the pane) or answer (the desk's question): the same grant

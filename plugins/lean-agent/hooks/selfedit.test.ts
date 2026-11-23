@@ -42,7 +42,8 @@ test('allow-self-edit: refused without a recorded human prompt that names the th
   const s = setup()
   const none = await allowSelfEdit(s.host, 't9')
   expect(none.ok).toBe(false)
-  expect(none.text).toContain("no written instruction from the user covers t9: ask with AskUserQuestion: 'Let t9 edit its worktree itself?'")
+  expect(none.text).toContain('no message typed by you in the last 24 h names t9. Give the command as PLAIN TEXT, never in a code block with a Run button')
+  expect(none.text).toContain("ask with AskUserQuestion: 'Let t9 edit its worktree itself?'")
   await s.say('how is t9 going?') // names it, no instruction
   await s.say('yes, let it edit the code') // an instruction, names nobody
   await s.say('let t90 edit its worktree itself') // names another thread

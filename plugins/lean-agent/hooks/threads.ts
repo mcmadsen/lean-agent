@@ -10,7 +10,7 @@ import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
-import { allowWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
+import { allowWrites, askWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
 import { noteBrief, ownFromGrant, recordPassedPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
 import { deliver } from './deliver'
@@ -823,6 +823,7 @@ const USES: Record<string, string[]> = {
   'action-list': [],
   'approve-action': ['id'],
   'allow-writes': ['target', 'kinds'],
+  'allow-ask': ['target', 'kinds'],
   'revoke-writes': ['id'],
   'allow-self-edit': [],
   'revoke-self-edit': ['id'],
@@ -941,9 +942,14 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
       return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     // approval in advance (deskwrites.ts): the mod makes the grant only when the user's own recorded words name the target and ask for the work
+    // the user's dialog answer as the written yes (deskwrites.ts askWrites / bindOfferAnswers): a signed offer and its canonical question
+    if (i.action === 'allow-ask') {
+      const o = await askWrites(h, (i.tN ?? '').trim(), i.target, i.kinds)
+      return o.ok ? { ok: true, text: o.text, data: { ask: o.ask } } : err(o.text)
+    }
     if (i.action === 'allow-writes') {
       const o = await allowWrites(h, (i.tN ?? '').trim(), i.target, i.kinds)
-      if (!o.ok) return err(o.text)
+      if (!o.ok) return o.ask ? { ok: false, text: o.text, data: { ask: o.ask } } : err(o.text) // a refusal carries the canonical question the desk can ask at once
       const owns = await ownFromGrant(h, (i.tN ?? '').trim(), o.target).catch(() => null) // the user's words name the target: it is the thread's own (ownpr.ts)
       return { ok: true, text: owns ? `${o.text}. ${owns}` : o.text }
     }

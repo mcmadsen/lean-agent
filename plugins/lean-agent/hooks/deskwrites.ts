@@ -21,10 +21,10 @@ import { macOf } from './reviews'
 import { parseOrigin } from './prhost'
 import type { PrHost } from './prhost'
 import { listProjects } from './projects'
-import { HUMAN_WI_STATES, STANDING_STATUSES, azureGet, claimAndSend, exclusive, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
+import { HUMAN_WI_STATES, STANDING_STATUSES, azureGet, claimAndSend, exclusive, hashOf, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
 import type { ActionKind, Params, Plan } from './deskactions'
-import { recentPrompts } from './humanprompts'
-import { SOFT_WORDS, createIn, instructionIn, revokeIn } from './writeinstr'
+import { PLAIN_HINT, recentPrompts, seenSince } from './humanprompts'
+import { SOFT_WORDS, createIn, instructionIn, revokeIn, typedApproval } from './writeinstr'
 
 export const WRITES_TTL_MS = 24 * 60 * 60 * 1000
 export const WRITES_CAP = 40
@@ -246,7 +246,7 @@ async function capOf(h: Host): Promise<number> {
 }
 const quoteOf = (s: string): string => s.replace(/\s+/g, ' ').trim().slice(0, 200)
 
-export async function allowWrites(h: Host, thread: string, target: unknown, kinds?: unknown): Promise<{ ok: boolean; text: string; target?: { scope: string; type: 'pr' | 'workitem'; n: number } }> {
+export async function allowWrites(h: Host, thread: string, target: unknown, kinds?: unknown): Promise<{ ok: boolean; text: string; target?: { scope: string; type: 'pr' | 'workitem'; n: number }; ask?: { question: string; options: { label: string; description: string }[] } }> {
   if (!threadOk(thread)) return { ok: false, text: 'allow-writes needs tN (the thread the writes are for)' }
   const t = await readJson<{ state?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, null).catch(() => null)
   if (!t) return { ok: false, text: `no thread ${thread}` }
@@ -276,7 +276,10 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
     }
   }
   const hit = [...prompts].reverse().find(p => (tg.create ? createIn(p.text) : namesTarget(p.text, tg, remoteScope, scopes) && instructionIn(p.text)))
-  if (!hit) return { ok: false, text: refusalText(thread, label, tg.create === true, prompts) }
+  if (!hit) {
+    const r = await refusalText(h, thread, tg, label, prompts, kinds !== undefined ? want : offerKindsFor(tg))
+    return { ok: false, text: r.text, ...(r.ask ? { ask: r.ask } : {}) }
+  }
   const cap = await capOf(h)
   return exclusive(async () => {
     const now = await h.clock.now()
@@ -293,11 +296,160 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
 export const FORMS = (thread: string) => `type to the DESK (not in a shell; a line starting with ! never reaches lean-agent): /lean-agent:allow ${thread} <PR number or URL> (also without the slash: allow ${thread} <PR number or URL>), or say 'fix the comments on PR <n>' (or paste the PR URL with 'please handle this')`
 const SOFT_IN = new RegExp(`(?<![\\w-])(${SOFT_WORDS.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')).join('|')})(?![\\w-])`, 'i')
 const COMMAND_TRY =/(?:^|[\s!])\/?(?:lean-agent:)?allow\b/i
-function refusalText(thread: string, label: string, create: boolean, prompts: { text: string }[]): string {
+async function refusalText(h: Host, thread: string, tg: Target, label: string, prompts: { text: string }[], offerKinds: string[]): Promise<{ text: string; ask?: Asked }> {
+  const create = tg.create === true
   const last = prompts[prompts.length - 1]
   const tried = last && (/lean-agent:allow/i.test(last.text) || COMMAND_TRY.test(last.text.trim()) || instructionIn(last.text) || createIn(last.text) || SOFT_IN.test(last.text)) ? last.text.replace(/\s+/g, ' ').trim().slice(0, 60) : ''
   const miss = tried ? `your last message '${tried}' did not name ${create ? 'a new work item to create' : 'a PR number or URL'} that matches ${label}${create ? '' : ' (a number counts as a whole word, after PR, or the PR / work item URL of this thread\'s project)'}: ` : ''
-  return `${miss}no written instruction from the user covers ${label}: ask with AskUserQuestion, or the forms that count are: ${FORMS(thread)}. Nothing was created`
+  // what the mod can SEE, and a ready-made canonical question (a signed offer) so the desk is never left with only a refusal
+  const offer = await makeOffer(h, thread, tg, offerKinds).catch(() => null)
+  const ask = offer ? offerQuestion(offer) : undefined
+  return {
+    text: `${miss}no message typed by you ${await seenSince(h)} names ${label}. ${PLAIN_HINT}, or answer this question (AskUserQuestion, pasted exactly with exactly the options Allow, Not now): ${ask ? JSON.stringify(ask.question) : `(none: lean_thread allow-ask ${thread} makes it)`}. The forms that count are: ${FORMS(thread)}. Nothing was created`,
+    ...(ask ? { ask } : {}),
+  }
+}
+
+// ---- the grant OFFER: a dialog answer is the written yes ----------------------------------------------------------------------------------------
+// `lean_thread allow-ask` (or a refused allow-writes) stores a SIGNED pending offer with the exact scope and kinds and returns its canonical question. The user's
+// answer is read by the mod from the dialog result (bindOfferAnswers, only the desk's AskUserQuestion hook calls it), exactly like an action approval: the
+// question text and option labels must be the canonical ones, and the typed-approval table (writeinstr.ts typedApproval) applies. An Allow creates the same
+// grant as the user's words (same scope, 24 h, cap, Revoke), with the history line "by the user in a dialog". Nothing a model sends creates one.
+const OFFERS = 'action.writes.offers'
+export const OFFER_TTL_MS = 2 * 60 * 60 * 1000
+export const OFFER_LABELS = ['Allow', 'Not now'] as const
+type Offer = { id: string; thread: string; scope: string; type: 'pr' | 'workitem'; n: number; create: boolean; kinds: string[]; ts: number; exp: number; sig: string }
+type Asked = { question: string; options: { label: string; description: string }[] }
+const oText = (o: Omit<Offer, 'sig'>) => `desk-offer\n${o.id}\n${o.thread}\n${o.scope}\n${o.type}\n${o.n}\n${o.create}\n${o.kinds.join(',')}\n${o.ts}\n${o.exp}`
+let oseq = 0
+// what a grant of an offer covers, when nothing but the kinds the user is told
+export const offerKindsFor = (tg: Target): string[] => (tg.create ? CREATE_KINDS : tg.type === 'pr' ? ['reply', 'comment', 'link'] : WI_KINDS)
+const andList = (l: string[]): string => (l.length <= 1 ? (l[0] ?? '') : `${l.slice(0, -1).join(', ')} and ${l[l.length - 1]}`)
+function whatOf(o: Pick<Offer, 'scope' | 'type' | 'n' | 'create' | 'kinds'>): string {
+  if (o.create) return `create work items in ${o.scope.replace(/^Azure DevOps work item /, '').replace(/#new$/, '')}`
+  const k = o.kinds
+  if (o.type === 'workitem') return `${andList([...(k.includes('comment') ? ['comment on'] : []), ...(k.includes('update') ? ['update'] : [])])} work item ${o.n}`
+  const post = ['reply', 'comment'].filter(x => k.includes(x)).map(x => (x === 'reply' ? 'replies' : 'comments'))
+  const parts = [...(post.length ? [`post ${andList(post)}`] : []), ...(k.includes('status') ? ['set thread statuses'] : []), ...(k.includes('link') ? ['link work items'] : [])]
+  return `${andList(parts)} on PR ${o.n} and move its own work item to Reviewing`
+}
+const offerCode = (o: Omit<Offer, 'sig'>): string => hashOf(oText(o)).slice(0, 12)
+export function offerQuestion(o: Offer): Asked {
+  return {
+    question: `Allow ${o.thread} to ${whatOf(o)} for 24 h? [offer ${o.id}, check ${offerCode(o)}]`,
+    options: [
+      { label: 'Allow', description: `the mod makes a written approval for exactly this: ${o.scope.replace(/^(Azure DevOps|GitHub) /, '')}, ${o.kinds.join(', ')}, 24 h or until ${o.thread} closes, at most 40 writes; Revoke in the pane` },
+      { label: 'Not now', description: `nothing is allowed; ${o.thread} asks for each write as before` },
+    ],
+  }
+}
+async function offerRows(h: Host, now: number): Promise<Offer[]> {
+  const v = await h.store.get(OFFERS).catch(() => null)
+  const out: Offer[] = []
+  for (const o of Array.isArray(v) ? v : []) {
+    if (!o || typeof o.id !== 'string' || !threadOk(o.thread) || typeof o.scope !== 'string' || (o.type !== 'pr' && o.type !== 'workitem') || !Array.isArray(o.kinds) || !o.kinds.every((k: unknown) => typeof k === 'string') || typeof o.create !== 'boolean') continue
+    if (![o.n, o.ts, o.exp].every(Number.isFinite) || typeof o.sig !== 'string' || now > o.exp) continue
+    const want = await macOf(h, oText(o), false)
+    if (want && want.length === o.sig.length && want === o.sig) out.push(o)
+  }
+  return out
+}
+// the offer for this target and kinds: a pending identical one is the one that is there; at most 5 are kept
+async function makeOffer(h: Host, thread: string, tg: Target, kinds: string[]): Promise<Offer | null> {
+  return exclusive(async () => {
+    const now = await h.clock.now()
+    const all = await offerRows(h, now)
+    const same = all.find(o => o.thread === thread && lc(o.scope) === lc(tg.scope) && o.kinds.join() === kinds.join())
+    if (same) return same
+    const base = { id: `o${now}-${++oseq}`, thread, scope: tg.scope, type: tg.type, n: tg.n, create: tg.create === true, kinds, ts: now, exp: now + OFFER_TTL_MS }
+    const sig = await macOf(h, oText(base), true)
+    if (!sig) return null
+    const rec = { ...base, sig }
+    await h.store.set(OFFERS, [...all, rec].slice(-5))
+    return rec
+  })
+}
+// `lean_thread allow-ask`: the model proposes the target, the user's dialog answer decides
+export async function askWrites(h: Host, thread: string, target: unknown, kinds?: unknown): Promise<{ ok: boolean; text: string; ask?: Asked }> {
+  if (!threadOk(thread)) return { ok: false, text: 'allow-ask needs tN (the thread the writes are for)' }
+  const t = await readJson<{ state?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, null).catch(() => null)
+  if (!t) return { ok: false, text: `no thread ${thread}` }
+  if (t.state === 'closed') return { ok: false, text: `${thread} is closed` }
+  const res = await resolveTarget(h, thread, target)
+  if (!res.ok) return { ok: false, text: res.text }
+  const tg = res.target
+  let want = offerKindsFor(tg)
+  if (kinds !== undefined) {
+    const allowed = tg.create ? CREATE_KINDS : tg.type === 'pr' ? PR_KINDS : WI_KINDS
+    const k = Array.isArray(kinds) ? kinds.map(x => (typeof x === 'string' ? x.trim().toLowerCase() : '')) : []
+    if (!k.length || k.some(x => !allowed.includes(x))) return { ok: false, text: `kinds for a ${tg.type === 'pr' ? 'PR' : 'work item'}: ${allowed.join(', ')}; a push, a merge, a delete or a settings change is never covered` }
+    want = [...new Set(k)]
+  }
+  const offer = await makeOffer(h, thread, tg, want)
+  if (!offer) return { ok: false, text: 'no key to sign the offer with' }
+  const q = offerQuestion(offer)
+  return { ok: true, ask: q, text: `ask the USER with AskUserQuestion, pasting this question exactly, with exactly the options Allow, Not now (${q.options.map(o => `${o.label}: ${o.description}`).join(' | ')}): ${JSON.stringify(q.question)}. The mod reads their answer itself: only an Allow they give makes the grant; never answer for them. Offer valid 2 h` }
+}
+type Q = { question?: unknown; options?: unknown; multiSelect?: unknown }
+// The desk's AskUserQuestion, after the user answered it: an Allow (the label, or a typed clear approval) for the CANONICAL question of one live offer makes the grant.
+export async function bindOfferAnswers(h: Host, questions: unknown, answers: unknown): Promise<{ notes: string[]; granted: { thread: string; target: { scope: string; type: 'pr' | 'workitem'; n: number } | undefined }[] }> {
+  const qs: Q[] = Array.isArray(questions) ? (questions as Q[]) : []
+  const given = answers && typeof answers === 'object' && !Array.isArray(answers) ? (answers as Record<string, unknown>) : null
+  const out = { notes: [] as string[], granted: [] as { thread: string; target: { scope: string; type: 'pr' | 'workitem'; n: number } | undefined }[] }
+  for (const q of qs) {
+    const text = typeof q?.question === 'string' ? q.question : ''
+    const m = /\[offer (o\d+-\d+), check ([0-9a-f]{12})\]/.exec(text)
+    if (!m || !given) continue
+    const now = await h.clock.now()
+    const o = (await offerRows(h, now)).find(x => x.id === m[1])
+    if (!o) {
+      out.notes.push(`the answer to the question about offer ${m[1]} was NOT recorded: no such offer, or it expired (2 h): call lean_thread allow-ask again`)
+      continue
+    }
+    const canon = offerQuestion(o)
+    const opts = Array.isArray(q.options) ? (q.options as { label?: unknown; description?: unknown }[]) : []
+    if (text !== canon.question || opts.length !== canon.options.length || !canon.options.every((c, i) => opts[i]?.label === c.label && opts[i]?.description === c.description) || q.multiSelect === true) {
+      out.notes.push(`the answer to the question about offer ${o.id} was NOT recorded: the question the user saw was not the canonical one (its text and the options Allow / Not now exactly). Ask again with the question from lean_thread allow-ask`)
+      continue
+    }
+    const a = typeof given[text] === 'string' ? (given[text] as string).trim() : ''
+    const yes = a === 'Allow' || (a !== 'Not now' && a !== '' && typedApproval(a).approve)
+    if (!yes) {
+      if (a === 'Not now') {
+        await dropOffer(h, o.id)
+        out.notes.push(`the user chose Not now for offer ${o.id}: nothing was allowed; ${o.thread} keeps asking per write`)
+      } else if (a) out.notes.push(`the user typed '${a.replace(/\s+/g, ' ').slice(0, 80)}': free text is not an Allow for offer ${o.id}; ask again with the choices, or the user can type /lean-agent:allow ${o.thread} <PR number>`)
+      continue
+    }
+    const g = await grantOfOffer(h, o, a)
+    out.notes.push(g.text)
+    if (g.ok) out.granted.push({ thread: o.thread, target: o.create ? undefined : { scope: o.scope, type: o.type, n: o.n } })
+  }
+  return out
+}
+async function dropOffer(h: Host, id: string): Promise<void> {
+  await exclusive(async () => {
+    const all = await offerRows(h, await h.clock.now())
+    await h.store.set(OFFERS, all.filter(o => o.id !== id))
+  })
+}
+async function grantOfOffer(h: Host, o: Offer, typed: string): Promise<{ ok: boolean; text: string }> {
+  const t = await readJson<{ state?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${o.thread}/thread.json`, null).catch(() => null)
+  if (!t || t.state === 'closed') return { ok: false, text: `${o.thread} is closed or gone: nothing was allowed` }
+  const cap = await capOf(h)
+  const g = await exclusive(async () => {
+    const now = await h.clock.now()
+    const base = { id: `w${now}-${++wseq}`, thread: o.thread, scope: o.scope, kinds: o.kinds, statuses: [] as string[], quote: `you answered ${typed && typed !== 'Allow' ? `"${typed.slice(0, 60)}"` : 'Allow'} in a dialog (offer ${o.id})`, qts: now, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
+    const signed = await resign(h, base)
+    if (!signed) return null
+    const keep = (await grantRows(h, now)).filter(x => !(x.thread === o.thread && lc(x.scope) === lc(o.scope) && !x.statuses.length))
+    await saveGrants(h, [...keep, signed])
+    await h.store.set(OFFERS, (await offerRows(h, now)).filter(x => x.id !== o.id))
+    return signed
+  })
+  if (!g) return { ok: false, text: 'no key to sign the grant with' }
+  await logHistory(h, o.thread, { kind: 'writes-granted', id: g.id, scope: g.scope, kinds: g.kinds, quote: g.quote, cap, hours: 24, by: 'the user in a dialog' })
+  return { ok: true, text: `the user allowed ${o.thread} on ${o.scope.replace(/^(Azure DevOps|GitHub) /, '')}: ${g.kinds.join(', ')} (up to ${cap} writes, 24 h or until ${o.thread} closes) by their answer in the dialog. Revoke: the pane's Revoke button, /lean-agent:revoke ${o.thread}, or "stop writes". Tell the user this in one line` }
 }
 async function remoteScopeOf(h: Host, thread: string, tg: Target): Promise<string | null> {
   const host = await remoteOf(h, thread)

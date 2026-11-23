@@ -180,6 +180,21 @@ users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --inc
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
 [ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "10" ] || fail "the action table (PARAM_KEYS) must hold exactly ten kinds"
+# the user's dialog answer as the written yes (1.0.28): a grant offer is signed and stored only in deskwrites.ts, and only the desk's AskUserQuestion hook reads the
+# answer (bindOfferAnswers); a skill the desk invokes is never the user's accept; no slash command in a bash code fence (its Run button runs it in a shell)
+callers=$(grep -rlE "bindOfferAnswers\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
+[ "$callers" = "deskwrites.ts register.tsx " ] || fail "bindOfferAnswers may only be called from the desk's AskUserQuestion hook (callers: $callers)"
+users=$(grep -rlE "action\.writes\.offers" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | tr '\n' ' ')
+[ "$users" = "deskwrites.ts " ] || fail "only deskwrites.ts may touch the grant offers (found: $users)"
+for f in "$root/commands/allow.md" "$root/commands/allow-edit.md"; do
+  grep -q 'it is their written accept' "$f" && fail "$(basename "$f") must not say the desk's invoking the skill is the user's written accept"
+  grep -qF "NOT the user's accept" "$f" || fail "$(basename "$f") must say invoking the skill is NOT the user's accept (only a recorded prompt or a dialog answer is)"
+  grep -qF 'Never put a slash command in a bash code fence' "$f" || fail "$(basename "$f") must say never to put a slash command in a bash code fence"
+done
+grep -qF 'allow-ask' "$root/commands/allow.md" || fail "allow.md must name allow-ask (the dialog answer as the written yes)"
+grep -qF 'Never put a slash command in a bash code fence' "$root/templates/front-desk.md" || fail "front-desk.md must say never to put a slash command in a bash code fence"
+grep -qF 'allow-ask' "$root/templates/front-desk.md" || fail "front-desk.md must name allow-ask"
+if grep -rn '^```bash' -A1 "$root/templates" "$root/commands" "$here" 2>/dev/null | grep -E '^\S+-[0-9]+-\s*/(lean-agent:)?(allow|revoke)'; then fail "a guide gives a slash command in a bash code fence"; fi
 # one version: plugin.json, marketplace.json and the pane's VERSION agree (the mod compares its own VERSION with the installed plugin)
 pv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -1)
 mv=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$root/../../.claude-plugin/marketplace.json" | head -1)

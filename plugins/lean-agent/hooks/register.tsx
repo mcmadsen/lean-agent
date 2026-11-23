@@ -11,7 +11,8 @@ import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDeli
 import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions } from './deskactions'
 import { recordHumanPrompt } from './humanprompts'
-import { revokeByWords } from './deskwrites'
+import { bindOfferAnswers, revokeByWords } from './deskwrites'
+import { ownFromGrant } from './ownpr'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
@@ -185,7 +186,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -536,7 +537,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own words); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep; projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -1114,6 +1115,13 @@ export const register: Register = on => {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
       // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
       notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
+      // and an Allow to a grant offer (deskwrites.ts bindOfferAnswers): the user's dialog answer is the written yes; the PR or work item it names becomes the thread's own
+      const offer = await bindOfferAnswers(host, e.questions, r?.result?.answers).catch(() => ({ notes: [] as string[], granted: [] as { thread: string; target: undefined }[] }))
+      notes.push(...offer.notes)
+      for (const g of offer.granted) {
+        const line = await ownFromGrant(host, g.thread, g.target).catch(() => null)
+        if (line) notes.push(line)
+      }
       if (notes.length) return { ...r, context: [...(r.context ?? []), ...notes.map(n => `[lean-agent] ${n}`)] }
     } catch {
       /* the answer is simply not recorded: the pane's Approve / Deny on the card is the other way */
