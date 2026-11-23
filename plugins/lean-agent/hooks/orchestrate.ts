@@ -337,13 +337,14 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   const note = n <= budget ? stepNote(n, budget) : null // 75% of the budget used: the result of THIS call carries the line (takeStepNote)
   if (note) notes.set(k, note)
   else notes.delete(k)
+  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, the check job's) is used: write the json block with what you have and answer; list what you could not check in unverified`
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
 // null = allow, a string = the refusal
 export function orchDecide(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (!c.on) return null
-  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : null
+  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : bare(ctx.agentType) === 'reviewer' ? workerDenial(c, { ...ctx, job: 'check' }, e) : null // the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) so it cannot explore
   if (ctx.kind === 'desk') return isAgentTool(e) ? DESK_ROUTE : null
   if (ctx.kind === 'thread') return threadDenial(c, ctx, e)
   return null

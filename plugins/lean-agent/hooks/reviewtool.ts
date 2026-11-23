@@ -8,7 +8,9 @@ import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
 import { noteReviewed } from './reviewkind'
 import type { Review } from './reviews'
-import { capPrep, prepText, prepare, refOk, resolveRange } from './reviewprep'
+import { capPrep, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
+import { STEPS_BY_JOB, stepBudget } from './jobs'
+import { loadOrch } from './orchestrate'
 import type { Range } from './reviewprep'
 import { requiredRuns, wantSecondOpinion, wantedModel } from './reviewrisk'
 import { addDecline, declinesFor, declinesText, enforce, findingLine, normalize } from './reviewgate'
@@ -19,7 +21,12 @@ import { slugOk } from './rules'
 import { lessonsTool, repoOf } from './reviewlessons'
 import { fetchPrs } from './prhost'
 import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
-import { expectedReviewCost, expectedText } from './reviewcost'
+import { addPrepNote, expectedReviewCost, expectedText, reviewCostLine } from './reviewcost'
+// "\nreview cost for <sha>: $0.84 over 2 passes, 41 requests" (the line every prepare and record reply ends with), or '' when no pass ran for the sha
+const costNote = async (h: Host, project: string, thread: string, sha: string): Promise<string> => {
+  const l = await reviewCostLine(h, project, thread, sha).catch(() => '')
+  return l ? `\n${l}` : ''
+}
 import { readRegistry, worktreeState } from './worktreereg'
 
 type Out = { ok: boolean; text: string }
@@ -116,7 +123,7 @@ async function loadContext(h: Host, project: string, r: Range, branch: string, s
   const d = earlier ? await prepare(h, r, earlier.sha, exclude) : null
   const declines = await declinesFor(h, project, branch)
   const ctx: Context = { prep, delta: d?.prep ?? null, earlier: earlier ? earlier.carry : null, declines, ...(second ? { second } : {}) }
-  return { ctx, diff, earlier, failed: failed || !!d?.failed }
+  return { ctx, diff, deltaDiff: d?.diff ?? null, earlier, failed: failed || !!d?.failed }
 }
 
 const namedRef = async (git: (...a: string[]) => Promise<{ exitCode: number } | null>, name: string): Promise<boolean> => {
@@ -165,11 +172,11 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   if (ext) await noteExternal(h, project, ext)
   if (ext) await noteReviewed(h, thread, project, range.head) // a review thread's report gate looks for a record of this sha (reviewevidence.ts)
   const branch = str(i.branch)
-  const { ctx, diff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
+  const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
   if (!ext && !str(i.since)) { // (a `since` the caller names is an explicit delta request: always prepared)
     const skip = await alreadyReviewed(h, project, range.head, level, earlier ? ctx.delta?.lines ?? null : null, earlier?.sha ?? '')
-    if (skip) return { ok: true, text: skip }
+    if (skip) return { ok: true, text: skip + (await costNote(h, project, thread, range.head)) }
   }
   const rereview = !!earlier
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { model?: unknown } }
@@ -194,7 +201,9 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   }
   const brief = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
   const second = !light && !rereview && wantSecondOpinion(ctx.prep)
+  const spent = await costNote(h, project, thread, range.head) // what the passes of an earlier prepare of this sha already cost (before this prepare is noted)
   await noteLevel(h, project, range.head, level)
+  await addPrepNote(h, project, { ts: await h.clock.now(), sha: range.head, level })
   // generated files stay out of the diff the reviewer reads (its own `git diff` takes the pathspecs as written)
   const specs = excludeSpecs(brief.excluded)
   const cut = specs ? ` -- . ${specs}` : ''
@@ -212,18 +221,21 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     lines.push(`RE-REVIEW. The last reviewed sha is ${earlier!.sha}. Review ONLY: (1) whether each open finding below is fixed, (2) the diff since: git -C ${co} diff ${earlier!.sha}...${range.head}${cut}, (3) ${light ? 'the reuse pass (3)' : 'the reuse, scope and platform passes (3 and 4)'} on the files changed since: ${brief.changed.slice(0, 30).join(', ') || 'none'}. Report new findings only about changed lines.`)
     lines.push(earlier!.carry.open.length ? `Open findings from the last review:\n${earlier!.carry.open.map(findingLine).join('\n')}` : 'Open findings from the last review: none.')
   }
+  const orch = await loadOrch(h).catch(() => undefined)
+  const plan = statsText(rereview && deltaDiff !== null ? deltaDiff : diff, orch ? stepBudget('check', orch.steps, orch.stepsByJob) : STEPS_BY_JOB.check)
+  if (plan) lines.push(plan)
   lines.push(prepText(capPrep(brief)))
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
-  const exp = await expectedReviewCost(h, project, nRuns)
+  const exp = await expectedReviewCost(h, project, nRuns, level)
   const meta = { level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
     : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {
@@ -339,8 +351,9 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const file = await writeReview(h, rec)
   if (!ext) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   const tail = [v.open.length ? `open findings:\n${v.open.map(findingLine).join('\n')}` : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : ''].filter(Boolean).join('\n')
-  if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}` }
-  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}` }
+  const spent = await costNote(h, project, thread, sha)
+  if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
+  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${spent}` }
 }
 
 async function doDecline(h: Host, project: string, i: any): Promise<Out> {

@@ -237,6 +237,22 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   expect(b.result.interrupted).toBe(false)
 })
 
+test('the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) and is told what to do at the end', () => {
+  orchReset()
+  const rv = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'rv1' }
+  const bash = { tool: 'Bash', command: 'git -C /r/app diff main...abc' }
+  for (let n = 1; n <= 10; n++) expect(call(rv, bash), `call ${n}`).toBeNull()
+  const over = call(rv, bash)
+  expect(over).toContain("the reviewer's budget (10 tool calls")
+  expect(over).toContain('write the json block')
+  expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull()
+  const small = orchConfig({ workers: { stepsByJob: { check: 2 } } })
+  expect([call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small)].map(x => x === null)).toEqual([true, true, false])
+  // another subagent type (explorer, auditor) is not counted by this rule
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'ex1' }
+  for (let n = 1; n <= 30; n++) expect(call(ex, bash)).toBeNull()
+})
+
 test('lean_run: summarize keeps failing names and the last 40 lines; runSummary runs the command with its output in a file', async () => {
   const log = [...Array.from({ length: 100 }, (_, i) => `ok ${i}`), 'FAIL  a.test.ts > adds', '✗ b fails', 'FAIL  a.test.ts > adds', ...Array.from({ length: 50 }, (_, i) => `tail ${i}`)].join('\n')
   const s = summarize(log)
