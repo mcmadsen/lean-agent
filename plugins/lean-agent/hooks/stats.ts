@@ -237,9 +237,9 @@ export async function threadCostsToday(h: Host, spend?: Spend | null): Promise<R
 // "$6.20" for a card, "$21.30!" when it is over the alert
 export const costBadge = (c: Pick<ThreadCost, 'usd' | 'over'>): string => `$${c.usd.toFixed(2)}${c.over ? '!' : ''}`
 // "today $12.40 (reviews $5.10, restarts $0.90)": the card, the thread pane and `lean_thread list` say the same line; a part at zero is left out
-// with the split known (main, workers): "today $12.90 (main $4.00 · workers $3.80 · reviews $5.10, restarts $0.90)"
-export function costLine(c: Pick<ThreadCost, 'usd' | 'over' | 'reviews' | 'restarts' | 'main' | 'workers'>): string {
-  const split = c.main !== undefined || c.workers !== undefined ? `main $${(c.main ?? 0).toFixed(2)} · workers $${(c.workers ?? 0).toFixed(2)} · reviews $${(c.reviews ?? 0).toFixed(2)}` : c.reviews ? `reviews $${c.reviews.toFixed(2)}` : ''
+// the thread pane passes withSplit (and has the split): "today $12.90 (main $4.00 · workers $3.80 · reviews $5.10, restarts $0.90)"; the card and the list keep the short form
+export function costLine(c: Pick<ThreadCost, 'usd' | 'over' | 'reviews' | 'restarts' | 'main' | 'workers'>, withSplit = false): string {
+  const split = withSplit && (c.main !== undefined || c.workers !== undefined) ? `main $${(c.main ?? 0).toFixed(2)} · workers $${(c.workers ?? 0).toFixed(2)} · reviews $${(c.reviews ?? 0).toFixed(2)}` : c.reviews ? `reviews $${c.reviews.toFixed(2)}` : ''
   const p = [split, c.restarts ? `restarts $${c.restarts.toFixed(2)}` : ''].filter(Boolean)
   return `today ${costBadge(c)}${p.length ? ` (${p.join(', ')})` : ''}`
 }

@@ -166,7 +166,7 @@ test('new with opus: a reason is required (nothing is created without one); with
   // a plain `new` is unchanged: sonnet, started
   const ok = await call({ action: 'new', title: 'plain', text: 'x' })
   expect(ok.text).toContain('t2 started')
-  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
+  expect(bg()[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
   // so is a haiku one
   expect((await call({ action: 'new', title: 'cheap', text: 'x', model: 'haiku' })).text).toContain('t3 started')
 })

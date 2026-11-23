@@ -68,7 +68,7 @@ test('haiku first, measured: at least 5 successful haiku runs of the job in this
 
 test('the why-sonnet refusal names the haiku record of the project for that job type; no new refusal, no text without a record', async () => {
   orchReset()
-  const h = fakeHost(null)
+  const h = fakeHost(null, { orchestrate: true })
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', project: 'app' }))
   const rec = (n: number, ok: boolean, job: string) => Array.from({ length: n }, (_, i) => JSON.stringify({ ts: 1, tN: 't1', project: 'app', agent: 'worker-haiku', job, agentId: `${job}${ok}${i}`, retry: false, budget: false, ok })).join('\n') + '\n'

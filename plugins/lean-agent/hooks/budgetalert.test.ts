@@ -108,7 +108,7 @@ test('a thread over budget.threadDaily is one notice and one toast event, once p
   expect(await checkBudget(h.host)).toEqual(['t3'])
   const notes = await readNotices(h.host)
   expect(notes).toHaveLength(1)
-  expect(notes[0]).toContain('t3 has spent $21.00 today, over its $20.00 daily alert (opus/high)')
+  expect(notes[0]).toContain('t3 has spent $21.00 today, over its $15.00 daily alert (opus/high)')
   expect(await checkBudget(h.host)).toEqual([])
   add(h, { tN: 't3', usd: 5 }, { tN: 't1', usd: 19 }) // t1 reaches $20
   expect(await checkBudget(h.host)).toEqual(['t1'])
@@ -145,8 +145,8 @@ test('threadCostsToday: the live cost per thread for the pane cards, with its mo
   const h = setup([{ tN: 't1', usd: 2.5 }, { tN: 't1', usd: 0.5 }, { tN: 't3', usd: 25 }, { ts: NOON - DAY, tN: 't2', usd: 9 }, { role: 'desk', tN: undefined, usd: 4 }])
   const c = await threadCostsToday(h.host)
   expect(Object.keys(c).sort()).toEqual(['t1', 't3']) // t2 spent nothing today, the desk is not a thread
-  expect(c.t1).toEqual({ id: 't1', usd: 3, model: 'sonnet', effort: 'high', over: false })
-  expect(c.t3).toEqual({ id: 't3', usd: 25, model: 'opus', effort: 'high', over: true })
+  expect(c.t1).toEqual({ id: 't1', usd: 3, model: 'sonnet', effort: 'high', over: false, main: 3, workers: 0 })
+  expect(c.t3).toEqual({ id: 't3', usd: 25, model: 'opus', effort: 'high', over: true, main: 25, workers: 0 })
   expect(costBadge(c.t1!)).toBe('$3.00')
   expect(costBadge(c.t3!)).toBe('$25.00!')
   config(h, { budget: { threadDaily: 'off' } })

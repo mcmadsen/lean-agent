@@ -287,7 +287,7 @@ test('a usage-limit resume of a session recorded on an unapproved opus starts a 
   expect(resumes(x)).toHaveLength(0)
   const bg = x.h.claudeCalls().filter(a => a[0] === '--bg')
   expect(bg).toHaveLength(2) // the thread's first start, then the new session
-  expect(bg[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
+  expect(bg[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
   expect(x.s.calls).toContain('stop 11111111')
 })
 

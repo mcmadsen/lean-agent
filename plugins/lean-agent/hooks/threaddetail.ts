@@ -229,7 +229,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     const c = (await threadCostsToday(h))[id]
     if (c) {
       d.costBadge = costBadge(c) // the header's badge, "!" over the alert
-      d.costLine = costLine(c)
+      d.costLine = costLine(c, true) // main $a · workers $b · reviews $c
     }
   })
   await guard('context', async () => {

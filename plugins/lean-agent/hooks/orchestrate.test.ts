@@ -167,9 +167,12 @@ test('worker: a tool-call budget (workers.steps); at the budget the call is refu
   expect(call(worker, { tool: 'Read' }, c)).toBe(SPLIT)
   expect(call(worker, { tool: 'Bash', command: 'ls' }, c)).toBe(SPLIT)
   expect(call({ ...worker, agentId: 'w2' }, { tool: 'Read' }, c)).toBeNull()
-  // the reviewer and other agents have no budget
+  // the reviewer has the budget of a check job (never above workers.steps, here 3: see the reviewer spec below); other agents have none
   const rev = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'v1' }
-  for (let i = 0; i < 40; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  for (let i = 0; i < 3; i++) expect(call(rev, { tool: 'Read' }, c)).toBeNull()
+  expect(call(rev, { tool: 'Read' }, c)).toContain("the reviewer's budget (3 tool calls")
+  const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'x1' }
+  for (let i = 0; i < 40; i++) expect(call(ex, { tool: 'Read' }, c)).toBeNull()
 })
 
 test('config off: every rule is off (today)', () => {

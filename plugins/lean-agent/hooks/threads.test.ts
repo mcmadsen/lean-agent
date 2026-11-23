@@ -7,9 +7,9 @@ import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handov
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = '/p'
 
-function setup(on: any = null) {
+function setup(on: any = null, orchestrate = false) {
   resetLocks()
-  const h = fakeHost(on)
+  const h = fakeHost(on, orchestrate ? { orchestrate: true } : undefined)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
   // a scripted `claude`: --bg prints the sid; `agents --json` answers from `rows`
@@ -41,10 +41,10 @@ test('new records the sid, writes the folder, settings and trust', async () => {
   expect(h.files.has('/h/.lean-agent/githooks/private.list')).toBe(true)
   expect(JSON.parse(h.files.get('/h/.claude.json')!).projects['/h/.lean-agent/threads/t1'].hasTrustDialogAccepted).toBe(true)
   const argv = h.claudeCalls().find(a => a[0] === '--bg')!
-  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'sonnet', '--effort', 'medium', '--', 'fix the login bug']) // an orchestrating thread defaults to medium
+  expect(argv).toEqual(['--bg', '-n', 't1 · fix login', '--model', 'sonnet', '--effort', 'high', '--', 'fix the login bug'])
   expect(s.model).toBe('sonnet')
-  expect(s.effortLevel).toBe('medium')
-  expect([t.model, t.effort]).toEqual(['sonnet', 'medium'])
+  expect(s.effortLevel).toBe('high')
+  expect([t.model, t.effort]).toEqual(['sonnet', 'high'])
   expect(h.calls.find(c => c.argv[0] === 'claude' && c.argv[1] === '--bg')!.cwd).toBe('/h/.lean-agent/threads/t1')
   expect((await call({ action: 'new', title: 'second' })).ok).toBe(true)
   expect(h.files.has('/h/.lean-agent/threads/t2/thread.json')).toBe(true)
@@ -372,7 +372,7 @@ test('new and start pass --model/--effort (call > config.json > default), record
   const { h, state, call } = setup()
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { model: 'haiku' } }))
   await call({ action: 'new', title: 'cheap', text: 'x' })
-  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'medium']) // the default effort of an orchestrating thread is medium
+  expect(h.claudeCalls().find(a => a[0] === '--bg')!.slice(3, 7)).toEqual(['--model', 'haiku', '--effort', 'high']) // the default effort is high (specs run with lean.orchestrate off: the medium default is in the orchestrating specs below)
   await call({ action: 'new', title: 'hard', text: 'x', model: 'sonnet', effort: 'high' })
   expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
   const t2 = JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!)
@@ -397,19 +397,19 @@ test('new and start pass --model/--effort (call > config.json > default), record
 })
 
 test('thread defaults are sonnet/medium while lean.orchestrate is on (high when off); config.json threads.effort and the call still override', async () => {
-  const { h, call } = setup()
+  const { h, call } = setup(null, true)
   await call({ action: 'new', title: 'plain', text: 'x' })
   expect(h.claudeCalls().filter(a => a[0] === '--bg')[0]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
   expect((await call({ action: 'new', title: 'plain2', text: 'x' })).text).toContain('sonnet/medium') // the start reply names the effort
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ threads: { effort: 'low' } }))
   await call({ action: 'new', title: 'cfg', text: 'x' })
-  expect(h.claudeCalls().filter(a => a[0] === '--bg')[1]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'low'])
-  await call({ action: 'new', title: 'call', text: 'x', effort: 'medium' })
-  expect(h.claudeCalls().filter(a => a[0] === '--bg')[2]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'medium'])
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[2]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'low'])
+  await call({ action: 'new', title: 'call', text: 'x', effort: 'high' })
+  expect(h.claudeCalls().filter(a => a[0] === '--bg')[3]!.slice(3, 7)).toEqual(['--model', 'sonnet', '--effort', 'high'])
 })
 
 test('effort by role: a restart recomputes a recorded default, keeps an effort a call named, and lean.orchestrate off means high', async () => {
-  const { h, call } = setup()
+  const { h, call } = setup(null, true)
   const bg = () => h.claudeCalls().filter(a => a[0] === '--bg')
   await call({ action: 'new', title: 'plain', text: 'x' }) // t1: default
   await call({ action: 'new', title: 'design', text: 'x', effort: 'high' }) // t2: the desk named high (design / refactoring)
