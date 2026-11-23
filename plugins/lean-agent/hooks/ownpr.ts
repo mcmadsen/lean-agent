@@ -118,7 +118,7 @@ export async function recordPassedPr(h: Host, thread: string, given: unknown, ho
   return l ? { line: l.line } : {}
 }
 
-// a brief that merely MENTIONS a PR owns nothing; the `new` reply says so when it names exactly one (PR URL or "PR 5659"), and the work items it names (AB#N,
+// a brief that merely MENTIONS a PR owns nothing; the `new` reply says so when it names exactly one (PR URL or "PR 4321"), and the work items it names (AB#N,
 // "work item N") are noted: they are owned only together with a branch name that has the same number as a whole token
 export async function noteBrief(h: Host, thread: string, brief: string): Promise<string | null> {
   if (!threadOk(thread)) return null

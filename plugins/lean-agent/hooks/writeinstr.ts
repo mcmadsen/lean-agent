@@ -12,7 +12,7 @@ export const VERBS = ['fix', 'fixes', 'fixing', 'resolve', 'resolves', 'resolvin
 export const OBJECTS = ['comment', 'comments', 'thread', 'threads', 'review', 'reviews', 'feedback', 'pr', 'prs', 'pull request', 'pull requests', 'work item', 'workitem', 'work items', 'ticket', 'task']
 export const EXPLICIT_LEAD = ['approve', 'approved', 'allow', 'allowed', 'go ahead', 'yes', 'ok', 'okay', 'permit']
 export const EXPLICIT_OBJECT = ['write', 'writes', 'reply', 'replies', 'comment', 'comments']
-// the command typed to the DESK's prompt; with the slash or without it (`lean-agent:allow t43 5659`, `allow t43 5659`) it is the command itself
+// the command typed to the DESK's prompt; with the slash or without it (`lean-agent:allow t8 4321`, `allow t8 4321`) it is the command itself
 export const COMMANDS = ['/lean-agent:allow', 'lean-agent:allow', '/allow', 'allow']
 // SOFT: a word that asks for the work when the user pasted the URL of the PR or work item and no verb of the table is there ("please get this done <url>")
 export const SOFT_WORDS = ['please', 'pls', 'get this done', 'get it done', 'get that done', 'lets get this done', "let's get this done", 'go ahead', 'go on', 'handle', 'handle it', 'finish', 'finish it', 'finish this', 'take it from here', 'carry on', 'proceed', 'do it', 'sort it']

@@ -12,7 +12,7 @@ const TOKEN = 'SECRET-TOKEN-0123456789'
 const L = '/h/.lean-agent'
 const PID = '11111111-2222-3333-4444-555555555555'
 const RID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-const GUID_URL = `https://dev.azure.com/acme/${PID}/_git/${RID}/pullrequest/5659?_a=overview`
+const GUID_URL = `https://dev.azure.com/acme/${PID}/_git/${RID}/pullrequest/4321?_a=overview`
 const WI_URL = 'https://dev.azure.com/acme/Shop%20App/_workitems/edit/1234'
 
 type Reads = { project?: string; repoProject?: string; fail?: boolean }
@@ -42,7 +42,7 @@ test('a pasted Azure DevOps PR URL with GUIDs (the number at its end is the targ
   await s.say(`please lets get this done ${GUID_URL}`)
   const o = await allowWrites(s.host, 't5', { pr: GUID_URL })
   expect(o.ok, o.text).toBe(true)
-  expect(await scopes(s)).toEqual(['Azure DevOps PR acme/Shop App/shop-api#5659']) // names, not GUIDs: what the requests carry
+  expect(await scopes(s)).toEqual(['Azure DevOps PR acme/Shop App/shop-api#4321']) // names, not GUIDs: what the requests carry
   for (const c of s.h.calls.filter(c => c.argv[0] === 'curl')) expect(c.argv.join(' ')).not.toContain(TOKEN) // the reads send the token on stdin
 })
 
@@ -72,7 +72,7 @@ test('GUIDs that cannot be read are taken as the thread\'s own project and repos
   const o = await allowWrites(s.host, 't5', { pr: GUID_URL })
   expect(o.ok, o.text).toBe(true)
   expect(o.text).toContain('could not be read')
-  expect(await scopes(s)).toEqual(['Azure DevOps PR acme/Shop App/shop-api#5659'])
+  expect(await scopes(s)).toEqual(['Azure DevOps PR acme/Shop App/shop-api#4321'])
 })
 
 test('a work item URL and a GitHub PR URL name their targets (GitHub only for a GitHub remote)', { timeoutMs: 20_000 }, async () => {
@@ -100,18 +100,18 @@ test('a URL alone, or "please" without it, is no instruction; the soft words cou
 })
 
 test('the command counts with the slash, as lean-agent:allow and as allow', { timeoutMs: 20_000 }, async () => {
-  for (const text of ['/lean-agent:allow t5 5659', 'lean-agent:allow t5 5659', 'allow t5 5659', 'Allow t5 5659']) {
+  for (const text of ['/lean-agent:allow t5 4321', 'lean-agent:allow t5 4321', 'allow t5 4321', 'Allow t5 4321']) {
     const s = setup()
     await s.say(text)
-    const o = await allowWrites(s.host, 't5', { pr: 5659 })
+    const o = await allowWrites(s.host, 't5', { pr: 4321 })
     expect([text, o.ok]).toEqual([text, true])
   }
-  expect(instructionIn('allow t43 5659')).toBeTruthy()
+  expect(instructionIn('allow t8 4321')).toBeTruthy()
 })
 
 test('a refusal lists the forms that count and quotes the near miss: the last message that did not name the target', { timeoutMs: 20_000 }, async () => {
   const none = setup()
-  const a = await allowWrites(none.host, 't5', { pr: 5659 })
+  const a = await allowWrites(none.host, 't5', { pr: 4321 })
   expect(a.ok).toBe(false)
   expect(a.text).toContain('type to the DESK (not in a shell')
   expect(a.text).toContain('/lean-agent:allow t5 <PR number or URL>')
@@ -119,17 +119,17 @@ test('a refusal lists the forms that count and quotes the near miss: the last me
   expect(a.text).not.toContain('your last message') // nothing was typed: no near miss
   const vague = setup()
   await vague.say('please lets get this done')
-  const b = await allowWrites(vague.host, 't5', { pr: 5659 })
+  const b = await allowWrites(vague.host, 't5', { pr: 4321 })
   expect(b.text).toContain("your last message 'please lets get this done' did not name")
   const cmd = setup()
   await cmd.say('/lean-agent:allow t5 five thousand')
-  const c = await allowWrites(cmd.host, 't5', { pr: 5659 })
+  const c = await allowWrites(cmd.host, 't5', { pr: 4321 })
   expect(c.text).toContain("your last message '/lean-agent:allow t5 five thousand' did not name a PR number or URL")
   const other = setup()
   await other.say('fix the comments on PR 77')
-  const d = await allowWrites(other.host, 't5', { pr: 5659 })
+  const d = await allowWrites(other.host, 't5', { pr: 4321 })
   expect(d.text).toContain("your last message 'fix the comments on PR 77' did not name")
   const chat = setup()
   await chat.say('thanks, looks good')
-  expect((await allowWrites(chat.host, 't5', { pr: 5659 })).text).not.toContain('your last message')
+  expect((await allowWrites(chat.host, 't5', { pr: 4321 })).text).not.toContain('your last message')
 })

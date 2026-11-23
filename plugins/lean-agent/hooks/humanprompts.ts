@@ -35,7 +35,7 @@ export async function recentPrompts(h: Host): Promise<HumanPrompt[]> {
   return (Array.isArray(v) ? v : []).filter((p): p is HumanPrompt => !!p && typeof p.text === 'string' && Number.isFinite(p.ts) && now - p.ts <= PROMPT_TTL_MS && p.ts <= now + 60_000)
 }
 
-// What the mod can SEE, said in a refusal: when the user's last recorded message was ("no message typed by you since 14:05 UTC names PR 5659"), and the hint that the
+// What the mod can SEE, said in a refusal: when the user's last recorded message was ("no message typed by you since 14:05 UTC names PR 4321"), and the hint that the
 // command must be PLAIN TEXT: a code block with a Run button runs in a shell, where lean-agent sees nothing.
 export const PLAIN_HINT = 'Give the command as PLAIN TEXT, never in a code block with a Run button (a Run button runs it in a shell, where lean-agent does not see it)'
 export async function seenSince(h: Host): Promise<string> {
