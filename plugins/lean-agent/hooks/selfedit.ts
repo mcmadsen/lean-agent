@@ -1,4 +1,4 @@
-// A GRANT THE USER GIVES IN WORDS (or by a click): "let t85 edit its worktree itself". With it the thread's OWN Edit / Write / NotebookEdit / Read / Grep /
+// A GRANT THE USER GIVES IN WORDS (or by a click): "let t9 edit its worktree itself". With it the thread's OWN Edit / Write / NotebookEdit / Read / Grep /
 // Glob work inside its registered worktrees (orchestrate.ts selfEditOk), never outside and never lean-agent's own state. It is the way out of a
 // classifier denial of the editing worker (denial.ts): no permission prompt exists for that, so nobody can "press yes" there.
 //

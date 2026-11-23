@@ -105,12 +105,12 @@ test('through the engine: the denied brief is checked by script and its counts a
 
 test('a blocked report with no prompt behind it says so, drops the approval, offers the real options and cuts the thread\'s "press Open"', async () => {
   const h = fakeHost(null)
-  h.store.set('denial.rec.t85', { ts: 1_000_000, category: 'Undermining Oversight', kind: 'worker', agent: HAIKU, roots: [] })
-  const t = await blockedTruth(h.host, 't85', 'worker denied three times. Press Open t85 in the pane and answer there.', 'edit the settings module')
+  h.store.set('denial.rec.t9', { ts: 1_000_000, category: 'Undermining Oversight', kind: 'worker', agent: HAIKU, roots: [] })
+  const t = await blockedTruth(h.host, 't9', 'worker denied three times. Press Open t9 in the pane and answer there.', 'edit the settings module')
   expect(t.approval).toBe('')
   expect(t.category).toBe('Undermining Oversight')
-  expect(t.text).toContain(noPromptText('t85', 'Undermining Oversight'))
-  expect(t.text).toContain('Let t85 edit its worktree itself')
+  expect(t.text).toContain(noPromptText('t9', 'Undermining Oversight'))
+  expect(t.text).toContain('Let t9 edit its worktree itself')
   expect(t.text).toContain('Retry the worker with a narrower brief')
   expect(t.text).toContain('retry with a narrower brief: ONE file plus its spec')
   expect(t.text).not.toMatch(/Press Open/)

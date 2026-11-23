@@ -10,15 +10,15 @@ function world(todo: unknown, brief = 'Rework the orbit parser (PR #42)\n') {
   const h = fakeHost(null)
   h.git.handler = git
   h.files.set(`${L}/todo.json`, JSON.stringify(todo))
-  h.files.set(`${L}/threads/t85/brief.md`, brief)
+  h.files.set(`${L}/threads/t9/brief.md`, brief)
   return h
 }
-const me = { id: 't85', cwd: '/r/app', home: '/h', title: 'orbit parser rework', goal: 'rework the orbit parser and its tests', worktree: '/w/orbit' }
+const me = { id: 't9', cwd: '/r/app', home: '/h', title: 'orbit parser rework', goal: 'rework the orbit parser and its tests', worktree: '/w/orbit' }
 
 test('400 unrelated tasks and 3 related: only the 3 are listed, the rest is a count, never the rest', async () => {
   const todo = [
     ...Array.from({ length: 400 }, (_, i) => ({ id: i + 1, text: `unrelated chore ${i} about the kitchen budget`, done: false })),
-    { id: 501, text: 'reply on the review thread', thread: 't85', done: false }, // carries the thread id
+    { id: 501, text: 'reply on the review thread', thread: 't9', done: false }, // carries the thread id
     { id: 502, text: 'delete the old orbit parser fixtures', done: false }, // two significant words of the goal
     { id: 503, text: 'merge after the checks', pr: 'https://host/org/repo/pull/42', done: false }, // the thread's PR
     { id: 504, text: 'orbit parser done already', done: true }, // closed: never listed
@@ -33,7 +33,7 @@ test('400 unrelated tasks and 3 related: only the 3 are listed, the rest is a co
 })
 
 test('at most 5 related tasks are shown, the overflow is a count', async () => {
-  const todo = Array.from({ length: 8 }, (_, i) => ({ text: `step ${i} for t85`, done: false }))
+  const todo = Array.from({ length: 8 }, (_, i) => ({ text: `step ${i} for t9`, done: false }))
   const t = await preflightText(world(todo).host, me)
   expect(t.match(/^- step/gm)).toHaveLength(5)
   expect(t).toContain('(+3 more tasks about this thread)')
@@ -49,8 +49,8 @@ test('no task is linked to the thread (or no task source): "none linked to this 
 })
 
 test('what links a task: id (not t850), branch, worktree, work item; one shared word is not enough; stop words never count', () => {
-  const c = { id: 't85', title: 'orbit parser rework', goal: 'rework the orbit parser', branch: 'fix-orbit-parser', worktree: '/w/orbit', ref: 'work item #7' }
-  expect(taskIsAbout({ text: 'see t85 notes' }, c)).toBe(true)
+  const c = { id: 't9', title: 'orbit parser rework', goal: 'rework the orbit parser', branch: 'fix-orbit-parser', worktree: '/w/orbit', ref: 'work item #7' }
+  expect(taskIsAbout({ text: 'see t9 notes' }, c)).toBe(true)
   expect(taskIsAbout({ text: 'see t850 notes' }, c)).toBe(false)
   expect(taskIsAbout({ text: 'rebase fix-orbit-parser' }, c)).toBe(true)
   expect(taskIsAbout({ text: 'clean /w/orbit' }, c)).toBe(true)

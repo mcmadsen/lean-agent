@@ -6,8 +6,8 @@ import { buildHandover, handoverReport } from './handover'
 import { lookupNotes } from './threadnotes'
 
 const L = '/h/.lean-agent'
-const T = `${L}/threads/t85`
-const THREAD = { id: 't85', title: 'port the inventory', project: 'app', state: 'open', sid: 's1', created: 1, lastWake: 0, delivered: 0 }
+const T = `${L}/threads/t9`
+const THREAD = { id: 't9', title: 'port the inventory', project: 'app', state: 'open', sid: 's1', created: 1, lastWake: 0, delivered: 0 }
 
 function world() {
   const h = fakeHost(null)
@@ -41,7 +41,7 @@ test('no goal set: the goal is the first line of the brief; no goal and no brief
   const h = world()
   const goalOf = async () => (await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])).prompt
   expect(await goalOf()).toContain('## Goal\ngoal: Port the inventory to the new store')
-  h.files.set(`${L}/goals.json`, JSON.stringify({ t85: { text: 'finish phase 2' } }))
+  h.files.set(`${L}/goals.json`, JSON.stringify({ t9: { text: 'finish phase 2' } }))
   const p = await goalOf()
   expect(p).toContain('## Goal\nfinish phase 2')
   expect(p).not.toContain('goal: Port the inventory')
@@ -59,8 +59,8 @@ test('lean_doctor handover: lists the notes files it used and those it found but
   expect(lookup.content.map(f => f.path)).toEqual(['notes.md'])
   expect(lookup.listed).toHaveLength(5) // at most 6 files in all
   expect(lookup.left.map(f => f.path)).toEqual(['scratch/r5.md', 'scratch/r6.md', 'scratch/r7.md', 'scratch/r8.md'])
-  const text = await handoverReport(h.host, '/h', 't85')
-  expect(text.split('\n')[0]).toMatch(/^handover for t85: about \d+ tokens: brief [1-9]\d*, corrections 0, notes [1-9]\d*, snapshot 0, preflight 0$/) // each part's size
+  const text = await handoverReport(h.host, '/h', 't9')
+  expect(text.split('\n')[0]).toMatch(/^handover for t9: about \d+ tokens: brief [1-9]\d*, corrections 0, notes [1-9]\d*, snapshot 0, preflight 0$/) // each part's size
   expect(text).toContain('notes used: notes.md; by name (read these before re-reading sources): scratch/r0.md, scratch/r1.md, scratch/r2.md, scratch/r3.md, scratch/r4.md')
   expect(text).toContain('notes found but left out: scratch/r5.md (budget: only the newest 6 notes files are listed')
   expect(text).toContain('scratch/r8.md (budget')

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.26
 
 ### Added
 - **Forge reads are allowed.** A reader, a worker, the reviewer and the thread may run a fixed allow-list of read-only `az` / `gh` forms (`az devops invoke` with GET or no method, `az rest` GET, `gh api` as a GET, `gh api graphql` with a `query`, `gh release view|list`, ...) and a plain `curl` / `wget` GET to a forge host (`hooks/forgeread.ts`). Every write form is refused as before; a read form outside the list says to use `lean_run get` or an allowed form (rule id `forge-read`).
