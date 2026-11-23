@@ -83,21 +83,23 @@ test("at the limit the handover is written and the desk's next reply starts with
   expect(limitLineOnce()).toContain('110k of 100k')
 })
 
-test('desk.autoRestart: off by default; on, over the limit and with no question open it opens the new desk once; an open question waits; a failure is a notice', async () => {
+test('desk.autoRestart: on by default (false = the button only); over the limit and with no question open it opens the new desk once; an open question waits; a failure is a notice', async () => {
   const h = world()
   let opened = 0
   const restart = async () => ({ ok: true, text: `opened ${++opened}` })
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: false } }))
   expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('off')
-  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true } }))
-  expect(await autoRestartDesk(h.host, { tokens: 70_000, restart })).toBe('under')
+  h.files.set(`${L}/config.json`, JSON.stringify({}))
+  expect(await autoRestartDesk(h.host, { tokens: 70_000, restart })).toBe('none')
   h.files.set(`${L}/questions.jsonl`, `${JSON.stringify({ from: 't1', question: 'which db?' })}\n`)
-  expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('question')
+  expect(await autoRestartDesk(h.host, { tokens: 110_000, restart })).toBe('question')
   expect(opened).toBe(0)
   h.files.set(`${L}/answers.jsonl`, `${JSON.stringify({ q: 1 })}\n`)
   expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('restarted')
   expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('already')
   expect(opened).toBe(1)
   // a failure leaves a notice and is tried again at the next turn end
+  h.clock.t += 31 * 60_000 // (the loop guard: 30 minutes after the last automatic restart)
   resetDeskCompact()
   expect(await autoRestartDesk(h.host, { tokens: 120_000, restart: async () => ({ ok: false, text: 'the Claude app is not running' }) })).toBe('failed')
   expect([...h.files.entries()].some(([k, v]) => /desk-autorestart/.test(k) && /not running/.test(String(v)))).toBe(true)
