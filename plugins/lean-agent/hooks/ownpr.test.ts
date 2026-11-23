@@ -4,9 +4,9 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { addActionRequest, answerAction, approveAction, resetActions } from './deskactions'
 import { revokeByWords, revokeWrites, writesView } from './deskwrites'
-import { lintText, ownConfig, recordBriefPr, recordPushPr, runOwnPr } from './ownpr'
+import { lintText, noteBrief, ownConfig, recordPassedPr, recordPushPr, runOwnPr } from './ownpr'
 import { recordHumanPrompt } from './humanprompts'
-import { resetLocks } from './threads'
+import { leanThread, resetLocks } from './threads'
 
 const TOKEN = 'SECRET-TOKEN-0123456789'
 const L = '/h/.lean-agent'
@@ -67,7 +67,7 @@ test('a reply WITH a status, a thread status change and a reply to another pull 
   expect(await go(s, 'ado-pr-thread-status', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 5659, thread: 7, status: 'fixed' })).toBeNull()
   expect(await go(s, 'ado-pr-reply', { ...REPLY, pr: 5660 })).toBeNull() // another PR
   expect(await go(s, 'ado-pr-reply', { ...REPLY, repo: 'other-api' })).toBeNull()
-  expect(await go(s, 'ado-pr-comment', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 5659, body: 'a new top-level comment' })).toBeNull() // not in the default's table
+  expect(await go(s, 'ado-pr-comment', { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 5660, body: 'a new top-level comment on another PR' })).toBeNull()
   expect(await go(s, 'gh-pr-comment', { repo: 'acme/shop-api', pr: 5659, body: 'x' })).toBeNull()
   expect(await go(s, 'ado-workitem-create', { org: 'acme', project: 'Shop App', type: 'Task', title: 'x' })).toBeNull()
   expect(await go(s, 'ado-workitem-comment', { org: 'acme', project: 'Shop App', id: 1234, body: 'x' })).toBeNull()
@@ -106,11 +106,38 @@ test('the thread\'s own work item moves to Reviewing | Active | In Progress | Re
   expect(await go(s, 'batch', { items: [...round, { kind: 'ado-pr-thread-status', params: { org: 'acme', project: 'Shop App', repo: 'shop-api', pr: 5659, thread: 7, status: 'fixed' } }] })).toBeNull() // one status in it: the whole batch is asked
 })
 
-test('the work items it owns: its brief, its branch name, one it created, one its PR was linked to', { timeoutMs: 20_000 }, async () => {
+test('the new top-level PR comment is covered for the owned PR (same lint, same cap), not for another PR', { timeoutMs: 20_000 }, async () => {
+  const s = setup({ config: { actions: { ownPrMaxPerDay: 2 } } })
+  const c = (body: string, pr = 5659) => ({ org: 'acme', project: 'Shop App', repo: 'shop-api', pr, body })
+  expect((await go(s, 'ado-pr-comment', c('Build 9981 is green.')))?.sent).toBe(true)
+  expect(await go(s, 'ado-pr-comment', c('See /home/dev/work/a.ts'))).toMatchObject({ sent: false }) // the text lint
+  expect(await go(s, 'ado-pr-comment', c('Build 9982 is green too.', 5660))).toBeNull()
+  expect((await go(s, 'ado-pr-comment', c('One more.')))?.sent).toBe(true)
+  expect(await go(s, 'ado-pr-comment', c('Over the cap.'))).toMatchObject({ sent: false }) // the cap of 2
+})
+
+test('a work item is owned only by creation, by the brief\'s AB#N / "work item N" together with a branch token N, or by the user\'s grant: digits in a branch alone are nothing', { timeoutMs: 20_000 }, async () => {
   const s = setup({ thread: { workItems: undefined } })
-  expect(await go(s, 'ado-workitem-update', WI('Active'))).toBeNull() // owns none yet
+  expect(await go(s, 'ado-workitem-update', WI('Active'))).toBeNull() // owns none
   s.h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { thread: 't5', branch: 'feature/1234-digest-flake', path: '/w/a' } }))
-  expect((await go(s, 'ado-workitem-update', WI('Reviewing')))?.sent).toBe(true) // the id in its branch name
+  expect(await go(s, 'ado-workitem-update', WI('Reviewing'))).toBeNull() // a number in the branch name alone is no signal
+  // the brief says AB#1234 and the branch has the token 1234: owned
+  const b = setup({ thread: { workItems: undefined } })
+  expect(await noteBrief(b.host, 't5', 'Fix the flaky digest test, AB#1234.')).toBeNull()
+  expect(await go(b, 'ado-workitem-update', WI('Reviewing'))).toBeNull() // the brief alone: no branch
+  b.h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { thread: 't5', branch: 'feature/1234-digest-flake', path: '/w/a' } }))
+  expect((await go(b, 'ado-workitem-update', WI('Resolved')))?.sent).toBe(true)
+  for (const brief of ['Work item 1234 tracks it.', 'see https://dev.azure.com/acme/Shop%20App/_workitems/edit/1234']) {
+    const w = setup({ thread: { workItems: undefined } })
+    await noteBrief(w.host, 't5', brief)
+    w.h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { thread: 't5', branch: 'fix/wi-1234', path: '/w/a' } }))
+    expect([brief, (await go(w, 'ado-workitem-update', WI('Active')))?.sent]).toEqual([brief, true])
+  }
+  // a branch token that is only part of a longer number is not the token
+  const part = setup({ thread: { workItems: undefined } })
+  await noteBrief(part.host, 't5', 'AB#1234')
+  part.h.files.set(`${L}/worktrees.json`, JSON.stringify({ a: { thread: 't5', branch: 'fix/12345-other', path: '/w/a' } }))
+  expect(await go(part, 'ado-workitem-update', WI('Active'))).toBeNull()
   expect(await go(s, 'ado-workitem-update', WI('Reviewing', 55))).toBeNull()
   // a create the user approved makes the new item the thread's own
   const made = await addActionRequest(s.host, 't5', { kind: 'ado-workitem-create', params: { org: 'acme', project: 'Shop App', type: 'Task', title: 'Rerun' }, why: 'x' })
@@ -186,30 +213,66 @@ test('Revoke (the pane\'s button, "stop writes", "stop writes t5") takes the def
   expect(off.writes()).toHaveLength(0)
 })
 
-test('ownership comes from the push that opened the PR and from the brief (a URL checked against the remote, or "PR 5659"); one distinct PR only; one line to the user', { timeoutMs: 20_000 }, async () => {
+test('a PR is owned only by an explicit signal: the push that opened it, the pr param (number or URL, checked against the remote), a review thread\'s pr; a brief that mentions one owns nothing', { timeoutMs: 20_000 }, async () => {
   const s = setup({ thread: { pr: undefined, workItems: undefined } })
   const line = await recordPushPr(s.host, 't5', PR.url)
-  expect(line).toBe("t5 owns PR 5659: its replies and moving its own work item to Reviewing go out without a question (revoke: Revoke button or 'stop writes'); resolving, votes and merges still ask")
+  expect(line).toBe("t5 owns PR 5659 (it opened the PR): its replies and moving its own work item to Reviewing go out without a question (revoke: Revoke button or 'stop writes'); resolving, votes and merges still ask")
   expect(JSON.parse(s.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toMatchObject({ host: 'azure', org: 'acme', project: 'Shop App', repo: 'shop-api', id: 5659, url: PR.url })
   expect(await recordPushPr(s.host, 't5', PR.url)).toBeNull() // the same PR again: nothing new to tell
   expect((await go(s, 'ado-pr-reply', REPLY))?.sent).toBe(true)
-  // the brief
-  const b = setup({ thread: { pr: undefined, workItems: undefined } })
-  expect(await recordBriefPr(b.host, 't5', 'Review PR 5659 and answer the comments. Work item 1234 tracks it.')).toContain('t5 owns PR 5659')
-  const t = JSON.parse(b.h.files.get(`${L}/threads/t5/thread.json`)!)
-  expect([t.pr.id, t.workItems]).toEqual([5659, [1234]])
+  // a brief that mentions PRs owns nothing; the note is for exactly one
+  const m = setup({ thread: { pr: undefined, workItems: undefined } })
+  expect(await noteBrief(m.host, 't5', 'Review PR 5659 and answer the comments.')).toBe('brief mentions PR 5659: it is not owned; pass pr to let t5 reply without a question')
+  expect(await noteBrief(m.host, 't5', `fix the comments on ${PR.url}`)).toContain('brief mentions PR 5659: it is not owned')
+  expect(await noteBrief(m.host, 't5', 'compare PR 12 with PR 5659')).toBeNull()
+  expect(await noteBrief(m.host, 't5', 'tidy the notes')).toBeNull()
+  expect(JSON.parse(m.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toBeUndefined()
+  expect(await go(m, 'ado-pr-reply', REPLY)).toBeNull() // still asked
+  // the pr param: a number is read against the project's remote, a URL is checked against it
+  const p = setup({ thread: { pr: undefined, workItems: undefined } })
+  expect((await recordPassedPr(p.host, 't5', 5659, 'you passed pr')).line).toContain('t5 owns PR 5659 (you passed pr)')
+  expect((await go(p, 'ado-pr-reply', REPLY))?.sent).toBe(true)
   const u = setup({ thread: { pr: undefined, workItems: undefined } })
-  expect(await recordBriefPr(u.host, 't5', `fix the comments on ${PR.url}`)).toContain('t5 owns PR 5659')
+  expect((await recordPassedPr(u.host, 't5', PR.url, 'you started a review for it')).line).toContain('t5 owns PR 5659 (you started a review for it)')
   const other = setup({ thread: { pr: undefined, workItems: undefined } })
-  expect(await recordBriefPr(other.host, 't5', 'fix the comments on https://dev.azure.com/evil/Shop%20App/_git/shop-api/pullrequest/5659')).toBeNull() // not the project's remote
-  const many = setup({ thread: { pr: undefined, workItems: undefined } })
-  expect(await recordBriefPr(many.host, 't5', 'compare PR 12 with PR 5659')).toBeNull() // ambiguous: owns none
-  expect(JSON.parse(many.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toBeUndefined()
-  const none = setup({ thread: { pr: undefined, workItems: undefined } })
-  expect(await recordBriefPr(none.host, 't5', 'tidy the notes')).toBeNull()
+  const bad = await recordPassedPr(other.host, 't5', 'https://dev.azure.com/evil/Shop%20App/_git/shop-api/pullrequest/5659', 'you passed pr')
+  expect(bad.line).toBeUndefined()
+  expect(bad.note).toContain('this URL points at evil/Shop App')
+  expect(JSON.parse(other.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toBeUndefined()
   const off = setup({ thread: { pr: undefined, workItems: undefined }, config: { actions: { ownPrDefault: false } } })
-  expect(await recordBriefPr(off.host, 't5', 'Review PR 5659')).toBeNull() // no line when the default is off
+  expect((await recordPassedPr(off.host, 't5', 5659, 'you passed pr')).line).toBeUndefined() // no line when the default is off
   const gh = setup({ thread: { pr: undefined, workItems: undefined }, remote: 'https://github.com/acme/shop-api.git' })
-  expect(await recordBriefPr(gh.host, 't5', 'Review PR 42')).toContain('t5 owns PR 42')
-  expect(JSON.parse(gh.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toMatchObject({ host: 'github', org: 'acme', repo: 'shop-api', id: 42 })
+  expect((await recordPassedPr(gh.host, 't5', 42, 'you passed pr')).line).toContain('t5 owns PR 42')
+  expect(JSON.parse(gh.h.files.get(`${L}/threads/t5/thread.json`)!).pr).toMatchObject({ host: 'github', org: 'acme', repo: 'shop-api', id: 42, how: 'you passed pr' })
+})
+
+test('through lean_thread: new with pr owns it and says how; a brief that mentions a PR says it is not owned; allow-writes owns the PR and the work item it names', { timeoutMs: 20_000 }, async () => {
+  const SID = '11111111-2222-3333-4444-555555555555'
+  const h = fakeHost(null)
+  resetLocks()
+  h.files.set('/p/templates/thread.md', '# {{id}} {{title}}')
+  h.files.set('/p/templates/front-desk.md', 'desk {{lean}}')
+  h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' } }))
+  h.claude.handler = (a: string[]) => (a[0] === '--bg' ? { exitCode: 0, stdout: `started ${SID}\n` } : { exitCode: 0, stdout: a[0] === 'agents' ? '[]' : '' })
+  h.git.handler = a => (a.includes('get-url') ? { exitCode: 0, stdout: 'https://dev.azure.com/acme/Shop%20App/_git/shop-api\n' } : { exitCode: 1, stdout: '' })
+  const said = await leanThread(h.host, '/p', { action: 'new', title: 'mention', text: 'look at PR 5659 for me', project: 'app' })
+  expect(said.ok, said.text).toBe(true)
+  expect(said.text).toContain('brief mentions PR 5659: it is not owned; pass pr to let t1 reply without a question')
+  expect(JSON.parse(h.files.get(`${L}/threads/t1/thread.json`)!).pr).toBeUndefined()
+  const passed = await leanThread(h.host, '/p', { action: 'new', title: 'for it', text: 'answer the comments', project: 'app', pr: 5659 } as any)
+  expect(passed.ok, passed.text).toBe(true)
+  expect(passed.text).toContain('t2 owns PR 5659 (you passed pr)')
+  expect(JSON.parse(h.files.get(`${L}/threads/t2/thread.json`)!).pr).toMatchObject({ id: 5659, how: 'you passed pr' })
+  const obj = await leanThread(h.host, '/p', { action: 'new', title: 'x', project: 'app', pr: { title: 'x' } } as any)
+  expect(obj.ok).toBe(false)
+  // the user's words name a PR and a work item: allow-writes owns them
+  const say = (text: string) => recordHumanPrompt(h.host, { text, wait: false, origin: { kind: 'composer' } })
+  await say('fix the comments on PR 5700')
+  const g = await leanThread(h.host, '/p', { action: 'allow-writes', tN: 't1', target: { pr: 5700 } })
+  expect(g.ok, g.text).toBe(true)
+  expect(g.text).toContain('t1 owns PR 5700 (you allowed writes on it)')
+  await say('please update work item 4321')
+  const w = await leanThread(h.host, '/p', { action: 'allow-writes', tN: 't1', target: { workitem: 4321 } })
+  expect(w.ok, w.text).toBe(true)
+  expect(JSON.parse(h.files.get(`${L}/threads/t1/thread.json`)!).workItems).toEqual([4321])
 })

@@ -246,7 +246,7 @@ async function capOf(h: Host): Promise<number> {
 }
 const quoteOf = (s: string): string => s.replace(/\s+/g, ' ').trim().slice(0, 200)
 
-export async function allowWrites(h: Host, thread: string, target: unknown, kinds?: unknown): Promise<{ ok: boolean; text: string }> {
+export async function allowWrites(h: Host, thread: string, target: unknown, kinds?: unknown): Promise<{ ok: boolean; text: string; target?: { scope: string; type: 'pr' | 'workitem'; n: number } }> {
   if (!threadOk(thread)) return { ok: false, text: 'allow-writes needs tN (the thread the writes are for)' }
   const t = await readJson<{ state?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, null).catch(() => null)
   if (!t) return { ok: false, text: `no thread ${thread}` }
@@ -286,7 +286,7 @@ export async function allowWrites(h: Host, thread: string, target: unknown, kind
     const keep = (await grantRows(h, now)).filter(x => !(x.thread === thread && lc(x.scope) === lc(tg.scope) && !x.statuses.length)) // (the words replace the words; a grant of the dialog's choice stays)
     await saveGrants(h, [...keep, g])
     await logHistory(h, thread, { kind: 'writes-granted', id: g.id, scope: g.scope, kinds: want, quote: g.quote, cap, hours: 24 })
-    return { ok: true, text: `allowed ${thread} on ${label}: ${want.join(', ')} (up to ${cap} writes, 24 h or until ${thread} closes), resting on your words "${g.quote}". Revoke: the pane's Revoke button, /lean-agent:revoke ${thread}, or say "stop writes".${res.note ? ` Note: ${res.note}.` : ''} Tell the user this in one line` }
+    return { ok: true, ...(tg.create ? {} : { target: { scope: tg.scope, type: tg.type, n: tg.n } }), text: `allowed ${thread} on ${label}: ${want.join(', ')} (up to ${cap} writes, 24 h or until ${thread} closes), resting on your words "${g.quote}". Revoke: the pane's Revoke button, /lean-agent:revoke ${thread}, or say "stop writes".${res.note ? ` Note: ${res.note}.` : ''} Tell the user this in one line` }
   })
 }
 // the forms that count, said in the refusal (the field: nothing said which form counts or why one failed)

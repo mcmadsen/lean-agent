@@ -11,7 +11,7 @@ import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
 import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
 import { allowWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
-import { recordBriefPr } from './ownpr'
+import { noteBrief, ownFromGrant, recordPassedPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
 import { deliver } from './deliver'
 import { denialRec } from './denial'
@@ -481,6 +481,8 @@ export function grantsBlock(_i: Pick<Input, 'allowEdit' | 'allowCmd'>): string |
 async function create(h: Host, root: string, home: string, i: Input, installed = ''): Promise<Out> {
   const title = (i.title ?? '').trim()
   if (!title) return err('new needs a title')
+  const prArg = (i as { pr?: unknown }).pr
+  if (prArg !== undefined && (typeof prArg === 'object' || typeof prArg === 'boolean' || (typeof prArg === 'string' ? !prArg.trim() : typeof prArg !== 'number'))) return err('new: pr is the PR number or URL the thread is started FOR (an object is the push option)')
   const grants = grantsBlock(i)
   if (typeof grants !== 'string') return err(grants.error) // before any folder exists
   const pre = await threadChoice(h, home, i)
@@ -506,8 +508,12 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await save(h, home, t)
   await trustFolder(h, dir)
   const r = await startSession(h, home, t, brief, i, installed, root)
-  const owns = r.ok ? await recordBriefPr(h, id, brief).catch(() => null) : null // the PR the brief names is the thread's own (ownpr.ts): one line to the user
-  return r.ok ? { ...r, ...(owns ? { text: `${r.text}\n${owns}. Tell the user this in one line` } : {}), data: t } : r
+  // A PR is the thread's own ONLY when `pr` was passed (or a review thread's review.pr), never because the brief mentions one (ownpr.ts); the reply says which
+  const passed = (i as { pr?: unknown }).pr ?? (i as { review?: { pr?: unknown } }).review?.pr
+  const own = r.ok && passed !== undefined ? await recordPassedPr(h, id, passed, (i as { pr?: unknown }).pr !== undefined ? 'you passed pr' : 'you started a review for it').catch(() => ({}) as { line?: string; note?: string }) : null
+  const mention = r.ok && passed === undefined ? await noteBrief(h, id, brief).catch(() => null) : null
+  const more = own?.line ? `${own.line}. Tell the user this in one line` : own?.note ?? mention
+  return r.ok ? { ...r, ...(more ? { text: `${r.text}\n${more}` } : {}), data: t } : r
 }
 
 // Stop a finished-but-alive session before anything takes its place (a resume, a fresh session). null = it is gone, go on; an Out =
@@ -795,7 +801,7 @@ const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume'])
 // ---- the fields each action uses (the tool entry refuses the others: a dropped field is a lost instruction) ----------------------------------
 const TEXTY = ['text', 'message']
 const USES: Record<string, string[]> = {
-  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'keep', 'allowEdit', 'allowCmd', 'needs', 'reason'],
+  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'allowEdit', 'allowCmd', 'needs', 'reason'],
   send: TEXTY,
   wake: TEXTY,
   close: [],
@@ -937,7 +943,9 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     // approval in advance (deskwrites.ts): the mod makes the grant only when the user's own recorded words name the target and ask for the work
     if (i.action === 'allow-writes') {
       const o = await allowWrites(h, (i.tN ?? '').trim(), i.target, i.kinds)
-      return o.ok ? { ok: true, text: o.text } : err(o.text)
+      if (!o.ok) return err(o.text)
+      const owns = await ownFromGrant(h, (i.tN ?? '').trim(), o.target).catch(() => null) // the user's words name the target: it is the thread's own (ownpr.ts)
+      return { ok: true, text: owns ? `${o.text}. ${owns}` : o.text }
     }
     // the user may let a thread whose worker was denied edit its worktree itself (selfedit.ts): the mod checks the user's recorded words
     if (i.action === 'allow-self-edit') {

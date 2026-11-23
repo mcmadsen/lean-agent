@@ -203,7 +203,7 @@ const SCHEMA = {
     sha: { type: 'string', description: 'approve-push, push: the full sha the user approved, naming this sha and branch' },
     reason: { type: 'string', description: 'approve-push: why. An expensive model (opus): why sonnet is not enough (required; the request waits for the user\'s Approve)' },
     review: { type: 'object', description: 'new: start a review thread: exactly one of pr, branch, sha (+ base); needs project', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
-    pr: { type: 'object', description: 'push: open a pull request after the push', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } }, required: ['title'] },
+    pr: { type: ['object', 'number', 'string'], description: 'new: the PR number or URL the thread is started FOR (it then owns it). push: open a pull request {title, body?, base?, draft?} after the push', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } } },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'default sonnet. Never choose opus yourself: only when the user asked, with a reason' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },

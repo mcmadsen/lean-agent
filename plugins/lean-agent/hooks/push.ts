@@ -328,7 +328,8 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
       notes.push(`thread not told (${String((e as Error)?.message ?? e).slice(0, 100)})`)
     }
     // the PR this push opened (or found open) is the thread's own: its replies need no question (ownpr.ts; the user gets a one-line notice in the pane)
-    if (res.ok && typeof extra.pr === 'string' && extra.pr) await recordPushPr(h, id, extra.pr).catch(() => null)
+    // (a PR that was already open was not opened by this push: not an ownership signal)
+    if (res.ok && typeof extra.pr === 'string' && extra.pr && !/PR already open/.test(res.text)) await recordPushPr(h, id, extra.pr).catch(() => null)
     return notes.length ? { ...res, text: `${res.text}. ${notes.join('; ')}` } : res
   }
 

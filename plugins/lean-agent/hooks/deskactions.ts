@@ -27,6 +27,7 @@ import { macOf } from './reviews'
 import { sha256 } from './sha'
 import { azureToken, oneLine } from './prhost'
 import { typedApproval } from './writeinstr'
+import { setNotice } from './notices'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -915,19 +916,16 @@ export async function addOwnWorkItems(h: Host, thread: string, ids: number[]): P
 }
 async function noteOwnItems(h: Host, r: ActionRequest, sentText: string): Promise<void> {
   const items = r.kind === 'batch' ? (Array.isArray(r.params.items) ? (r.params.items as { kind: string; params: Params }[]) : []) : [{ kind: r.kind as string, params: r.params }]
-  const t = await readJson<{ pr?: { org?: string; project?: string; repo?: string; id?: number } } | null>(h, `${threadsDir(await homeDir(h))}/${r.thread}/thread.json`, null).catch(() => null)
   const ids: number[] = []
   for (const it of items) {
     if (it.kind === 'ado-workitem-create') {
       const m = /(?:create: done \(|^)id (\d{1,9})\b/.exec(sentText) ?? /\bid (\d{1,9})\b/.exec(sentText)
       if (m) ids.push(Number(m[1]))
-    } else if (it.kind === 'ado-pr-workitem-link') {
-      const p = it.params
-      const pr = t?.pr
-      if (pr && String(pr.org).toLowerCase() === String(p.org).toLowerCase() && String(pr.project).toLowerCase() === String(p.project).toLowerCase() && String(pr.repo).toLowerCase() === String(p.repo).toLowerCase() && pr.id === p.pr) ids.push(Number(p.workitem))
     }
   }
+  // (only a work item the thread CREATED becomes its own here; a link to a PR, a brief or a branch name is no ownership signal)
   await addOwnWorkItems(h, r.thread, ids)
+  for (const id of ids) await setNotice(h, `ownpr:${r.thread}:wi${id}`, `${r.thread} owns work item ${id} (it created the work item): moving it to Reviewing goes out without a question when ${r.thread} owns a PR (revoke: Revoke button or 'stop writes'); other changes still ask`).catch(() => undefined)
 }
 
 async function dropOne(h: Host, id: string): Promise<void> {
