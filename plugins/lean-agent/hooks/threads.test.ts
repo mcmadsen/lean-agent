@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadSettings as leanThreadSettings } from './leantools'
 import { leanThread, parseAgents, resetLocks, threadClaudeMd, trustFolder } from './threads'
-import { PROMPT_MAX, REPORT_BUDGET, olderVersion, reportHistory } from './handover'
+import { PROMPT_MAX, olderVersion, reportHistory } from './handover'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const ROOT = '/p'
@@ -767,10 +767,10 @@ test('an older report cut in the handover names the file with its full text, wri
   await call({ action: 'new', title: 'a', text: 'brief' })
   const long = 'L'.repeat(1200)
   const rows = [
-    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (700) and the desk never wrote a file: the handover does
+    { ts: 10, from: 't1', kind: 'report', text: 'ancient', state: 'working' }, // older than the last 3: only counted
+    { ts: 11, from: 't1', kind: 'report', text: `early ${long}`, state: 'working' }, // cut (200) and the desk never wrote a file: the handover does
     { ts: 12, from: 't1', kind: 'report', text: `middle ${long}`, state: 'working' }, // cut, the desk's own file already exists
     { ts: 13, from: 't1', kind: 'report', text: 'short one', state: 'working' }, // whole: no pointer
-    { ts: 14, from: 't1', kind: 'report', text: 'last one', state: 'done' },
   ]
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
   h.files.set('/h/.lean-agent/desk/reports/12-t1-report.md', 'the desk wrote this')
@@ -778,6 +778,8 @@ test('an older report cut in the handover names the file with its full text, wri
   state.rows = []
   await call({ action: 'reopen', tN: 't1' })
   const prompt = bg[1]![bg[1]!.length - 1]!
+  expect(prompt).toContain('1 older reports: lean_thread report t1')
+  expect(prompt).not.toContain('ancient')
   expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/11-t1-report.md)')
   expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/12-t1-report.md)')
   expect(h.files.get('/h/.lean-agent/desk/reports/11-t1-report.md')).toBe(`# Report from t1 (working)\n\nearly ${long}\n`)
@@ -789,18 +791,19 @@ test('an older report cut in the handover names the file with its full text, wri
 test('reportHistory names the full-text path of a cut line only when asked, and reports which were cut', () => {
   const recs = [{ ts: 1, from: 't1', kind: 'report' as const, text: 'x'.repeat(900), state: 'working' }, { ts: 2, from: 't1', kind: 'ask' as const, text: 'last?', state: undefined }]
   expect(reportHistory(recs).lines[0]).not.toContain('full text in')
-  const r = reportHistory(recs, REPORT_BUDGET, x => `/d/reports/${x.ts}.md`)
+  const r = reportHistory(recs, x => `/d/reports/${x.ts}.md`)
   expect(r.lines[0]).toContain('(cut: full text in /d/reports/1.md)')
   expect(r.cutRecs.map(x => x.ts)).toEqual([1])
 })
 
-test('the handover keeps the newest report whole and cuts older ones to the budget', () => {
+test('1.0.27: the handover keeps the last 3 reports as 200-character digests and counts the older ones', () => {
   const recs = Array.from({ length: 40 }, (_, n) => ({ ts: n, from: 't1', kind: 'report' as const, text: `report ${n} ` + 'x'.repeat(900), state: 'working' }))
   recs.push({ ts: 99, from: 't1', kind: 'report', text: 'FINAL ' + 'y'.repeat(5000), state: 'done' })
   const { lines, omitted } = reportHistory(recs)
-  expect(lines[lines.length - 1]).toContain('y'.repeat(5000)) // newest whole
-  expect(lines.join('\n').length).toBeLessThan(REPORT_BUDGET + 6000)
-  expect(omitted).toBeGreaterThan(0)
+  expect(lines).toHaveLength(3)
+  expect(lines[2]).toContain('[done] FINAL ')
+  expect(lines[2]!.length).toBeLessThan(260)
+  expect(omitted).toBe(38)
   expect(lines.some(l => l.includes('report 39'))).toBe(true)
   expect(lines.some(l => l.includes('report 0 '))).toBe(false)
   expect(reportHistory([]).lines).toEqual([])

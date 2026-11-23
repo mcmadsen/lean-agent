@@ -10,9 +10,10 @@ import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchn
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
 
-export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
-const OLD_REPORT_MAX = 700 // an older report is cut to this
-const NEWEST_REPORT_MAX = 20_000 // the newest is whole up to this (the prompt is one argv string: Linux caps a single one at 128 KB)
+export const REPORT_DIGESTS = 3 // 1.0.27: the restart prompt carries the last 3 reports as digests (state, first 200 characters, file path), the rest is a count
+export const DIGEST_CHARS = 200
+export const SNAPSHOT_MAX = 1_500 // chars of the state snapshot in the prompt (the file has the rest)
+export const PREFLIGHT_MAX = 800 // chars of the preflight in the prompt
 const QUEUED_EACH = 1_000 // a desk message in the corrections, cut to this
 export const PROMPT_MAX = 80_000 // hard cap on the whole handover prompt (the parts above add up to about 60k at most)
 const BRIEF_MAX = 6_000
@@ -21,32 +22,18 @@ const REMEMBER_MAX = 20
 const flat = (s: string) => s.replace(/\r/g, '').trim()
 const cut = (s: string, n: number, tail = false) => (s.length <= n ? s : tail ? '…' + s.slice(s.length - n) : s.slice(0, n) + '…')
 
-// The reports of one thread, oldest first, inside the budget: the newest whole, older ones newest-first while they fit.
-// `pathOf`: where the FULL text of a report is (desk/reports/<file>); a line that is cut names it, so the new session can Read the rest
-// instead of guessing. `cutRecs` are the reports whose line was cut (the caller makes sure their file exists).
-export function reportHistory(recs: DeskRec[], budget = REPORT_BUDGET, pathOf?: (r: DeskRec) => string): { lines: string[]; omitted: number; cutRecs: DeskRec[] } {
+// The reports of one thread, oldest first: the LAST 3 as digests (state, first 200 characters, the file with the full text when cut), older ones
+// only counted (the head says `lean_thread report tN`). `pathOf`: where the FULL text of a report is (desk/reports/<file>).
+// `cutRecs` are the reports whose line was cut (the caller makes sure their file exists).
+export function reportHistory(recs: DeskRec[], pathOf?: (r: DeskRec) => string): { lines: string[]; omitted: number; cutRecs: DeskRec[] } {
   const cutRecs: DeskRec[] = []
-  const line = (r: DeskRec, max: number) => {
+  const lines = recs.slice(-REPORT_DIGESTS).map(r => {
     const text = flat(r.text)
-    const isCut = text.length > max
-    return `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(text, max)}${isCut && pathOf ? ` (cut: full text in ${pathOf(r)})` : ''}`
-  }
-  const kept: string[] = []
-  let used = 0
-  let omitted = 0
-  for (let i = recs.length - 1; i >= 0; i--) {
-    const r = recs[i]!
-    const max = i === recs.length - 1 ? NEWEST_REPORT_MAX : OLD_REPORT_MAX
-    const l = line(r, max)
-    if (kept.length && used + l.length > budget) {
-      omitted = i + 1
-      break
-    }
-    kept.unshift(l)
-    if (flat(r.text).length > max) cutRecs.unshift(r)
-    used += l.length
-  }
-  return { lines: kept, omitted, cutRecs }
+    const isCut = text.length > DIGEST_CHARS
+    if (isCut) cutRecs.push(r)
+    return `- ${r.kind === 'ask' ? '[question]' : `[${r.state || 'working'}]${r.superseded ? ' [brief superseded]' : ''}`} ${cut(text, DIGEST_CHARS)}${isCut && pathOf ? ` (cut: full text in ${pathOf(r)})` : ''}`
+  })
+  return { lines, omitted: Math.max(0, recs.length - REPORT_DIGESTS), cutRecs }
 }
 
 // Make sure the full text of every cut report is in desk/reports/<ts>-<from>-<kind>.md (the file a long direct send wrote; a short
@@ -149,7 +136,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask') && !(r as { mod?: boolean }).mod)
   // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
-  const hist = reportHistory(recs, REPORT_BUDGET, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
+  const capped = (s: string, n: number, file: string) => (s.length > n ? `${s.slice(0, n)}\n…(cut to ${n} characters: full text in ${file})` : s)
+  const hist = reportHistory(recs, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX).map(m => ({ ...m, text: retireText(m.text!) })) // (a forge write by script is retired, not passed on)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const now = await h.clock.now()
@@ -171,9 +159,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
-    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now, { git: !gitInPre, scratch: false }) : '', file: snapshotFile(home, t.id), mode: 'head' },
-    { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
-    { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
+    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? capped(snapshotText(snap, now, { git: !gitInPre, scratch: false }), SNAPSHOT_MAX, snapshotFile(home, t.id)) : '', file: snapshotFile(home, t.id), mode: 'head' },
+    { name: 'preflight', head: '## Preflight', body: capped(pre, PREFLIGHT_MAX, `${dir}/preflight`), file: `${dir}/preflight`, mode: 'head' },
+    { name: 'reports', head: `## Your reports so far (last ${Math.min(REPORT_DIGESTS, recs.length)}, oldest first${hist.omitted ? `; ${hist.omitted} older reports: lean_thread report ${t.id}` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
     { name: 'progress', head: `## Your notes (end of ${progress?.path})`, body: progressText ? cut(progressText, NOTES_MAX, true) : '', file: `${dir}/${progress?.path}`, mode: 'tail' },
     { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
@@ -183,8 +171,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   ]
   const noNotes = !notes && !progressText && !scratchNotesText && !nl.listed.length && !nl.left.length
   const missing = [!goalText && 'no goal (goal-set tN "<line>")', noNotes && `no notes (looked in ${dir}/notes.md, ${dir}/notes/*.md, ${dir}/scratch/*.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
-  const sized = fitParts(parts, (await handoverTokens(h, home)) * 4)
-  const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap
+  const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap (but counted in the budget: the rest shrinks to make room)
+  const sized = fitParts(parts, Math.max(2_000, (await handoverTokens(h, home)) * 4 - (tail ? tail.length + 2 : 0)))
   const base = cutPrompt(sized.map(partText).filter(Boolean).join('\n\n'))
   return { prompt: tail ? `${base}\n\n${tail}` : base, worktree: wt?.path, branch: wt?.branch, parts: tail ? [...sized, { name: 'instructions', head: INSTR_HEAD, body: tail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : sized, missing, notes: { content: nl.content.map(f => f.path), listed: nl.listed.map(f => f.path), left: nl.left.map(f => f.path), scratchNotes: !!scratchNotesText } }
 }
@@ -275,9 +263,12 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
   const rows = (ho.parts ?? []).filter(p => p.body).map(p => `  ${p.name.padEnd(10)} ~${String(tok(partText(p))).padStart(5)} tokens${p.cut ? `  (cut: full text in ${p.file})` : ''}`)
   const all = tok(ho.prompt)
   const sum = (...names: string[]) => (ho.parts ?? []).filter(p => names.includes(p.name)).reduce((n, p) => n + tok(partText(p)), 0)
+  // an overrun is never hidden: by how much, and the largest section (what is left once every cuttable section is at its floor)
+  const big = [...(ho.parts ?? [])].filter(p => p.body).sort((a, b) => tok(partText(b)) - tok(partText(a)))[0]
+  const over = all > budget ? `over budget by ${all - budget} tokens: the largest section is ${big?.name ?? '?'} (~${big ? tok(partText(big)) : 0} tokens${big?.mode === 'fixed' ? ', a fixed line: never cut' : ''}); the desk's instructions and the fixed lines are never cut` : ''
   return [
-    `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}`,
-    `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
+    `handover for ${id}: about ${all} tokens: brief ${sum('brief')}, corrections ${sum('corrections')}, notes ${sum('notes', 'progress', 'scratchrule', 'scratchnotes', 'scratchlist')}, snapshot ${sum('snapshot')}, preflight ${sum('preflight')}, reports ${sum('reports')}`,
+    `${t.title}: ~${all} tokens of a budget of ${budget} (config handoverTokens, the whole prompt including reports)${over ? ` - ${over}` : ' - within budget'}`,
     'sections:',
     ...rows,
     ...notesRows(ho, `${threadsDir(home)}/${id}`),

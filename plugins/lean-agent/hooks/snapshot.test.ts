@@ -140,11 +140,42 @@ test('handover: fitParts drops the oldest report lines first and names the inbox
   expect(parts[1]!.body).toContain('- one') // the input is untouched
 })
 
+test('1.0.27: 25 reports -> the last 3 as digests and a count; the whole prompt (snapshot 1500, preflight 800, no CLAUDE.md copy) stays within handoverTokens', async () => {
+  const h = setup()
+  const long = (n: number) => `report ${n}: ` + 'detail '.repeat(300)
+  h.files.set(`${L}/desk/inbox.jsonl`, Array.from({ length: 25 }, (_, i) => rec({ ts: 100 + i, from: 't1', kind: 'report', state: i === 24 ? 'done' : 'working', text: long(i) })).join(''))
+  h.files.set(`${T1}/CLAUDE.md`, 'CLAUDE-MD-MARKER the thread guide')
+  h.files.set('/w/app/CLAUDE.md', 'CLAUDE-MD-MARKER the project guide')
+  setPreflight(async () => 'preflight line\n' + 'p'.repeat(3000))
+  const text = await handoverReport(h.host, '/h', 't1')
+  setPreflight(null)
+  const prompt = text.split('--- the prompt, as a fresh session gets it ---\n')[1]!
+  expect(prompt.match(/^- \[(working|done)\] report \d+/gm)).toHaveLength(3)
+  expect(prompt).toContain('report 22: ')
+  expect(prompt).toContain('report 24: ')
+  expect(prompt).not.toContain('report 21: ')
+  expect(prompt).toContain('22 older reports: lean_thread report t1')
+  expect(prompt).toContain('(cut: full text in /h/.lean-agent/desk/reports/')
+  expect(prompt).not.toContain('CLAUDE-MD-MARKER') // the engine loads the CLAUDE.md files; the prompt never repeats them
+  expect(prompt).toContain('…(cut to 800 characters: full text in')
+  expect(text).toContain('within budget')
+  expect(Math.ceil(prompt.length / 4)).toBeLessThanOrEqual(6000)
+})
+
+test('1.0.27: `lean_doctor handover` never hides an overrun: "over budget by N tokens" and the largest section', async () => {
+  const h = setup({ config: { handoverTokens: 500 } })
+  h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'a goal that is far too long ' + 'g'.repeat(9000), ts: 1 } })) // a fixed line: never cut
+  const text = await handoverReport(h.host, '/h', 't1')
+  expect(text).toMatch(/over budget by \d+ tokens: the largest section is \w+/)
+  expect(text).not.toContain('within budget')
+})
+
 test('lean_doctor handover: sections with their tokens and what is missing', async () => {
   const h = setup()
   const text = await handoverReport(h.host, '/h', 't1')
-  expect(text).toMatch(/^handover for t1: about \d+ tokens: brief \d+, corrections \d+, notes \d+, snapshot \d+, preflight \d+\n/)
+  expect(text).toMatch(/^handover for t1: about \d+ tokens: brief \d+, corrections \d+, notes \d+, snapshot \d+, preflight \d+, reports \d+\n/)
   expect(text).toContain('of a budget of 6000')
+  expect(text).toContain('within budget')
   expect(text).toMatch(/brief\s+~\s*\d+ tokens/)
   expect(text).not.toContain('no goal') // (the thread has a brief: its first line is the goal)
   expect(text).toContain('goal: fix the login bug')
