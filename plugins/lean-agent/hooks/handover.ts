@@ -4,7 +4,7 @@ import { atomicWrite, leanDir, readJson, readJsonl, threadsDir } from './state'
 import type { Host } from './state'
 import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
-import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
+import { GIT_LINE, readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
 import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
@@ -158,8 +158,9 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX).map(m => ({ ...m, text: retireText(m.text!) })) // (a forge write by script is retired, not passed on)
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const now = await h.clock.now()
+  const pre = await preflightOf(h, home, t) // (first: it refreshes the snapshot's git fields when they are older than 60 s; the snapshot is read after)
   const snap = await readSnapshot(h, home, t.id)
-  const pre = await preflightOf(h, home, t)
+  const gitInPre = pre.includes(GIT_LINE) // the preflight carries the git state from the snapshot's own record: the snapshot section does not repeat it
   const scratchNotesText = await scratchNotes(h, dir) // the reading the last session kept (scratchnotes.ts): a restart must not redo it
   const scratchFiles = await scratchList(h, dir)
   const inbox =`${deskState(home)}/inbox.jsonl`
@@ -175,7 +176,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}`, body: corr.lines.length ? `${corr.older ? `(${corr.older} older messages omitted: ${dir}/inbox.jsonl)\n` : ''}${corr.lines.join('\n')}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
-    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now) : '', file: snapshotFile(home, t.id), mode: 'head' },
+    { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now, { git: !gitInPre, scratch: false }) : '', file: snapshotFile(home, t.id), mode: 'head' },
     { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
     { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },

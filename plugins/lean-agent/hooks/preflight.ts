@@ -5,20 +5,11 @@ import type { Host } from './state'
 import { listProjects } from './projects'
 import { readRegistry } from './worktreereg'
 import { STOP_WORDS } from './stopwords'
+import { GIT_LINE, atText, sharedGit } from './snapshot'
 
 export type PreflightThread = { id: string; cwd: string; home: string; title?: string; goal?: string; branch?: string; worktree?: string }
 
 const NA = 'n/a'
-const one = (s: string) => s.trim().split('\n')[0]!.trim()
-
-async function git(h: Host, cwd: string, ...args: string[]): Promise<string | null> {
-  try {
-    const r = await h.process.run(['git', '-C', cwd, ...args])
-    return r.exitCode === 0 ? r.stdout : null
-  } catch {
-    return null
-  }
-}
 
 // the last non-empty line of the thread's last report to the desk (desk/inbox.jsonl)
 async function lastReport(h: Host, home: string, id: string): Promise<string> {
@@ -93,22 +84,22 @@ async function knownRef(h: Host, home: string, id: string): Promise<string> {
 
 export async function preflightText(h: Host, t: PreflightThread): Promise<string> {
   const part = async <T>(f: () => Promise<T>, d: T): Promise<T> => f().catch(() => d)
-  const branch = await git(h, t.cwd, 'rev-parse', '--abbrev-ref', 'HEAD')
-  const head = await git(h, t.cwd, 'log', '-1', '--format=%h %s')
-  const status = await git(h, t.cwd, 'status', '--short')
-  const stat = await git(h, t.cwd, 'diff', '--stat')
-  const st = status === null ? [] : status.split('\n').filter(l => l.trim())
-  const statLines = st.length > 30 ? [...st.slice(0, 30), `(+${st.length - 30} more)`] : st
-  const diffLast = stat === null ? NA : stat.trim() ? stat.trim().split('\n').pop()!.trim() : 'no unstaged changes'
+  // ONE computation of the working tree's state, shared with the state snapshot (snapshot.ts sharedGit): the snapshot's own fields when it is
+  // younger than 60 s, else computed once and written back to it: the handover never prints two numbers for one file
+  const { facts: g, at, reused } = await part(() => sharedGit(h, t.home, t.id, t.cwd), { facts: { branch: '', head: '', headLine: '', status: [] as string[], diffStat: '', ok: false }, at: 0, reused: false })
+  const st = g.status.filter(l => l.trim())
+  const statLines = st.length > 20 ? [...st.slice(0, 20), `(+${st.length - 20} more)`] : st
+  const dirty = st.length > 0
   const ref = await part(() => knownRef(h, t.home, t.id), NA)
-  const tasks = await part(() => openTasks(h, t.home, { id: t.id, title: t.title, goal: t.goal, branch: (branch === null ? '' : one(branch)) || t.branch, worktree: t.worktree, ref: ref === NA ? '' : ref }), NA)
+  const tasks = await part(() => openTasks(h, t.home, { id: t.id, title: t.title, goal: t.goal, branch: g.branch || t.branch, worktree: t.worktree, ref: ref === NA ? '' : ref }), NA)
   return [
     `preflight (computed by script, ${t.id}):`,
-    `branch: ${branch === null ? NA : one(branch) || NA}`,
-    `HEAD: ${head === null ? NA : one(head) || NA}`,
-    `status: ${status === null ? NA : st.length ? `${st.length} changed` : 'clean'}`,
+    `branch: ${g.branch || NA}`,
+    `HEAD: ${g.headLine || NA}`,
+    g.ok ? `${GIT_LINE}${atText(at)} (${reused ? 'from the state snapshot' : 'computed now'}): commit ${g.head.slice(0, 7)}, worktree ${dirty ? 'dirty' : 'clean'}` : `git state: not readable${t.cwd ? '' : ' (no checkout registered)'}`,
+    `status: ${!g.ok ? NA : dirty ? `${st.length} changed` : 'clean'}`,
     ...statLines.map(l => `  ${l}`),
-    `diff: ${diffLast}`,
+    ...(g.ok ? [`diff vs HEAD: ${g.diffStat.trim() ? '' : 'no changes'}`.trimEnd(), ...(g.diffStat.trim() ? g.diffStat.split('\n').map(l => `  ${l}`) : [])] : [`diff vs HEAD: ${NA}`]),
     `last report: ${await part(() => lastReport(h, t.home, t.id), NA)}`,
     `open tasks:${tasks.startsWith('\n') ? tasks : ` ${tasks}`}`,
     `PR / work item: ${ref}`,

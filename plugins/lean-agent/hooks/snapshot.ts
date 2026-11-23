@@ -19,8 +19,10 @@ export type Snapshot = {
   dir: string // where git ran (the thread's worktree, else its folder)
   branch: string
   head: string
+  headLine?: string // `git log -1 --format=%h %s`
+  gitAt?: number // when the git fields were last computed (the preflight refreshes them when the snapshot is older than 60 s); else `at`
   status: string[] // `git status --short`, cut
-  diffStat: string
+  diffStat: string // `git diff --stat HEAD`, cut
   edited: string[] // files edited in the turn that just ended
   tasks: SnapTask[]
   lastReport: { ts: number; state: string; text: string } | null
@@ -105,15 +107,47 @@ export function tasksOf(raw: unknown): SnapTask[] {
   return out
 }
 
+// ---- the ONE computation of the working tree's state (the snapshot AND the preflight pack read it: never two numbers for one file) -----
+export type GitFacts = { branch: string; head: string; headLine: string; status: string[]; diffStat: string; ok: boolean }
+export async function gitFacts(h: Host, dir: string): Promise<GitFacts> {
+  const [branch, head, status, stat, headLine] = await Promise.all([git(h, dir, ['rev-parse', '--abbrev-ref', 'HEAD']), git(h, dir, ['rev-parse', 'HEAD']), git(h, dir, ['status', '--short']), git(h, dir, ['diff', '--stat', 'HEAD']), git(h, dir, ['log', '-1', '--format=%h %s'])])
+  const lines = status ? status.split('\n') : []
+  const statLines = stat ? stat.split('\n') : []
+  return {
+    branch,
+    head,
+    headLine: headLine.split('\n')[0]!.trim(),
+    status: lines.slice(0, STATUS_MAX).concat(lines.length > STATUS_MAX ? [`… ${lines.length - STATUS_MAX} more`] : []),
+    diffStat: statLines.length > 6 ? `${statLines.slice(0, 5).join('\n')}\n… ${statLines[statLines.length - 1]}` : stat,
+    ok: !!(branch || head),
+  }
+}
+export const FRESH_MS = 60_000 // a snapshot younger than this is the answer; older: the state is computed again, once, and written back
+export const GIT_LINE = 'git as of '
+export const atText = (ms: number): string => (Number.isFinite(ms) ? `${new Date(ms).toISOString().slice(0, 19).replace('T', ' ')}Z` : '?')
+// The state of `cwd` for the preflight: the snapshot's own git fields when it was taken (or last refreshed) less than FRESH_MS ago in the same
+// folder, else computed once and written back to the snapshot (its other fields untouched), so the handover never prints two numbers for one file.
+// With no snapshot the state is computed and nothing is written (a snapshot is the thread's own record of a turn end).
+export async function sharedGit(h: Host, home: string, id: string, cwd: string): Promise<{ facts: GitFacts; at: number; reused: boolean }> {
+  const now = await h.clock.now()
+  if (!cwd) return { facts: { branch: '', head: '', headLine: '', status: [], diffStat: '', ok: false }, at: now, reused: false }
+  const snap = await readSnapshot(h, home, id)
+  const age = snap ? now - (snap.gitAt ?? snap.at) : -1
+  if (snap && snap.dir === cwd && (snap.branch || snap.head) && age >= 0 && age < FRESH_MS) {
+    return { facts: { branch: snap.branch, head: snap.head, headLine: snap.headLine ?? '', status: snap.status, diffStat: snap.diffStat, ok: true }, at: snap.gitAt ?? snap.at, reused: true }
+  }
+  const facts = await gitFacts(h, cwd)
+  if (snap && facts.ok) await writeSnapshot(h, home, { ...snap, dir: cwd, branch: facts.branch, head: facts.head, headLine: facts.headLine, status: facts.status, diffStat: facts.diffStat, gitAt: now })
+  return { facts, at: now, reused: false }
+}
+
 export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?: string; tokens?: number | null; edited?: string[]; tasks?: unknown; pending?: SnapPending[] } = {}): Promise<Snapshot> {
   const dir = await workDir(h, home, id)
-  const [branch, head, status, stat] = await Promise.all([git(h, dir, ['rev-parse', '--abbrev-ref', 'HEAD']), git(h, dir, ['rev-parse', 'HEAD']), git(h, dir, ['status', '--short']), git(h, dir, ['diff', '--stat', 'HEAD'])])
+  const g = await gitFacts(h, dir)
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === id && (r.kind === 'report' || r.kind === 'ask'))
   const reports = recs.filter(r => r.kind === 'report' && !(r as any).mod)
   const last = reports[reports.length - 1]
   const asks = recs.filter(r => r.kind === 'ask' && (!last || r.ts > last.ts))
-  const lines = status ? status.split('\n') : []
-  const statLines = stat ? stat.split('\n') : []
   const scratch = await scratchList(h, `${threadsDir(home)}/${id}`)
   return {
     v: 1,
@@ -121,10 +155,11 @@ export async function buildSnapshot(h: Host, home: string, id: string, o: { sid?
     at: await h.clock.now(),
     sid: o.sid ?? '',
     dir,
-    branch,
-    head,
-    status: lines.slice(0, STATUS_MAX).concat(lines.length > STATUS_MAX ? [`… ${lines.length - STATUS_MAX} more`] : []),
-    diffStat: statLines.length > 6 ? `${statLines.slice(0, 5).join('\n')}\n… ${statLines[statLines.length - 1]}` : stat,
+    branch: g.branch,
+    head: g.head,
+    headLine: g.headLine,
+    status: g.status,
+    diffStat: g.diffStat,
     edited: (o.edited ?? []).slice(0, EDITED_MAX),
     tasks: tasksOf(o.tasks),
     lastReport: last ? { ts: last.ts, state: last.state || 'working', text: cut(String(last.text ?? '').trim(), REPORT_MAX) } : null,
@@ -157,17 +192,21 @@ export function ageText(ms: number): string {
 }
 
 // The handover section: what a fresh session needs to know about the working tree without running git first.
-export function snapshotText(s: Snapshot, now: number): string {
+// `o.git` false: the git lines (branch, status, diff stat) are left out, the preflight section next to it carries them from this same record;
+// `o.scratch` false: the scratch list is left out (the handover lists the notes and scratch files itself).
+export function snapshotText(s: Snapshot, now: number, o: { git?: boolean; scratch?: boolean } = {}): string {
   const l: string[] = [`taken ${ageText(now - s.at)} ago, at the end of the last turn (threads/${s.id}/state.json); check with git before you rely on it`]
-  if (s.branch || s.head) l.push(`branch: ${s.branch || '?'} · HEAD ${s.head ? s.head.slice(0, 10) : '?'}${s.dir ? ` · in ${s.dir}` : ''}`)
-  l.push(s.status.length ? `git status --short:\n${s.status.map(x => `  ${x}`).join('\n')}` : 'git status --short: clean (or not readable)')
-  if (s.diffStat) l.push(`diff stat:\n${s.diffStat.split('\n').map(x => `  ${x}`).join('\n')}`)
+  if (o.git !== false) {
+    if (s.branch || s.head) l.push(`branch: ${s.branch || '?'} · HEAD ${s.head ? s.head.slice(0, 10) : '?'}${s.dir ? ` · in ${s.dir}` : ''}`)
+    l.push(s.status.length ? `git status --short:\n${s.status.map(x => `  ${x}`).join('\n')}` : 'git status --short: clean (or not readable)')
+    if (s.diffStat) l.push(`diff stat:\n${s.diffStat.split('\n').map(x => `  ${x}`).join('\n')}`)
+  }
   if (s.edited.length) l.push(`edited in the last turn: ${s.edited.join(', ')}`)
   if (s.tasks.length) l.push(`task list:\n${s.tasks.map(t => `  [${t.status}] ${t.text}`).join('\n')}`)
   if (s.lastReport) l.push(`last report (${s.lastReport.state}): ${s.lastReport.text.replace(/\s+/g, ' ')}`)
   if (s.questions.length) l.push(`open questions:\n${s.questions.map(q => `  - ${q.replace(/\s+/g, ' ')}`).join('\n')}`)
   if (s.pending?.length) l.push(`pending results (workers that finished after the context limit stopped the thread; read them, they were not acted on):\n${s.pending.map(p => `  - ${p.agent}: ${p.text.replace(/\s+/g, ' ')}`).join('\n')}`)
-  if (s.scratch?.length) l.push(`scratch files (threads/${s.id}/scratch; they replace re-reading their sources):\n${listText(s.scratch).split('\n').map(x => `  ${x}`).join('\n')}`)
+  if (s.scratch?.length && o.scratch !== false) l.push(`scratch files (threads/${s.id}/scratch; they replace re-reading their sources):\n${listText(s.scratch).split('\n').map(x => `  ${x}`).join('\n')}`)
   if (s.tokens !== null) l.push(`context at that time: ${s.tokens} tokens`)
   return l.join('\n')
 }
