@@ -7,6 +7,8 @@ roles: desk, thread
 
 # Rules PR
 
+(thread only) `lean_rules` is deferred in a thread session: load it first with ToolSearch (`select:mcp__lean-agent__lean_rules`).
+
 ## Desk
 
 `/lean-agent:rules-pr <project> [flags]` runs in a thread, never on the desk: `lean_thread` action `new` with `project` and `text` "Run lean-agent:rules-pr for <project> <flags>; report the draft PR link". No project: ask which (`lean_thread` `projects`).

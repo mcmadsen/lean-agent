@@ -7,6 +7,8 @@ roles: desk, thread
 
 # Compare
 
+(thread only) `lean_compare` is deferred in a thread session: load it first with ToolSearch (`select:mcp__lean-agent__lean_compare`).
+
 Both modes run in the mod: you call one tool and show its answer. Nothing is measured by reading files yourself.
 
 **Overhead mode** (cheap: about a dozen one-turn calls on haiku, capped at $0.25, `/context` itself is free).

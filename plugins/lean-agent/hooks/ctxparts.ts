@@ -19,6 +19,7 @@ export type Parts = {
   fixed: number
   total: number
   full: boolean // counted with the token-count API (first turn end) | estimated locally
+  skillsEngine?: number // the engine's own count of the skills row (its whole inventory) when `skills` was corrected to the listing the model reads
   skillsListed?: { total: number; included: number; bySource: Record<string, { n: number; tokens: number }> }
   mcpServers?: Record<string, number> // tokens by server
   memoryFiles?: { type: string; tokens: number }[] // the largest, no path
@@ -138,6 +139,7 @@ export function partsTable(r: PartsRec, limit?: number): string {
   for (const [key, name, v] of rows) out.push(`  ${String(v).padStart(7)}  ${name}: ${FIX[key] ?? ''}`)
   out.push(`  fixed ${first.fixed} + messages ${p.messages} = ${first.fixed + p.messages}${typeof r.request === 'number' ? ` · first request ${r.request} (first prompt ${Math.max(0, r.request - first.fixed)})` : ''}${typeof limit === 'number' ? ` · free for work ${Math.max(0, limit - first.fixed)} of ${limit}` : ''}`)
   const sl = first.skillsListed
+  if (first.skillsEngine) out.push(`  skills: the engine counts ${first.skillsEngine} (all ${first.skillsListed?.total ?? '?'} skills it has); the mod trims what the model reads to the figure above (threads.skills)`)
   if (sl) out.push(`  skills listed: ${sl.included} of ${sl.total}; by source: ${Object.entries(sl.bySource).sort((a, b) => b[1].tokens - a[1].tokens).map(([s, v]) => `${s} ${v.n} (${v.tokens})`).join(', ')}`)
   if (first.mcpServers) out.push(`  MCP tools by server: ${Object.entries(first.mcpServers).sort((a, b) => b[1] - a[1]).map(([s, v]) => `${s} ${v}`).join(', ')}`)
   return out.join('\n')

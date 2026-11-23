@@ -90,11 +90,17 @@ test('the thread\'s own mod records the breakdown at its first turn end (full) a
   on('session.usage', ((_: any, e: any) => { asked.push(JSON.stringify(e)); return { value: { context: { tokens: 90_000, window: 200_000, percent: 45, breakdown: BREAKDOWN }, rateLimits: [] } } }) as any)
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('session.measure', (_: any, e: any) => ({ changed: e.changed }))
+  on('prompt.attachment', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/h/.lean-agent/threads/t1', surface: 'desktop', isInteractive: true } as any)
+  // the model reads the thread's trimmed listing; the engine's breakdown counts every skill it has (7.9k): the record uses what was read
+  const listing = ['The following skills are available for use with the Skill tool:', '', '- lean-agent:review: both', '- other:big: ' + 'x'.repeat(30_000), '- lean-agent:doctor: the desk only'].join('\n')
+  const read: any = await $.prompt.attachment({ type: 'skill_listing', text: listing, origin: { kind: 'engine' } } as any)
+  const carried = Math.round(read.text.length / 4)
+  expect(read.text).not.toContain('other:big')
   await $.session.measure({ context: { tokens: 60_000, window: 200_000, percent: 30 }, rateLimits: [], changed: ['context'] } as any)
   await $.session.measure({ context: { tokens: 90_000, window: 200_000, percent: 45 }, rateLimits: [], changed: ['context'] } as any)
   const rec = JSON.parse(h.files.get('/h/.lean-agent/threads/t1/context-parts.json') ?? 'null')
-  expect(rec).toMatchObject({ sid: 'sess-x', first: { fixed: 28_200, full: true }, last: { fixed: 28_200 } })
+  expect(rec).toMatchObject({ sid: 'sess-x', first: { skills: carried, skillsEngine: 7_900, fixed: 28_200 - 7_900 + carried, messages: 66_500 + 7_900 - carried, total: 94_700, full: true }, last: { fixed: 28_200 - 7_900 + carried } })
   expect(asked.filter(a => a.includes('full')).length).toBe(1) // the counted breakdown once per session
   expect(asked.filter(a => a.includes('summary')).length).toBeGreaterThanOrEqual(1)
 })

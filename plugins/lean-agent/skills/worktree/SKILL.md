@@ -7,6 +7,8 @@ roles: thread
 
 # Worktrees
 
+`lean_worktree` is deferred in a thread session: load it first with ToolSearch (`select:mcp__lean-agent__lean_worktree`).
+
 Layout: `~/.lean-agent/worktrees/<project>/<branch-dir>` (slashes in the branch become `-`). Registry:
 `~/.lean-agent/worktrees.json`, an object keyed `<project>/<branch>` with `{path, repo, branch, thread?, shared?}`.
 

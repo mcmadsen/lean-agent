@@ -61,12 +61,19 @@ let last: Stat | null = null
 const types = new Set<string>() // attachment type names only
 const sections = new Set<string>() // prompt section ids only
 export const skillsSeen = (type: string, reason: string) => void (last = { type, reason })
+// The skills the model really reads (chars / 4 of the listing after the mod's rewrite). The engine's context breakdown counts the whole inventory of
+// skills (built-in, synced, user, every plugin's), whatever the mod rewrote: ctxparts uses this figure instead (measured live: 54 skills / 7.5k
+// counted, 17 listed to a thread / about 1k read).
+let carried = 0
+export const noteCarried = (text: string) => void (carried = Math.round(text.length / 4))
+export const skillsCarried = (): number => carried
 export const noteAttachment = (type: string) => void (types.size < 40 && types.add(type))
 export const noteSection = (name: string) => void (sections.size < 40 && sections.add(name))
 export const skillStat = (): string => (last ? `${last.reason} (${last.type})` : 'no skill_listing attachment seen')
 export const seenNames = (): string => `attachments: ${[...types].join(', ') || 'none'}; sections: ${[...sections].join(', ') || 'none'}`
 export const resetSkillStat = () => {
   last = null
+  carried = 0
   types.clear()
   sections.clear()
 }

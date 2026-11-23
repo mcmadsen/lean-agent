@@ -13,18 +13,21 @@ export const DEFAULT_BASE = 40_000
 export const FOLDER_FILES = 50
 export const MAX_PATHS = 60
 const FILE_EXT = 'md|markdown|txt|ts|tsx|js|jsx|mjs|json|ya?ml|toml|py|rs|go|java|kt|cs|rb|php|html|css|sql|sh|log|csv'
-const PATH = new RegExp(`(?:~\\/|\\/|\\.{1,2}\\/)?[\\w.@+-]+(?:\\/[\\w.@+-]+)+\\/?|(?:~\\/|\\/|\\.{1,2}\\/)?[\\w.@+-]+\\/|\\b[\\w.-]+\\.(?:${FILE_EXT})\\b`, 'g')
+// one whole token: a path with a slash (`a/b.ext`, `./x`, `/abs/y`, `dir/`) or a bare file name with a known extension
+const PATH = new RegExp(`^(?:(?:~\\/|\\/|\\.{1,2}\\/)?[\\w.@+-]+(?:\\/[\\w.@+-]+)*\\/[\\w.@+-]*|[\\w-][\\w.-]*\\.(?:${FILE_EXT}))$`)
 const FAN = /\b(all|every|full|each of)\b/gi
 const k = (n: number) => `${Math.max(1, Math.round(n / 1000))}k`
 
-// the path-like words of a brief (no URL parts), distinct, in order
+// the path-like words of a brief (no URL), distinct, in order. Token by token on the first SCAN_CHARS (a brief can be huge: a regex over the
+// whole text backtracked quadratically on a long run of word characters).
+export const SCAN_CHARS = 40_000
+const TOKEN_MAX = 300
 export function pathWords(text: string): string[] {
   const out: string[] = []
-  for (const m of text.matchAll(PATH)) {
-    const before = text[(m.index ?? 0) - 1] ?? ''
-    if (before === '/' || before === ':' || /\w/.test(before)) continue // a URL's host or path, or the tail of a longer word
-    const w = m[0].replace(/[.,;:)]+$/, '')
-    if (w.length >= 3 && !out.includes(w)) out.push(w)
+  for (const raw of text.slice(0, SCAN_CHARS).split(/[\s,;()<>"'`]+/)) {
+    const w = raw.replace(/[.,;:!?)\]]+$/, '')
+    if (w.length < 3 || w.length > TOKEN_MAX || w.includes('://') || !PATH.test(w)) continue
+    if (!out.includes(w)) out.push(w)
     if (out.length >= MAX_PATHS) break
   }
   return out

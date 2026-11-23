@@ -94,7 +94,7 @@ test('through the engine: a tool result of a thread at the warn level carries th
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)
-  const ctx = async () => ((await $.tool.call({ tool: 'mcp__lean-agent__lean_run', command: 'echo hi' } as any)) as any).context?.join('\n') ?? ''
+  const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? '' // (the thread's own folder: always allowed)
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 104_000
   expect(await ctx()).toContain('context 104k of 120k: write what you have learned so far to scratch/notes.md now')

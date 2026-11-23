@@ -6,6 +6,9 @@ import { fakeHost } from './fake'
 import { resetLocks } from './threads'
 
 export const BUDGET = { thread: 4500, desk: 6000 } // tokens, chars / 4 (including the name)
+// what 1.0.25 registered for a thread by the same count (20.8k chars of lean_review 7.3k, lean_script 4.4k, lean_rules 3.2k, lean_report 2.6k, lean_run
+// 1.3k, lean_worktree 0.8k, lean_compare 0.6k, three small ones 0.6k): 1.0.26 cuts it by at least 40%
+export const WAS_THREAD = 5200
 
 type Spec = { name: string; description?: string; inputSchema?: unknown; isDeferred?: boolean }
 const size = (s: Spec): number => JSON.stringify({ name: s.name, description: s.description ?? '', input_schema: s.inputSchema ?? {} }).length
@@ -28,7 +31,7 @@ async function register($: any, on: any, cwd: string, files: Record<string, stri
 const report = (role: string, specs: Spec[]) => {
   const rows = specs.filter(s => !s.isDeferred).map(s => [s.name, size(s)] as const).sort((a, b) => b[1] - a[1])
   const total = rows.reduce((n, [, c]) => n + c, 0)
-  console.log(`tool schemas, ${role}: ${Math.round(total / 4)} tokens (${total} chars) in ${rows.length} tools: ${rows.map(([n, c]) => `${n} ${Math.round(c / 4)}`).join(', ')}; deferred: ${specs.filter(s => s.isDeferred).map(s => s.name).join(', ') || 'none'}`)
+  ;(globalThis as any).console?.log(`tool schemas, ${role}: ${Math.round(total / 4)} tokens (${total} chars) in ${rows.length} tools: ${rows.map(([n, c]) => `${n} ${Math.round(c / 4)}`).join(', ')}; deferred: ${specs.filter(s => s.isDeferred).map(s => s.name).join(', ') || 'none'}`)
   return total / 4
 }
 
@@ -37,7 +40,10 @@ test('a thread session registers at most 4.5k tokens of lean-agent tool schemas'
   const names = specs.map(s => s.name)
   for (const n of ['lean_report', 'lean_ask', 'lean_review', 'lean_run', 'lean_script']) expect(names).toContain(n)
   for (const n of ['lean_thread', 'lean_doctor']) expect(names).not.toContain(n) // the desk's
-  expect(report('thread', specs)).toBeLessThanOrEqual(BUDGET.thread)
+  for (const n of ['lean_rules', 'lean_compare', 'lean_worktree', 'lean_profile']) expect([n, specs.find(s => s.name === n)?.isDeferred]).toEqual([n, true]) // one kind of run each: behind ToolSearch
+  const tokens = report('thread', specs)
+  expect(tokens).toBeLessThanOrEqual(BUDGET.thread)
+  expect(tokens).toBeLessThanOrEqual(WAS_THREAD * 0.6) // at least 40% less than 1.0.25
 })
 
 test('the desk registers at most 6k tokens of lean-agent tool schemas', { timeoutMs: 20_000 }, async ($, on) => {
