@@ -55,7 +55,7 @@ test('the state snapshot lists the scratch files and the handover carries scratc
   const ho = await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])
   expect(ho.prompt).toContain(`Your earlier reading is kept: ${HANDOVER_RULE}.`)
   expect(ho.prompt).toContain('## Your scratch notes (end of scratch/notes.md)\n## living doc')
-  expect(ho.prompt).toContain('## Scratch files (name, size, first line)\n- notes.md (68 B): ## living doc')
+  expect(ho.prompt).toContain('## Other notes and scratch files: read these before re-reading sources (newest first; path, size, first line)\n- scratch/lookup-a1b2c3.md (2.4 kB): # Report 7: the build order') // (scratch/notes.md has its own section: not listed twice)
   expect(ho.prompt.indexOf('Your earlier reading is kept')).toBeLessThan(ho.prompt.indexOf('## Your scratch notes'))
   // no scratch folder: nothing of it in the prompt
   const none = fakeHost(null)

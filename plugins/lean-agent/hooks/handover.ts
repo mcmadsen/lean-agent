@@ -6,7 +6,8 @@ import { approvalOf, deskState, reportBody, reportFile, unconsumed } from './del
 import type { DeskRec } from './delivery'
 import { readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
-import { HANDOVER_RULE, NOTES_FILE, listText, scratchList, scratchNotes } from './scratchnotes'
+import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
+import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
 
 export const REPORT_BUDGET = 16_000 // chars of report history (about 4k tokens); the newest report is always kept whole
@@ -60,7 +61,8 @@ async function ensureReportFiles(h: Host, home: string, recs: DeskRec[]): Promis
   return none
 }
 
-export type Handover = { prompt: string; worktree?: string; branch?: string; parts?: Part[]; missing?: string[] }
+// notes: the files of the notes lookup (threadnotes.ts): carried with their text, listed by name, found but left out
+export type Handover = { prompt: string; worktree?: string; branch?: string; parts?: Part[]; missing?: string[]; notes?: { content: string[]; listed: string[]; left: string[]; scratchNotes: boolean } }
 
 // The first words of a restart, wake or handover prompt are the task: a model that reads "continue" plus a status check answers the
 // status check and ends its turn. A status request is answered as a side effect (one short lean_report), never as the whole turn.
@@ -143,6 +145,12 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const wt = mine[mine.length - 1]
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const goal = (typeof goals?.[t.id]?.text === 'string' ? goals[t.id]!.text!.trim() : '') || (t.lastGoal ?? '').trim()
+  // no goal set: the first line of the brief is the goal, never "no goal" for a thread that has a brief
+  const briefFirst = taskLine('', flat(await text(`${dir}/brief.md`)), '')
+  const goalText = goal || (briefFirst ? `goal: ${briefFirst}` : '')
+  const nl = await lookupNotes(h, dir)
+  const progress = nl.content.find(f => f.path !== 'notes.md')
+  const progressText = progress ? flat(await text(`${dir}/${progress.path}`)) : ''
   const recs = (await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)).filter(r => r.from === t.id && (r.kind === 'report' || r.kind === 'ask') && !(r as { mod?: boolean }).mod)
   // a cut report line names the file with its full text (written now when the desk never made one); no file = the inbox, by row time
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
@@ -166,21 +174,23 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'brief', head: '## Brief', body: cut(flagForeignPaths(brief, t.id), BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}`, body: corr.lines.length ? `${corr.older ? `(${corr.older} older messages omitted: ${dir}/inbox.jsonl)\n` : ''}${corr.lines.join('\n')}` : '', file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
-    { name: 'goal', head: '## Goal', body: goal, mode: 'fixed' },
+    { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
     { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? snapshotText(snap, now) : '', file: snapshotFile(home, t.id), mode: 'head' },
     { name: 'preflight', head: '## Preflight', body: pre, file: `${dir}/preflight`, mode: 'head' },
     { name: 'reports', head: `## Your reports so far (oldest first${hist.omitted ? `; ${hist.omitted} older omitted` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
-    { name: 'scratchrule', body: scratchNotesText || scratchFiles.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
+    { name: 'progress', head: `## Your notes (end of ${progress?.path})`, body: progressText ? cut(progressText, NOTES_MAX, true) : '', file: `${dir}/${progress?.path}`, mode: 'tail' },
+    { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
     { name: 'scratchnotes', head: '## Your scratch notes (end of scratch/notes.md)', body: scratchNotesText, file: `${dir}/scratch/${NOTES_FILE}`, mode: 'tail' },
-    { name: 'scratchlist', head: '## Scratch files (name, size, first line)', body: scratchFiles.length ? listText(scratchFiles) : '', file: `${dir}/scratch`, mode: 'lines' },
+    { name: 'scratchlist', head: `## Other notes and scratch files: ${READ_FIRST} (newest first; path, size, first line)`, body: nl.listed.length ? `${nl.listed.map(noteLine).join('\n')}${nl.left.length ? `\n(+${nl.left.length} older, not listed: ${nl.left.map(f => f.path).join(', ')})` : ''}` : '', file: dir, mode: 'lines' },
     { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },
   ]
-  const missing = [!goal && 'no goal (goal-set tN "<line>")', !notes && `no notes (${dir}/notes.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
+  const noNotes = !notes && !progressText && !scratchNotesText && !nl.listed.length && !nl.left.length
+  const missing = [!goalText && 'no goal (goal-set tN "<line>")', noNotes && `no notes (looked in ${dir}/notes.md, ${dir}/notes/*.md, ${dir}/scratch/*.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
   const sized = fitParts(parts, (await handoverTokens(h, home)) * 4)
   const tail = instrBlock(instr) // the desk's own instructions: last, whole, after the cap
   const base = cutPrompt(sized.map(partText).filter(Boolean).join('\n\n'))
-  return { prompt: tail ? `${base}\n\n${tail}` : base, worktree: wt?.path, branch: wt?.branch, parts: tail ? [...sized, { name: 'instructions', head: INSTR_HEAD, body: tail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : sized, missing }
+  return { prompt: tail ? `${base}\n\n${tail}` : base, worktree: wt?.path, branch: wt?.branch, parts: tail ? [...sized, { name: 'instructions', head: INSTR_HEAD, body: tail.slice(INSTR_HEAD.length + 1), mode: 'fixed' as const }] : sized, missing, notes: { content: nl.content.map(f => f.path), listed: nl.listed.map(f => f.path), left: nl.left.map(f => f.path), scratchNotes: !!scratchNotesText } }
 }
 
 // ---- the size budget -------------------------------------------------------------------------------------------------------------
@@ -193,7 +203,7 @@ export async function handoverTokens(h: Host, home: string): Promise<number> {
 
 export type Part = { name: string; head?: string; body: string; file?: string; mode: 'fixed' | 'head' | 'tail' | 'lines'; cut?: boolean }
 export const partText = (p: Part): string => (p.body ? (p.head ? `${p.head}\n${p.body}` : p.body) : '')
-const CUT_ORDER = ['remembered', 'scratchlist', 'notes', 'reports', 'scratchnotes', 'corrections', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
+const CUT_ORDER = ['remembered', 'scratchlist', 'notes', 'progress', 'reports', 'scratchnotes', 'corrections', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
 const FLOOR = 300 // a section is never cut below this many characters
 const noteOf = (p: Part) => `\n…(cut to fit the handover budget: full text in ${p.file ?? 'its source'})`
 const total = (parts: Part[]) => parts.reduce((n, p) => n + (p.body ? partText(p).length + 2 : 0), 0)
@@ -246,6 +256,18 @@ async function preflightOf(h: Host, home: string, t: Thread): Promise<string> {
   }
 }
 
+// which note files the handover used and which it found but left out (the reason is always the budget: the file limit, or the token budget)
+export function notesRows(ho: Handover, dir: string): string[] {
+  const n = ho.notes
+  if (!n) return []
+  const cutOf = (name: string) => !!ho.parts?.find(p => p.name === name && p.cut)
+  const withCut = (f: string, cut: boolean) => (cut ? `${f} (its end only: budget)` : f)
+  const used = [...n.content.map(f => withCut(f, f === 'notes.md' ? cutOf('notes') : cutOf('progress'))), ...(n.scratchNotes ? [withCut('scratch/notes.md', cutOf('scratchnotes'))] : [])]
+  const rows = [`notes used: ${used.length ? used.join(', ') : 'none'}${n.listed.length ? `; by name (${READ_FIRST}): ${n.listed.join(', ')}${cutOf('scratchlist') ? ' (list cut: budget)' : ''}` : ''}`]
+  if (n.left.length) rows.push(`notes found but left out: ${n.left.map(f => `${f} (budget: only the newest ${NOTE_FILES_MAX} notes files are listed; full text in ${dir}/${f})`).join('; ')}`)
+  return rows
+}
+
 // `lean_doctor handover tN`: exactly what a fresh session would get, the tokens of each section, what is missing.
 export async function handoverReport(h: Host, home: string, id: string): Promise<string> {
   const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
@@ -260,6 +282,7 @@ export async function handoverReport(h: Host, home: string, id: string): Promise
     `handover for ${id} (${t.title}): ~${all} tokens of a budget of ${budget} (config handoverTokens)${all > budget ? ' (over: the fixed lines are never cut)' : ''}`,
     'sections:',
     ...rows,
+    ...notesRows(ho, dir),
     ho.missing?.length ? `missing: ${ho.missing.join('; ')}` : 'missing: nothing',
     '--- the prompt, as a fresh session gets it ---',
     ho.prompt,
