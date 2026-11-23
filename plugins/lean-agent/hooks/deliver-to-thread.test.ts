@@ -2,7 +2,7 @@
 // Synthetic ids, names and paths only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { deliveryTick, kindOf, setThreadSender } from './deliver-to-thread'
+import { UNAVAILABLE_MS, deliveryTick, directUnavailable, kindOf, resetUnavailable, setThreadSender } from './deliver-to-thread'
 import { leanThread, listLine, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
@@ -10,6 +10,9 @@ import { resetActivity, truthOf } from './threadstate'
 import { stateOf } from './view'
 import { threadTool } from './delivery'
 import { deskSettings, mergeDeskSettingsFile } from './leantools'
+import { deskToolPossible } from './guard'
+import { trimTools } from './squeeze'
+import { MOD_SEND_PREFIX, asMod, modSending } from './modsend'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const NEW = '99999999-8888-7777-6666-555555555555'
@@ -26,6 +29,7 @@ function setup(o: { config?: unknown; row?: Record<string, unknown>; send?: (sid
   resetFinish()
   resetThreadCache()
   resetActivity()
+  resetUnavailable()
   const h = fakeHost(null)
   h.clock.t = T0
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}} {{title}}')
@@ -163,12 +167,12 @@ test('tick: no activity within 45 s after an answer to a waiting thread: escalat
   after(() => 0)
 })
 
-test('tick: the engine refuses the send ("this session has no SendMessage tool", the desk denies it): the queued answer to a waiting thread still ends in a restart by script', async () => {
-  const { h, deps, restarts } = setup({ row: { status: 'idle', state: 'blocked' }, send: async () => ({ isDelivered: false, reason: 'this session has no SendMessage tool' }) })
+test('a send refused for the TARGET (stale id, ...) is still watched; the sweep\'s repeats keep the clock, so the answer to a waiting thread ends in a restart by script', async () => {
+  const { h, deps, restarts } = setup({ row: { status: 'busy', state: 'working' }, send: async () => ({ isDelivered: false, reason: 'no live session on this machine has id abc' }) })
   activity(h, T0 - 60_000)
   waits(h, T0 - 60_000)
   const r = await send(h, 'sqlite')
-  expect(r.text).toContain('this session has no SendMessage tool')
+  expect(r.text).toContain('no live session on this machine has id abc')
   expect(thread(h).delivered).toBe(0)
   h.clock.t = T0 + 20_000
   await leanThread(h.host, ROOT, { action: 'wake', tN: 't1' }) // the desk's sweep sends the unread inbox again: the clock must NOT restart
@@ -177,6 +181,74 @@ test('tick: the engine refuses the send ("this session has no SendMessage tool",
   const notes = await deliveryTick(h.host, deps)
   expect(restarts).toEqual([{ id: 't1', why: expect.stringContaining('did not react'), rewind: 0 }])
   expect(notes[0]!.text).toBe('t1 did not react to your answer within 45 s: restarted it with the answer; its notes are kept')
+  after(() => 0)
+})
+
+const NO_TOOL = 'this session has no SendMessage tool (messaging between sessions and agents is not on here)'
+
+test('state blocked + status idle + NO waitingFor is an idle session: the engine has no SendMessage -> the wake (stop the idle process, --resume with the message), never a fresh session', async () => {
+  let calls = 0
+  const { h, st } = setup({ row: { status: 'idle', state: 'blocked' }, send: async () => (calls++, { isDelivered: false, reason: NO_TOOL }) })
+  activity(h, T0 - 60_000)
+  waits(h, T0 - 60_000)
+  const r = await send(h, 'sqlite')
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('t1 woken with 1 message')
+  expect(h.claudeCalls().filter(x => x[0] === 'stop')).toHaveLength(1)
+  const starts = h.claudeCalls().filter(x => x[0] === '--bg')
+  expect(starts).toHaveLength(1)
+  expect(starts[0]).toContain('--resume') // the conversation is kept: no fresh session
+  expect(starts[0]![starts[0]!.length - 1]).toContain('sqlite')
+  expect(thread(h).sid).toBe(S1)
+  expect(thread(h).delivered).toBe(1)
+  expect(calls).toBe(1)
+  expect(recOf(h)).toMatchObject({ sid: S1, upTo: 1, kind: 'answer' }) // the wake is watched too
+  expect(json(h, `${T1}/waiting.json`).since).toBeUndefined()
+  expect(JSON.parse((h.files.get(`${T1}/history.jsonl`) ?? '').split('\n')[0]!).why).toContain('direct send unavailable')
+  // the refusal is cached for this desk session: the next message does not try the send again
+  st.rows[0]!.pid = 42
+  h.clock.t = T0 + 31_000
+  await send(h, 'and use WAL mode')
+  expect(calls).toBe(1)
+  expect(h.claudeCalls().filter(x => x[0] === '--bg' && x.includes('--resume'))).toHaveLength(2)
+  after(() => 0)
+})
+
+test('the cached refusal means no 45 s wait on a send that never went out; it ends after UNAVAILABLE_MS and when the send works again', async () => {
+  let ok = false
+  const { h, st, sent } = setup({ row: { status: 'busy', state: 'working' }, send: async (sid, text) => (ok ? (void 0, undefined) : { isDelivered: false, reason: NO_TOOL }) })
+  await send(h, 'one')
+  expect(directUnavailable()).toBe(NO_TOOL)
+  expect(h.files.get(`${T1}/delivery.json`)).toBeUndefined() // nothing went out: nothing to wait for
+  expect(sent).toHaveLength(0)
+  ok = true
+  h.clock.t = T0 + UNAVAILABLE_MS + 1_000
+  st.rows[0]!.pid = 42
+  const r = await send(h, 'two')
+  expect(r.text).toContain('delivered straight to its running session')
+  after(() => 0)
+})
+
+test('wake without activity after threads.answerWaitSeconds: the escalation to a fresh session by script (one notice); with activity: none', async () => {
+  const quiet = setup({ row: { status: 'idle', state: 'blocked' }, send: async () => ({ isDelivered: false, reason: NO_TOOL }) })
+  activity(quiet.h, T0 - 60_000)
+  waits(quiet.h, T0 - 60_000)
+  await send(quiet.h, 'sqlite')
+  quiet.h.clock.t = T0 + 30_000
+  expect(await deliveryTick(quiet.h.host, quiet.deps)).toEqual([]) // inside the 45 s
+  quiet.h.clock.t = T0 + 46_000
+  const notes = await deliveryTick(quiet.h.host, quiet.deps)
+  expect(quiet.restarts).toEqual([{ id: 't1', why: expect.stringContaining('did not react'), rewind: 0 }])
+  expect(notes).toHaveLength(1)
+  expect(notes[0]!.text).toBe('t1 did not react to your answer within 45 s: restarted it with the answer; its notes are kept')
+  const live = setup({ row: { status: 'idle', state: 'blocked' }, send: async () => ({ isDelivered: false, reason: NO_TOOL }) })
+  activity(live.h, T0 - 60_000)
+  waits(live.h, T0 - 60_000)
+  await send(live.h, 'sqlite')
+  activity(live.h, T0 + 5_000, 'prompt') // the resumed session took the prompt
+  live.h.clock.t = T0 + 60_000
+  expect(await deliveryTick(live.h.host, live.deps)).toEqual([])
+  expect(live.restarts).toHaveLength(0)
   after(() => 0)
 })
 
@@ -294,6 +366,18 @@ test('the desk keeps the SendMessage tool (the engine gates the mod\'s direct se
   const deny = JSON.parse(h.files.get('/d/.claude/settings.json')!).permissions.deny
   expect(deny).toContain('Agent')
   expect(deny).not.toContain('SendMessage')
+})
+
+test('the desk\'s tool pool keeps SendMessage for the mod\'s own send (the engine checks the pool); only that send, marked by the mod, passes the guard', async () => {
+  expect(deskToolPossible('SendMessage')).toBe(true)
+  expect(trimTools([{ name: 'SendMessage' }, { name: 'Edit' }, { name: 'Read' }], 'desk', undefined).map(t => t.name)).toEqual(['SendMessage', 'Read'])
+  const line = `${MOD_SEND_PREFIX}:\nhello`
+  expect(modSending({ message: line })).toBe(false) // no mod send in progress: the desk model's own call is refused
+  await asMod(async () => {
+    expect(modSending({ message: line })).toBe(true)
+    expect(modSending({ message: 'tell t1 to push' })).toBe(false) // not the mod's line
+  })
+  expect(modSending({ message: line })).toBe(false)
 })
 
 test('waiting reminder: an open question unanswered for waitReminderMinutes comes back ONCE as a notice', async () => {

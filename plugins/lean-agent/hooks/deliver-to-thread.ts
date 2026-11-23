@@ -15,6 +15,7 @@ import { homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { wakeMark } from './delivery'
 import { setNotice } from './notices'
+import { MOD_SEND_PREFIX, asMod } from './modsend'
 import { clearWaiting, liveOf, readActivity, readWaiting, stillWaiting, waitingFile } from './threadstate'
 import type { AgentRow, Out, Thread } from './threads'
 
@@ -53,42 +54,62 @@ const dropRec = (h: Host, home: string, id: string) => writeJson(h, recFile(home
 // a session that can take a direct message: a listed row with a live process
 export const aliveRow = (row: AgentRow | undefined): row is AgentRow => !!row && row.pid > 0 && liveOf(row) !== 'gone' && row.state !== 'done'
 
-export type Delivered = { delivered: boolean; text: string; refused?: boolean }
+// The message is WATCHED (delivery.json) from the moment it is handed to any route: the activity check in deliveryTick decides whether it started a turn. A message
+// still pending for the same session keeps its ORIGINAL time (`again`: the desk's sweep sends the unread inbox again every few seconds, and a restarted clock would
+// never reach threads.answerWaitSeconds). A message that is not an FYI also ends the thread's waiting state (the answer is on its way).
+export async function watchDelivery(h: Host, home: string, id: string, o: { sid: string; from: number; upTo: number; kind: MsgKind; again?: boolean }): Promise<void> {
+  if (o.kind === 'fyi') return
+  try {
+    const old = o.again ? await readRec(h, home, id) : null
+    const keep = old && old.sid === o.sid
+    await writeJson(h, recFile(home, id), { at: keep ? old.at : await h.clock.now(), sid: o.sid, from: keep ? Math.min(old.from, o.from) : o.from, upTo: o.upTo, kind: keep && old.kind === 'answer' ? 'answer' : o.kind, ...(keep && old.tries ? { tries: old.tries } : {}) } satisfies DeliveryRec)
+  } catch {
+    /* the watch is best effort */
+  }
+}
+export async function answered(h: Host, home: string, id: string): Promise<void> {
+  await clearWaiting(h, home, id) // the answer (or an instruction) is in: it no longer waits
+  await setNotice(h, `wait-${id}`, null).catch(() => undefined)
+}
+
+// A refusal that is about THIS SESSION, not about the target ("this session has no SendMessage tool ..."), is remembered: the mod does not try again every few seconds,
+// and a send that never went out is not waited for: the next route (the wake) runs at once. Forgotten after UNAVAILABLE_MS (the desk's tool pool may have changed).
+export const UNAVAILABLE_MS = 10 * 60_000
+const sessionLevel = (reason: string) => /has no SendMessage tool/i.test(reason)
+let unavailable: { reason: string; at: number } | null = null
+export const directUnavailable = (): string | null => unavailable?.reason ?? null
+export const resetUnavailable = (): void => {
+  unavailable = null
+}
+
+export type Delivered = { delivered: boolean; text: string; refused?: boolean; unavailable?: boolean }
 // `body`: the batch as the thread reads it; `from` / `upTo`: its inbox positions (the caller moves the thread's `delivered` pointer to upTo when this says delivered)
 export async function deliverToThread(h: Host, home: string, t: Thread, row: AgentRow | undefined, o: { body: string; from: number; upTo: number; kind: MsgKind }): Promise<Delivered> {
   if (!aliveRow(row)) return { delivered: false, text: '' } // no live session: the caller's wake
   if (row.waitingFor) return { delivered: false, refused: true, text: `${t.id} waits on a permission prompt in its own session: ${String(row.waitingFor).replace(/\s+/g, ' ').slice(0, 160)}; a message cannot answer it, so it stays queued in its inbox (the user answers the prompt in that session)` }
   const send = sender
   if (!send) return { delivered: false, text: '' }
-  const line = `[lean-agent] message from the desk:\n${o.body}\n${wakeMark(o.upTo)}`
-  // the message is WATCHED (delivery.json) whether the send resolved or not: a refused send (the engine: "this session has no SendMessage tool", a stale id, ...)
-  // leaves it queued in the inbox, which a thread that waits never reads, so the same activity check and the same restart apply
-  // (a message still pending for the same session keeps its ORIGINAL time: the desk's sweep sends the unread inbox again every few seconds, and a restarted
-  // clock would never reach threads.answerWaitSeconds)
-  const watch = async (again: boolean) => {
-    if (o.kind === 'fyi') return
-    try {
-      const old = again ? await readRec(h, home, t.id) : null // (only a RE-send after a refusal keeps the clock; a message that went through starts its own)
-      const keep = old && old.sid === row.sid
-      await writeJson(h, recFile(home, t.id), { at: keep ? old.at : await h.clock.now(), sid: row.sid, from: keep ? Math.min(old.from, o.from) : o.from, upTo: o.upTo, kind: keep && old.kind === 'answer' ? 'answer' : o.kind, ...(keep && old.tries ? { tries: old.tries } : {}) } satisfies DeliveryRec)
-    } catch {
-      /* the watch is best effort */
-    }
-  }
+  const now = await h.clock.now()
+  if (unavailable && now >= unavailable.at && now - unavailable.at < UNAVAILABLE_MS) return { delivered: false, unavailable: true, text: '' } // known: no send, no wait
+  const line = `${MOD_SEND_PREFIX}:\n${o.body}\n${wakeMark(o.upTo)}`
   try {
-    const r = await send(row.sid, line)
+    const r = await asMod(() => send(row.sid, line))
     if (r && r.isDelivered === false) {
-      await watch(true)
-      return { delivered: false, text: `direct send to ${t.id} refused (${String(r.reason ?? 'no reason').replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
+      const why = String(r.reason ?? 'no reason').replace(/\s+/g, ' ').slice(0, 160)
+      if (sessionLevel(why)) {
+        unavailable = { reason: why, at: now }
+        return { delivered: false, unavailable: true, text: `direct send unavailable: ${why}; using the inbox and the wake` }
+      }
+      await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind, again: true }) // a refused send leaves it queued: still watched
+      return { delivered: false, text: `direct send to ${t.id} refused (${why}): queued in its inbox` }
     }
   } catch (e) {
-    await watch(true)
+    await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind, again: true })
     return { delivered: false, text: `direct send to ${t.id} failed (${String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 160)}): queued in its inbox` }
   }
   if (o.kind !== 'fyi') {
-    await watch(false)
-    await clearWaiting(h, home, t.id) // the answer (or an instruction) is in: it no longer waits
-    await setNotice(h, `wait-${t.id}`, null).catch(() => undefined)
+    await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind })
+    await answered(h, home, t.id)
   }
   return { delivered: true, text: `${t.id}: delivered straight to its running session (${row.state || 'alive'})${o.kind === 'fyi' ? '' : '; the mod restarts it by itself if it does not react'}` }
 }

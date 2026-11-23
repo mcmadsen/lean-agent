@@ -9,7 +9,7 @@
 //   mergeSettings(base, fragment) the fragment merged into an existing settings object (deny lists united, env merged, nothing else touched)
 //
 // The thread settings writer lives in threads.ts: add `leanThreadSettings` there (see the README "Fixed overhead").
-import { DESK_TOOLS } from './guard'
+import { DESK_MOD_TOOLS, DESK_TOOLS } from './guard'
 import { nameMatches, serverOf } from './profile'
 import { atomicWrite, dirOf, mkdirp } from './state'
 import type { Host } from './state'
@@ -53,9 +53,8 @@ const THREAD_ENV: Record<string, string> = {
 const uniq = (l: string[]) => [...new Set(l)]
 
 // the desk may call DESK_TOOLS (guard.ts) and lean-agent's own tools; everything else built in is removed
-// SendMessage is the engine's gate for the mod's own `$.session.send` (deliver-to-thread.ts, desk -> thread): a session whose deny list removes the tool is refused with
-// "this session has no SendMessage tool" (seen live), so the desk keeps it. The desk MODEL still never calls it (guard.ts deskDenial denies every tool outside DESK_TOOLS).
-export const DESK_MOD_TOOLS: readonly string[] = ['SendMessage']
+// SendMessage is the engine's gate for the mod's own `$.session.send` (deliver-to-thread.ts, desk -> thread): a session whose deny list or tool pool lacks the tool is refused with
+// "this session has no SendMessage tool" (seen live; the pool cut is squeeze.ts trimTools), so the desk keeps it (guard.ts DESK_MOD_TOOLS). The desk MODEL still never calls it (guard.ts deskDenial).
 export function deskSettings(): ToolsSettings {
   return { permissions: { deny: BUILTIN_TOOLS.filter(t => !DESK_TOOLS.includes(t) && !DESK_MOD_TOOLS.includes(t)) }, env: { ...DESK_ENV }, enableAllProjectMcpServers: false }
 }

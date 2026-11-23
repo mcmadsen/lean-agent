@@ -21,7 +21,7 @@ import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
-import { aliveRow, deliverToThread, kindOf } from './deliver-to-thread'
+import { aliveRow, answered, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
 import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -617,10 +617,20 @@ async function pending(h: Host, home: string, t: Thread): Promise<Inbox[]> {
 // Direct delivery (deliver-to-thread.ts): the batch goes to the thread's live session with `$.session.send`, the inbox pointer moves only when it
 // resolved. null = not sent (no live session, no sender, a refused send): the caller's old path goes on (inbox + wake). A session with an open
 // permission prompt gets the plain refusal text as the answer (the message stays queued).
+// the `since` of the question the thread still waits on (nothing done since it), else null; (wake passes no activityAt to truthOf: a stall is not its business)
+async function waitingSinceOf(h: Host, home: string, t: Thread): Promise<number | null> {
+  const w = await readWaiting(h, home, t.id)
+  return w && stillWaiting(w, await lastActivity(h, home, t.id, t.lastWake)) ? w.since : null
+}
+// what the batch is (an FYI / status check, an answer to a waiting thread, an instruction): deliver-to-thread.ts kindOf
+async function kindFor(h: Host, home: string, t: Thread, msgs: Inbox[], kind?: MsgKind): Promise<MsgKind> {
+  if (kind) return kind
+  if (msgs.length && msgs.every(m => kindOf(m.text, false) === 'fyi')) return 'fyi'
+  return stillWaiting(await readWaiting(h, home, t.id), await lastActivity(h, home, t.id, t.lastWake)) ? 'answer' : 'instruction'
+}
 async function directOut(h: Host, home: string, t: Thread, row: AgentRow | undefined, u: { msgs: Inbox[]; upTo: number }, body: string, kind?: MsgKind): Promise<Out | null> {
   if (!aliveRow(row) || !body) return null
-  const waiting = stillWaiting(await readWaiting(h, home, t.id), await lastActivity(h, home, t.id, t.lastWake))
-  const k: MsgKind = kind ?? (u.msgs.length && u.msgs.every(m => kindOf(m.text, false) === 'fyi') ? 'fyi' : waiting ? 'answer' : 'instruction')
+  const k = await kindFor(h, home, t, u.msgs, kind)
   const d = await deliverToThread(h, home, t, row, { body, from: u.upTo - u.msgs.length, upTo: u.upTo, kind: k })
   if (d.delivered) {
     t.delivered = u.upTo
@@ -650,7 +660,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (!listed) return err(`${t.id}: cannot list sessions (claude agents failed), so it is not resumed; messages stay queued`)
   const row = listed.find(a => a.sid === t.sid)
   const now = await h.clock.now()
-  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes })
+  const truth = truthOf({ threadState: t.state, finished: !!t.finished, row, queued: msgs, now, stuckMinutes: (await threadsConfig(h, home)).stuckMinutes, waitingSince: await waitingSinceOf(h, home, t) })
   const limited = !!opts.limit && isLimitRow(row)
   // A hard-stopped session (contextstop.ts: every tool call refused) can do nothing with a message, so one never queues behind it, whatever the
   // session shows (working, blocked, idle): the same forced stop as the pane's restart, then a fresh session with the message in its first prompt.
@@ -664,7 +674,8 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
     const d = await directOut(h, home, t, row, u, batchPrompt(msgs), opts.kind)
     if (d) return d
   }
-  if ((truth.word === 'running' || truth.word === 'waiting') && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}${viaInbox()}`, data: { resumed: false } }
+  // (a waiting thread whose session is IDLE ("blocked" + idle, no prompt) is not queued behind: it is woken below, with the message)
+  if ((truth.word === 'running' || (truth.word === 'waiting' && liveOf(row) !== 'idle')) && !limited) return { ok: true, text: `${t.id} is running: ${msgs.length ? `${msgs.length} message(s) queued, it reads them at its next tool call` : 'nothing queued'}${viaInbox()}`, data: { resumed: false } }
   if (!msgs.length && !opts.force && truth.word !== 'idle' && !isStuck(truth.word)) return { ok: true, text: `${t.id}: nothing queued` }
   // an idle session with old unread messages ("stuck": it never reads an inbox file): the direct send is what gets them to it
   if (!opts.limit && msgs.length && isStuck(truth.word) && liveOf(row) === 'idle' && !t.finished && !(await doneSession(h, home, t))) {
@@ -724,6 +735,7 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   // lean_report while the work goes on, never as the whole turn)
   const lead = opts.lead ?? resumeLead(await taskOf(h, home, t))
   const prompt = [lead, batchPrompt(msgs), wakeMark(upTo)].filter(Boolean).join('\n\n')
+  const kind = msgs.length && !opts.limit ? await kindFor(h, home, t, msgs, opts.kind) : 'fyi' // (before the wake: the wake itself is activity)
   const r = await h.process.run(['claude', '--bg', '--resume', t.sid, ...(await threadToolsArgv(h)), '--', prompt], { cwd: tpath(home, t.id), timeoutMs: 120_000 })
   if (r.exitCode !== 0) return err(`claude --bg --resume failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
   // safety net: the CLI prints "started a copy as <id>" when it forked after all; the thread follows the copy
@@ -737,6 +749,11 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
   if (opts.installed) t.version = opts.installed // the resumed process loads the code installed now
   if (dec.act === 'resume' && dec.why === 'keep') delete t.finished // keep mode switched on after a finish: the session works again
   await save(h, home, t)
+  // the wake is watched like a direct send: a resumed session that shows no prompt or tool call within threads.answerWaitSeconds is replaced by a fresh one with the message
+  if (kind !== 'fyi' && t.sid) {
+    await watchDelivery(h, home, t.id, { sid: t.sid, from: upTo - msgs.length, upTo, kind })
+    await answered(h, home, t.id)
+  }
   // the name a resumed session keeps is the one it was started with (`--resume` takes no -n): read back, said when it is not the thread's
   const bad = nameProblem(after.find(a => a.sid === t.sid), sessionName(t.id, t.title, t.gen ?? 1))
   const named = bad ? ` · the app lists it as "${bad.slice(0, 60)}": Claude Code cannot rename a background session (the doctor says more)` : ''

@@ -16,7 +16,10 @@ const DONE = new Set(['done', 'completed', 'complete', 'finished', 'stopped', 'e
 export type Live = 'working' | 'idle' | 'gone'
 export function liveOf(r: AgentRow | undefined): Live {
   if (!r) return 'gone'
-  if (r.state === 'working' || r.state === 'blocked') return 'working'
+  // `blocked` with status idle and NO waitingFor (seen live: a thread that asked a question and ended its turn) is an idle session waiting for its next message,
+  // not one on a permission prompt: it is idle (wake can resume it). With waitingFor, or a busy status, it stays working.
+  if (r.state === 'blocked') return r.status === 'idle' && !r.waitingFor ? 'idle' : 'working'
+  if (r.state === 'working') return 'working'
   if (r.state === 'idle') return 'idle' // (the field case: the listed status still said busy while the turn had ended)
   if (r.status === 'idle') return 'idle'
   if (DONE.has(r.status)) return 'gone'
@@ -101,7 +104,7 @@ export function truthOf(o: { threadState: string; finished?: boolean; row: Agent
   const limit = (o.stuckMinutes ?? STUCK_MINUTES) * 60_000
   const stallLimit = (o.stallMinutes ?? STALL_MINUTES) * 60_000
   const live = liveOf(o.row)
-  const waits = !!o.row && (!!o.row.waitingFor || o.row.state === 'blocked')
+  const waits = !!o.row && (!!o.row.waitingFor || (o.row.state === 'blocked' && live !== 'idle')) // (blocked + idle + no waitingFor is idle: liveOf)
   const idleMs = typeof o.activityAt === 'number' && o.activityAt > 0 ? Math.max(0, o.now - o.activityAt) : 0
   const stalledMs = Math.max(idleMs, oldestMs)
   let word: Word

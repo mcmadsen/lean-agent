@@ -66,7 +66,9 @@ function world(o: { rows?: Row[]; thread?: Row; inbox?: string; config?: unknown
 test('liveOf: state working, blocked or idle decides (a status that still says busy does not make an idle session running); else the status', () => {
   expect(liveOf(agent({ state: 'idle', status: 'busy', pid: 42 }))).toBe('idle')
   expect(liveOf(agent({ state: 'working', status: 'idle' }))).toBe('working')
-  expect(liveOf(agent({ state: 'blocked', status: 'idle' }))).toBe('working')
+  expect(liveOf(agent({ state: 'blocked', status: 'idle' }))).toBe('idle') // 1.0.27c: blocked + idle + no waitingFor = an idle session that waits for its next message (seen live after lean_ask)
+  expect(liveOf(agent({ state: 'blocked', status: 'idle', waitingFor: 'permission: Bash(x)' }))).toBe('working') // an open prompt
+  expect(liveOf(agent({ state: 'blocked', status: 'busy' }))).toBe('working')
   expect(liveOf(agent({ status: 'busy' }))).toBe('working')
   expect(liveOf(agent({ status: 'weird' }))).toBe('working') // an unknown word is never "idle": no session is replaced on a guess
   expect(liveOf(agent({ status: 'idle' }))).toBe('idle')
