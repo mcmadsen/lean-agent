@@ -275,7 +275,7 @@ test('preflight: branch, HEAD, status, diff, last report, tasks, ref; a failing 
     return { exitCode: 1, stdout: '' }
   }
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', [{ from: 't1', kind: 'report', text: 'first\nlast line one' }, { from: 't2', kind: 'report', text: 'other' }].map(x => JSON.stringify(x)).join('\n') + '\n')
-  h.files.set('/h/.lean-agent/todo.json', JSON.stringify([{ text: 'open one', done: false }, { text: 'closed', done: true }]))
+  h.files.set('/h/.lean-agent/todo.json', JSON.stringify([{ text: 'open one', done: false, thread: 't1' }, { text: 'closed', done: true, thread: 't1' }]))
   h.files.set('/h/.lean-agent/threads/t1/brief.md', 'Fix the bug from PR #42 please\n')
   const t = await preflightText(h.host, { id: 't1', cwd: '/r/app', home: '/h' })
   expect(t).toContain('branch: fix-x')

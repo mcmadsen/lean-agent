@@ -143,10 +143,11 @@ test('handover: fitParts drops the oldest report lines first and names the inbox
 test('lean_doctor handover: sections with their tokens and what is missing', async () => {
   const h = setup()
   const text = await handoverReport(h.host, '/h', 't1')
-  expect(text).toContain('handover for t1 (fix login): ~')
+  expect(text).toMatch(/^handover for t1: about \d+ tokens: brief \d+, corrections \d+, notes \d+, snapshot \d+, preflight \d+\n/)
   expect(text).toContain('of a budget of 6000')
   expect(text).toMatch(/brief\s+~\s*\d+ tokens/)
-  expect(text).toContain('no goal')
+  expect(text).not.toContain('no goal') // (the thread has a brief: its first line is the goal)
+  expect(text).toContain('goal: fix the login bug')
   expect(text).toContain('no notes')
   expect(text).toContain('no snapshot')
   expect(text).toContain('--- the prompt, as a fresh session gets it ---')
