@@ -65,6 +65,7 @@ export type Thread = {
   running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
   finished?: number // ms the session was finished after a done report (finish.ts): the next send, wake or resume starts a NEW session with the handover
   keep?: boolean // keep mode (threadcontext.ts): after a done report the session is RESUMED for follow-ups until its context passes the limit
+  keepGoing?: boolean // the standing order "keep going, no asks" (continuepending.ts): a turn end that is not done / blocked / a question is continued by script
   gen?: number // how many sessions this thread has had (1 = the first): the name of the session is "tN · title", "tN · title (2)" ... (threadstate.ts sessionName)
   req0?: number // the thread's request count in the ledger when its session was started or woken: a session that ended its turn at once added at most two
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it

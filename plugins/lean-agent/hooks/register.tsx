@@ -70,6 +70,7 @@ import { recordContext, threadLimits } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { deliveryTick, setThreadSender } from './deliver-to-thread'
+import { continueTick, noteTurnEnd } from './continuepending'
 import { STOP_RULE, notePending, stopGate } from './contextstop'
 import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
@@ -348,7 +349,18 @@ async function noteParts($: any, host: Host, id: string, sid: string): Promise<v
     /* no breakdown: the first request stays "first request" */
   }
 }
-async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>): Promise<void> {
+// The last assistant text of the turn that just ended, when NOTHING came after it (no tool call): the final message of the transcript tail is an assistant text.
+// null = unknown or a tool call came last (continuepending.ts then records no "next:" continue).
+async function lastTextOf($: any): Promise<string | null> {
+  try {
+    const m: any = await bounded($, Promise.resolve($.session.messages({ last: 3 })), 'session.messages', 5_000)
+    const last = Array.isArray(m) ? m[m.length - 1] : null
+    return last && last.role === 'assistant' && typeof last.text === 'string' && last.text.trim() ? last.text : null
+  } catch {
+    return null
+  }
+}
+async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string, after?: () => Promise<void>, text?: () => Promise<string | null>): Promise<void> {
   try {
     const tokens = typeof tokensIn === 'number' && Number.isFinite(tokensIn) ? tokensIn : null
     const key = `${sid}:${tokens}@${Math.floor((await host.clock.now()) / 5_000)}`
@@ -356,6 +368,7 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null }) // "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
@@ -558,6 +571,14 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await deliveryTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, rewind) => leanThread(host2, $.plugin.root, { action: 'answer-restart', tN: id, reason: why, rewind }) })
         for (const n of notes) {
           if (n.toast) $.ui.notify(n.text, { key: `lean-delivery-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a turn that ended with "next: ..." (or any turn end of a keep-going thread) is continued by script after threads.continueSeconds (continuepending.ts)
+      every($, 10_000, 'desk', async host2 => {
+        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-continue-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -968,7 +989,7 @@ export const register: Register = on => {
     if (!e.agentId) inTurn = false
     if (role.kind === 'thread' && !e.agentId && lastSid) {
       const tid = role.id
-      await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid))
+      await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid), () => lastTextOf($))
     }
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
@@ -1005,7 +1026,7 @@ export const register: Register = on => {
         await recordContext(host, id, sid, tokens)
         lastTokens = typeof tokens === 'number' ? tokens : null
         // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
-        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid))
+        if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid), () => lastTextOf($))
       } catch {
         /* the size stays unknown */
       }
