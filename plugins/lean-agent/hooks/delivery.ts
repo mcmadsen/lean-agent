@@ -18,6 +18,8 @@ import { ACTION_KINDS, addActionRequest, runStanding } from './deskactions'
 import { runGranted } from './deskwrites'
 import { logRefusal } from './feedback'
 import { missingOutputs, notDoneText } from './donecheck'
+import { digestable, digestText, partLines, partsOf, pointerText, prepareDigest, reportChars, sentenceCut } from './reportdigest'
+import type { Digest } from './reportdigest'
 
 const tdir = (home: string, id: string) => `${threadsDir(home)}/${id}`
 export const deskState = (home: string) => `${leanDir(home)}/desk`
@@ -256,17 +258,20 @@ export async function recordDeskSid(h: Host, sid: string): Promise<void> {
 // The line sent to the desk. `cut`: a report longer than DIRECT_MAX (cut, with a pointer). `keyed`: the line carries the row key, so the
 // row may be marked delivered: always, except a cut report whose full text has no file (`file` = the display path of the written
 // file; none = it could not be written).
-export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[]; approval?: string; action?: DeskAction }, file?: string): { line: string; cut: boolean; keyed: boolean } {
+// `dg`: the digest form (reportdigest.ts): a plain report longer than dg.chars is sent as its first dg.chars characters cut at a sentence end,
+// the structured parts (dg.parts, one line each) and the file pointer; a question, an approval request and a blocked report are never digested.
+export function directLine(r: { ts: number; from: string; kind: 'report' | 'ask'; state?: string; text: string; options?: string[]; approval?: string; action?: DeskAction }, file?: string, dg?: { chars: number; parts?: string[] }): { line: string; cut: boolean; keyed: boolean } {
   const flat = r.text.replace(/\s+/g, ' ').trim().replace(/<!--|-->/g, '‹comment›') // no comment marker of a thread's can pose as the key
+  const dig = !!dg && digestable(r, dg.chars)
   const max = r.kind === 'ask' ? ASK_MAX : DIRECT_MAX
   const opts = r.options?.length ? r.options.join(' | ') : ''
-  const textCut = flat.length > max
+  const textCut = dig || flat.length > max
   const cut = textCut || opts.length > OPTIONS_MAX // (the ONE place that decides: tellDesk asks directLine, then writes the file)
   const keyed = !cut || !!file
   const head = `[lean-agent] ${r.from} ${r.kind === 'ask' ? 'asking' : r.state === 'done' ? 'done' : r.state === 'blocked' ? 'blocked' : 'progress'}: `
   const tail = `${opts ? ` [options: ${opts.length > OPTIONS_MAX ? `${opts.slice(0, OPTIONS_MAX - 1).replace(/[\ud800-\udbff]$/, '')}…` : opts}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`
   const pointer = file ? `(cut: the full text is in ${file}: Read it; the pane's Answers list has it too)` : '(cut: the full report is in the desk inbox / pane)'
-  const body = textCut ? `${flat.slice(0, max - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : cut ? `${flat} ${pointer}` : flat
+  const body = dig ? `${sentenceCut(flat, dg!.chars)} ${pointerText(r.from, file)}${partLines(dg!.parts ?? [])}` : textCut ? `${flat.slice(0, max - 1).replace(/[\ud800-\udbff]$/, '')}… ${pointer}` : cut ? `${flat} ${pointer}` : flat
   return { line: `${head}${body}${tail}${keyed ? ` <!-- lean:r=${r.ts}:${r.from}:${r.kind} -->` : ''}`, cut, keyed }
 }
 
@@ -319,14 +324,16 @@ async function tellDesk(h: Host, home: string, send: Send | undefined, rec: { ts
   if (!sid) return ' (the desk session id is not known yet: it reads this from its inbox)'
   // a long text: its full text goes to its own file first (the cut line points at it, by absolute path). `from` must be a thread id: it
   // is part of the file name. No file (bad name, write failed): the cut line is unkeyed and the row stays unread.
-  const first = directLine(rec)
+  const chars = await reportChars(h)
+  const dg = digestable(rec, chars) ? { chars, parts: await partsOf(h, home, rec.from) } : undefined // the desk gets a digest, not the full text (reportdigest.ts)
+  const first = directLine(rec, undefined, dg)
   let file: string | undefined
   if (first.cut && /^t\d+$/.test(rec.from)) {
     const path = reportFile(home, rec)
     file = await atomicWrite(h, path, reportBody(rec)).then(() => path, () => undefined)
     if (file) await pruneReports(h, home, file)
   }
-  const { line, cut, keyed } = file ? directLine(rec, file) : first
+  const { line, cut, keyed } = file ? directLine(rec, file, dg) : first
   const key = `${rec.ts}:${rec.from}:${rec.kind}`
   try {
     if (keyed) await setKey(h, home, key, true)
@@ -595,8 +602,8 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
 }
 
 // a done report carries the hint that closing is the desk's job (a thread cannot close itself)
-export const renderReports = (recs: DeskRec[]) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+export const renderReports = (recs: DeskRec[], dg?: Digest) =>
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${dg && digestable(r, dg.chars) ? digestText(r, dg) : r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a
@@ -615,9 +622,10 @@ export async function relayReports(h: Host, o: { busy: boolean; last: number; su
     const { recs, upTo, from } = await unreadReports(h)
     if (!worthRelay(recs)) return false
     const was = from // a refused submit rewinds to the real pointer (delivered rows are not part of recs)
+    const text = `${RELAY_LEAD}\n${renderReports(recs, await prepareDigest(h, recs).catch(() => undefined))}` // (the digest: its files are written before anything is marked)
     await markRead(h, upTo)
     Promise.resolve()
-      .then(() => o.submit(`${RELAY_LEAD}\n${renderReports(recs)}`))
+      .then(() => o.submit(text))
       // refused: they show again at the next prompt, unless something was marked read meanwhile (then nothing is rewound: no repeats)
       .catch(() => serial('reports', async () => { if ((await readJson<{ n: number }>(h, `${deskState(await homeDir(h))}/inbox-read.json`, { n: 0 })).n === upTo) await markRead(h, was); else redo.push(...recs) }).catch(() => undefined))
     return true
@@ -633,7 +641,8 @@ export async function takeReports(h: Host): Promise<string | null> {
     const back = redo.splice(0)
     if (!recs.length && !back.length) return null
     await markRead(h, upTo)
-    return renderReports([...back, ...recs])
+    const all = [...back, ...recs]
+    return renderReports(all, await prepareDigest(h, all).catch(() => undefined))
   })
 }
 

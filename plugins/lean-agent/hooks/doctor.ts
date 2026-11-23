@@ -130,6 +130,14 @@ export async function fix(h: Host, root: string): Promise<FixOut> {
 }
 
 // ---- check ----------------------------------------------------------------------------------------------------
+// the desk's reply to `lean_doctor check`: its conversation keeps every reply, so only the FIX rows and a count of the rest, unless verbose
+export function checkReply(rows: string[], verbose: boolean): string {
+  if (verbose) return rows.join('\n')
+  const fix = rows.filter(r => /^FIX/.test(r))
+  const rest = rows.length - fix.length
+  return [...fix, `${rest} other row(s) ${fix.length ? 'not shown' : 'ok: nothing to fix'}; verbose: true lists them`].join('\n')
+}
+
 export async function check(h: Host, root: string): Promise<string[]> {
   const home = await homeDir(h)
   const out: string[] = []

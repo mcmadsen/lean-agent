@@ -19,7 +19,7 @@ function setup() {
   h.files.set(`${L}/projects.json`, JSON.stringify({ app: { path: '/r/app' }, other: { path: '/r/other' } }))
   h.files.set(`${L}/config.json`, JSON.stringify({ threads: { plugins: 'all', skills: 'all' } })) // the pre-1.0.20 behaviour; the lean defaults are specced in threadlean.test.ts
   h.claude.handler = (a: string[]) => (a[0] === '--bg' ? { exitCode: 0, stdout: `started ${SID}\n` } : { exitCode: 0, stdout: '[]' })
-  const call = (i: any) => leanThread(h.host, ROOT, i)
+  const call = (i: any) => leanThread(h.host, ROOT, i.action === 'list' ? { verbose: true, ...i } : i) // (the long list form)
   return { h, call }
 }
 // installed plugins: lean-agent itself, a skills-only one, one that brings an MCP server, one with hooks, one that registers its own tools

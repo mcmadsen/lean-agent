@@ -21,9 +21,9 @@ import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
 import { markNative, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
 import { leanDir, readJson, threadsDir } from './state'
 import { chase } from './chaser'
-import { autoMigrate, check, guardParents, guardTick, migrate } from './doctor'
+import { autoMigrate, check, checkReply, guardParents, guardTick, migrate } from './doctor'
 import { mcpRows, setSettingsEnv } from './mcpenv'
-import { bounded, setupFix, setupText } from './setup'
+import { bounded, openDesk, setupFix, setupText } from './setup'
 import { checkDeskModel, decideSwitch, deskModelStatus, forgetUserChoice, newSwitchState, noteSdkSwitch, noteSwitched, noteUserChoice } from './deskmodel'
 import { DESK_FAMILIES, deskChoice, modelFamily } from './models'
 import { isExpensiveModel } from './expensive'
@@ -47,7 +47,7 @@ import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed,
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
-import { contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, noteUsage, recentUser, resetDeskCompact, serveHandover } from './deskcompact'
+import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, sessionId } from './deskcompact'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
 import { takeTip } from './tips'
@@ -174,7 +174,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk's own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the failing test names and the last 40 lines. Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] } }, required: [] } }
@@ -191,6 +191,9 @@ const SCHEMA = {
     id: { type: 'string', description: 'approve-action: the id from action-list, only after the USER chose Approve for exactly that request' },
     target: { type: 'object', description: 'allow-writes: the PR (number or URL) or work item (id) the USER named in their own words; the mod refuses without their recorded words. Never a target the user did not write', properties: { pr: { type: ['number', 'string'] }, workitem: { type: ['number', 'string'] } } },
     kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment; work item: comment, update)' },
+    section: { type: 'string', description: 'report tN: one section of its last report (a heading or part of one), instead of the digest' },
+    full: { type: 'boolean', description: 'report tN: the whole last report (reports reach you as a short digest)' },
+    verbose: { type: 'boolean', description: 'list: the long form (default: one short line per thread)' },
     sha: { type: 'string', description: 'approve-push, push: the full sha the user approved, naming this sha and branch' },
     reason: { type: 'string', description: 'approve-push: why. An expensive model (opus): why sonnet is not enough (required; the request waits for the user\'s Approve)' },
     review: { type: 'object', description: 'new: start a review thread: exactly one of pr, branch, sha (+ base); needs project', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
@@ -555,7 +558,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         })
         for (const line of did) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
       })
-      // the desk's own context: idle and over config deskTokens (default 200000) it compacts itself (fixed instructions); a veto or a
+      // the desk's own context: idle and over config deskTokens (default 100000; the handover is written from 80%) it compacts itself (fixed instructions); a veto or a
       // failure is recorded with its reason and tried again when the turn ends; when it is not possible the mod writes desk/handover.md
       // and says so in the status line (deskcompact.ts)
       every($, 30_000, 'desk', async host2 => void (await compactDesk($, host2)))
@@ -948,7 +951,12 @@ export const register: Register = on => {
     if (role.kind === 'thread' && !e.agentId && e.reason === 'error') await noteLimit($, role.id).catch(() => undefined)
     // the desk's turn ended: a compaction that was vetoed or failed is tried again at the next desk tick (within 30 s), not 10 minutes
     // later (deskcompact.ts)
-    if (role.kind === 'desk' && !e.agentId) deskTurnEnded()
+    if (role.kind === 'desk' && !e.agentId) {
+      deskTurnEnded()
+      // config desk.autoRestart (default false): over its limit and no question to the user open, the mod opens the new desk itself (deskcompact.ts)
+      const host = hostOf($)
+      void autoRestartDesk(host, { tokens: contextSize(), restart: () => restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host) }) }).catch(() => undefined)
+    }
     return next(e)
   })
 
@@ -1181,7 +1189,7 @@ export const register: Register = on => {
     const host = hostOf($)
     try {
       await ensureGitHooks(host).catch(() => undefined)
-      if (e.action === 'check') return { result: (await check(host, $.plugin.root)).join('\n') } as any
+      if (e.action === 'check') return { result: checkReply(await check(host, $.plugin.root), e.verbose === true) } as any
       if (e.action === 'fix') {
         const o = await setupFix(host, $.plugin.root)
         dropSetupCheck()
@@ -1465,6 +1473,8 @@ export const register: Register = on => {
         more = await takeReports(host)
         const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts
         if (stalled) more = more ? `${more}\n${stalled}` : stalled
+        const lim = limitLineOnce() // the desk reached its limit: its reply starts with one line saying so, once (deskcompact.ts)
+        if (lim) more = more ? `${more}\n${lim}` : lim
         const tip = await takeTip(host, e.text).catch(() => null) // a coaching tip: the table in intents.ts decides, at most one line, never blocks
         if (tip) more = more ? `${more}\n${tip}` : tip
       }

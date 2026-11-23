@@ -1,5 +1,7 @@
-// The desk's own context. A desk session lives for days: when it is idle and over its limit (config.json `deskTokens`, default 200000)
-// the mod compacts it (`$.session.compact` with fixed instructions). Every compaction that was vetoed or failed is recorded with its
+// The desk's own context. A desk session lives for days: at 80% of its limit (config.json `deskTokens`, default 100000) the handover is written and
+// the pane says "restart the desk soon" with the Restart desk button; at the limit the desk's next reply starts with one line saying so (once) and,
+// with config `desk.autoRestart: true`, the mod opens the new desk itself at the end of the turn (no question to the user open). When it is idle and
+// over its limit the mod also tries to compact it (`$.session.compact` with fixed instructions; the app's desk cannot, see below). Every compaction that was vetoed or failed is recorded with its
 // reason (desk/compact.json, a notice, the doctor check) and tried again when the desk's turn ends. When compaction is not possible
 // the mod writes desk/handover.md and the status line asks the user to type /compact or start a new desk session, which reads it.
 // "Restart desk" (pane button, /lean-agent-restart-desk) writes the same handover on demand and opens a new desk session.
@@ -23,17 +25,23 @@ import { readConfig } from './budget'
 import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
+import { listActions, standingView } from './deskactions'
+import { writesView } from './deskwrites'
+import { readSnapshot } from './snapshot'
 import { waitingScripts } from './scripts'
 import { setNotice } from './notices'
 import { dismissOldDesk, recordOldDesk, titleOf } from './olddesk'
 import type { Thread } from './threads'
 
-export const DEFAULT_TOKENS = 200_000
+export const DEFAULT_TOKENS = 100_000 // (was 200k: the desk only routes, a conversation that big is mostly old reports)
 export const MIN_TOKENS = 10_000 // a smaller configured value is ignored (a compaction every few turns would be worse than none)
 export const DESK_RETRY_MS = 10 * 60_000 // after a vetoed or failed compaction, when no turn end comes sooner
+export const SOON_PCT = 80 // from here: the handover is written, the pane says "restart the desk soon" with the Restart desk button
+export const soonAt = (limit: number): number => Math.floor((limit * SOON_PCT) / 100)
+export const HANDOVER_MAX_CHARS = 12_000 // the desk handover: at most 3k tokens (characters / 4)
 const SOON_MS = 30_000
 
-// config.json `deskTokens` (default 200000). The 1.0.6 key `checkpoint.deskTokens` is still read when `deskTokens` is not set.
+// config.json `deskTokens` (default 100000). The 1.0.6 key `checkpoint.deskTokens` is still read when `deskTokens` is not set.
 export async function deskTokens(h: Host): Promise<number> {
   const c: any = await readConfig(h, await homeDir(h))
   const v = c?.deskTokens ?? c?.checkpoint?.deskTokens
@@ -76,8 +84,10 @@ export type DeskDeps = {
 }
 // fallback: the size the handover file was written at (0 = none); again: try at the turn's end; vetoes: in a row; episode: a failure or a
 // veto is on record and not yet settled; manual: the size at which the engine said it cannot compact this (headless) session (0 = not so)
-type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean; vetoes: number; episode: boolean; manual: number }
-const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false, vetoes: 0, episode: false, manual: 0 })
+// written / limitWritten: the handover was written at 80% / at the limit (once each, until the size is below it again); limitPending: the one line
+// "the desk reached its limit" is still to be said (`limitLineOnce`); auto: the mod opened the new desk itself (config desk.autoRestart)
+type Desk = { retryAt: number; fallback: number; rejected: number; again: boolean; vetoes: number; episode: boolean; manual: number; written: boolean; limitWritten: boolean; limitPending: boolean; limitSaid: boolean; at: { tokens: number; limit: number }; auto: boolean }
+const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: false, vetoes: 0, episode: false, manual: 0, written: false, limitWritten: false, limitPending: false, limitSaid: false, at: { tokens: 0, limit: 0 }, auto: false })
 export const MAX_VETOES = 3 // vetoes in a row before the handover file and the /compact line
 let ds: Desk = freshDesk()
 export const resetDeskCompact = (): void => {
@@ -121,10 +131,27 @@ async function record(h: Host, tokens: number, result: CompactRec['result'], rea
 }
 const why = (e: unknown) => String((e as Error)?.message ?? e).replace(/\s+/g, ' ').trim().slice(0, 160) || 'no reason given'
 
-export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'skipped' | 'fallback' | 'busy' | 'quiet'> {
+// the handover once per stage (80%, the limit): script-built from the stores, so it is ready before the user needs it
+async function ensureHandover(h: Host, d: DeskDeps, tokens: number, stage: 'written' | 'limitWritten'): Promise<void> {
+  if (ds[stage]) return
+  ds[stage] = true
+  try {
+    await writeDeskHandover(h, tokens, await d.recent().catch(() => []), d.sid?.())
+  } catch {
+    ds[stage] = false // (tried again at the next tick)
+  }
+}
+
+export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'skipped' | 'fallback' | 'busy' | 'quiet' | 'soon'> {
   const limit = await deskTokens(h)
   const tokens = await d.tokens().catch(() => 0)
+  ds.at = { tokens, limit }
+  if (tokens < soonAt(limit)) ds.written = false
   if (tokens < limit) {
+    ds.limitWritten = false
+    ds.limitPending = false
+    ds.limitSaid = false
+    ds.retryAt = 0 // under the limit again: the next climb over it starts afresh
     if (ds.fallback || ds.manual) d.status('') // the "type /compact" line goes away with the reason for it
     if (ds.episode) await record(h, tokens, 'compacted', 'the context is below the limit again') // the notice and the doctor row go with it
     ds.fallback = 0
@@ -133,11 +160,22 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
     ds.vetoes = 0
     ds.again = false
     ds.episode = false
+    if (tokens >= soonAt(limit)) {
+      await ensureHandover(h, d, tokens, 'written') // 80%: the pane says "restart the desk soon (the handover is ready)"
+      return 'soon'
+    }
     return 'quiet'
+  }
+  // The limit. Where the session cannot be compacted (the app's desk: headless) or a compaction did not happen, the handover is written and the desk's
+  // next reply starts with one line saying so (once: limitLineOnce); a compaction that works leaves nothing to say.
+  const say = () => {
+    if (!ds.limitSaid) ds.limitPending = true
   }
   if (ds.manual) {
     // this session cannot compact (headless): asked once, not again until a new session; the line is put back (it may have been replaced)
     ds.again = false
+    await ensureHandover(h, d, tokens, 'limitWritten')
+    say()
     d.status(deskNote())
     return 'fallback'
   }
@@ -165,6 +203,8 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       await record(h, tokens, 'unavailable', why(err))
       ds.manual = tokens
       ds.rejected = 0
+      await ensureHandover(h, d, tokens, 'limitWritten') // (the app cannot compact the desk: the handover is what is left)
+      say()
       d.status(deskNote())
       return 'fallback'
     }
@@ -176,6 +216,8 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
       return 'skipped'
     }
     await writeDeskHandover(h, tokens, await d.recent().catch(() => []), d.sid?.())
+    ds.limitWritten = true
+    say()
     ds.fallback = tokens
     d.status(deskNote())
     return 'fallback'
@@ -190,6 +232,8 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
     }
     // vetoed every time: the mod cannot compact, the user can (the notice and the doctor row keep the reason)
     await writeDeskHandover(h, tokens, await d.recent().catch(() => []), d.sid?.())
+    ds.limitWritten = true
+    say()
     ds.fallback = tokens
     d.status(deskNote())
     return 'fallback'
@@ -199,8 +243,42 @@ export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'ski
   ds.fallback = 0
   ds.vetoes = 0
   ds.episode = false
+  ds.limitPending = false // compacted: the desk is small again, nothing to say
+  ds.limitWritten = false
+  ds.written = false
   d.reset()
   return 'compacted'
+}
+
+// what the pane header says from 80% of the limit (view.ts): amber, with the Restart desk button next to it ('' = below 80%)
+export const soonText = (tokens: number, limit: number): string => (limit > 0 && tokens >= soonAt(limit) ? `desk context ${kTokens(tokens)} of ${kTokens(limit)}: restart the desk ${tokens >= limit ? 'now' : 'soon'} (the handover is ready)` : '')
+
+// At the limit the desk's next reply starts with ONE line saying so, once (the prompt hook adds this to the desk's context; null = nothing to say)
+export const limitLineOnce = (): string | null => {
+  if (!ds.limitPending) return null
+  ds.limitPending = false
+  ds.limitSaid = true
+  const n = `${kTokens(ds.at.tokens)} of ${kTokens(ds.at.limit)}`
+  return `[lean-agent] The desk context reached its limit (${n}). Start your next reply with this one line, once, then carry on: "Desk context ${n}: press Restart desk in the pane (the handover is written)."`
+}
+
+// config desk.autoRestart (default false): at the end of a desk turn over the limit, with no question to the user open, the mod opens the new desk itself
+// (restartDesk: the handover is written first). Once per desk session. A failure is a notice (the pane's Restart desk button is still there).
+export async function autoRestartDesk(h: Host, o: { tokens: number; restart: () => Promise<{ ok: boolean; text: string }> }): Promise<'off' | 'under' | 'question' | 'already' | 'restarted' | 'failed'> {
+  const home = await homeDir(h)
+  if (((await readConfig(h, home)) as any)?.desk?.autoRestart !== true) return 'off'
+  if (o.tokens < (await deskTokens(h))) return 'under'
+  if (ds.auto) return 'already'
+  if ((await openQuestions(h)).length) return 'question' // the user is deciding something: not now (the next turn end asks again)
+  ds.auto = true
+  const r = await o.restart().catch(e => ({ ok: false, text: why(e) }))
+  if (!r.ok) {
+    ds.auto = false
+    await setNotice(h, 'desk-autorestart', `the desk is over its limit and could not open a new one by itself: ${r.text}`)
+    return 'failed'
+  }
+  await setNotice(h, 'desk-autorestart', null)
+  return 'restarted'
 }
 
 // the user's latest messages in the desk's conversation (not lean-agent's own relays), for the handover file; `$` is the session handle
@@ -224,7 +302,15 @@ export const handoverFile = (home: string) => `${deskState(home)}/handover.md`
 // (anchored to the END of the file: the user's messages, titles and report texts above it may quote such a comment, and none of them counts)
 const WRITER = /\n<!-- lean-agent: written-by-session ([A-Za-z0-9_-]{1,80}) -->\s*$/
 const sidOk = (s: unknown): s is string => typeof s === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(s)
-export async function deskHandover(h: Host, tokens: number, recent: string[], sid = ''): Promise<string> {
+// what one open thread is doing now, by script: its current task (the snapshot's), else its goal (the thread's own line)
+async function doingOf(h: Host, home: string, id: string, goal: string): Promise<string> {
+  const snap = await readSnapshot(h, home, id).catch(() => null)
+  const task = snap?.tasks?.find(t => t.status === 'in_progress') ?? snap?.tasks?.find(t => t.status === 'pending')
+  return task ? task.text : goal
+}
+
+async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid: string, tight: boolean): Promise<string> {
+  const w = (n: number) => (tight ? Math.floor(n / 2) : n) // a handover over its size is built again with half the widths and without the user's last words
   const home = await homeDir(h)
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
@@ -241,10 +327,18 @@ export async function deskHandover(h: Host, tokens: number, recent: string[], si
     const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
     if (!t || t.state === 'closed') continue
     const lr = last.get(t.id)
-    rows.push(`| ${t.id} | ${cell(t.title, 50)} | ${cell(t.project || '-', 30)} | ${t.state}${t.finished ? ' (finished: the next message starts a new session)' : ''} | ${lr ? cell(`[${lr.kind === 'ask' ? 'question' : lr.state || 'working'}] ${lr.text}`, 120) : '-'} |`)
+    const doing = await doingOf(h, home, t.id, goals?.[t.id]?.text ?? '')
+    rows.push(`| ${t.id} | ${cell(t.title, w(50))} | ${cell(t.project || '-', 30)} | ${t.state}${t.finished ? ' (finished: the next message starts a new session)' : ''} | ${cell(doing || '-', w(100))} | ${lr ? cell(`[${lr.kind === 'ask' ? 'question' : lr.state || 'working'}] ${lr.text}`, w(120)) : '-'} |`)
   }
-  const goalLines = Object.entries(goals && typeof goals === 'object' ? goals : {}).filter(([, g]) => g && typeof g.text === 'string').map(([id, g]) => `- ${id}: ${flat(g.text!, 200)}`)
-  const qs = (await openQuestions(h)).map(q => `- ${q.from ?? 'desk'}: ${flat(q.question ?? '', 300)}`)
+  const goalLines = Object.entries(goals && typeof goals === 'object' ? goals : {}).filter(([, g]) => g && typeof g.text === 'string').map(([id, g]) => `- ${id}: ${flat(g.text!, w(200))}`)
+  const qs = (await openQuestions(h)).map(q => `- ${q.from ?? 'desk'}: ${flat(q.question ?? '', w(300))}`)
+  // requests that wait for the user's yes (a thread asked the desk to send something), and the written grants that are still in force
+  const now = await h.clock.now()
+  const reqs = (await listActions(h).catch(() => [])).map(a => `- ${a.id} (${a.thread}, ${a.state}): ${flat(a.headline, w(160))}${a.writes ? ` (${a.writes} writes)` : ''}; the exact text: lean_thread action-list`)
+  const grantLines = [
+    ...(await writesView(h).catch(() => ({ grants: [] }))).grants.map(g => `- ${g.thread}: ${g.kinds.join('/')} on ${flat(g.scope, 80)}, ${g.used}/${g.cap} used, ${untilText(g.exp, now)}`),
+    ...(await standingView(h).catch(() => ({ grants: [] }))).grants.map(g => `- ${g.thread}: status changes (${g.statuses.join('/')}) on ${flat(g.scope, 80)}, ${untilText(g.exp, now)}`),
+  ]
   const waiting = (await waitingScripts(h).catch(() => [])).map(s => `- script ${s.name} (${s.project}) waits for the user's decision: ${flat(s.why, 120)}`)
   const read = (await readJson<{ n?: number }>(h, `${deskState(home)}/inbox-read.json`, {})).n || 0
   const unread = Math.max(0, recs.length - read)
@@ -252,14 +346,28 @@ export async function deskHandover(h: Host, tokens: number, recent: string[], si
   const parts = [
     `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'})`,
     `This desk session replaces the previous one (restarted, or its context was too large). Read this at the start, then carry on; the full report texts are in ${deskState(home)}/inbox.jsonl (${unread} row(s) unread), earlier handoff notes in ${deskState(home)}/notes.md.`,
-    `## Goals\n${goalLines.length ? goalLines.join('\n') : 'none set'}`,
-    `## Open threads\n| id | title | project | state | last report |\n|---|---|---|---|---|\n${rows.length ? rows.join('\n') : '| - | no open threads | | | |'}`,
     `## Unanswered thread questions\n${qs.length ? qs.join('\n') : 'none'}`,
+    `## Pending requests (wait for the user's yes)\n${reqs.length ? reqs.join('\n') : 'none'}`,
     `## Pending approvals\n${waiting.length ? waiting.join('\n') : 'none known to the mod (a push approval the user gave in the old chat is single use: ask again if needed)'}`,
-    recent.length ? `## What the user said last (newest last; their preferences and decisions of the old session are in the old conversation)\n${recent.map(m => `- ${flat(m, 300)}`).join('\n')}` : '',
+    `## Grants in force (written approvals of the user)\n${grantLines.length ? grantLines.join('\n') : 'none'}`,
+    `## Open threads (what each is doing now, and its last report)\n| id | title | project | state | doing | last report |\n|---|---|---|---|---|---|\n${rows.length ? rows.join('\n') : '| - | no open threads | | | | |'}`,
+    `## Goals\n${goalLines.length ? goalLines.join('\n') : 'none set'}`,
+    recent.length && !tight ? `## What the user said last (newest last; their preferences and decisions of the old session are in the old conversation)\n${recent.map(m => `- ${flat(m, 300)}`).join('\n')}` : '',
     sidOk(sid) ? `<!-- lean-agent: written-by-session ${sid} -->` : '',
   ]
   return parts.filter(Boolean).join('\n\n') + '\n'
+}
+const untilText = (exp: number, now: number): string => (exp > now ? `${Math.max(1, Math.round((exp - now) / 60_000))} min left` : 'expired')
+
+// at most HANDOVER_MAX_CHARS (3k tokens): over it, built again with half the widths and without the user's last words; still over, the middle is cut
+// (the writer's id stays the LAST line: serveHandover reads it there)
+export async function deskHandover(h: Host, tokens: number, recent: string[], sid = ''): Promise<string> {
+  let text = await buildDeskHandover(h, tokens, recent, sid, false)
+  if (text.length > HANDOVER_MAX_CHARS) text = await buildDeskHandover(h, tokens, recent, sid, true)
+  if (text.length <= HANDOVER_MAX_CHARS) return text
+  const tail = WRITER.exec(text)?.[0] ?? '\n'
+  const head = text.slice(0, text.length - tail.length)
+  return `${head.slice(0, HANDOVER_MAX_CHARS - tail.length - 200).trimEnd()}\n\n(cut: the rest is in ${deskState(await homeDir(h))}/inbox.jsonl)${tail.startsWith('\n') ? tail : `\n${tail}`}`
 }
 
 // `sid`: the writing desk session. Unknown, no writer is named (desk.json may still hold an older desk's id): any desk may then serve it.

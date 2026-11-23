@@ -3,6 +3,7 @@
 // output. Tokens are estimated as characters / 4 (the transcript has no per-result count).
 import { readJson, threadsDir } from './state'
 import type { Host } from './state'
+import { deskFile } from './delivery'
 
 export type Top = { tool: string; tokens: number; at: number }
 export type ContextStat = {
@@ -127,9 +128,120 @@ export async function readRecords(h: Host, file: string): Promise<any[]> {
   return recs
 }
 
-// `session` may be a thread id (tN): the transcript of that thread's current session, and the top three sources with a fix each
+// ---- the DESK's own conversation: what its Messages consist of ----------------------------------------------------------------
+// The desk only routes, yet its conversation grows: every thread report that reaches it, every lean_thread / lean_doctor reply, the
+// user's long pastes. Tokens by source (chars / 4), the ten largest single items by kind and time (never their text), growth per turn.
+export type DeskItem = { kind: string; tokens: number; at: string }
+export type DeskStat = { by: Record<string, { items: number; tokens: number }>; top: DeskItem[]; turns: number; total: number; perTurn: number; recentPerTurn: number; sizeFirst: number; sizeLast: number }
+export const SRC_REPORTS = 'thread reports delivered'
+export const SRC_USER = "the user's prompts"
+export const SRC_DESK = "the desk's own answers"
+export const SRC_OTHER = 'other tool results'
+
+const blocksText = (c: unknown): string => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((b: any) => (b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('\n') : '')
+const REPORT_MARK = /^\s*\[lean-agent\]|<!--\s*lean:r=\d+:t\d+:(?:report|ask)\s*-->/
+
+export function deskStat(records: any[]): DeskStat {
+  const names = new Map<string, { tool: string; action: string }>() // tool_use id -> tool name and action
+  const by: DeskStat['by'] = {}
+  const items: DeskItem[] = []
+  const turnTokens: number[] = []
+  let size0 = 0
+  let sizeN = 0
+  const add = (kind: string, chars: number, at: string) => {
+    const tokens = tokensOf(chars)
+    if (tokens <= 0) return
+    const s = (by[kind] ??= { items: 0, tokens: 0 })
+    s.items++
+    s.tokens += tokens
+    items.push({ kind, tokens, at })
+    if (turnTokens.length) turnTokens[turnTokens.length - 1]! += tokens
+  }
+  for (const r of records) {
+    const m = r?.message
+    if (!r || r.isSidechain === true) continue
+    const at = typeof r.timestamp === 'string' ? r.timestamp : ''
+    if (r.type === 'attachment') {
+      const t = blocksText(r.attachment?.content ?? r.attachment?.text)
+      if (REPORT_MARK.test(t)) add(SRC_REPORTS, t.length, at)
+      continue
+    }
+    if (!m || typeof m !== 'object') continue
+    if (r.type === 'assistant') {
+      const n = contextTokensOf(m.usage)
+      if (n > 0) {
+        if (!size0) size0 = n
+        sizeN = n
+      }
+      if (!Array.isArray(m.content)) continue
+      for (const b of m.content) {
+        if (!b || typeof b !== 'object') continue
+        if (b.type === 'tool_use' && typeof b.id === 'string') {
+          const inp = b.input && typeof b.input === 'object' ? (b.input as any) : {}
+          names.set(b.id, { tool: String(b.name ?? '?'), action: typeof inp.action === 'string' ? inp.action : '' })
+        }
+        if (b.type === 'text' && typeof b.text === 'string') add(SRC_DESK, b.text.length, at)
+        else if (b.type === 'tool_use') add(SRC_DESK, JSON.stringify(b.input ?? {}).length + String(b.name ?? '').length, at)
+      }
+      continue
+    }
+    if (r.type !== 'user') continue
+    const parts = typeof m.content === 'string' ? [{ type: 'text', text: m.content }] : Array.isArray(m.content) ? m.content : []
+    const results = parts.filter((b: any) => b?.type === 'tool_result')
+    if (!results.length && parts.length) turnTokens.push(0) // a prompt (the user's or a delivered report) starts a turn
+    for (const b of parts) {
+      if (!b || typeof b !== 'object') continue
+      if (b.type === 'tool_result') {
+        const n = names.get(String(b.tool_use_id))
+        const t = n?.tool ?? '?'
+        const kind = /lean_thread$/.test(t) ? `lean_thread ${n!.action || '?'} replies` : /lean_doctor$/.test(t) ? `lean_doctor ${n!.action || '?'} replies` : SRC_OTHER
+        add(kind, textLen(b.content), at)
+      } else if (b.type === 'text' && typeof b.text === 'string') add(REPORT_MARK.test(b.text) ? SRC_REPORTS : SRC_USER, b.text.length, at)
+    }
+  }
+  const total = Object.values(by).reduce((n, v) => n + v.tokens, 0)
+  const turns = turnTokens.length
+  const recent = turnTokens.slice(-5)
+  return {
+    by,
+    top: items.sort((a, b) => b.tokens - a.tokens).slice(0, 10),
+    turns,
+    total,
+    perTurn: turns ? Math.round(total / turns) : 0,
+    recentPerTurn: recent.length ? Math.round(recent.reduce((n, v) => n + v, 0) / recent.length) : 0,
+    sizeFirst: size0,
+    sizeLast: sizeN,
+  }
+}
+const contextTokensOf = (u: any): number => (u && typeof u === 'object' ? (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0) : 0)
+
+export function deskText(s: DeskStat, label = ''): string {
+  const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+  const rows = Object.entries(s.by).sort((a, b) => b[1].tokens - a[1].tokens)
+  const lt = rows.filter(([n]) => n.startsWith('lean_thread ')).reduce((n, [, v]) => n + v.tokens, 0)
+  const ld = rows.filter(([n]) => n.startsWith('lean_doctor ')).reduce((n, [, v]) => n + v.tokens, 0)
+  const pct = (n: number) => (s.total ? `${Math.round((100 * n) / s.total)}%` : '0%')
+  return [
+    `desk context ${label}(Messages ${k(s.total)} in ${s.turns} turn(s); tokens estimated as chars/4)`,
+    'by source:',
+    ...(rows.length ? rows.map(([n, v]) => `  ${n}: ${v.items} item(s), ${k(v.tokens)} (${pct(v.tokens)})`) : ['  none']),
+    `lean_thread replies together ${k(lt)} (${pct(lt)}) · lean_doctor replies together ${k(ld)} (${pct(ld)})`,
+    'ten largest items (kind, size, time):',
+    ...(s.top.length ? s.top.map((t, i) => `  ${i + 1}. ${t.kind} ${k(t.tokens)}${t.at ? ` at ${t.at}` : ''}`) : ['  none']),
+    `growth per turn: ${k(s.perTurn)} on average, ${k(s.recentPerTurn)} over the last 5${s.sizeLast ? ` · the engine's own count: ${k(s.sizeFirst)} at the first reply, ${k(s.sizeLast)} now` : ''}`,
+  ].join('\n')
+}
+
+// `session` may be a thread id (tN): the transcript of that thread's current session, and the top three sources with a fix each.
+// No session, or "desk": the DESK's conversation (desk.json names it; the newest transcript when none is recorded): deskStat.
 export async function contextReport(h: Host, home: string, session?: string): Promise<string> {
   try {
+    if (!session || session === 'desk') {
+      const sid = String((await readJson<{ sid?: string }>(h, deskFile(home), {}))?.sid ?? '')
+      const file = await findTranscript(h, home, /^[\w-]+$/.test(sid) ? sid : undefined)
+      if (!file) return `context: no desk transcript found under ${home}/.claude/projects`
+      return deskText(deskStat(await readRecords(h, file)), `${file.split('/').pop()} `)
+    }
     const thread = session && /^t\d+$/.test(session) ? session : ''
     if (thread) session = (await readJson<{ sid?: string }>(h, `${threadsDir(home)}/${thread}/thread.json`, {})).sid || undefined
     if (thread && !session) return `context: ${thread} has no session yet`

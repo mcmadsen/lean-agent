@@ -47,7 +47,7 @@ function setup(o: Opts = {}) {
   const thread = () => JSON.parse(h.files.get(`${T1}/thread.json`)!)
   const starts = () => h.claudeCalls().filter(x => x[0] === '--bg' && !x.includes('--resume')) // new sessions
   const resumes = () => h.claudeCalls().filter(x => x[0] === '--bg' && x.includes('--resume'))
-  return { h, st, run: (i: any) => leanThread(h.host, ROOT, i), thread, starts, resumes }
+  return { h, st, run: (i: any) => leanThread(h.host, ROOT, i.action === 'list' ? { verbose: true, ...i } : i) /* the long list form: the default is one short line */, thread, starts, resumes }
 }
 
 // ---- config ----

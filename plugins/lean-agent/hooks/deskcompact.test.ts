@@ -33,16 +33,16 @@ function deskDeps(o: { tokens?: number; busy?: boolean; compact?: (i: string) =>
   }
 }
 
-test('context size is input + cache read + cache write; the desk limit defaults to 200k, config deskTokens overrides it, bad values are ignored', async () => {
+test('context size is input + cache read + cache write; the desk limit defaults to 100k, config deskTokens overrides it, bad values are ignored', async () => {
   expect(contextTokens({ input_tokens: 1, cache_read_input_tokens: 20, cache_creation_input_tokens: 300 })).toBe(321)
   expect(contextTokens(null)).toBe(0)
-  expect(DEFAULT_TOKENS).toBe(200_000)
+  expect(DEFAULT_TOKENS).toBe(100_000)
   const { h } = setup()
-  expect(await deskTokens(h.host)).toBe(200_000)
+  expect(await deskTokens(h.host)).toBe(100_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 150_000 }))
   expect(await deskTokens(h.host)).toBe(150_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 5 }))
-  expect(await deskTokens(h.host)).toBe(200_000) // too small a value is ignored
+  expect(await deskTokens(h.host)).toBe(100_000) // too small a value is ignored
   h.files.set(`${L}/config.json`, JSON.stringify({ checkpoint: { deskTokens: 120_000 } })) // the 1.0.6 key is still read
   expect(await deskTokens(h.host)).toBe(120_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 90_000, checkpoint: { deskTokens: 120_000 } }))
@@ -60,10 +60,10 @@ test('an idle desk over its limit compacts itself with the fixed instructions; b
   const b = deskDeps({ busy: true })
   expect(await deskTick(h.host, b.deps)).toBe('busy')
   expect(b.seen.compact).toEqual([])
-  const c = deskDeps({ tokens: 150_000 }) // under the new 200k default
+  const c = deskDeps({ tokens: 70_000 }) // under 80% of the 100k default
   expect(await deskTick(h.host, c.deps)).toBe('quiet')
   expect(c.seen.compact).toEqual([])
-  h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 300_000 }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 400_000 }))
   expect(await deskTick(h.host, deskDeps().deps)).toBe('quiet')
 })
 
@@ -143,7 +143,7 @@ test('a failed compact is recorded with its reason; twice in a row (or an engine
   const md = r.h.files.get(`${L}/desk/handover.md`)!
   expect(md).toContain('context 250k')
   expect(md).toContain('- t1: ship the login fix')
-  expect(md).toContain('| t1 | fix login | app | open | [working] form / found |')
+  expect(md).toContain('| t1 | fix login | app | open | ship the login fix | [working] form / found |') // (its goal is what it is doing: no task yet)
   expect(md).toContain('which login page?')
   expect(md).toContain('use sonnet for t3')
   expect(md.toLowerCase()).not.toContain('checkpoint')
@@ -173,7 +173,7 @@ test('a headless (SDK) session cannot compact: asked once, no failure row, no no
   expect(deskNote()).toBe(MANUAL)
   expect((await lastCompaction(h.host))?.result).toBe('unavailable')
   expect(h.files.has(`${L}/notices/desk-compaction.txt`)).toBe(false) // no red notice
-  expect(h.files.has(`${L}/desk/handover.md`)).toBe(false) // Restart desk writes it when pressed
+  expect(h.files.get(`${L}/desk/handover.md`)).toContain('# Desk handover') // the app cannot compact: the handover is written at the limit (Restart desk opens the new desk)
   expect(deskRetryWanted()).toBe(false)
   // never again in this session: not at the turn end, not after the retry gap
   deskTurnEnded()

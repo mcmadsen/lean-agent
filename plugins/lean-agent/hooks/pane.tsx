@@ -18,7 +18,7 @@ import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
 import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
-import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
+import { kTokens, recentUser, restartDesk, sessionId, soonText } from './deskcompact'
 import { openNewThread, openThreadPane } from './panelinks'
 import { notifyTick } from './notify'
 // grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
@@ -822,10 +822,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {ctx > 0 && limit > 0 ? (
           <Box flexWrap="wrap" columnGap={1}>
             <Progress key="ctx" label="desk context" value={ctx} max={limit} valueText={`${kTokens(ctx)} of ${kTokens(limit)}`} color={barColor} />
-            {overDesk && <Button key="restart-desk" label={restartLabel} onPress={restartDeskPress} />}
           </Box>
         ) : (
           <Text dimColor>desk context: known after the next request</Text>
+        )}
+        {/* from 80% of the limit: the amber line (the handover is already written, deskcompact.ts) with Restart desk next to it */}
+        {overDesk && (
+          <Box flexWrap="wrap" columnGap={1}>
+            <Text color="warning">{soonText(ctx, limit)}</Text>
+            <Button key="restart-desk" label={restartLabel} onPress={restartDeskPress} />
+          </Box>
         )}
         <Text dimColor size="caption">
           lean-agent {VERSION} · refreshed {lastRefresh || 'never'}
