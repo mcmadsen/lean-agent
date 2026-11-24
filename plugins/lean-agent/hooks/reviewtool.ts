@@ -9,11 +9,12 @@ import type { External } from './reviewext'
 import { forgeFiles, ownCommits, rangeLooksWrong } from './reviewforge'
 import { logRefusal } from './feedback'
 import { noteReviewed, reviewedBy } from './reviewkind'
+import { notePrepare, requiredAreas, resetPrepare } from './reviewprepared'
 import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
 import { MIN_FILTER_VERSION, changeScope, changedText, contextOf, dropNotes, droppedText, scopeLine, scopedOf, withArea } from './reviewchange'
 import { compareVersions, running, runningOf } from './skew'
-import { areaOf, areasOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
+import { areaOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
 import { REVIEWER_STEPS, reviewerBudget } from './jobs'
 import { loadOrch } from './orchestrate'
 import type { Range } from './reviewprep'
@@ -210,9 +211,12 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   // a diff over 300 files or 20000 lines (generated files out) is not reviewed in one: counts only, and the areas to review one by one (reviewarea.ts)
   const whole = perFileStats(diff)
   const areasAll = partition(whole)
-  if (!scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))) {
+  const big = !scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))
+  // the prepared state of this thread and ref: a later prepare REPLACES the earlier one (reviewprepared.ts); an area pass (scope) is part of its prepare
+  const replaces = ext && !scopeArg ? await notePrepare(h, thread, ext.label, { project, head: range.head, mb: range.mb, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), forgeN, areas: big ? areasAll.map(a => a.name) : [] }) : ''
+  if (big) {
     await noteAreas(h, project, range.head, areasAll.map(a => a.name))
-    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head })}\n${bigText(whole, ctx.prep, areasAll)}` }
+    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head })}\n${bigText(whole, ctx.prep, areasAll)}${replaces ? `\n${replaces}` : ''}` }
   }
   const area = scopeArg ? areaOf(areasAll, scopeArg) : undefined
   if (scopeArg && !area) return { ok: false, text: `prepare: scope ${JSON.stringify(scopeArg.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'the diff has no changed files'}); run prepare without scope to see the areas` }
@@ -288,7 +292,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
     : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${spent}${held ? `\n${held}` : ''}${replaces ? `\n${replaces}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {
@@ -504,7 +508,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
   const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped)].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
-  const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
+  const left = area ? (await requiredAreas(h, thread, project, sha)).areas.filter(n => !(rec.areas ?? {})[n]) : [] // (the areas of the thread's LAST prepare)
   const areaLine = area ? `${replaced ? `\n${replaced}` : ''}\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
   return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
@@ -540,6 +544,7 @@ async function reviewToolRun(h: Host, project: string, i: any, thread = ''): Pro
     const old = await oldFilterNote(h, thread)
     return old ? { ...out, text: `${old}\n${out.text}` } : out
   }
+  if (action === 'reset-prepare') return { ok: true, text: await resetPrepare(h, thread, str(i.ref)) }
   if (action === 'merge') return doMerge(h, project, i, thread)
   if (action === 'prs') {
     // the PR comments of a project's recent PRs (or one), from the host in its origin URL: prhost.ts, the one fetch the pr and review-learn skills share

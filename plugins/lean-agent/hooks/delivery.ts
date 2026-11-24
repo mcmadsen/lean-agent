@@ -117,9 +117,9 @@ export const DEFERRED_THREAD_TOOLS = new Set(['lean_profile', 'lean_rules', 'lea
 export const THREAD_TOOLS: Tool[] = [
   {
     name: 'lean_review',
-    description: 'The strict review\'s script side (the review and review-learn skills have the flow): prepare (computes the brief and picks the reviewer), merge (two runs), record (the default: the verdict the push gate reads; green is refused with the reason), decline, lessons / learn / lessons-list / lessons-rm / lessons-undo / lessons-verify (the project\'s review lessons), prs (review comments of recent PRs).',
+    description: 'The strict review\'s script side (skills review, review-learn: the flow): prepare (the brief and the reviewer; a later prepare replaces the earlier), reset-prepare (drops stale areas), merge (two runs), record (the default: the verdict the push gate reads; green is refused with the reason), decline, lessons / learn / lessons-list / lessons-rm / lessons-undo / lessons-verify (the project\'s review lessons), prs (review comments of recent PRs).',
     inputSchema: obj({
-      action: { type: 'string', enum: ['prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'prs'] },
+      action: { type: 'string', enum: ['prepare', 'reset-prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'prs'] },
       project: { type: 'string' },
       sha: { type: 'string', description: 'record: the full HEAD sha reviewed' },
       base: { type: 'string', description: 'prepare, record, lessons: base branch or sha' },
