@@ -6,6 +6,8 @@ import { fakeHost } from './fake'
 import { STANDING_LABEL, STANDING_LABEL_WI, addActionRequest, actionListText, answerAction, approveAction, bindAnswers, dropActions, flaggedGrants, listActions, questionOf, resetActions, standingView, sweepExpired, withdrawAction, withdrawByWords } from './deskactions'
 import { auditStanding, revokeWrites, writesListText, writesView } from './deskwrites'
 import { resetLocks } from './threads'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test how a request ends, not whose task it is (owntask.test.ts does)
 
 const L = '/h/.lean-agent'
 const HOUR = 3_600_000

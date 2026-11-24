@@ -279,7 +279,7 @@ export const limitLineOnce = (): string | null => {
 //   tools    the desk lost its tools: the mod's own send was refused with "this session has no SendMessage tool" (deliver-to-thread.ts)
 // and only when: this session is the current desk (deskauto.ts retiredInfo); no turn is running (an AskUserQuestion in flight is a running turn);
 // the desk is shown in the desktop app; no thread's question to the user is open (the handover carries them, so over 120% of the limit it goes on
-// anyway); the loop guard allows it (last one 30+ min ago, fewer than 4 in 24 h: else ONE notice and the amber status line). Requests, approvals,
+// anyway); the loop guard allows it (last one 30+ min ago, fewer than desk.autoRestartPerDay (default 12) in 24 h: else ONE notice and the amber status line). Requests, approvals,
 // grants and threads are in the handover (buildDeskHandover) and need no wait. Once per desk session. A failure is a notice (the Restart desk button is
 // still there). A model / tools reason is not repeated for the same cause within 24 h (the new desk would have the same trouble: only the button).
 export type AutoIn = {

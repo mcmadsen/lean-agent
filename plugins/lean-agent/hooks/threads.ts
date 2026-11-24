@@ -529,9 +529,6 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await mkdirp(h, dir)
   const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(i.priority === 'low' || i.priority === 'urgent' ? { priority: i.priority } : {}), ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : i.keepGoing === false ? { keepGoing: false } : {}) }
   applyRefs(t, refd.refs) // (in the row before the first save: the session start saves this object again)
-=======
-  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(i.priority === 'low' || i.priority === 'urgent' ? { priority: i.priority } : {}), ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : {}) }
->>>>>>> fix-1.0.31j
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))

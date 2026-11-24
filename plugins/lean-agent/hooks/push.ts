@@ -368,10 +368,10 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const r = await adoPullRequest(h, dir, ado, pr, branch, adoBase)
     const need = 'az repos pr create needs az + az login (extension azure-devops)'
     if (r.kind === 'created') {
-      // 1.0.31: the PR's last steps, from the work items the thread stored: link the PR to them and move them to Reviewing (each one asked)
+      // 1.0.31: the PR's last steps belong to the mod (workitemflow.ts afterPrOpened): ONE request to link the PR and move the work item to Reviewing, only for the user's own task; the thread asks for nothing
       const tj = await readJson<{ workItems?: unknown; briefItems?: unknown }>(h, `${threadsDir(home)}/${id}/thread.json`, {}).catch(() => ({}) as { workItems?: unknown; briefItems?: unknown })
       const ids = [...new Set([...(Array.isArray(tj.workItems) ? tj.workItems : []), ...(Array.isArray(tj.briefItems) ? tj.briefItems : [])].filter((n): n is number => Number.isInteger(n)))].slice(0, 3)
-      const next = ids.length ? `; next, one asked request each: ado-pr-workitem-link and ado-workitem-update to Reviewing for work item ${ids.join(', ')}` : ''
+      const next = ids.length ? `; the mod itself asks the user for the one request that links the PR to work item ${ids.join(', ')} and sets Reviewing, only for the user's own task (do not request it yourself)` : ''
       return await finish({ ok: true, text: `${done}; PR ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}${next}`)
     }
     if (r.kind === 'open') return await finish({ ok: true, text: `${done}; PR already open: ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}`)

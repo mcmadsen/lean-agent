@@ -1,16 +1,21 @@
 // The automatic desk restart, the parts around it (the decision is deskcompact.ts autoRestartDesk, the restart itself restartDesk):
-//  - the loop guard: an automatic restart only when the last one is more than 30 minutes ago and fewer than 4 happened in the last 24 h
+//  - the loop guard: an automatic restart only when the last one is more than 30 minutes ago and fewer than `desk.autoRestartPerDay` (default 12) happened in the last 24 h
 //    (desk/auto-restarts.json); a blocked one says so ONCE per restart (a notice; the caller puts the amber status line) and waits for the button;
 //  - the record the new desk finds at its start (desk/auto-started.json: when, why, which session it replaced) for its first notice;
 //  - the old desk retiring itself: desk.json names ONE current desk session; any other desk session is retired (its timers and the hooks
 //    that act do nothing, and it answers a prompt with one line). The new desk's start stamps `startedAt` into desk.json for that line.
-import { homeDir, readJson, writeJson } from './state'
+import { homeDir, leanDir, readJson, writeJson } from './state'
 import type { Host } from './state'
 import { deskFile, deskState } from './delivery'
 import { setNotice } from './notices'
 
 export const AUTO_GAP_MS = 30 * 60_000
-export const AUTO_MAX = 4
+export const AUTO_MAX = 12 // config desk.autoRestartPerDay (default 12; was a fixed 4 until 1.0.30: a low desk.contextLimit reached it in a day)
+async function autoMax(h: Host): Promise<number> {
+  const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
+  const v = cfg && typeof cfg === 'object' ? (cfg.desk?.autoRestartPerDay ?? cfg['desk.autoRestartPerDay']) : undefined
+  return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 100 ? v : AUTO_MAX
+}
 export const AUTO_WINDOW_MS = 24 * 3_600_000
 export const AUTO_FRESH_MS = 15 * 60_000 // the new desk's start finds its record this long
 export const GUARD_NOTICE = 'desk-autorestart-guard'
@@ -43,7 +48,8 @@ export async function autoGuard(h: Host): Promise<string | null> {
   const last = Math.max(0, ...runs.map(r => r.at))
   if (last && now >= last && now - last < AUTO_GAP_MS) return `the last automatic desk restart was ${Math.max(1, Math.round((now - last) / 60_000))} min ago (at most one every 30 min)`
   const n = runs.filter(r => now - r.at < AUTO_WINDOW_MS && r.at <= now).length
-  if (n >= AUTO_MAX) return `${n} automatic desk restarts in the last 24 h (the limit is ${AUTO_MAX})`
+  const max = await autoMax(h)
+  if (n >= max) return `${n} automatic desk restarts in the last 24 h (the limit is ${max}: config desk.autoRestartPerDay)`
   return null
 }
 

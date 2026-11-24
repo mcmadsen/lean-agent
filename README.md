@@ -586,7 +586,8 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `desk.autoResume` | desk | boolean | true | now | Resume a thread blocked by the usage limit two minutes after the limit resets. |
 | `desk.autoRestart` | desk | boolean | true | now | The mod opens a fresh desk itself when the desk must restart (off: only the Restart desk button). |
 | `desk.reportChars` | desk | number >= 0 | 400 | now | Characters of a thread report the desk gets (0 = the whole report). |
-| `deskTokens` | desk | number >= 10000 | 100000 | now | The desk compacts itself when its conversation passes this many tokens. |
+| `desk.contextLimit` | desk | number >= 10000 | 60000 | now | The desk restarts itself (handover first) when its context passes this many tokens (the older deskTokens still counts when this is unset). |
+| `desk.autoRestartPerDay` | desk | number >= 1 <= 100 | 12 | now | Automatic desk restarts allowed per 24 hours (and at most one every 30 minutes); past it only the Restart desk button. |
 | `deskToolResultChars` | desk | number >= 1 | 6000 | now | Largest tool result the desk keeps whole, in characters (longer ones are cut). |
 | `notify.toast` | desk | boolean | true | now | Show a toast for desk notices. |
 | `notify.sound` | desk | boolean | false | now | Play a sound with a toast (accepted; no sound clip is bundled yet). |
@@ -603,6 +604,10 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `threads.continueSeconds` | threads | number >= 1 | 20 | now | Seconds a "next: ..." turn waits before the continue message is sent. |
 | `threads.keepGoing` | threads | boolean | true | now | Keep going is the standing order of every work thread (review threads excluded); a thread's own keep-going on / off wins. |
 | `threads.idleAlertMinutes` | threads | number >= 0 | 10 | now | Minutes a thread may be idle without a report before the desk gets one notice (0 = off). |
+| `threads.softCheckpointTokens` | threads | number >= 20000 <= 400000 | 80000 | next session | A work thread this big is told once to checkpoint at its next boundary (an idle one is checkpointed by script). |
+| `workitems.afterPr` | threads | ask / off | ask | now | After a PR is opened the mod asks for one Approve to link it to the thread's work item and set it to Reviewing (off: never). |
+| `workitems.reviewState` | threads | string | Reviewing | now | The work item state that request sets after a PR is opened. |
+| `workitems.lookup` | threads | boolean | true | now | A request to create a work item reads your active assigned work items (read-only) to show the closest ones. |
 | `threads.escalate` | threads | boolean | true | now | Restart a thread that ignored a message from the desk (off: ask you first). |
 | `threads.answerWaitSeconds` | threads | number >= 1 | 45 | now | Seconds a thread has to react to a message before it counts as ignored. |
 | `threads.waitReminderMinutes` | threads | number >= 1 | 15 | now | Minutes an unanswered thread question waits before it comes back once. |
@@ -635,11 +640,18 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `review.lessonMax` | review | number >= 1 | 1500 | now | Most review lessons kept per project. |
 | `review.contextLines` | review | number >= 0 <= 20 | 0 | now | Lines of context around a changed hunk that still count as part of the change (0 to 20). |
 | `review.maxFiles` (sensitive) | review | number >= 1 | 150 | now | Most files a review range may hold before prepare asks you to confirm it (a wrong range is the usual cause). |
+| `review.askAboveUsd` (sensitive) | review | number >= 0 <= 1000 | 5 | now | A review expected to cost more than this (USD) is not started until you said yes (0 = never ask). |
+| `review.maxUsd` (sensitive) | review | number >= 0 <= 10000 | 25 | now | A review expected to cost more than this (USD) is refused unless you say yes anyway (0 = no limit). |
+| `review.preflight` (sensitive) | review | boolean | true | now | Before any reviewer starts, compare the prepared file count with the forge's own count for the PR. |
+| `review.preflightMinFiles` | review | number >= 1 <= 100000 | 20 | now | The forge count check never stops a review of at most this many prepared files. |
+| `review.preflightRatio` | review | number >= 1 <= 100 | 3 | now | Prepared files above this many times the forge's count stop the review as a wrong range. |
+| `review.lessonsFallback` | review | number >= 0 <= 6 | 2 | now | General review lessons offered per topic when nothing else matches it (at most 6 in all; 0 = off). |
 | `review.prChecks` | review | json | none | now | Review-side PR checks: false turns all off, or {"severity": false, "size": false} single ones. |
 | `rulesPr.minSessions` | review | number >= 1 | 3 | now | Sessions a learned rule must have loaded in before it is proposed upstream. |
 | `rulesPr.minDays` | review | number >= 1 | 7 | now | Days a learned rule must have been in use before it is proposed upstream. |
 | `rulesPr.minGaps` | review | number >= 1 | 2 | now | Reports of a missing piece of context before it is proposed as a rule. |
 | `rulesPr.windowDays` | review | number >= 1 | 90 | now | Days back that rule loads and reports are counted. |
+| `threads.softUsd` | budget | number >= 0 <= 10000 | 8 | now | Per-thread budget in USD from the ledger: one nudge at 80%, told to report and stop at 100% (0 = off; lean_thread budget tN overrides it). |
 | `budget.daily` | budget | number >= 0 | 25 | now | Daily spend in USD at which the desk is warned (0 = no alert). |
 | `budget.threadDaily` | budget | number >= 0 | 15 | now | Daily spend of one thread in USD at which the desk is warned (0 = no alert). |
 | `dailyCapUsd.desk` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for desk sessions; past it requests are refused (none by default). |
@@ -647,6 +659,9 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `dailyCapUsd.plain` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for plain sessions; past it requests are refused (none by default). |
 | `workerCapUsd` (sensitive) | budget | number >= 0.01 | none | now | USD one worker may spend before it ends and reports (none by default). |
 | `workerCaps` (sensitive) | budget | json | none | now | USD cap per worker kind, e.g. {"worker-opus": 4}. |
+| `window.throttleAbove` | budget | number >= 1 <= 100 | 70 | now | Percent of the 5 h window above which new agents run on haiku and low-priority threads wait (100 = off). |
+| `window.blockAbove` | budget | number >= 1 <= 100 | 92 | now | Percent of the 5 h window above which no new thread or reviewer starts (priority urgent excepted). |
+| `window.capFiveHourPct` | budget | number >= 1 <= 100 | none | now | Your own cap in percent of the 5 h window: at it all new work is held until the window resets (none by default). |
 | `window.holdAbove` | budget | number >= 1 <= 100 | 85 | now | Percent of the usage window above which starting a thread warns and holds. |
 | `pane.theme` | pane | on / off | off | desk restart | Give the app lean-agent's own look (on) or leave it alone (off). |
 | `feedback.destination` | feedback | local / folder / github / folder+github | local | now | Where the feedback export goes: local, folder, github or folder+github. |
@@ -655,6 +670,7 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `memory.indexTokens` | memory | number >= 50 | 400 | now | Token budget of the standing-orders list every session starts with (the lowest-ranked lines are dropped). |
 | `memory.relevantTokens` | memory | number >= 50 | 300 | now | Token budget of the one memory reminder line (at most 3 items) a session gets when it matters. |
 | `memory.autoCapture` | memory | boolean | true | now | Store typed "remember / always / never / from now on" and repeated corrections by script (off: only /lean-agent:remember and the tools). |
+| `workitems.onlyOwn` (sensitive) | safety | boolean | true | now | Link and move only a work item assigned to you for a PR you created (off: any work item the thread has). |
 | `threads.plugins` (sensitive) | safety | list or all | [] | next session | Plugins a thread loads besides lean-agent (all = every plugin you have). |
 | `threads.mcp` (sensitive) | safety | all / project / none | all | next session | MCP servers a thread may use: all, project (the project's only) or none. |
 | `threads.tools` (sensitive) | safety | list or all | none | next session | Built-in tools of a thread session (all = the full set; default is a short list). |
@@ -1045,6 +1061,10 @@ The tool checks it again, at `lean_review merge` and `lean_review record`, and d
 
 If the PR diff cannot be read, `merge` and `record` refuse with "could not read the PR diff: review not recorded" and write nothing: a review is never recorded unfiltered. A PR too large for one review is split into areas built only from its changed files ("N changed files, M changed lines"), never from folders. The reviewer's JSON block is saved to `scratch/review-<area>-<pass>.json` when it answers, so a restart does not lose it; the reviewer has one budget, 16 tool calls. The review summary says what the filter did (`reviewed 12 changed files (340 lines); 3 findings dropped: outside the change (files: ...)`) and names the lean-agent version the thread ran; a review thread older than 1.0.29 is told to restart first.
 
+#### A later prepare replaces the earlier one (review threads)
+
+The mod keeps ONE prepared state per thread and PR ref: the last `lean_review prepare` (an id like `p2`, its time, head, range, file and area counts, the forge's own file count). Prepare the same PR again (a new base or a newer head) and the new prepare **replaces** the old one; the reply says so ("replaces the earlier prepare of 14:05: 6 areas / 1206 files; now 1 area / 7 files"). The area records of the replaced prepare move into the record's `superseded` history and are never required. `lean_report` done checks the areas of the last prepare only and names it in a refusal; it is also refused, with "the range of the last prepare looks wrong; prepare again", when that prepare holds more files than the forge lists for the PR. `lean_review reset-prepare` (optional `ref`) drops the prepared state of a ref, keeps its records as history and says what it dropped, so a thread is never stuck on stale areas. Not tested against a real Azure DevOps PR whose head is a forge merge commit.
+
 ## Pull request guidelines and review votes (1.0.31)
 
 A review used to post its comments and leave the PR without a state. Now the comments and the state go in one request, and a PR is checked against the repo's own guidelines before it is created. Every write keeps the usual pattern: a typed action, the exact text on the card, your Approve, the token only on stdin.
@@ -1063,9 +1083,34 @@ A review used to post its comments and leave the PR without a state. Now the com
 | Secrets (`secrets`) | Private keys, tokens, connection strings with a password, passwords in URLs in the lines the PR adds: refused with file:line; "lean-agent: allow-secret" on a line is a false alarm. | `pr.checks.secrets` |
 | No force-push (`force`) | A forced push to a branch whose open PR has comments is refused: "push new commits instead". When the forge cannot be asked the push goes on. | `pr.checks.force` |
 | Severity (`severity`) | A review comment with a `severity` (blocker, major, minor, nit, question) starts with that word. | `review.prChecks.severity` |
-| Work item steps | After an Azure DevOps PR is created the thread is told to link it to its stored work items and set them to Reviewing (two asked requests). | none |
+| Work item steps | After an Azure DevOps PR is created the MOD builds ONE request that links it to the thread's stored work item and sets Reviewing, only for your own task (see "Work items and PRs belong to the task"); the thread asks for nothing. | `workitems.afterPr`, `workitems.onlyOwn` |
 
 `pr.checks: false` turns every create-side check off, `pr.checks: {size: false}` one of them; the same for `review.prChecks`. Unset means on. Not tested live: everything is covered by specs with canned `gh`, `az` and `curl` output; nothing was sent to a real Azure DevOps or GitHub.
+
+### Work items and PRs belong to the task (1.0.31)
+
+A task keeps its work item and PR when it changes thread. Each thread row carries `workItem` (id, org, project) and `pr` (number, repo, host), shown in `lean_thread list` as `WI 9840 · PR 5687`.
+
+- **Set by script, from the right places.** `lean_thread new` takes `workitem` and `pr` (a number or the URL). The mod also takes them from the brief and from your last typed prompt, in unambiguous forms only: URLs, `WI 9840`, `work item 9840`, `PR 5687`, `pull request 5687`; a bare `#123` is never taken, and two different work items in one text link none. Correct it with `lean_thread set tN workitem|pr <number|url|none>`. A reference is not ownership.
+- **Carried everywhere.** Every handover has the line `work item: 9840 (project-A), PR: 5687`; `lean_thread new ... continues: "tN"` makes a follow-on that inherits them.
+- **One thread per work item.** `~/.lean-agent/workitems.json` maps work items and PRs to threads; `lean_thread find 9840` lists the owners first. `new` for a work item that already has a thread is refused and points to it; `force` needs your typed words ("new thread"). A follow-up `send` to a thread that reported done restarts it with its handover. A `send` you asked for to a CLOSED thread that has a work item or PR reopens it the same way; a send of the mod itself (a chaser, a timer, a tell: `internal`) never reopens a closed thread.
+- **No duplicate work item.** An `ado-workitem-create` request is refused when the thread already has a work item ("link it with ado-pr-workitem-link instead"); your own words lift that. Otherwise the card shows other threads of the task and the closest titles among your active assigned work items (a read-only WIQL query; `workitems.lookup`).
+- **After a PR is opened, by script, once.** When the desk opens a PR (push with `pr`), or a PR URL is set with `set`, and the thread has a stored work item, the mod builds ONE request: link the PR and move the work item to Reviewing (`workitems.afterPr`, `workitems.reviewState`). One Approve. The thread asks for nothing itself (the push result and the PR skill say so), so there is never a second request.
+- **Only your own tasks are moved.** The link and the state change happen only when the work item is assigned to you and the PR was created by you, read from Azure DevOps itself (reads only). Otherwise the mod does nothing and says one line why. A failed read is never "yours". The same check guards a thread's own `ado-pr-workitem-link` and State `ado-workitem-update` requests, when made and again right before the send; a work item comment is not a move. Only you lift it: `workitems.onlyOwn: false` (default true) or typed words naming the work item ("move WI 9840 anyway").
+
+Not tested live: a real Azure DevOps WIQL query and `connectionData` / `createdBy` / `System.AssignedTo` answers (canned JSON in the specs).
+
+## Budget and window awareness (1.0.31)
+
+Caps used to be dollars per day only: the 5-hour plan window could be 47 % used while every cap said "no cap". Everything below is script-side; no thread-tool parameter was added. All keys are in the settings table (nested or flat).
+
+- **Review: wrong range and cost, before any reviewer starts.** `lean_review prepare` compares the prepared file count with the forge's own count (GitHub `pulls/<n>/files`, Azure DevOps the iteration changes): more than max(`review.preflightMinFiles` 20, `review.preflightRatio` 3 x forge files) stops it ("prepared 380 files, the forge lists 12: wrong range; not starting reviewers"); an unreadable forge never blocks (`review.preflight`). `prepare` prints "3 areas x 1 pass ~ $4.50 (from your last 5 review runs)" (the ledger's median, else $1.50 a pass). Above `review.askAboveUsd` (5) it does not start: the thread asks you with `lean_ask` and runs `prepare` again with `confirm: true` only after your yes; above `review.maxUsd` (25) it refuses unless you say yes anyway.
+- **The 5-hour window** (read from `desk/windows.json`; a window past its reset counts as unmeasured). Over `window.throttleAbove` (70): agents run on haiku only (the guard refuses another model), a new thread with `priority: low` is refused, low-priority threads are parked by script and resumed when the window drops or resets, one desk notice each way; raise the key (100 = off) to lift it. Over `window.blockAbove` (92): no new thread, agent fan-out or reviewer except priority urgent. At your own `window.capFiveHourPct` all new work is held and the desk says when the window resets. `lean_thread list` starts with the window line; `lean_doctor stats` adds it.
+- **Context per thread.** `lean_thread limit tN <tokens>` (40k to 200k, `off` removes it) sets one thread's hard limit, kept over restarts, and the soft line moves with it. A thread over `threads.softCheckpointTokens` (80000, was 100k) is told once to checkpoint at its next natural boundary; an idle one with work left is checkpointed by script. The list shows "ctx 85k/120k (soft 80k)".
+- **Budget per thread.** `lean_thread budget tN <usd>` (0 = none, `off` = `threads.softUsd`, default 8). At 80 % one nudge and one desk notice; at 100 % the thread is told to report and stop and its new agent calls are refused. The list shows "$6.40/$8".
+- **The desk** restarts at `desk.contextLimit` 60000 tokens (was `deskTokens` 100000). Its handover holds the open items, a one-line-per-thread table and an index of what to pull (1789 to 804 tokens in the spec fixture; `handover.mode: full` brings the old one back). Automatic desk restarts keep the 30-minute gap and are capped at `desk.autoRestartPerDay` (default 12; the old fixed cap of 4 would be hit in a day by the lower limit); past it only the Restart desk button works.
+
+Not tested live: real `rateLimits` from a plan, a real Azure DevOps or GitHub PR through the pre-flight, the guard's window rule inside a real Agent call, and the saving itself (synthetic fixture; run `lean_doctor overhead` after a day).
 
 ## Fewer turns, cheaper roles, visible cost (1.0.27)
 

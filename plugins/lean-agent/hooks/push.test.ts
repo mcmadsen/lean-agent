@@ -612,15 +612,16 @@ test('a PR text that breaks the repo template, or a diff with a secret, is refus
   expect(s.pushes()).toHaveLength(1)
 })
 
-test('an Azure DevOps PR the desk opened tells the thread its last steps from the stored work items: link the PR, move the item to Reviewing (each asked)', async () => {
+test('an Azure DevOps PR the desk opened tells the thread the mod asks for the link and Reviewing itself (own task only): the thread requests nothing, no double request', async () => {
   const s = await setup({ urls: { origin: ADO_ORIGIN } })
   s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, workItems: [1234], briefItems: [1234, 99] }))
   const r = await s.push({ pr: { title: 'T' } })
   expect(r.ok, r.text).toBe(true)
-  expect(JSON.parse(s.inbox().trim()).text).toContain('next, one asked request each: ado-pr-workitem-link and ado-workitem-update to Reviewing for work item 1234, 99')
+  expect(JSON.parse(s.inbox().trim()).text).toContain('the mod itself asks the user for the one request that links the PR to work item 1234, 99 and sets Reviewing, only for the user\'s own task (do not request it yourself)')
+  expect(JSON.parse(s.inbox().trim()).text).not.toContain('one asked request each')
   const t = await setup({ urls: { origin: ADO_ORIGIN } })
   await t.push({ pr: { title: 'T' } })
-  expect(JSON.parse(t.inbox().trim()).text).not.toContain('next, one asked request')
+  expect(JSON.parse(t.inbox().trim()).text).not.toContain('the mod itself asks')
 })
 
 test('without a recorded green run the PR opens as a DRAFT with the reason; draft false opens it ready; a push without a PR is not checked', async () => {

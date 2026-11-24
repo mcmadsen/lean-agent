@@ -32,7 +32,8 @@ test('registry: the examples of the request are there, with the right type and s
   }
   for (const k of ['lean.orchestrate', 'actions.holdSeconds', 'actions.ownPrDefault', 'actions.standing', 'threads.plugins', 'threads.mcp', 'workers.commit', 'private', 'dailyCapUsd.desk']) expect(findEntry(k)?.sensitive).toBe(true)
   for (const k of ['desk.model', 'threadTokens', 'budget.daily', 'pane.theme', 'feedback.destination', 'tips']) expect(findEntry(k)?.sensitive).toBeUndefined()
-  expect(findEntry('checkpoint.deskTokens')?.key).toBe('deskTokens') // an alias the reader still accepts
+  expect(findEntry('checkpoint.deskTokens')?.key).toBe('desk.contextLimit') // an alias the reader still accepts
+  expect(findEntry('deskTokens')?.key).toBe('desk.contextLimit')
 })
 
 test('values: each type parses text and rejects what the readers would ignore', async () => {
@@ -70,7 +71,7 @@ test('lookup: nested and flat spellings are read the same; an unknown key gets i
   expect(currentOf({ feedback: { destination: 'folder' } }, e)).toMatchObject({ value: 'folder', style: 'nested' })
   expect(currentOf({ 'feedback.destination': 'github' }, e)).toMatchObject({ value: 'github', style: 'flat' })
   expect(currentOf({}, e)).toBeNull()
-  expect(currentOf({ checkpoint: { deskTokens: 50000 } }, findEntry('deskTokens')!)).toMatchObject({ value: 50000, spelling: 'checkpoint.deskTokens' })
+  expect(currentOf({ checkpoint: { deskTokens: 50000 } }, findEntry('desk.contextLimit')!)).toMatchObject({ value: 50000, spelling: 'checkpoint.deskTokens' })
   expect(nearestKey('desk.autoRestrt')).toBe('desk.autoRestart')
   expect(nearestKey('autoRestart')).toMatch(/autoRestart$/)
   expect(nearestKey('threads.autorestart')).toBe('threads.autoRestart')

@@ -226,3 +226,17 @@ test('send to a DONE thread restarts it by script with its handover and the text
   const p = await call({ action: 'send', tN: 't2', text: 'hello' })
   expect(p.text).toContain('t2 is closed: message queued, no wake')
 })
+
+test('a send of the mod itself (internal: a chaser, a timer, a tell) never reopens a closed thread that has a work item; the user\'s send does', { timeoutMs: 20_000 }, async () => {
+  const { bg, call, row } = world()
+  await call({ action: 'new', title: 'worker telemetry', text: 'WI 9840' })
+  await call({ action: 'close', tN: 't1' })
+  bg.length = 0
+  const m = await call({ action: 'send', tN: 't1', text: '[lean-agent] chaser: report your status', internal: true } as any)
+  expect(m.text).toContain('t1 is closed: message queued, no wake')
+  expect(row('t1').state).toBe('closed')
+  expect(bg).toHaveLength(0)
+  const u = await call({ action: 'send', tN: 't1', text: 'one more question about the fix' })
+  expect(u.text).toContain('t1 was closed: reopened')
+  expect(row('t1').state).toBe('open')
+})

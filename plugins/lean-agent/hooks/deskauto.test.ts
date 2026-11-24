@@ -109,7 +109,7 @@ test('blocked: config off, a turn running, the desk not in the app, a thread que
   expect(seen.restarts).toBe(1)
 })
 
-test('the loop guard: 30 minutes between automatic restarts and fewer than 4 in 24 h; then ONE notice and the amber line', async () => {
+test('the loop guard: 30 minutes between automatic restarts and fewer than desk.autoRestartPerDay (default 12) in 24 h; then ONE notice and the amber line', async () => {
   const { h, run, seen } = world()
   const over = { tokens: 100_000 }
   expect(await run(over)).toBe('restarted')
@@ -124,8 +124,8 @@ test('the loop guard: 30 minutes between automatic restarts and fewer than 4 in 
   expect(h.files.has(notice)).toBe(false) // said once for this restart: not again
   expect(seen.status).toHaveLength(2) // (the amber line stays put)
   expect(seen.restarts).toBe(1)
-  // 4 in a day, 31 minutes apart: the fifth waits for the button; the notice is gone after a restart that went
-  for (let n = 2; n <= 4; n++) {
+  // 12 in a day (the default), 31 minutes apart: the 13th waits for the button; the notice is gone after a restart that went
+  for (let n = 2; n <= 12; n++) {
     h.clock.t += AUTO_GAP_MS + MIN
     resetDeskCompact()
     expect(await run(over)).toBe('restarted')
@@ -134,12 +134,29 @@ test('the loop guard: 30 minutes between automatic restarts and fewer than 4 in 
   h.clock.t += AUTO_GAP_MS + MIN
   resetDeskCompact()
   expect(await run(over)).toBe('guard')
-  expect(seen.status.at(-1)).toMatch(/4 automatic desk restarts in the last 24 h/)
+  expect(seen.status.at(-1)).toMatch(/12 automatic desk restarts in the last 24 h/)
   expect(h.files.has(notice)).toBe(true)
-  expect(seen.restarts).toBe(4)
+  expect(seen.restarts).toBe(12)
   h.clock.t += 24 * 3_600_000
   resetDeskCompact()
   expect(await run(over)).toBe('restarted') // a day later the count is down
+})
+
+test('desk.autoRestartPerDay sets the daily cap (the 30-minute gap stays); a bad value falls back to 12', async () => {
+  const { h, run, seen } = world()
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestartPerDay: 2 } }))
+  const over = { tokens: 100_000 }
+  expect(await run(over)).toBe('restarted')
+  h.clock.t += AUTO_GAP_MS + MIN
+  resetDeskCompact()
+  expect(await run(over)).toBe('restarted')
+  h.clock.t += AUTO_GAP_MS + MIN
+  resetDeskCompact()
+  expect(await run(over)).toBe('guard')
+  expect(seen.status.at(-1)).toMatch(/2 automatic desk restarts in the last 24 h \(the limit is 2/)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestartPerDay: 'many' } }))
+  resetDeskCompact()
+  expect(await run(over)).toBe('restarted') // the default 12 applies again
 })
 
 test('a restart that fails (the opener) is a notice, writes no record for the new desk and is not counted; once per desk session otherwise', async () => {

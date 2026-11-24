@@ -107,7 +107,7 @@ test('an area record is never green and joins the earlier ones of the sha; more 
 
 test('an area prepare writes the area diff to one patch file; recording an area again says it replaces the earlier record', { timeoutMs: 20_000 }, async () => {
   const h = setup(bigDiff(320))
-  const prep = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const prep = await tool(h, { action: 'prepare', base: 'main', level: 'full', confirm: true }) // (6 areas x $1.50 is above review.askAboveUsd: the user said yes)
   const names = [...prep.text.matchAll(/^- (area-\d+):/gm)].map(m => m[1]!)
   const a = await tool(h, { action: 'prepare', base: 'main', level: 'full', scope: names[0] })
   expect(a.text).toContain(`Patch file of ${names[0]}`)

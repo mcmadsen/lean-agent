@@ -19,7 +19,23 @@ Reviews
 Pull requests
 - New request kind `gh-pr-review` (comment, request-changes or approve, with a body) posts a GitHub review through `gh api`, with the head commit read when it is sent. An approval of a PR you wrote is refused, and so is any approval of the PR a thread opened for you (also on Azure DevOps): the mod never approves your own work and never completes a PR.
 - PR guidelines by script. For the repo of a thread, the mod reads the PR template, CONTRIBUTING, CODEOWNERS and the title style of the last merged PRs, and keeps a short record per project. `lean_run {pr-guide: true}` shows it; `{pr-guide: {title, body}}` checks a PR text. The PR skill builds title and description from the template's headings, and the desk's push refuses a PR text that does not follow them, naming the exact missing parts. The approval is kept.
-- More PR checks, each with a switch: a PR over 400 changed lines or 15 files gets a "large PR: consider splitting" note (never a refusal); a diff that adds a private key, a token or a password in a URL is refused with file:line (false alarm: "lean-agent: allow-secret" on the line); a PR whose commit has no green `lean_run` on record opens as a DRAFT; a force-push to a branch whose open PR has comments is refused; after an Azure DevOps PR is created the thread links its work items and moves them to Reviewing (each asked). Switches: `pr.checks: false` or `{guide, size, draft, secrets, force: false}`; `review.prChecks: false` or `{severity, size: false}` for the review side.
+- More PR checks, each with a switch: a PR over 400 changed lines or 15 files gets a "large PR: consider splitting" note (never a refusal); a diff that adds a private key, a token or a password in a URL is refused with file:line (false alarm: "lean-agent: allow-secret" on the line); a PR whose commit has no green `lean_run` on record opens as a DRAFT; a force-push to a branch whose open PR has comments is refused. Switches: `pr.checks: false` or `{guide, size, draft, secrets, force: false}`; `review.prChecks: false` or `{severity, size: false}` for the review side.
+
+Review lessons
+- Lessons learned from earlier reviews now reach every reviewer: `lean_review prepare` picks the lessons that fit the changed files (per area for a PR reviewed by area) and puts a `LESSONS (n of N, ids ...)` block into the brief, or says `lessons: none offered (reason)`; the thread pastes nothing. The review record, the merge answer and the report evidence say which lessons were offered, and warn `lessons: not offered` when no prepare brief of that head carried them. A small general slice per topic is offered too (`review.lessonsFallback`, default 2).
+- A learned line's `paths` are checked as path globs against the project's files (identifiers and phrases are rejected, paths are derived from the finding's file); new actions `lessons-check` (read-only audit) and `lessons-repair` (writes the suggested globs, with a `.bak` copy).
+- A later `lean_review prepare` of the same PR replaces the earlier one, so the areas of a first prepare on a wrong range no longer block `lean_report` done; the refusal names the prepare it checked, and is also refused when the last prepare holds more files than the forge lists. New action `reset-prepare` drops a stale prepare and keeps the records.
+- Before any reviewer starts, `prepare` compares its file count with the forge's ("prepared 380 files, the forge lists 12: wrong range") and prints what the review will cost ("3 areas x 1 pass ~ $4.50"): above $5 the thread asks you first, above $25 it refuses unless you say yes anyway (`review.askAboveUsd`, `review.maxUsd`, `review.preflight`).
+
+Work items and PRs
+- A work item or PR belongs to the task, not to one thread: threads carry it (`WI 9840 · PR 5687` in the list), taken from the brief and your prompt (URLs, "WI 9840", "PR 5687"; never a bare #123), corrected with `lean_thread set tN workitem|pr`, repeated in every handover and inherited by a follow-on thread (`continues`).
+- One thread per work item: a new thread for a work item that already has one is refused and points to it; a follow-up you ask for on a finished or closed thread restarts it with its handover. A send by the mod itself (a chaser, a timer) never reopens a closed thread. A request to create a duplicate work item is refused; otherwise the card shows the closest of your active assigned work items (`workitems.lookup`).
+- After a PR is opened, the mod itself asks for ONE Approve to link it to the work item and set it to Reviewing (`workitems.afterPr`, `workitems.reviewState`); the thread asks for nothing, so there is no second request. It does this only for your own task (work item assigned to you, PR created by you, read from Azure DevOps); otherwise it does nothing and says why. Your words ("move WI 9840 anyway") or `workitems.onlyOwn: false` lift it.
+
+Budget and the 5-hour window
+- The 5-hour plan window slows work down, not only the daily dollars. Above 70 % (`window.throttleAbove`) every new agent runs on haiku, a new thread with `priority: low` is refused and running low-priority threads are parked until the window drops or resets; above 92 % (`window.blockAbove`) no new thread or reviewer starts except priority urgent; at your own `window.capFiveHourPct` all new work is held and the desk says when the window resets. `lean_thread new` takes `priority: low | normal | urgent`.
+- Per-thread context limit (`lean_thread limit t3 90000`, 40k to 200k, `off` removes it) and per-thread budget in USD (`lean_thread budget t3 6`; 80 % one nudge, 100 % report and stop; `threads.softUsd`, default 8). The list shows "ctx 85k/120k (soft 80k)" and "$6.40/$8".
+- Automatic desk restarts are capped at `desk.autoRestartPerDay` (default 12, still at most one every 30 minutes; the old fixed cap of 4 would be reached in a day at the lower desk limit).
 
 Approvals
 - Requests expire after 24 hours (was 2 h): `actions.pendingHours` (default 24).
@@ -50,7 +66,7 @@ Memory
 Settings (lean_config)
 - Settings can be changed from the chat: `/lean-agent:config` lists every setting by group, `<key>` shows one, `<key> <value>` sets it, `reset <key>` restores the default, `validate` checks the file. Every change is checked, written safely, keeps unknown keys and your file's style, never stores a secret, and says when it applies.
 - Settings that loosen a safety rule change only when you typed the name yourself or press Approve on the question for exactly that change; a thread or worker can never change settings. A typo gets "did you mean ...?", and `lean_doctor check` has a settings row.
-- The README has a "Settings (lean_config)" table of all 97 settings, generated from the one list the code uses; a spec fails when the code reads a setting that is not in it.
+- The README has a "Settings (lean_config)" table of all 113 settings, generated from the one list the code uses; a spec fails when the code reads a setting that is not in it.
 
 Pane
 - The inbox is on each thread's card, folded by default: a chip with the unread count ("3 new", amber when the thread also needs you) and "Show messages" / "Hide messages". The bottom "Inbox" lists only senders without a card; "N unread" and "ack all" are on the Threads header.
@@ -60,6 +76,8 @@ Feedback export
 - To GitHub, never automatic: one Approve card "public issue on the lean-agent repo" with the exact title and body; only your Approve runs `gh issue create`. Never covered by standing approvals. Not tested against a real GitHub.
 
 ### Changed
+- Long threads checkpoint earlier: a thread is told once, at 80k tokens (was 100k), to checkpoint at its next natural boundary (`threads.softCheckpointTokens`); the hard limit stays 120k.
+- The desk restarts at 60k tokens (was 100k, `desk.contextLimit`, the older `deskTokens` still counts when it is unset). Its handover holds only the open items, a one-line-per-thread table and an index of what to pull (about 55 % smaller in the spec fixture); `handover.mode: full` brings the old handover back.
 - A thread's restart no longer carries "everything it remembered": your rules come first, the older notes were imported once as facts and are found with `lean_run {pull: "memory"}`.
 - Messages that told you to "raise X in config.json" now name `lean_config set <key> <value>`.
 - A plain Approve is only ever a plain Approve: an answer counts as an option only when it is exactly that option's label, and only the exact "Approve, and allow this kind ... for 24 h" label makes a 24-hour approval.
