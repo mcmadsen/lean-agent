@@ -25,6 +25,7 @@ import { fetchPrs } from './prhost'
 import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
 import { addPrepNote, expectedReviewCost, expectedText, fanOutText, reviewCostLine } from './reviewcost'
 import { spendStop } from './reviewspend'
+import { reviewWindowGate } from './throttle'
 // "\nreview cost for <sha>: $0.84 over 2 passes, 41 requests" (the line every prepare and record reply ends with), or '' when no pass ran for the sha
 const costNote = async (h: Host, project: string, thread: string, sha: string): Promise<string> => {
   const l = await reviewCostLine(h, project, thread, sha).catch(() => '')
@@ -227,6 +228,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const fan = fanOutText(exp, 1)
   const costStop = await spendStop(h, project, exp.usd, fan, i.confirm === true) // above review.askAboveUsd / maxUsd: the user decides first (reviewspend.ts)
   if (costStop) return { ok: false, text: costStop }
+  const hot = await reviewWindowGate(h, thread) // the 5h window (throttle.ts): blocked or capped = no reviewers; throttled = haiku only
+  if (hot.stop) return { ok: false, text: hot.stop }
   const brief0 = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
   const brief = area ? scopedPrep(brief0, keep, areaDiff) : brief0
   const second = !light && !rereview && wantSecondOpinion(prepFor)
@@ -265,7 +268,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
     : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.\n${fan}.${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.\n${fan}.${hot.note ? `\n${hot.note}` : ''}${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {

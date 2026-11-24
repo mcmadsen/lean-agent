@@ -13,6 +13,8 @@ import { appChoseText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
 import { windowLine } from './windows'
+import { throttleLine, windowState } from './throttle'
+import { budgetLine } from './budgetthread'
 export { windowLine } // for the pane (pane.tsx is not edited here): `windowLine(h)` is one line of text
 
 export const STATS_DAYS = 7
@@ -65,6 +67,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   const out: string[] = []
   out.push(await windowLine(h)) // the plan windows lead: "5h window: 78% used, resets 14:20 (in 1h 13m) | 7d: 41% (snapshot 3 min old)"
   out.push(`lean-agent stats: last ${n} day(s) to ${today}`)
+  if ((await windowState(h)).level !== 'ok') out.push(await throttleLine(h)) // "5h window 74%: throttled above 70%: new agents haiku only, ..." (throttle.ts)
   // the period and the files this report read, and a warning when the live file starts inside the window (a rotation moved older rows)
   const read = Object.keys(ro.files).sort()
   out.push(`period: ${span[0]} 00:00Z to now; ledger files read: ${read.join(', ') || 'none'} (rows: ${ro.rows})`)
@@ -72,6 +75,8 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   const rotated = read.filter(f => f !== LEDGER)
   if (start && rotated.length && start.ts > Date.parse(`${span[0]}T00:00:00Z`)) out.push(`WARNING: ledger.jsonl starts at ${new Date(start.ts).toISOString().slice(0, 16).replace('T', ' ')} UTC (rotated); older rows of this window are in ${rotated.join(', ')}, which this report read too`)
   out.push(`spend: today ${usd(td?.t[0] ?? 0)} (${td?.t[5] ?? 0} req) · ${n}d ${usd(sum.t[0])} (${sum.t[5]} req)`)
+  const bl = await budgetLine(h).catch(() => '') // "thread budgets (threads.softUsd 8): t1 $21.00/$8!" (budgetthread.ts)
+  if (bl) out.push(bl)
   // caps (config.json dailyCapUsd) against today, per role
   const cfg: any = await readConfig(h, home)
   const caps = cfg?.dailyCapUsd && typeof cfg.dailyCapUsd === 'object' ? (cfg.dailyCapUsd as Record<string, number>) : {}
