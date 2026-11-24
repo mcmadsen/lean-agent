@@ -142,6 +142,9 @@ export const REGISTRY: readonly Entry[] = [
   mk('refusals.repeat', 'number', 3, 'other', 'now', 'refusals.ts', 'How often one refusal pattern repeats before the doctor names it.', n(2, { int: true })),
   // ---- pane ----
   mk('pane.theme', 'enum', 'off', 'pane', 'desk-restart', 'look.ts', 'Give the app lean-agent\'s own look (on) or leave it alone (off).', { values: ['on', 'off'] }),
+  mk('pane.sort', 'enum', 'active', 'pane', 'now', 'panelist.ts', 'How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), cost or name. The pane\'s sort chips set it.', { values: ['active', 'needs', 'cost', 'name'], flat: true }),
+  mk('pane.maxSessions', 'number', 30, 'pane', 'now', 'panelist.ts', 'Sessions the desk pane lists before one "show more" row (a session with an unread message or something waiting for you is always listed).', { min: 5, max: 500, int: true, flat: true }),
+  mk('pane.healthOpen', 'boolean', false, 'pane', 'now', 'panelist.ts', 'Start the pane\'s Health card (findings, fixes, standing approvals) unfolded (true); by default it starts folded and is highlighted when something needs a fix.', { flat: true }),
   // ---- feedback ----
   mk('feedback.destination', 'enum', 'local', 'feedback', 'now', 'feedbackdest.ts', 'Where the feedback export goes: local, folder, github or folder+github.', { values: ['local', 'folder', 'github', 'folder+github'], flat: true }),
   mk('feedback.folder', 'path', null, 'feedback', 'now', 'feedbackdest.ts', 'Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads.', { flat: true }),

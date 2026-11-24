@@ -77,6 +77,7 @@ export type Thread = {
   effort?: string // low | medium | high
   effortSet?: boolean // a call named the effort (lean_thread new / start ... effort:); an effort that was only the default is recomputed at every start (models.ts)
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
+  closedAt?: number // ms the thread was closed (the pane's closed rows carry "closed 3 h ago")
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
   version?: string // the lean-agent version the DESK saw installed when the session was last started or resumed (what the session really runs is `running`)
   running?: { version: string; sid: string; at: number } // written by the session's own mod at its start: the code it runs (skew.ts runningOf)
@@ -1362,6 +1363,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
             return { ok: false, text: `${id} is closing, not closed: claude agents failed twice, so it may still run. Stop it from the Claude app, then close ${id} again.` }
           }
           t.state = 'closed'
+          t.closedAt = await h.clock.now()
           await revokeModelApprovals(h, id).catch(() => undefined) // an approval ends with the thread (a reopen asks again)
           await dropActions(h, id).catch(() => undefined) // and so does a request for a remote write that was never answered
           await dropGrants(h, id).catch(() => undefined) // and its standing approvals end with it
