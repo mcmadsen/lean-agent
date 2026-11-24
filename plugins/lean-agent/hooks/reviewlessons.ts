@@ -16,7 +16,7 @@ import { countsLine, lastFetchCounts } from './prhost'
 
 export type Family = 'review-checklist' | 'shared-helpers'
 export const FAMILIES: Family[] = ['review-checklist', 'shared-helpers']
-export type Lesson = { id: number; family: Family; topic: string; text: string; paths: string[]; keywords: string[]; source: string; added: string; batch?: string; dropped?: string; droppedWhy?: string }
+export type Lesson = { id: number; family: Family; topic: string; text: string; paths: string[]; keywords: string[]; source: string; added: string; broad?: boolean; batch?: string; dropped?: string; droppedWhy?: string }
 
 export const DEFAULT_TOKENS = 3200 // about 4 cards of 800 tokens, what 0.45 offered a review (config.json review.lessonTokens)
 export const TOPIC_TOKENS = 800
@@ -148,9 +148,91 @@ async function logBatch(h: Host, home: string, project: string, ops: Op[], ts: n
   await atomicWrite(h, batchFile(home, project), JSON.stringify([...(Array.isArray(d) ? d : []), { ts, ops }].slice(-30), null, 1) + '\n')
 }
 
+// ---- path validation: a lesson's `paths` must be path GLOBS that the repository's own files can match ---------------------------------
+// pathsIn() reads paths out of the line's words, so an identifier ("vaultId/groupId") or a phrase ("fail-open/fail-closed") used to land in
+// `paths` and never matched a changed file. At learn time (and in lessons-check / lessons-repair) every path is checked: syntax first, then
+// against `git ls-files` (case-insensitive); the rest is DERIVED by script from the finding's file or from the words matched against file names.
+const GLOB_EXAMPLE = 'e.g. src/auth/** or src/lib/dates.ts'
+export function globSyntax(p: string): string {
+  if (/\s/.test(p)) return `has a space: a phrase is not a path glob (${GLOB_EXAMPLE})`
+  if (!/^[A-Za-z0-9._\-*/@]+$/.test(p)) return `has characters other than letters, digits and . _ - * / (${GLOB_EXAMPLE})`
+  const segs = p.split('/')
+  if (segs.some((s, i) => (!s && i < segs.length - 1) || s === '..')) return `has an empty or .. segment (${GLOB_EXAMPLE})`
+  if (!/[/*]/.test(p) && !/\.[A-Za-z0-9]{1,8}$/.test(p)) return `has no / , * or file extension: a bare word is an identifier, not a path (${GLOB_EXAMPLE})`
+  const g = p.includes('*') ? globProblem(p) : ''
+  return g ? `is not a valid glob: ${g}` : ''
+}
+const globLike = (p: string) => p.includes('*') || EXT.test(p) || /\.[A-Za-z0-9]{1,8}$/.test(p)
+export async function repoFiles(h: Host, repo: string): Promise<string[] | null> {
+  if (!repo.startsWith('/')) return null
+  const out = await git(h, repo, 'ls-files')
+  return out === null ? null : out.split('\n').filter(Boolean)
+}
+const lowFiles = (files: string[]) => files.map(f => f.toLowerCase())
+// the paths worth keeping, and what was wrong with the others; files null = syntax only (no repo to look at)
+export function checkPaths(paths: string[], files: string[] | null): { keep: string[]; notes: string[] } {
+  const keep: string[] = []
+  const notes: string[] = []
+  const low = files ? lowFiles(files) : null
+  for (const raw of paths) {
+    const p = clean(String(raw))
+    const bad = globSyntax(p)
+    if (bad) { notes.push(`path "${p.slice(0, 60)}" rejected: ${bad}`); continue }
+    if (low && !pathHit(p.toLowerCase(), low)) {
+      if (!globLike(p)) { notes.push(`path "${p}" rejected: matches no file in the repo and is no glob (an identifier or phrase?); ${GLOB_EXAMPLE}`); continue }
+      notes.push(`warning: path "${p}" matches no file in the repo`)
+    }
+    if (!keep.includes(p)) keep.push(p)
+  }
+  return { keep, notes }
+}
+const GENERIC = new Set(['logger', 'log', 'metric', 'comment', 'mock', 'candidate', 'test', 'value', 'field', 'name', 'code', 'function', 'file', 'check', 'add', 'change'])
+// derived globs: the finding's own file, else the top 3 directories whose file names the lesson's words match
+export function derivePaths(text: string, files: string[], file = ''): { paths: string[]; how: string } {
+  const low = lowFiles(files)
+  const f = clean(file).toLowerCase()
+  if (f) {
+    const i = low.indexOf(f)
+    if (i >= 0) return { paths: [files[i]!], how: "the finding's own file" }
+    const d = dirName(f)
+    if (d && low.some(x => x.startsWith(d + '/'))) return { paths: [`${files[low.findIndex(x => x.startsWith(d + '/'))]!.slice(0, d.length)}/**`], how: "the folder of the finding's file" }
+  }
+  const words = [...new Set(wordsOf(text).filter(w => w.length >= 4))].slice(0, 20)
+  const byDir = new Map<string, number>()
+  low.forEach((p, i) => {
+    const segs = files[i]!.split('/')
+    if (segs.length < 2) return
+    const dir = segs.slice(0, Math.min(2, segs.length - 1)).join('/')
+    const n = words.filter(w => p.includes(w)).length
+    if (n) byDir.set(dir, (byDir.get(dir) ?? 0) + n)
+  })
+  const top = [...byDir].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0])).slice(0, 3)
+  return { paths: top.map(([d]) => `${d}/**`), how: top.length ? `the words of the line matched file names in ${top.map(([d]) => d).join(', ')}` : '' }
+}
+export type PathExtra = { file?: string; paths?: string[]; broad?: boolean }
+// l.paths = the valid ones, else derived ones; ok false = no valid path could be found and the learner did not say `broad`
+export function settlePaths(l: Lesson, files: string[] | null, ex: PathExtra = {}): { ok: boolean; notes: string[] } {
+  const c = checkPaths([...(ex.paths ?? []), ...l.paths], files)
+  const notes = c.notes.map(n => `#${l.id}: ${n}`)
+  let paths = c.keep
+  if (!paths.length && files) {
+    const d = derivePaths(l.text, files, ex.file)
+    paths = d.paths
+    if (paths.length) notes.push(`#${l.id}: paths derived from ${d.how}: ${paths.join(', ')}`)
+  }
+  if (!paths.length) {
+    if (ex.broad === true) { l.paths = []; l.broad = true; notes.push(`#${l.id}: stored with paths [] and broad: true (offered by its words and in the general slice)`); return { ok: true, notes } }
+    if (!files) { l.paths = []; return { ok: true, notes: [...notes, `#${l.id}: no path (the repo was not read)`] } }
+    return { ok: false, notes: [...notes, `NOT added: no valid path for "${l.text.slice(0, 70)}": give {text, file: "src/x.ts"} (the file of the finding) or {text, paths: ["src/x/**"]}, or {text, broad: true} for a line that holds for every change`] }
+  }
+  l.paths = paths.slice(0, 6)
+  return { ok: true, notes }
+}
+
 // ---- learning: add (near-duplicates skipped, a helper's name updates its line), replace, remove, undo, list -----------------
-export type LearnIn = { checklist?: unknown[]; helpers?: unknown[]; replace?: unknown[]; source?: string }
-export type LearnOut = { added: string[]; updated: string[]; skipped: string[]; refused: string[] }
+// `files`: the repo's file list (git ls-files) the paths are checked against; null = no repo, syntax only; undefined = not checked at all
+export type LearnIn = { checklist?: unknown[]; helpers?: unknown[]; replace?: unknown[]; source?: string; files?: string[] | null }
+export type LearnOut = { added: string[]; updated: string[]; skipped: string[]; refused: string[]; unpathed: string[]; notes: string[] }
 const helperLine = (h: any): string => (typeof h === 'string' ? lineOf(h) : h && typeof h === 'object' && String(h.name ?? '').trim() ? lineOf(`${String(h.name).trim()} (${String(h.where ?? '?').trim() || '?'}): ${String(h.what ?? '').trim()}`.replace(/: $/, '')) : '')
 export async function learnLessons(h: Host, project: string, inp: LearnIn): Promise<LearnOut> {
   if (!slugOk(project)) throw new Error('review lessons need a project name')
@@ -159,13 +241,19 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
   const cap = await lessonCap(h)
   return withFolderLock(h, lockOf(home, project), async () => {
     const all = await readLessons(h, project)
-    const out: LearnOut = { added: [], updated: [], skipped: [], refused: [] }
+    const out: LearnOut = { added: [], updated: [], skipped: [], refused: [], unpathed: [], notes: [] }
     const ops: Op[] = []
     const source = (inp.source || 'review-learn').slice(0, 60)
     const batch = `${day(now)}-${now}`
     const upd = (l: Lesson, text: string) => {
-      ops.push({ kind: 'update', id: l.id, old: { ...l } })
+      const old = { ...l }
+      ops.push({ kind: 'update', id: l.id, old })
       Object.assign(l, makeLesson(l.id, l.family, text, { source: l.source, added: l.added, batch: l.batch }))
+      if (inp.files !== undefined && l.family === 'review-checklist') {
+        const s = settlePaths(l, inp.files, { broad: old.broad })
+        out.notes.push(...s.notes)
+        if (!s.ok) { l.paths = old.paths; if (old.broad) l.broad = true } // (a corrected line that finds no path keeps the old ones)
+      }
     }
     for (const r of Array.isArray(inp.replace) ? inp.replace : []) {
       const o = lineOf(String(asObj(r).old ?? ''))
@@ -174,20 +262,27 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
       const hit = live(all).map(l => ({ l, s: jaccard(wset(l.text), wset(o)) })).filter(x => x.s >= 0.7).sort((a, b) => b.s - a.s || a.l.id - b.l.id)[0]
       if (hit) { upd(hit.l, n); out.updated.push(`corrected #${hit.l.id}: ${n}`) } else out.skipped.push(`replace: no line like "${o.slice(0, 60)}"`)
     }
-    const add = (family: Family, text: string) => {
+    const add = (family: Family, text: string, ex: PathExtra = {}) => {
       if (!text) return
       if (live(all).length >= cap.max) { out.refused.push(text); return }
       const fresh = makeLesson(nextId(all), family, text, { source, added: day(now), batch })
+      if (inp.files !== undefined && family === 'review-checklist') {
+        const s = settlePaths(fresh, inp.files, ex)
+        out.notes.push(...s.notes.filter(n => s.ok || !n.includes('NOT added')))
+        if (!s.ok) { out.unpathed.push(s.notes.find(n => n.includes('NOT added')) ?? text); return }
+      }
       all.push(fresh)
       ops.push({ kind: 'add', id: fresh.id })
       out.added.push(`#${fresh.id} ${family}: ${text}`)
     }
     for (const c of Array.isArray(inp.checklist) ? inp.checklist : []) {
-      const t = lineOf(String(c ?? ''))
+      const o = asObj(c)
+      const t = lineOf(String(typeof c === 'string' ? c : o.text ?? ''))
       if (!t) continue
+      const ex: PathExtra = typeof c === 'string' ? {} : { file: typeof o.file === 'string' ? o.file : undefined, paths: Array.isArray(o.paths) ? o.paths.filter((x: unknown): x is string => typeof x === 'string') : undefined, broad: o.broad === true }
       if (live(all).some(l => similar(l.text, t))) out.skipped.push(`already there: ${t.slice(0, 80)}`)
       else if (removedByUser(all).some(l => similar(l.text, t))) out.skipped.push(`removed earlier, not added again: ${t.slice(0, 80)}`)
-      else add('review-checklist', t)
+      else add('review-checklist', t, ex)
     }
     for (const hv of Array.isArray(inp.helpers) ? inp.helpers : []) {
       const t = helperLine(hv)
@@ -527,7 +622,7 @@ export function splitChecklist(list: unknown[]): { store: unknown[]; routed: { a
     const text = lineOf(String(typeof c === 'string' ? c : o.text ?? ''))
     if (!text) continue
     const area = typeof c === 'string' ? '' : String(o.area ?? '').trim()
-    if (!area) store.push(text)
+    if (!area) store.push(typeof c !== 'string' && (o.file || Array.isArray(o.paths) || o.broad === true) ? { text, file: o.file, paths: o.paths, broad: o.broad } : text) // (the learner's own path hints travel with the line)
     else if (AREA.test(area) && !area.split('/').includes('..')) routed.push({ area: area.replace(/\/+$/, ''), text })
     else bad.push(`area "${area.slice(0, 40)}" is not a folder or rule name: ${text.slice(0, 60)}`)
   }
@@ -555,8 +650,12 @@ async function learnTool(h: Host, project: string, i: any): Promise<{ ok: boolea
       helpers = ok
     }
   }
-  const r = await learnLessons(h, project, { checklist: split.store, helpers, replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
-  const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`), ...refusedHelpers, ...split.bad.map(x => `NOT added: ${x}`), ...notes]
+  // the paths of the checklist lines are checked against the repo's own files (git ls-files): null = no repo, only the syntax is checked
+  const repoDir = await repoOf(h, project, str(i.repo) || undefined)
+  const files = split.store.length || (Array.isArray(i.replace) && i.replace.length) ? await repoFiles(h, repoDir) : null
+  if (files === null && split.store.length) notes.push(`paths were NOT checked against the repo's files (${repoDir.startsWith('/') ? 'git ls-files failed' : 'no repo: pass repo, or register the project'}); lessons-check finds them later`)
+  const r = await learnLessons(h, project, { checklist: split.store, helpers, replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined, files })
+  const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`), ...r.unpathed, ...r.notes, ...refusedHelpers, ...split.bad.map(x => `NOT added: ${x}`), ...notes]
   if (split.routed.length) {
     const byArea = new Map<string, string[]>()
     for (const x of split.routed) byArea.set(x.area, [...(byArea.get(x.area) ?? []), x.text])

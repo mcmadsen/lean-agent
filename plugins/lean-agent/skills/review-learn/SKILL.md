@@ -33,6 +33,10 @@ roles: desk, thread
    capped at 25 lines; the store has its own, much larger cap). First `lean_review` `lessons-list` (`project`) to see what
    is there. Then one `lean_review` `learn` call (`project`, `source` e.g. "review-learn <date>"):
    - `checklist`: general lines, each "Before adding X, check Y in Z" or "When changing X, also Y". No PR numbers, names or dates.
+     A line's `paths` must be path globs the repo's files match (`src/auth/**`, `src/lib/dates.ts`), never an identifier or a phrase
+     (`vaultId/groupId`, `fail-open/fail-closed`): the tool rejects those and derives globs from the finding's file or the line's words,
+     and says what it derived. Give `{text, file}` (the file of the finding) or `{text, paths}` when you know them; `{text, broad: true}` only for a
+     line that holds for every change (stored with `paths: []`). A line that gets no valid path is refused with how to fix it.
      **One test for where a line goes:** would a reviewer check it in ANY change (a string, stored here), or does it only describe one
      area's commands or layout (how that folder builds, tests or is laid out)? Give the second kind as `{text, area}` (`area` = the
      folder or rule name): the tool does not store it, it hands it back under "NOT stored" and you put it into that area's rule with the
