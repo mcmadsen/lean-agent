@@ -53,7 +53,7 @@ function basePattern(rawText: string, agent: string): Pattern {
     return { key: `edit:${dir}`, label: `a worker's edit outside its grant (older wording): ${dir}`, fix: 'older lean-agent wording (a grant refusal): since 1.0.18 a worker edits anywhere the permission check allows, no grant needed' }
   }
   if (/strict mode: route this to a thread/.test(text)) return { key: 'desk-strict', label: 'the desk was refused a command or file (strict mode)', fix: 'the desk routes work to a thread (thread skill); it reads only under ~/.lean-agent and runs the read-only git / gh forms' }
-  if (/subagent cap reached/.test(text)) return { key: 'cap', label: 'the subagent cap was reached', fix: 'raise agents.cap in config.json, or do the rest in the thread (reviewer passes never count)' }
+  if (/subagent cap reached/.test(text)) return { key: 'cap', label: 'the subagent cap was reached', fix: 'raise it with lean_config set agents.cap <n>, or do the rest in the thread (reviewer passes never count)' }
   m = /^lean-agent: (\S+) needs the user's approval/.exec(text)
   if (m) return { key: `model:${m[1]}`, label: `${m[1]} was refused until the user approves it`, fix: 'approve it in the pane (Needs you) when it is worth it, otherwise start the work on sonnet' }
   if (/push gate/.test(text)) return { key: 'push-gate', label: 'a thread tried git push', fix: 'a thread never pushes: run the full review, then lean_report "ready to push <sha>"; the desk pushes after the user\'s yes' }
@@ -82,7 +82,7 @@ const RULE_FIX: Record<string, string> = {
   'allow-mcp-write-tool': 'a worker has read-only MCP access: the write goes through the thread and the desk\'s approval',
   'delegation-denied': 'the permission check (auto mode classifier or a rule) denied the thread\'s worker call (the reason category is in the row): the thread may edit its registered worktrees and the paths its brief named itself for the rest of the session (the permission check still judges it), or retry with a narrower brief: one file plus its spec, the exact change, one test command, an additive step first; not a lean-agent fault',
   'self-edit-grant': 'the thread edited / read / searched inside a worktree the user let it edit itself (a signed grant from the user\'s words or click; `lean_thread allow-self-edit`): counted, not a refusal',
-  'context-limit': 'the thread reached threadTokens: its state is saved, a fresh session continues from the handover (end the turn; raise threadTokens in config.json if the limit is too small)',
+  'context-limit': 'the thread reached threadTokens: its state is saved, a fresh session continues from the handover (end the turn; raise the limit with lean_config set threadTokens <n> if it is too small)',
   'run-refused': 'lean_run runs tests and builds only: push and forge commands are the desk\'s',
 }
 const RULES: [string, RegExp][] = [

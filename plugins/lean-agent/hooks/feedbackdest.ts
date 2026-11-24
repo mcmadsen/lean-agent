@@ -31,14 +31,14 @@ export async function feedbackConfig(h: Host, home: string): Promise<FeedbackCfg
   let dest: FeedbackDest = 'local'
   if (rawDest !== undefined) {
     if (typeof rawDest === 'string' && (FEEDBACK_DESTS as readonly string[]).includes(rawDest.trim())) dest = rawDest.trim() as FeedbackDest
-    else problems.push(`config.json feedback.destination ${JSON.stringify(rawDest).slice(0, 40)} is not one of ${FEEDBACK_DESTS.join(', ')}: using local`)
+    else problems.push(`config.json feedback.destination ${JSON.stringify(rawDest).slice(0, 40)} is not one of ${FEEDBACK_DESTS.join(', ')}: using local (fix: lean_config set feedback.destination <word>)`)
   }
   let folder = ''
   if (rawFolder !== undefined) {
     if (typeof rawFolder === 'string' && rawFolder.trim() && !/[\u0000-\u001f]/.test(rawFolder)) folder = rawFolder.trim()
-    else problems.push(`config.json feedback.folder must be a path like ~/Downloads (got ${JSON.stringify(rawFolder).slice(0, 40)})`)
+    else problems.push(`config.json feedback.folder must be a path like ~/Downloads (got ${JSON.stringify(rawFolder).slice(0, 40)}; fix: lean_config set feedback.folder ~/Downloads)`)
   }
-  if (wantsFolder(dest) && !folder && !problems.some(p => p.includes('feedback.folder'))) problems.push(`config.json feedback.destination is ${dest} but feedback.folder is not set: exports stay local`)
+  if (wantsFolder(dest) && !folder && !problems.some(p => p.includes('feedback.folder'))) problems.push(`config.json feedback.destination is ${dest} but feedback.folder is not set: exports stay local (fix: lean_config set feedback.folder ~/Downloads)`)
   return { dest, folder, set: rawDest !== undefined || rawFolder !== undefined, problems }
 }
 

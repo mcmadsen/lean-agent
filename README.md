@@ -293,14 +293,14 @@ reply, a comment, a work item update or any kind that carries text. Two ways, an
   thread's `history.jsonl` (`standing-grant`). A tool cannot create one: no action kind, report or message writes the grant store, and a
   spec (in `skills-contract.test.sh`) keeps the writer to the human's answer (the pane press, or the answer to the desk's question as the
   tool result carries it).
-- **A rule you write by hand** in `~/.lean-agent/config.json` (sessions cannot write that file; the guard refuses it):
+- **A rule you write yourself** in `~/.lean-agent/config.json` (sessions cannot write that file; the guard refuses it; type `/lean-agent:config actions.standing <the JSON list>` in the chat box and the mod writes it, see Settings):
   `"actions": { "standing": [{ "project": "Shop App", "kinds": ["ado-pr-thread-status"], "statuses": ["fixed"] }] }`. `project` is the
   Azure DevOps project (for `gh-pr-thread-resolve`: the repo, `owner/name` or the name, or the lean-agent project of the thread). The rule
   is not bound to a thread or a PR. Only fixed, closed and active can be named.
 
 With a grant or a rule, a request of those kinds is executed by the mod at once, by the same executor as an approved request (signature,
 hash re-check, token on stdin), reported to the thread in the `lean_report` reply, and shown in the pane as "sent under your standing
-approval: set thread 7 of PR 42 to fixed" with a **Revoke** button for a grant (a rule is removed by editing `config.json`). A `batch` is
+approval: set thread 7 of PR 42 to fixed" with a **Revoke** button for a grant (a rule is removed with `/lean-agent:config reset actions.standing`). A `batch` is
 covered only when EVERY item is covered; one reply or comment in it, another PR, another thread (for a grant) or another status and the
 user is asked as usual. `lean_thread action-list` shows the active grants and the number of rules; the desk does not ask again.
 

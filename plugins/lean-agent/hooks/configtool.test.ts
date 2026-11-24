@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { check } from './doctor'
 import { resetLocks } from './threads'
 import { recordHumanPrompt } from './humanprompts'
 import { bindConfigAnswers, configRow, configTool } from './configtool'
@@ -210,6 +211,20 @@ test('doctor row: nothing for a default install, the differing keys and the inva
   expect(bad.text).toBe('config: 0 settings differ from the defaults, 2 invalid')
   expect(bad.fix).toBe('lean_config validate')
   expect((await configRow(setup(undefined, '{ nope').host))!.ok).toBe(false)
+})
+
+test('lean_doctor check: the config row, a FIX naming lean_config validate only when something is invalid', async () => {
+  const doc = (conf?: unknown) => {
+    const h = setup(conf)
+    h.files.set('/p/.claude-plugin/plugin.json', JSON.stringify({ version: '1.0.4' }))
+    h.claude.handler = (a: string[]) => ({ exitCode: 0, stdout: a[0] === '--version' ? '2.1.327 (Claude Code)\n' : '' })
+    return check(h.host, '/p')
+  }
+  expect((await doc()).some(r => r.includes('config:'))).toBe(false)
+  const ok = (await doc({ desk: { model: 'opus' }, threads: { autoRestart: false } })).find(r => r.includes('config:'))!
+  expect(ok).toMatch(/^ok\s+config: 2 settings differ from the defaults \(desk\.model, threads\.autoRestart\), 0 invalid$/)
+  const bad = (await doc({ desk: { model: 'gpt' } })).find(r => r.includes('config:'))!
+  expect(bad).toMatch(/^FIX\s+config: 0 settings differ from the defaults, 1 invalid; fix: lean_config validate$/)
 })
 
 // ---- the tool through the engine: desk only ----
