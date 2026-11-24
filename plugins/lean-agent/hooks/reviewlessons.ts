@@ -321,7 +321,7 @@ export async function verifyLessons(h: Host, project: string, repo: string, appl
 }
 
 // ---- selection --------------------------------------------------------------------------------------------------------------------
-export type Pick = { id: number; family: Family; topic: string; why: string; score: number }
+export type Pick = { id: number; family: Family; topic: string; why: string; score: number; general?: boolean }
 export type LessonsOut = { text: string; picked: Pick[]; tokens: number; total: number }
 const dirName = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')
 // a folder's neighbours: the same folder, or its parent / child one level away (never the repo root against a deep folder)
@@ -443,6 +443,53 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
   const r = await reviewLessons(h, a.project, changed, diff, { budget: a.budget, goal: a.goal })
   const tail = r.total ? `\n(${r.picked.length} of ${r.total} lessons offered for ${changed.length} changed file(s): ${r.picked.map(p => `#${p.id}`).join(' ') || 'none matched'})` : `\n(no learned lessons for ${a.project} yet)`
   return { ok: true, text: r.text + tail }
+}
+
+// ---- the brief's block: lean_review prepare puts the lessons of the prepared files into every reviewer brief --------------------------
+// What a pass was offered: ids, how many of how many, and why none (a missing store, a selector error). The mod's store keeps it per head
+// sha and area (the record and merge replies, and the report evidence, say what was offered or that nothing was).
+export type Offered = { ids: number[]; n: number; total: number; general?: number; why?: string }
+export async function briefLessons(h: Host, project: string, changed: string[], diff: string, goal?: string): Promise<{ text: string; offered: Offered }> {
+  try {
+    const r = await reviewLessons(h, project, changed, diff, { goal })
+    if (!r.total) return { text: 'lessons: none offered (no learned lessons for this project yet)', offered: { ids: [], n: 0, total: 0, why: 'the store is missing or empty' } }
+    const ids = r.picked.map(p => p.id)
+    const general = r.picked.filter(p => p.general).length
+    if (!ids.length) return { text: `lessons: none offered (none of the ${r.total} learned lessons fit these ${changed.length} changed file(s))`, offered: { ids, n: 0, total: r.total, why: 'none fit these files' } }
+    return { text: `LESSONS (${ids.length} of ${r.total}, ids ${ids.map(i => `#${i}`).join(' ')}):\n${r.text}`, offered: { ids, n: ids.length, total: r.total, ...(general ? { general } : {}) } }
+  } catch (e) {
+    const why = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 120)
+    return { text: `lessons: none offered (the selector failed: ${why})`, offered: { ids: [], n: 0, total: 0, why: `the selector failed: ${why}` } }
+  }
+}
+const offerKey = (project: string) => `review.lessons.${project}`
+const OFFER_KEEP = 20
+type OfferEntry = { ts: number; areas: Record<string, Offered> }
+const offers = async (h: Host, project: string): Promise<Record<string, OfferEntry>> => {
+  const v = await h.store.get(offerKey(project)).catch(() => undefined)
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, OfferEntry>) : {}
+}
+export async function noteOffered(h: Host, project: string, sha: string, scope: string, o: Offered): Promise<void> {
+  try {
+    const all = await offers(h, project)
+    const ts = await h.clock.now()
+    all[sha] = { ts, areas: { ...(all[sha]?.areas ?? {}), [scope]: o } }
+    const keep = Object.entries(all).sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0)).slice(0, OFFER_KEEP)
+    await h.store.set(offerKey(project), Object.fromEntries(keep))
+  } catch { /* the note is evidence, never a reason to fail a prepare */ }
+}
+// "lessons offered: #590, #594 (2 of 597)" (per area: "[area-1] ..."), "lessons: none offered (why)", or "lessons: not offered" (a visible WARNING)
+// when no prepare brief of that sha carried the block (the thread skipped prepare's brief). sha '' = the newest prepare of the project (merge names none).
+export async function offeredLine(h: Host, project: string, sha = '', scope = ''): Promise<string> {
+  const all = await offers(h, project)
+  const key = sha && all[sha] ? sha : sha ? '' : Object.keys(all).sort((a, b) => (all[b]?.ts ?? 0) - (all[a]?.ts ?? 0))[0] ?? ''
+  const e = key ? all[key] : undefined
+  const miss = 'WARNING lessons: not offered (no prepare brief of this head carried the lessons block: run lean_review prepare and give the reviewer its brief unchanged)'
+  if (!e || (scope && !e.areas[scope])) return miss
+  const one = (o: Offered) => (o.n ? `${o.ids.map(i => `#${i}`).join(', ')} (${o.n} of ${o.total}${o.general ? `, ${o.general} general` : ''})` : `none offered (${o.why ?? 'nothing fit'})`)
+  const rows = Object.entries(e.areas).sort((a, b) => a[0].localeCompare(b[0]))
+  if (rows.length === 1 && !rows[0]![0]) return rows[0]![1].n ? `lessons offered: ${one(rows[0]![1])}` : `lessons: ${one(rows[0]![1])}`
+  return `lessons offered: ${rows.map(([k, o]) => `${k ? `[${k}] ` : ''}${one(o)}`).join('; ')}`
 }
 
 // ---- learn, the tool side ------------------------------------------------------------------------------------------------------------

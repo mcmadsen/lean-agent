@@ -35,6 +35,7 @@ export async function reviewReport(h: Host, thread: string, stateIn: string, tex
       `verdicts: ${rec.verdicts.join(', ')}`,
       ...(rec.areas ? [`areas: ${Object.entries(rec.areas).map(([n, a]) => `${n} ${a.verdict} (${a.open} open)`).join('; ')}`] : []),
       `findings: ${counts || (rec.findings?.length ? `${rec.findings.length} open` : 'none open')}`,
+      ...(rec.lessons ? [rec.lessons] : []), // (which learned lessons the reviewer's brief carried, or "not offered")
       ...(rec.scoped ? [scopeLine(rec.scoped)] : ['changed-code filter: this record has no filter summary (recorded by an older lean-agent)']), // (the mod's own count: what was reviewed, what was dropped)
     ].join('\n')
     return { ok: true, text: `${text.trimEnd()}\n\n${evidence}` }

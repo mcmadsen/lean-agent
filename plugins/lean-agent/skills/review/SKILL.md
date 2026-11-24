@@ -67,9 +67,7 @@ tool's refusal: do what it says.
    worktree path (git -C <worktree> ...). Print the reviewer line (`reviewer: sonnet x2
    (risk: ...)`, or `reviewer: sonnet (...)`) and the expected cost line so the user sees who reviews, why and what it costs. The reviewer is **always sonnet**; never pass
    `model` to prepare yourself: it is only for a model the brief explicitly names.
-3. **Lessons:** call `lean_review` with `action: "lessons"` (`project`, `base`, `head` = the full HEAD sha, `goal` = the one-line goal from step 1: its words select lessons too) and add the text block it returns to the
-   reviewer's prompt (the project's review checklist and shared helpers that match the changed paths). If the tool says it has no such
-   action or errors, go on without it.
+3. **Lessons:** the prepare text already carries the project's lessons (`LESSONS (n of N, ids ...)` or `lessons: none offered (why)`): paste nothing yourself (`action: "lessons"` is for a manual look only).
 4. **Second opinion (only when prepare says so: a new abstraction or a big diff, never on a re-review):** spawn
    `lean-agent:reader-haiku`, search-only, with the new symbols and files from prepare and this brief: "For each new symbol or file,
    read its definition in the diff, then search the repository (`rg`; by name, key identifiers and behaviour words such as counter,
@@ -87,7 +85,7 @@ tool's refusal: do what it says.
    review, a re-review and a docs/tests-only diff get one. Opus reviews only when `config.json` `review.model` is `opus` or the brief explicitly asks for it AND the
    user approved it in the pane for this thread: without that approval prepare says so, files a request in the pane and sonnet runs; never
    spawn a reviewer on opus (or `worker-opus`) on your own, the guard refuses it ("opus needs the user's approval: report it and stop"). Its prompt: the project path, base and full HEAD sha, the goal, the whole
-   prepare text, the lessons, the second opinion, the project's test command, and these lines, with the real base and full HEAD sha
+   prepare text (lessons included), the second opinion, the project's test command, and these lines, with the real base and full HEAD sha
    filled in (the prepare text already carries this `allow-cmd:` line with your worktree path: keep it as printed; a grant matches the command or a prefix of it followed by more words; nothing else, no pipes or redirects). Your session's
    folder is the thread folder, which is NOT a repository, so every git command names the checkout: `<worktree>` is the absolute path of the
    worktree (or repo) you review, the same path `git -C` takes everywhere else here:
