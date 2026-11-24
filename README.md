@@ -180,9 +180,16 @@ Top to bottom (the desk's pane; any other session sees only the way to the desk 
    line. Buttons: **Open** (the thread's detail pane), **Resume** / **Start**, **Restart** and **Close** (both press twice). The
    branch, commit and verdict are read from the thread's latest reports and the signed review record of the commit they name; a
    record whose signature does not verify counts as "not green".
-4. **Inbox.** Reports and questions grouped by thread, a thread with something unread first and open, unread rows first, then the
-   last 5 read ones ("show all" for the rest). A read row older than 7 days is archived: hidden here, still in
-   `~/.lean-agent/desk/inbox.jsonl`. **ack all** marks everything read.
+4. **The inbox is on each card, folded.** Every thread card carries its own inbox: a small chip with the unread count ("3 new", amber
+   when the thread has something in Needs you; nothing when nothing is unread) and one toggle, **Show messages** / **Hide messages**.
+   The messages are folded by default, even when something is unread; the chip is the only sign, so nothing is hidden silently. Unfolded:
+   unread rows first, then the last 5 read ones ("show all" for the rest), at most 20 rows, each with **ack** / expand. Folding
+   acks nothing, and the folded state is the pane's own (not saved as read). A done thread stays one row: its chip is the toggle, and with
+   nothing unread the toggle is behind "more". The **Inbox (N unread)** section at the bottom is only for senders that have no card (the
+   desk itself, closed threads, system notices), its groups folded the same way; when every row belongs to a card it is hidden. The
+   header row of Threads shows the total ("N unread") and **ack all**. A read row older than 7 days is archived: hidden here, still in
+   `~/.lean-agent/desk/inbox.jsonl`. Pressing **ack** on a row acks only that row and never moves the desk's own read marker. Not judged
+   visually here (no desktop app in the container): the specs check the tree, not the look.
 5. **Goals** (only when there are some), **Closed (N)** and **More** (projects, scripts) are folded sections.
 6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`; nothing is posted),
    **Setup / repair** and **Restart desk**, always here (the header's button shows only near the limit; both press twice and do the same).
