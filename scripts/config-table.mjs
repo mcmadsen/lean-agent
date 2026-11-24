@@ -40,12 +40,12 @@ const w = process.argv.indexOf('--write')
 if (w >= 0) {
   const file = process.argv[w + 1] && !process.argv[w + 1].startsWith('--') ? process.argv[w + 1] : readme
   const cur = readFileSync(file, 'utf8')
-  const re = /(<!-- config-table:start -->\n)[\s\S]*?(\n<!-- config-table:end -->)/
+  const re = /(<!-- config-table:start -->\n)[\s\S]*?<!-- config-table:end -->/
   if (!re.test(cur)) {
     console.error(`${file}: no <!-- config-table:start --> ... <!-- config-table:end --> markers`)
     process.exit(1)
   }
-  writeFileSync(file, cur.replace(re, (_, a, b) => `${a}${table()}${b}`))
+  writeFileSync(file, cur.replace(re, (_, a) => `${a}${table()}\n<!-- config-table:end -->`))
   console.log(`${file}: table written (${REGISTRY.length} keys)`)
   process.exit(0)
 }

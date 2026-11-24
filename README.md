@@ -528,10 +528,118 @@ A polish of the desk pane, and one optional look. **It was not judged visually h
 
 in `~/.lean-agent/config.json`. When on, the look (a calm palette, cool grays and one teal accent, light and dark; danger, success and warning keep red, green and amber) is sent once at each session start with `$.theme.set`, built by `makeColors` (`hooks/make-colors.js`, copied unchanged from the plugin-authoring skill; a spec checks that nothing in its `problems` makes Desktop ignore the theme and that every color name is real). With the config off, or never set, lean-agent sets nothing and clears nothing. The theme is cleared only when the config goes from on to off (the mod keeps one record, `~/.lean-agent/look.json`, so it clears a look it set and never another plugin's at any other time). `lean_doctor` has one row: `pane theme: off`, `on, drawn`, or `on, not drawn: <the reason>` (the terminal and editors draw no look).
 
+## Settings (lean_config)
+
+Every setting of `~/.lean-agent/config.json` can be listed, read, changed and checked from the chat: you never need to edit the file by hand. The desk has one tool for it, `lean_config`; a thread or a worker never has it (a thread that needs a setting changed reports that to the desk, and the desk asks you).
+
+**How to change a setting.** Type it in the chat box, or say it in words and the desk calls the tool:
+
+- `/lean-agent:config` lists the settings per group: key, current value, default, one line of what it does; `*` marks a value that differs from the default.
+- `/lean-agent:config desk.model` shows one setting (value, default, what it accepts, when it applies); `/lean-agent:config desk.model opus` sets it; `/lean-agent:config reset desk.model` puts the default back (the key is removed from the file).
+- `/lean-agent:config validate` checks the whole file: an unknown key is named with the nearest known key ("did you mean desk.autoRestart?"), a bad value with what it accepts, a flat spelling that nothing reads with the nested form to use.
+
+The value is checked against one table (`hooks/configkeys.ts`): the type (true / false, a number in its range, one of the allowed words, a list, a folder that exists; `~` stays as you typed it in the file and is expanded only where the path is used). The file is written atomically, keeps every key lean-agent does not know, the nesting style it already has (`"desk": { "model": ... }` or the flat `"feedback.destination"` where the reader accepts it) and its indent. A value that looks like a secret is refused. The reply says when the change applies: **now**, **from the next session** (threads already running keep the old value) or **after the desk restarts**. A `config.json` that is not valid JSON is never overwritten: the tool says what is wrong. `lean_doctor check` has one row, `config: N settings differ from the defaults (keys), M invalid`, with `lean_config validate` as the fix.
+
+**Sensitive settings.** A setting marked `(sensitive)` in the table loosens a safety rule: turning the execution model off, the approvals and the hold time of remote writes, what a thread or worker may load, run or spend, skipping reviews. The mod changes one only when your own typed words this session name the key (a slash command typed in the chat box counts, a line run in a shell box never reaches the mod) or when you pressed Approve on the question the mod itself asked for exactly that change (bound to the request, like an approval of a thread's remote write). Otherwise the tool refuses and says how to go on: type `/lean-agent:config <key> <value>` in the chat box, or the desk asks you with a question. Resetting a sensitive key follows the same rule.
+
+<!-- config-table:start -->
+| Setting | Group | Type | Default | Applies | What it does |
+| --- | --- | --- | --- | --- | --- |
+| `desk.model` | desk | haiku / sonnet / opus | sonnet | desk restart | Which model the desk session runs on. |
+| `desk.effort` | desk | low / medium / high | high | desk restart | How much effort the desk session puts in. |
+| `desk.blockAppModel` | desk | boolean | false | now | Refuse the app switching the desk to another model (default: it asks you first). |
+| `desk.autoRelay` | desk | boolean | true | now | Hand a thread's report to the desk at once, without waiting for your next message. |
+| `desk.autoResume` | desk | boolean | true | now | Resume a thread blocked by the usage limit two minutes after the limit resets. |
+| `desk.autoRestart` | desk | boolean | true | now | The mod opens a fresh desk itself when the desk must restart (off: only the Restart desk button). |
+| `desk.reportChars` | desk | number >= 0 | 400 | now | Characters of a thread report the desk gets (0 = the whole report). |
+| `deskTokens` | desk | number >= 10000 | 100000 | now | The desk compacts itself when its conversation passes this many tokens. |
+| `deskToolResultChars` | desk | number >= 1 | 6000 | now | Largest tool result the desk keeps whole, in characters (longer ones are cut). |
+| `notify.toast` | desk | boolean | true | now | Show a toast for desk notices. |
+| `notify.sound` | desk | boolean | false | now | Play a sound with a toast (accepted; no sound clip is bundled yet). |
+| `tips` | desk | boolean | true | now | Show an occasional tip about a lean-agent feature. |
+| `tools.desk.drop` | desk | list | [] | desk restart | Tool names (globs allowed) taken away from the desk. |
+| `handover.mode` | desk | core / full | core | now | What a restarted thread gets first: core (only what changes behaviour, rest on request) or full. |
+| `handoverTokens` | desk | number >= 500 | 6000 | now | In full handover mode: the handover is cut to about this many tokens. |
+| `tools.thread.drop` | threads | list | [] | next session | Tool names (globs allowed) taken away from threads. |
+| `threads.model` | threads | haiku / sonnet / opus | sonnet | next session | Which model new threads run on. |
+| `threads.effort` | threads | low / medium / high | medium | next session | How much effort new threads put in (medium; high when lean.orchestrate is off). |
+| `threads.autoRestart` | threads | boolean | true | now | Restart a thread by itself when its context is full (off: it stops and asks). |
+| `threads.stopGraceMinutes` | threads | number >= 0 | 3 | now | Minutes after the stop record before a still-working thread is restarted anyway. |
+| `threads.autoContinue` | threads | boolean | true | now | Continue a thread that ends its turn with "next: ..." (off: no automatic continue). |
+| `threads.continueSeconds` | threads | number >= 1 | 20 | now | Seconds a "next: ..." turn waits before the continue message is sent. |
+| `threads.escalate` | threads | boolean | true | now | Restart a thread that ignored a message from the desk (off: ask you first). |
+| `threads.answerWaitSeconds` | threads | number >= 1 | 45 | now | Seconds a thread has to react to a message before it counts as ignored. |
+| `threads.waitReminderMinutes` | threads | number >= 1 | 15 | now | Minutes an unanswered thread question waits before it comes back once. |
+| `threads.stuckMinutes` | threads | number >= 1 | 10 | now | Minutes an unread message may wait before the thread counts as stuck. |
+| `threads.removeOld` | threads | boolean | true | now | Remove the old stopped session of a thread after a restart. |
+| `threads.stallMinutes` | threads | number >= 1 | 10 | now | Minutes without a tool call or report before a working thread counts as stalled. |
+| `threads.stallRestart` | threads | boolean | false | now | Restart a stalled thread automatically (default: only flag it). |
+| `threads.skills` | threads | lean / all | lean | next session | Skills a thread lists: lean (lean-agent's only) or all. |
+| `threadTokens` | threads | number >= 10000 | 120000 | now | A thread restarts itself when its context passes this many tokens. |
+| `threadWarnTokens` | threads | number >= 10000 | 100000 | now | A thread is told to wrap up when its context passes this many tokens (default 83% of threadTokens). |
+| `threadToolResultChars` | threads | number >= 2000 (0 = off) | 8000 | now | Largest tool result a thread keeps whole, in characters (0 = no cut). |
+| `attribution` | threads | boolean | false | next session | Let threads add Claude attribution lines to commits and pull requests. |
+| `workers.briefChars` (sensitive) | workers | number >= 1 | 3000 | now | Longest brief a worker accepts, in characters. |
+| `workers.steps` (sensitive) | workers | number >= 1 | 24 | now | Most tool calls one worker may make before it must return what it has. |
+| `workers.stepsByJob.lookup` (sensitive) | workers | number >= 1 | 10 | now | Tool calls for a lookup job. |
+| `workers.stepsByJob.edit` (sensitive) | workers | number >= 1 | 16 | now | Tool calls for an edit job. |
+| `workers.stepsByJob.run` (sensitive) | workers | number >= 1 | 6 | now | Tool calls for a run job. |
+| `workers.stepsByJob.check` (sensitive) | workers | number >= 1 | 10 | now | Tool calls for a check job. |
+| `workers.requireJob` | workers | boolean | false | now | Refuse a worker brief whose first line does not name the job. |
+| `workers.answerChars` | workers | number >= 100 | 1200 | now | Characters of a subagent answer that come back into the conversation. |
+| `agentResultChars` | workers | number >= 1 | 6000 | now | Largest result a subagent keeps whole, in characters. |
+| `learn.maxExplorers` | workers | number >= 1 | 4 | now | Explorers the learn skill may run at once. |
+| `ask.model` | workers | haiku / sonnet / opus | haiku | now | Model that answers a thread question put to the desk. |
+| `ask.effort` | workers | low / medium / high | low | now | Effort of the model that answers a thread question put to the desk. |
+| `review.model` | review | string | auto | now | Model of the reviewer (auto picks by the risk of the change). |
+| `review.perMilestone` (sensitive) | review | boolean | true | now | Review again at every milestone (off: skip the pass between milestones). |
+| `review.minLines` (sensitive) | review | number >= 0 | 60 | now | Changed lines since the last pass below which a milestone review is skipped. |
+| `review.exclude` (sensitive) | review | list | [] | now | Globs of files left out of a review (generated files are always left out). |
+| `review.lessonTokens` | review | number >= 1 | 3200 | now | Tokens of review lessons a new review is given. |
+| `review.lessonMax` | review | number >= 1 | 1500 | now | Most review lessons kept per project. |
+| `rulesPr.minSessions` | review | number >= 1 | 3 | now | Sessions a learned rule must have loaded in before it is proposed upstream. |
+| `rulesPr.minDays` | review | number >= 1 | 7 | now | Days a learned rule must have been in use before it is proposed upstream. |
+| `rulesPr.minGaps` | review | number >= 1 | 2 | now | Reports of a missing piece of context before it is proposed as a rule. |
+| `rulesPr.windowDays` | review | number >= 1 | 90 | now | Days back that rule loads and reports are counted. |
+| `budget.daily` | budget | number >= 0 | 25 | now | Daily spend in USD at which the desk is warned (0 = no alert). |
+| `budget.threadDaily` | budget | number >= 0 | 15 | now | Daily spend of one thread in USD at which the desk is warned (0 = no alert). |
+| `dailyCapUsd.desk` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for desk sessions; past it requests are refused (none by default). |
+| `dailyCapUsd.thread` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for thread sessions; past it requests are refused (none by default). |
+| `dailyCapUsd.plain` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for plain sessions; past it requests are refused (none by default). |
+| `workerCapUsd` (sensitive) | budget | number >= 0.01 | none | now | USD one worker may spend before it ends and reports (none by default). |
+| `workerCaps` (sensitive) | budget | json | none | now | USD cap per worker kind, e.g. {"worker-opus": 4}. |
+| `window.holdAbove` | budget | number >= 1 <= 100 | 85 | now | Percent of the usage window above which starting a thread warns and holds. |
+| `pane.theme` | pane | on / off | off | desk restart | Give the app lean-agent's own look (on) or leave it alone (off). |
+| `feedback.destination` | feedback | local / folder / github / folder+github | local | now | Where the feedback export goes: local, folder, github or folder+github. |
+| `feedback.folder` | feedback | path | none | now | Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads. |
+| `threads.plugins` (sensitive) | safety | list or all | [] | next session | Plugins a thread loads besides lean-agent (all = every plugin you have). |
+| `threads.mcp` (sensitive) | safety | all / project / none | all | next session | MCP servers a thread may use: all, project (the project's only) or none. |
+| `threads.tools` (sensitive) | safety | list or all | none | next session | Built-in tools of a thread session (all = the full set; default is a short list). |
+| `threads.directReads` (sensitive) | safety | number >= 0 | 3 | now | Direct file reads a thread may do per turn before it must use a worker. |
+| `threads.workers` (sensitive) | safety | number >= 1 | 4 | now | Workers one thread may run at once. |
+| `workers.commit` (sensitive) | safety | boolean | true | now | A worker may commit its own change when the brief says commit. |
+| `agents.cap` (sensitive) | safety | number >= 1 | none | now | Most subagents a thread session may start (no cap by default; small workers do not count). |
+| `grants.ttlMinutes` (sensitive) | safety | number >= 1 | 120 | now | Minutes a worker slot is held before it counts as ended. |
+| `lean.orchestrate` (sensitive) | safety | boolean | true | next session | The desk only routes and threads only brief workers (off: threads edit and run things themselves). |
+| `actions.holdSeconds` (sensitive) | safety | number >= 0 | 30 | now | Seconds a covered reply or comment is held before it is sent (0 = at once). |
+| `actions.ownPrDefault` (sensitive) | safety | boolean | true | now | A thread owns the pull request it opens: its replies go out without a question. |
+| `actions.ownPrMaxPerDay` (sensitive) | safety | number >= 1 <= 1000 | 20 | now | Pull requests a thread may take as its own per day. |
+| `actions.ownWorkItemStates` (sensitive) | safety | list | ["Reviewing","Active","In Progress","Resolved"] | now | Work item states a thread may move its own work item to. |
+| `actions.maxWritesPerGrant` (sensitive) | safety | number >= 1 <= 1000 | 40 | now | Writes one approval in advance (allow) covers. |
+| `actions.standing` (sensitive) | safety | json | [] | now | Standing approvals: a list of {project, kinds, statuses} that need no question. |
+| `private` (sensitive) | safety | on / off | on | now | Private projects: on keeps them hidden from lists, off shows them. |
+| `tools.plain.drop` | other | list | [] | next session | Tool names (globs allowed) taken away from plain sessions that are not the desk or a thread. |
+| `toolResultChars` | other | number >= 2000 (0 = off) | 20000 | now | Largest tool result kept whole, in characters (0 = no cut). |
+| `refusals.repeat` | other | number >= 2 | 3 | now | How often one refusal pattern repeats before the doctor names it. |
+<!-- config-table:end -->
+
+The table is generated from the registry by `node scripts/config-table.mjs` (`--write` puts it between the markers above); `node scripts/config-table.mjs --check`, run by `hooks/skills-contract.test.sh`, fails when the hooks read a key the registry lacks, an entry has no one-line description, or this table differs from the registry, so the table cannot drift. Add a key to `hooks/configkeys.ts` when you add a reader.
+
 ## Skills
 
 | Skill | Use |
 |---|---|
+| `config` | list, show, change, reset and validate settings through `lean_config` (`/lean-agent:config [key [value]]`), never by hand-editing `config.json` |
 | `thread` | start, message, wake, park, close, list threads |
 | `goals` | one line per thread; the chaser asks a thread that has been quiet for an hour for a status |
 | `handover` | write a handover note for the next session |
