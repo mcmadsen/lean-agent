@@ -34,19 +34,28 @@ export function parseUsd(text: unknown): number | null | string {
 }
 
 // ---- the soft budget of a thread (config threads.softUsd, default 8; thread.json budgetUsd overrides it; 0 = none) ----------------------------------------
-// The thread's spend is its lifetime total in the usage ledger (the rollup, per `tN`). At 80% the thread gets ONE nudge and the desk ONE notice; at 100% the thread is told to
-// report and stop, and the guard refuses its NEW Agent calls (never an edit in progress: no tool of its own is cut). The state is <thread>/budget.json, written by the desk tick.
+// The thread's spend is its lifetime total in the usage ledger (the rollup, per `tN`). At 80% the thread gets ONE nudge and the desk ONE notice; at 100% the DESK gets one notice
+// (raise / park / continue) and the thread goes on: the soft budget never stops a thread by itself. A real stop is the separate hard cap (config threads.hardUsd, none by default):
+// at it the thread is told to report and stop, and the guard refuses its NEW Agent calls (never an edit in progress: no tool of its own is cut).
+// The state is <thread>/budget.json, written by the desk tick.
 export type BLevel = 'ok' | 'near' | 'over'
 export const budgetLevel = (spent: number, budget: number): BLevel => (spent >= budget ? 'over' : spent >= budget * 0.8 ? 'near' : 'ok')
 const money = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2))
 // "$6.40/$8"
 export const budgetText = (spent: number, budget: number): string => `$${spent.toFixed(2)}/$${money(budget)}`
 export const budgetFile = (home: string, id: string) => `${threadsDir(home)}/${id}/budget.json`
-export type BudgetRec = { budget: number; near?: number; over?: number } // when each level was announced (ms), for THIS budget value
+// when each level was announced (ms), for THIS budget value; hard / hardUsd: the hard cap was reached (the guard refuses new Agent calls while it is set)
+export type BudgetRec = { budget: number; near?: number; over?: number; hard?: number; hardUsd?: number }
 
-export const nearNudge = (spent: number, budget: number): string => `[lean-agent] You have used 80% of your budget (${budgetText(spent, budget)}): finish the step you are on, checkpoint (lean_run checkpoint), and report with lean_report. Do not start new work.`
-export const overNudge = (spent: number, budget: number): string => `[lean-agent] Your budget is used (${budgetText(spent, budget)}): report now with lean_report (state done, or blocked with what is left) and stop. New Agent calls are refused; nothing already running is cut.`
-export const budgetRefusal = (budget: number): string => `lean-agent: this thread's budget of $${money(budget)} is used: no new Agent call. Report with lean_report (done, or blocked with what is left) and stop; the user can raise it with lean_thread budget`
+export const nearNudge = (spent: number, budget: number): string => `[lean-agent] You have used 80% of your soft budget (${budgetText(spent, budget)}): this is a nudge, not a stop. Keep going on the cheapest path (a script before a model, haiku workers, no repeat reads) and report with lean_report at the next natural point.`
+export const overNote = (id: string, spent: number, budget: number): string => `${id}: soft budget ${budgetText(spent, budget)} passed: the thread goes on. Raise it (budget ${id} <usd>), park it (thread park ${id}), or leave it (config threads.hardUsd sets a real stop)`
+export const hardNudge = (spent: number, hard: number): string => `[lean-agent] Your hard budget cap is reached (${budgetText(spent, hard)}, config threads.hardUsd): report now with lean_report (state done, or blocked with what is left) and stop. New Agent calls are refused; nothing already running is cut.`
+export const budgetRefusal = (hard: number): string => `lean-agent: this thread's hard cap of $${money(hard)} (config threads.hardUsd) is used: no new Agent call. Report with lean_report (done, or blocked with what is left) and stop; the user can raise threads.hardUsd`
+// the hard cap in USD, or null (the default: none; 0 = none)
+export async function hardOf(h: Host): Promise<number | null> {
+  const n = await cfgNum(h, 'threads.hardUsd')
+  return n !== null && n > 0 ? n : null
+}
 
 // lifetime USD per thread from the rollup (ledger.ts keeps KEEP_DAYS days)
 export async function threadTotals(h: Host): Promise<Record<string, number>> {

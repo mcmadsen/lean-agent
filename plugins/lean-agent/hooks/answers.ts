@@ -6,12 +6,34 @@
 //   - classic.SubagentStop: an answer longer than `workers.answerChars` (default 1200) is answered ONCE with "write the full findings to <path>
 //     and answer again with the path and at most 5 lines"; a second long answer is let through and counted (rule `answer-too-long`)
 // Pure rules plus a little in-memory state (the paths told, the subagents already asked); nothing here touches a tool call.
-import { homeDir, leanDir, readJson } from './state'
+import { appendJsonl, homeDir, leanDir, readJson, readJsonl } from './state'
 import type { Host } from './state'
 
 export const ANSWER_CHARS = 1200
 export const ANSWER_LINES = 5
 export const ANSWER_RULE = 'answer-too-long'
+// A second long answer is let through: nothing was refused, so it is a COUNTER (counters.jsonl, shown by `lean_doctor stats`), never a row of
+// refusals.jsonl (the feedback export and `lean_doctor refusals` list those as refusals).
+export const COUNTERS = 'counters.jsonl'
+export async function countLongAnswer(h: Host, a: { agent: string; chars: number; thread?: string }): Promise<void> {
+  await appendJsonl(h, `${leanDir(await homeDir(h))}/${COUNTERS}`, { ts: await h.clock.now(), rule: ANSWER_RULE, agent: a.agent.replace(/^lean-agent:/, ''), chars: a.chars, ...(a.thread ? { thread: a.thread } : {}) })
+}
+// the stats lines: second long answers let through in the window, by agent type, and the longest
+export async function longAnswerLines(h: Host, now: number, days: number): Promise<string[]> {
+  const since = now - days * 86_400_000
+  const by = new Map<string, number>()
+  let n = 0
+  let max = 0
+  for (const r of await readJsonl<{ ts?: number; rule?: string; agent?: string; chars?: number }>(h, `${leanDir(await homeDir(h))}/${COUNTERS}`)) {
+    if (r?.rule !== ANSWER_RULE || typeof r.ts !== 'number' || r.ts < since) continue
+    n++
+    by.set(String(r.agent ?? '?'), (by.get(String(r.agent ?? '?')) ?? 0) + 1)
+    if (typeof r.chars === 'number') max = Math.max(max, r.chars)
+  }
+  if (!n) return []
+  const who = [...by].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([a, c]) => `${a} ${c}`).join(', ')
+  return [`long answers let through after one reminder (${days}d): ${n} (${who}); longest ${max} characters (workers.answerChars ${ANSWER_CHARS} is a reminder, not a refusal)`]
+}
 
 // the machine lines at the end of an answer (the mod's own records) are not the answer's text
 const MACHINE_LINE = /^\s*`?(LEAN-FEEDBACK|LEAN-AUDIT)\b/

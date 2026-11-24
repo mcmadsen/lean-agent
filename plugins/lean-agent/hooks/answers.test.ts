@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { resetLocks } from './threads'
-import { ANSWER_CHARS, answerCharsOf, answerLength, answersReset, noteAgentCall, scratchPath, startAgent, stopAnswer } from './answers'
+import { ANSWER_CHARS, answerCharsOf, answerLength, answersReset, longAnswerLines, noteAgentCall, scratchPath, startAgent, stopAnswer } from './answers'
 
 const DIR = '/h/.lean-agent/threads/t1'
 const READER = 'lean-agent:reader-haiku'
@@ -72,7 +72,12 @@ test('through the engine: SubagentStart names the file (the call input is not ch
   expect(rows(h).filter((r: any) => r.rule === 'answer-too-long')).toEqual([])
   const b: any = await $.classic.SubagentStop({ ...stop, stop_hook_active: true })
   expect(b.block).toBeUndefined()
-  expect(rows(h).filter((r: any) => r.rule === 'answer-too-long').length).toBe(1)
+  expect(rows(h).filter((r: any) => r.rule === 'answer-too-long')).toEqual([]) // let through: NOT a refusal row (the export lists those)
+  const counted = (h.files.get('/h/.lean-agent/counters.jsonl') ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l))
+  expect(counted.length).toBe(1)
+  expect(counted[0]).toMatchObject({ rule: 'answer-too-long', agent: 'reader-haiku', chars: 2000, thread: 't1' })
+  expect((await longAnswerLines(h.host, h.clock.t + 1000, 7))[0]).toContain('long answers let through after one reminder (7d): 1 (reader-haiku 1); longest 2000 characters')
+  expect(await longAnswerLines(h.host, h.clock.t + 8 * 86_400_000, 7)).toEqual([])
   const c: any = await $.classic.SubagentStop({ ...stop, agent_id: 'agentw2', last_assistant_message: 'path\nok' })
   expect(c.block).toBeUndefined()
 })

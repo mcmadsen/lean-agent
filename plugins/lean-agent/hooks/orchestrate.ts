@@ -121,11 +121,19 @@ const stopped = new Set<string>() // subagents that ended before their launch re
 const MAX_TRACKED = 500
 const budgetHit = new Set<string>() // subagent ids whose call past the step budget was refused
 export const hitBudget = (agentId: string | undefined): boolean => !!agentId && budgetHit.has(agentId)
+// the tool-call count and budget of the refusal just made for a worker (said once per refusal, then gone): the refusal record names them
+const over = new Map<string, { calls: number; budget: number }>()
+export function takeOver(workerKey: string | undefined): { calls: number; budget: number } | null {
+  const o = (workerKey && over.get(workerKey)) || null
+  if (workerKey) over.delete(workerKey)
+  return o
+}
 export const orchTurnStart = (key: string): void => void reads.delete(key)
 export function orchReset(): void {
   reads.clear()
   inflight.clear()
   steps.clear()
+  over.clear()
   notes.clear()
   slots.clear()
   stopped.clear()
@@ -343,6 +351,7 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (n > budget) { // the run used its whole step budget (workerruns.ts counts the share of runs that did)
     if (budgetHit.size >= MAX_TRACKED) budgetHit.delete(budgetHit.values().next().value as string)
     budgetHit.add(k)
+    over.set(k, { calls: n, budget }) // for the refusal record (register.tsx takeOver): how many calls the run made, against which budget
   }
   if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, REVIEWER_STEPS) is used: write the json block with what you have and answer; list what you could not check in unverified`
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
@@ -392,6 +401,7 @@ export function launchOf(r: any, text: string): { async: boolean; agentId?: stri
 // the subagent ended (classic.SubagentStop): its slot and its step count are released
 export function orchAgentEnd(agentId: string): void {
   steps.delete(agentId)
+  over.delete(agentId)
   notes.delete(agentId)
   if (slots.has(agentId)) freeSlot(agentId)
   else {

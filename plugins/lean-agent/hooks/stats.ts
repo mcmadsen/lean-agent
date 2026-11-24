@@ -9,6 +9,7 @@ import type { Host } from './state'
 import { deskChoice, modelFamily, threadChoice } from './models'
 import { loadOrch } from './orchestrate'
 import { tierJobSection } from './workerruns'
+import { longAnswerLines } from './answers'
 import { appChoseText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { isRunning, parseAgents } from './threads'
 import { capStats } from './cap'
@@ -92,6 +93,7 @@ export async function statsText(h: Host, opts: { days?: number; project?: string
   out.push(...table(`by agent (${n}d; main = the session itself)`, sum.agent))
   out.push(...table(`by thread (${n}d)`, sum.tN))
   out.push(...(await tierJobSection(h, now, n).catch(() => [])))
+  out.push(...(await longAnswerLines(h, now, n).catch(() => [])))
   // small messages (cap.ts): characters of Bash / MCP output that were cut before they entered a thread's conversation
   const cut = await capStats(h, now, n).catch(() => ({ results: 0, chars: 0 }))
   if (cut.results) out.push(`output cap (${n}d): saved ${tok(cut.chars)} chars in ${cut.results} result${cut.results === 1 ? '' : 's'} (the full text of each is a file under the thread folder)`)

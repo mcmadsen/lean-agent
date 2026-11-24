@@ -1444,7 +1444,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           await writeJson(h, budgetFile(home, id), {}) // the levels are announced again for the new value
           const b = await budgetOf(h, t)
           const spent = (await threadTotals(h).catch(() => ({}) as Record<string, number>))[id] ?? 0
-          return { ok: true, text: b === null ? `${id}: no soft budget (spent $${spent.toFixed(2)})` : `${id}: soft budget $${b}${v === null ? ' (config threads.softUsd)' : ''}, spent ${budgetText(spent, b)}: a nudge at 80%, told to report and stop at 100%; "budget ${id} off" uses the shared one`, data: { budgetUsd: v } }
+          return { ok: true, text: b === null ? `${id}: no soft budget (spent $${spent.toFixed(2)})` : `${id}: soft budget $${b}${v === null ? ' (config threads.softUsd)' : ''}, spent ${budgetText(spent, b)}: a nudge at 80%, a desk notice at 100% (the thread goes on; only config threads.hardUsd stops it); "budget ${id} off" uses the shared one`, data: { budgetUsd: v } }
         }
         case 'window-park': { // (the desk's tick, budgettick.ts: a hot 5h window parks the threads with priority low; the user's parks are never marked)
           if (t.state !== 'open' || t.priority !== 'low') return err(`${id} is not an open thread with priority low`)

@@ -8,7 +8,7 @@ import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
-import { decide, workerJob } from './guard'
+import { decide, workerBrief, workerJob } from './guard'
 import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { noteRun, runPrGuide } from './prchecks'
 import { holdLines, holdsTick } from './sendhold'
@@ -63,7 +63,7 @@ import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
 import { bindSelfEditAnswers, selfEditRoots, revokeSelfEditByWords } from './selfedit'
 import { bindDeliverAnswers } from './deliver'
-import { clearDenied, fallbackUsed, isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeSliceNote, takeStepNote } from './orchestrate'
+import { clearDenied, fallbackUsed, isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeOver, takeSliceNote, takeStepNote } from './orchestrate'
 import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRec, worktreeRoots } from './denial'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
@@ -90,7 +90,7 @@ import { attachParts, noteBase } from './base'
 import { partsOf, recordParts } from './ctxparts'
 import { takeWarn, warnedAlready } from './scratchnotes'
 import { threadToolsArgv } from './orchestrate'
-import { ANSWER_RULE, answersEnd, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
+import { answersEnd, countLongAnswer, loadAnswerChars, noteAgentCall, startAgent, stopAnswer } from './answers'
 import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited, takeEdited } from './snapshot'
@@ -959,7 +959,7 @@ export const register: Register = on => {
         const dir = `${threadsDir(await homeDir(host))}/${role.id}`
         const v = stopAnswer(dir, id, type, e?.last_assistant_message ?? e?.result, await loadAnswerChars(host))
         if (v?.block) return { ...(await next(e)), block: v.block } as any
-        if (v?.tooLong) await logRefusal(host, { role: 'worker', rule: ANSWER_RULE, text: `${ANSWER_RULE}: a second answer of ${v.tooLong.chars} characters, let through`, agent: type, tool: 'SubagentStop', thread: role.id, version: VERSION })
+        if (v?.tooLong) await countLongAnswer(host, { agent: type, chars: v.tooLong.chars, thread: role.id }) // let through: a counter in `lean_doctor stats`, not a refusal row
       } catch {
         /* the stop goes through as before */
       }
@@ -1541,7 +1541,11 @@ export const register: Register = on => {
     const rname = atype || e.agentId ? 'worker' : role.kind // the role field of every refusal / missing-tool record
     const why = await decide(host, gctx, e)
     if (why) {
-      await logRefusal(host, { role: rname, rule: ruleOf(why, atype ?? ''), text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION }) // for the feedback export (feedback.ts: the one writer)
+      const rule = ruleOf(why, atype ?? '')
+      // a step-budget refusal names the job, the run's tool-call count and budget and the brief's size, so an export can tell a budget that is too small for the job from a brief that is too big
+      const over = rule === 'worker-step-budget' && e.agentId ? takeOver(String(e.agentId)) : null
+      const brief = over ? await workerBrief(host, gctx).catch(() => ({}) as { job?: string; chars?: number }) : {}
+      await logRefusal(host, { role: rname, rule, text: why, agent: atype, tool: e.tool, thread: role.kind === 'thread' ? role.id : undefined, version: VERSION, ...(over ? { ...brief, calls: over.calls, budget: over.budget, run: String(e.agentId).replace(/[^A-Za-z0-9]/g, '').slice(-6) } : {}) }) // for the feedback export (feedback.ts: the one writer)
       return { deny: why } as any
     }
     const octx: OCtx | null = role.kind === 'plain' ? null : { kind: role.kind, agentType: atype, agentId: e.agentId, home: await homeDir(host), threadDir: role.kind === 'thread' ? `${threadsDir(await homeDir(host))}/${role.id}` : undefined, cwd }
@@ -1558,7 +1562,7 @@ export const register: Register = on => {
     const gopts = { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }
     if (gcall) {
       try {
-        await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, g!, gopts)
+        await recordGrant(host, role, gcall, typeof e.subagent_type === 'string' ? e.subagent_type : undefined, { ...g!, chars: String(e.prompt ?? '').length }, gopts)
       } catch (err) {
         if (octx) orchEnd(octx, e) // the slot the guard counted is free again: the call never ran
         throw err

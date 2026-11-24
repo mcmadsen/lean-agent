@@ -93,23 +93,28 @@ function leaves(cfg: Cfg): Leaf[] {
   for (const [k, v] of Object.entries(cfg)) if (!/^(_|\/\/|\$)/.test(k)) walk(k, v, k.includes('.'))
   return out
 }
-export type Report = { total: number; differ: { key: string; value: unknown }[]; problems: string[] }
+export type Report = { total: number; differ: { key: string; value: unknown }[]; problems: string[]; keys: string[] } // keys: the setting each problem is about, in the same order
 export function reportOf(cfg: Cfg): Report {
-  const r: Report = { total: 0, differ: [], problems: [] }
+  const r: Report = { total: 0, differ: [], problems: [], keys: [] }
   for (const l of leaves(cfg)) {
     r.total++
     const e = findEntry(l.path)
     if (!e) {
       const near = nearestKey(l.path)
       r.problems.push(`unknown setting "${l.path}"${near ? `: did you mean ${near}?` : ''} (it is kept, and nothing reads it)`)
+      r.keys.push(l.path)
       continue
     }
     const c = checkValue(e, l.value)
     if (!c.ok) {
       r.problems.push(`${e.key} ${show(l.value).slice(0, 40)}: ${c.why} (the default is used)`)
+      r.keys.push(e.key)
       continue
     }
-    if (l.flat && !e.flat) r.problems.push(`${l.path} is written flat, but only the nested form is read for it ("${parts(e.key)[0]}": { ... }): it is ignored`)
+    if (l.flat && !e.flat) {
+      r.problems.push(`${l.path} is written flat, but only the nested form is read for it ("${parts(e.key)[0]}": { ... }): it is ignored`)
+      r.keys.push(l.path)
+    }
     if (!sameValue(c.value, e.default === null ? undefined : e.default) && !(Array.isArray(e.default) && Array.isArray(c.value) && !c.value.length && !e.default.length)) r.differ.push({ key: e.key, value: c.value })
   }
   return r
@@ -122,7 +127,7 @@ export async function configRow(h: Host): Promise<{ ok: boolean; text: string; f
   if (!r.total) return null
   const keys = r.differ.map(d => d.key)
   const shown = keys.length > 6 ? `${keys.slice(0, 6).join(', ')} and ${keys.length - 6} more` : keys.join(', ')
-  return { ok: !r.problems.length, text: `config: ${r.differ.length} setting${r.differ.length === 1 ? '' : 's'} differ from the defaults${keys.length ? ` (${shown})` : ''}, ${r.problems.length} invalid`, ...(r.problems.length ? { fix: 'lean_config validate' } : {}) }
+  return { ok: !r.problems.length, text: `config: ${r.differ.length} setting${r.differ.length === 1 ? '' : 's'} differ from the defaults${keys.length ? ` (${shown})` : ''}, ${r.problems.length} invalid${r.problems.length ? `: ${[...new Set(r.keys)].slice(0, 8).join(', ')}${new Set(r.keys).size > 8 ? ` and ${new Set(r.keys).size - 8} more` : ''} (lean_config validate)` : ''}` } // the invalid keys are named: the row itself says what to look at
 }
 
 // ---- reading ----

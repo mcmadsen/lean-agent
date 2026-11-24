@@ -383,7 +383,8 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     for (const t of arr(r.unverifiedClaims)) texts.unverified!.push({ text: A(t), ts: tsOf(r) })
     for (const t of arr(r.unreachedFolders)) texts.unreached!.push({ text: A(t), ts: tsOf(r) })
   }
-  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string; kind?: string; role?: string; rule?: string; version?: string; tool?: string; job?: string; what?: string }>(h, `${lean}/refusals.jsonl`)
+  const refRows = await readJsonl<{ ts?: number; text?: string; agent?: string; command?: string; src?: string; kind?: string; role?: string; rule?: string; version?: string; tool?: string; job?: string; what?: string; calls?: number; budget?: number; chars?: number; run?: string }>(h, `${lean}/refusals.jsonl`)
+  const steps = new Map<string, { runs: Set<string>; rows: number; chars: number[]; calls: number[]; budget: number }>() // worker-step-budget rows by job: one run keeps calling and writes a row per refused call
   // a refusal a worker reported: its command and the refusal text, as the worker quoted them
   for (const r of refRows) if (r?.src === 'worker' && typeof r.command === 'string' && isNew(r, st)) texts.refused!.push({ text: A(`${r.command}${r.text ? ` -> ${r.text}` : ''}`), ts: tsOf(r) })
   // `missing` also comes from the gap logs (one line per gap a worker reported)
@@ -401,8 +402,16 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
       else miss.set(t, { text: t, n: 1 })
       continue
     }
-    if (typeof r?.text !== 'string' || !isNew(r, st) || r.src === 'worker' || r.command !== undefined) continue // the guard's own rows only
+    if (typeof r?.text !== 'string' || !isNew(r, st) || r.src === 'worker' || r.command !== undefined || r.rule === 'answer-too-long') continue // the guard's own rows only (answer-too-long rows of 1.0.31 are not refusals: a counter now, answers.ts)
     const agent = (r.agent ?? r.role ?? 'session').replace(/^lean-agent:/, '')
+    if (r.rule === 'worker-step-budget' && typeof r.job === 'string' && typeof r.calls === 'number') {
+      const s = steps.get(r.job) ?? steps.set(r.job, { runs: new Set(), rows: 0, chars: [], calls: [], budget: 0 }).get(r.job)!
+      s.rows++
+      s.runs.add(r.run ?? `${agent}${s.rows}`)
+      if (typeof r.chars === 'number') s.chars.push(r.chars)
+      s.calls.push(r.calls)
+      s.budget = Math.max(s.budget, Number(r.budget) || 0)
+    }
     const what = typeof r.what === 'string' && r.what ? A(r.what).replace(/\s+/g, ' ').trim() : '' // what was tried (a program and subcommand, or a tool and a path's kind): the export groups by it
     const t0 = A(r.text).replace(/\s+/g, ' ').trim()
     const t = what && !t0.includes(`[tried: ${what}]`) ? `${t0} [tried: ${what}]` : t0
@@ -410,6 +419,12 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
     const cur = ref.get(k)
     if (cur) cur.n++
     else ref.set(k, { text: t, agent, n: 1, ...(r.rule ? { rule: r.rule } : {}), ...(r.version ? { version: r.version } : {}) })
+  }
+  // one line per job type: how many RUNS used their step budget (n), against how many refused calls, with the calls and brief sizes: a budget too small for the job shows as calls just past the budget with small briefs, a brief too big as large briefs
+  const med = (xs: number[]) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.floor((xs.length - 1) / 2)]! : 0)
+  for (const [job, s] of steps) {
+    const text = `step budget used by ${s.runs.size} ${job} run(s) (${s.rows} refused calls; budget ${s.budget} tool calls; median ${med(s.calls)} calls made${s.chars.length ? `; brief characters: median ${med(s.chars)}, largest ${Math.max(...s.chars)}` : '; brief size unknown'})`
+    ref.set(`steps\u0000${job}`, { text, agent: 'worker', n: s.runs.size, rule: 'worker-step-budget-runs' })
   }
   const core = (await allScripts(h).catch(() => [])).filter(x => x.meta.core && !st.core.includes(x.meta.name)).map(x => ({ name: x.meta.name, line: A(`${x.meta.name}: ${x.meta.purpose} (run: ${x.meta.run}; inputs: ${x.meta.inputs.join('; ')}; ${x.meta.status})`) }))
   const blocked = (await readJsonl<{ ts?: number; from?: string; kind?: string; state?: string; text?: string }>(h, `${lean}/desk/inbox.jsonl`))

@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread } from './threads'
 import { ctxText, limitsOf, threadLimitsFor } from './threadcontext'
-import { budgetLine, budgetLevel, budgetOf, budgetText, limitReply, parseTokens, parseUsd, threadTotals } from './budgetthread'
+import { budgetLine, budgetLevel, budgetOf, budgetText, hardOf, limitReply, parseTokens, parseUsd, threadTotals } from './budgetthread'
 import { takeWarn, warnLine, warnReset } from './scratchnotes'
 import { softBudgetTick, softCheckpointTick } from './budgettick'
 import { decide } from './guard'
@@ -130,35 +130,64 @@ test('threadTotals / budgetOf / budgetLine on the sonnet-heavy day: the 530-requ
   expect(await budgetLine(h.host)).toBe('thread budgets (80% or more used; threads.softUsd 8): t1 $21.00/$8!, t2 $9.47/$8!') // (t3 has budget 0 = none)
 })
 
-test('softBudgetTick: ONE nudge at 80% and one desk notice, told to report and stop at 100%, once per budget value; the guard then refuses new Agent calls only', async () => {
+test('softBudgetTick: ONE nudge at 80% and one desk notice; at 100% ONE desk notice (raise / park / continue) and the thread goes on, nothing is refused; once per budget value', async () => {
   const h = fakeHost(null)
   thread(h, 't1')
   h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', usd: 6.4 }) + '\n') // 80% of $8
   const sent: { action: string; tN: string; text?: string }[] = []
   const deps = { thread: async (i: any) => (sent.push(i), { ok: true, text: 'queued' }) }
   const a = await softBudgetTick(h.host, deps)
-  expect(a).toEqual(['t1: 80% of its budget used ($6.40/$8): told to finish the step, checkpoint and report'])
+  expect(a).toEqual(['t1: 80% of its soft budget used ($6.40/$8): nudged to take the cheapest path and report at the next natural point; it goes on'])
   expect(sent).toHaveLength(1)
   expect(sent[0]).toMatchObject({ action: 'send', tN: 't1' })
-  expect(sent[0]!.text).toContain('You have used 80% of your budget ($6.40/$8): finish the step you are on, checkpoint')
+  expect(sent[0]!.text).toContain('You have used 80% of your soft budget ($6.40/$8): this is a nudge, not a stop')
   expect(await softBudgetTick(h.host, deps)).toEqual([]) // once
   const run = (e: any) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', root: '/plug' }, e)
-  expect(await run({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' })).toBeNull() // not over yet
-  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 6.4 }), row({ tN: 't1', usd: 1.7, ts: 1_000_001 })].join('\n') + '\n') // $8.10
+  const agent = { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' }
+  expect(await run(agent)).toBeNull() // not over yet
+  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 6.4 }), row({ tN: 't1', usd: 6, ts: 1_000_001 })].join('\n') + '\n') // $12.40 of $8 (a thread of the field report)
   const b = await softBudgetTick(h.host, deps)
-  expect(b).toHaveLength(1)
-  expect(b[0]).toContain('budget $8.10/$8 used: told to report and stop')
-  expect(sent[1]!.text).toContain('Your budget is used ($8.10/$8): report now with lean_report')
+  expect(b).toEqual(['t1: soft budget $12.40/$8 passed: the thread goes on. Raise it (budget t1 <usd>), park it (thread park t1), or leave it (config threads.hardUsd sets a real stop)'])
+  expect(sent).toHaveLength(1) // the thread is NOT told to stop: only the desk is told
+  expect(await softBudgetTick(h.host, deps)).toEqual([]) // once
+  expect(await run(agent)).toBeNull() // over the soft budget: nothing is refused
+  expect(await run({ tool: 'Edit', file_path: '/r/app/a.ts' })).not.toContain('budget')
+  // the user raises the soft budget: the levels are announced again for the new value
+  const r = await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '14' })
+  expect(r.text).toContain('t1: soft budget $14, spent $12.40/$14')
+  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 11.3 })].join('\n') + '\n') // 80.7% of $14
+  expect((await softBudgetTick(h.host, deps))[0]).toContain('80% of its soft budget used ($11.30/$14)')
+})
+
+test('threads.hardUsd is the only real stop (none by default): told to report and stop once, new Agent calls refused, raised or removed ends it', async () => {
+  const h = fakeHost(null)
+  thread(h, 't1')
+  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', usd: 12.4 }) + '\n')
+  const sent: { action: string; tN: string; text?: string }[] = []
+  const deps = { thread: async (i: any) => (sent.push(i), { ok: true, text: 'queued' }) }
+  const run = (e: any) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', root: '/plug' }, e)
+  const agent = { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' }
+  expect(await hardOf(h.host)).toBeNull() // default: none
+  await softBudgetTick(h.host, deps) // the soft notice only
+  expect(sent).toHaveLength(0)
+  expect(await run(agent)).toBeNull()
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 12 } }))
+  const a = await softBudgetTick(h.host, deps)
+  expect(a).toEqual(['t1: hard cap $12.40/$12 reached: told to report and stop; its new Agent calls are refused (raise threads.hardUsd, or remove it, to let it go on)'])
+  expect(sent).toHaveLength(1)
+  expect(sent[0]!.text).toContain('Your hard budget cap is reached ($12.40/$12, config threads.hardUsd): report now with lean_report')
   expect(await softBudgetTick(h.host, deps)).toEqual([])
-  const why = (await run({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' }))!
-  expect(why).toContain("this thread's budget of $8 is used: no new Agent call")
-  expect(await run({ tool: 'Edit', file_path: '/r/app/a.ts' })).not.toContain('budget') // an edit in progress is never cut
-  // the user raises it: the levels are announced again for the new value, the refusal ends
-  const r = await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '12' })
-  expect(r.text).toContain('t1: soft budget $12, spent $8.10/$12')
-  expect(await run({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' })).toBeNull()
-  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 9.7 })].join('\n') + '\n') // 80.8% of $12
-  expect((await softBudgetTick(h.host, deps))[0]).toContain('80% of its budget used ($9.70/$12)')
+  expect(await run(agent)).toContain("this thread's hard cap of $12 (config threads.hardUsd) is used: no new Agent call")
+  expect(await run({ tool: 'Edit', file_path: '/r/app/a.ts' })).not.toContain('hard cap') // an edit in progress is never cut
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 20 } })) // raised: the refusal ends
+  await softBudgetTick(h.host, deps)
+  expect(await run(agent)).toBeNull()
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 12 } })) // set again below the spend: announced again
+  expect((await softBudgetTick(h.host, deps))[0]).toContain('hard cap $12.40/$12 reached')
+  expect(await run(agent)).toContain('hard cap')
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 0 } })) // 0 = none: the refusal ends
+  await softBudgetTick(h.host, deps)
+  expect(await run(agent)).toBeNull()
 })
 
 test('lean_thread budget: parse, 0 = none, off = the shared one; the list shows spend and budget next to ctx; config threads.softUsd 0 turns it off', async () => {

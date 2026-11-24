@@ -48,7 +48,7 @@ export type FbCtx = { thread?: string; project?: string; agent?: string; version
 // refusals and takes the worker rows for the `refused` texts, so one refusal is never counted twice.
 // `what`: WHAT was tried, taken from the ` [tried: ...]` tag the guard's text ends with (orchestrate.ts tried(): a program and subcommand, or a
 // tool and the KIND of a path, never an argument or a path) so the next export groups refusals by it.
-export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string; role?: string; rule?: string; kind?: 'refusal' | 'missing-tool'; server?: string; job?: string; what?: string }
+export type RefusalRow = { src: 'guard' | 'worker'; text: string; agent?: string; tool?: string; thread?: string; version?: string; command?: string; role?: string; rule?: string; kind?: 'refusal' | 'missing-tool'; server?: string; job?: string; what?: string; calls?: number; budget?: number; chars?: number; run?: string }
 export const triedOf = (text: string): string | undefined => /\[tried: ([^\]\n]{1,60})\]/.exec(String(text ?? ''))?.[1]?.trim() || undefined
 export async function appendRefusal(h: Host, row: RefusalRow): Promise<void> {
   const home = await homeDir(h)
@@ -60,7 +60,8 @@ export async function appendRefusal(h: Host, row: RefusalRow): Promise<void> {
 // The ONE entry for every refusal the mod makes (a guard refusal, a refused tool call, a refused action, a trimmed result, a gate): one row,
 // one format: role (desk | thread | worker | ...), rule id (refusals.ts ruleOf, or the id the caller gives), short text, running version. It
 // lands in refusals.jsonl, which the feedback export lists under "Guard refusals" and `lean_doctor refusals` groups. Never throws.
-export type RefusalRec = { role?: string; rule?: string; text: string; tool?: string; agent?: string; thread?: string; version?: string }
+// worker-step-budget rows also carry: job (the brief's job type), calls (tool calls the run made), budget (its step budget), chars (the brief's size), run (the worker's short id: runs are counted by it, a run that keeps calling writes one row per refused call)
+export type RefusalRec = { role?: string; rule?: string; text: string; tool?: string; agent?: string; thread?: string; version?: string; job?: string; calls?: number; budget?: number; chars?: number; run?: string }
 export const logRefusal = (h: Host, rec: RefusalRec): Promise<void> =>
   appendRefusal(h, { src: 'guard', kind: 'refusal', ...rec, role: rec.role ?? (rec.agent ? 'worker' : 'session'), rule: rec.rule ?? 'guard', version: rec.version || running.version || undefined }).catch(() => undefined)
 
