@@ -4,6 +4,7 @@
 //   threads.mcp      "all" (default, as before: connectors available, `allow-mcp:` jobs work) | "project" (only the servers the project lists in
 //                    projects.json <name>.mcp or its profile, plus the thread's `needs`) | "none" (only `needs`). A server outside the list is
 //                    DEFERRED (profile.ts), never removed: ToolSearch still finds it.
+//   threads.liteSetup (default true) a thread started as haiku / low with a one-step brief gets a lite first request (firstrequest.ts)
 // Pure helpers; the one reader takes a host.
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
@@ -32,6 +33,16 @@ export async function readLeanThreadCfg(h: Host, home: string): Promise<LeanThre
 export function leanNote(c: LeanThreadCfg): string {
   const plugins = c.plugins === 'all' ? 'all plugins' : `lean-agent${c.plugins.length ? ` + ${c.plugins.join(', ')}` : ' only'}`
   return `lean base: plugins ${plugins}, skills ${c.skills === 'all' ? 'all listed' : "lean-agent's only"}, MCP ${c.mcp === 'all' ? 'all available' : c.mcp === 'project' ? "the project's, the rest deferred" : 'all deferred'} (config threads.plugins / skills / mcp)`
+}
+
+// config threads.liteSetup (default true): a small thread (haiku / low, one-step brief) gets the lite first request (firstrequest.ts)
+export const liteSetupOn = (cfg: any): boolean => pick(cfg, 'liteSetup') !== false
+export async function readLiteSetup(h: Host): Promise<boolean> {
+  try {
+    return liteSetupOn(await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, {}))
+  } catch {
+    return true
+  }
 }
 
 // a thread's skills listing is trimmed to lean-agent's skills (config threads.skills "all" turns it off); the desk always is
