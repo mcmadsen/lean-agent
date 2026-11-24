@@ -81,6 +81,7 @@ export const REGISTRY: readonly Entry[] = [
   mk('threads.stallRestart', 'boolean', false, 'threads', 'now', 'threadstate.ts', 'Restart a stalled thread automatically (default: only flag it).'),
   mk('threads.plugins', 'list', [], 'safety', 'next-session', 'threadlean.ts', 'Plugins a thread loads besides lean-agent (all = every plugin you have).', { special: ['all'], flat: true, ...S }),
   mk('threads.skills', 'enum', 'lean', 'threads', 'next-session', 'threadlean.ts', 'Skills a thread lists: lean (lean-agent\'s only) or all.', { values: ['lean', 'all'], flat: true }),
+  mk('threads.liteSetup', 'boolean', true, 'threads', 'next-session', 'threadlean.ts', 'A thread started as haiku / low with a one-step brief gets a lite first request: no review, PR, work item or memory guide lines, rarely used tools behind ToolSearch.', { flat: true }),
   mk('threads.mcp', 'enum', 'all', 'safety', 'next-session', 'threadlean.ts', 'MCP servers a thread may use: all, project (the project\'s only) or none.', { values: ['all', 'project', 'none'], flat: true, ...S }),
   mk('threads.tools', 'list', null, 'safety', 'next-session', 'orchestrate.ts', 'Built-in tools of a thread session (all = the full set; default is a short list).', { special: ['all'], flat: true, ...S }),
   mk('threads.directReads', 'number', 3, 'safety', 'now', 'orchestrate.ts', 'Direct file reads a thread may do per turn before it must use a worker.', n(0, { int: true, flat: true, ...S })),

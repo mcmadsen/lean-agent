@@ -616,6 +616,7 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `threads.stallMinutes` | threads | number >= 1 | 10 | now | Minutes without a tool call or report before a working thread counts as stalled. |
 | `threads.stallRestart` | threads | boolean | false | now | Restart a stalled thread automatically (default: only flag it). |
 | `threads.skills` | threads | lean / all | lean | next session | Skills a thread lists: lean (lean-agent's only) or all. |
+| `threads.liteSetup` | threads | boolean | true | next session | A thread started as haiku / low with a one-step brief gets a lite first request: no review, PR, work item or memory guide lines, rarely used tools behind ToolSearch. |
 | `threadTokens` | threads | number >= 10000 | 120000 | now | A thread restarts itself when its context passes this many tokens. |
 | `threadWarnTokens` | threads | number >= 10000 | 100000 | now | A thread is told to wrap up when its context passes this many tokens (default 83% of threadTokens). |
 | `threadToolResultChars` | threads | number >= 2000 (0 = off) | 8000 | now | Largest tool result a thread keeps whole, in characters (0 = no cut). |
@@ -814,6 +815,10 @@ and what the transcript names of MCP (servers, tool names, instructions). This r
 | worker-sonnet | 0 | 598 | 0 | 0 | 598 |
 | reviewer | 0 | 3099 | 0 | 0 | 3099 |
 | auditor | 0 | 855 | 0 | 0 | 855 |
+
+**First request of a thread, part by part (1.0.32).** `node scripts/first-request.mjs [--tools-from <claude plugin test output>] [--from tN]` prints it (chars / 4; the engine's own rows come from a recorded `context-parts.json`, else "unknown"). On the leanest defaults a thread's fixed base is about 12k tokens: engine system prompt and built-ins 2.9k, lean-agent tools 3.1k, guide 3.0k, skills 1.0k, agents 0.9k, memory index up to 0.4k, rules 0.7k.
+**Lite setup (`threads.liteSetup`, default true).** A thread started as haiku / low with a one-step brief (under 600 characters, no review, PR, work item or push in it) gets a guide without the review, PR, work item, forge and memory lines ("ask the desk") and `lean_review`, `lean_script`, `lean_goal`, `lean_remember` behind ToolSearch: -3.0k tokens (guide -1.2k, tools -1.9k); the report rule and `lean_report` stay.
+The skills (1.0k) and agent listings (0.9k) are each under the 1k worth cutting and stay for every thread.
 
 After the rule text diet (1.0.15), the guides, in tokens:
 

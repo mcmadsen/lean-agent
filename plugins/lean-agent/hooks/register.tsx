@@ -41,7 +41,8 @@ import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, r
 import { jobOf, jobResult, retryCount } from './jobs'
 import { recordWorkerCall } from './workerruns'
 import { overheadReport } from './overhead'
-import { threadSkillsLean } from './threadlean'
+import { readLiteSetup, threadSkillsLean } from './threadlean'
+import { LITE_DEFERRED_TOOLS, liteHolds } from './firstrequest'
 import { overheadProbe } from './probe'
 import { memorySection, recordAnswer, runSchedule, writeCompactNotes } from './extras'
 import { resetSkew, setRunning, skewNote } from './skew'
@@ -566,8 +567,11 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
     const tid = newRole.id
     await step('thread tools', async () => {
       // (lean_profile, lean_rules, lean_compare and lean_worktree are used in one kind of run only: behind ToolSearch, so they add nothing to a thread's first turn)
-      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: DEFERRED_THREAD_TOOLS.has(t.name) })
-      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
+      // a lite thread (haiku / low, one-step brief: firstrequest.ts, config threads.liteSetup) also finds lean_review, lean_script, lean_goal and lean_remember behind ToolSearch
+      const small = await readJson<{ lite?: unknown; model?: unknown; effort?: unknown }>(host, `${threadsDir(await homeDir(host))}/${tid}/thread.json`, {}).then(async t => liteHolds(t, await readLiteSetup(host)), () => false)
+      const lazy = (name: string) => small && LITE_DEFERRED_TOOLS.includes(name)
+      for (const t of THREAD_TOOLS) await registerOnce($, { ...t, isDeferred: DEFERRED_THREAD_TOOLS.has(t.name) || lazy(t.name) })
+      await registerOnce($, { ...SCRIPT_SPEC, isDeferred: lazy(SCRIPT_SPEC.name) })
       await registerOnce($, { ...RUN_SPEC, isDeferred: false } as any)
     })
     // what this thread was started with: its profile (tool.describe defers the MCP servers outside it), model and effort (ledger rows)

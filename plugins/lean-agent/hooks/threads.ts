@@ -55,6 +55,8 @@ import { afterRefs, applyRefs, isNone, newLine, parsePr, prepareRefs, refsShort,
 import { afterPrOpened } from './workitemflow'
 import type { PrRef, WorkItemRef } from './workitems'
 import { threadSettings as leanThreadSettings } from './leantools'
+import { isLite, liteGuide, liteHolds } from './firstrequest'
+import { readLiteSetup } from './threadlean'
 
 export const WAKE_GAP_MS = 30_000
 
@@ -75,6 +77,7 @@ export type Thread = {
   budgetUsd?: number // lean_thread budget tN <usd>: this thread's own soft budget (budgetthread.ts), over config threads.softUsd
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
+  lite?: boolean // started as haiku / low with a one-step brief (firstrequest.ts isLite): a lite first request while it still runs haiku / low (liteHolds)
   effortSet?: boolean // a call named the effort (lean_thread new / start ... effort:); an effort that was only the default is recomputed at every start (models.ts)
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   lastGoal?: string // the goal a close cleared (a reopen's handover names it)
@@ -244,12 +247,14 @@ async function template(h: Host, root: string, name: string): Promise<string> {
 // `choice`: the model and effort the session starts with (written into the guide as one line: a thread cannot see its own settings).
 // Without one (compare's throw-away folder: no thread.json, the arm's model comes from flags) the line is left out, never guessed.
 // `loaded`: what the thread's profile lets it load (null = no profile applies).
-export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string, choice?: Choice, loaded: Loaded | null = null): Promise<string> {
+// `lite`: a small thread (firstrequest.ts): the review / PR / work item / memory lines stand as "ask the desk" lines; false = the text as it was
+export async function threadClaudeMd(h: Host, root: string, id: string, title: string, project: string, choice?: Choice, loaded: Loaded | null = null, lite = false): Promise<string> {
   const home = await homeDir(h)
   const cfg = await readJson<{ attribution?: unknown }>(h, `${leanDir(home)}/config.json`, {})
   // the <!-- profile --> block of the template (what is loaded and how to ask for more) is only there when a profile applies: a thread
   // of a project without one is told nothing new
   let text = (await template(h, root, 'thread.md')).replace(/<!-- profile -->\n([\s\S]*?)<!-- \/profile -->\n?/, (_m, block: string) => (restricted(loaded) ? block : ''))
+  if (lite) text = liteGuide(text)
   if (!choice) text = text.split('\n').filter(l => !/\{\{(model|effort)\}\}/.test(l)).join('\n')
   return fill(text, { id, title, project, lean: leanDir(home), attribution: attributionLine(cfg?.attribution === true), loaded: loadedLine(loaded), model: choice?.model ?? '', effort: choice?.effort ?? '' })
 }
@@ -529,7 +534,10 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await mkdirp(h, dir)
   const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(i.priority === 'low' || i.priority === 'urgent' ? { priority: i.priority } : {}), ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : i.keepGoing === false ? { keepGoing: false } : {}) }
   applyRefs(t, refd.refs) // (in the row before the first save: the session start saves this object again)
-  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
+  // a small thread (haiku / low, a one-step brief that names no review, PR or work item) gets the lite first request (firstrequest.ts, config threads.liteSetup)
+  const anyOf = (v: unknown) => v !== undefined && v !== null && v !== false && v !== ''
+  if (isLite({ enabled: await readLiteSetup(h), model: pre.model, effort: pre.effort, brief: (i.text ?? '').trim() || title, review: anyOf((i as { review?: unknown }).review), pr: anyOf((i as { pr?: unknown }).pr) || !!t.pr, workitem: anyOf(i.workitem) || !!t.workItem, continues: anyOf(i.continues) })) t.lite = true
+  await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? []), t.lite === true))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
   const brief = ((i.text ?? '').trim() || title) + grants
@@ -633,7 +641,8 @@ async function refreshGuide(h: Host, root: string, home: string, t: Thread, choi
   try {
     const have = await h.fs.read(file)
     if (typeof have !== 'string' || !have.startsWith('<!-- generated by lean-agent')) return // the user's own file stays
-    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, choice, await resolveLoaded(h, home, t.project, t.needs ?? []))
+    const lite = liteHolds({ lite: t.lite, model: choice?.model ?? t.model, effort: choice?.effort ?? t.effort }, await readLiteSetup(h)) // (a restart on another model, or the config off, is the full guide again)
+    const want = await threadClaudeMd(h, root, t.id, t.title, t.project, choice, await resolveLoaded(h, home, t.project, t.needs ?? []), lite)
     if (want && want !== have) await h.fs.write(file, want)
   } catch {
     /* no guide yet: nothing to refresh */
