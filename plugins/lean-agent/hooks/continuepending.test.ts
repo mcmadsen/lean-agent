@@ -111,7 +111,7 @@ test('at most 3 continues in a row without a tool call: then ONE notice and the 
     notes.push(...(await tick(h, sent)).map(n => n.text))
   }
   expect(sent).toHaveLength(3)
-  expect(notes).toEqual(["t1 keeps stopping after 'next:'"]) // once
+  expect(notes.filter(n => !n.includes('was continued by the mod'))).toEqual(["t1 keeps stopping after 'next:'"]) // once (the first continue's own notice is the desk-sees-it one)
   expect(cstate(h).halted).toBeGreaterThan(0)
   expect(await peekNotice(h.host, 'continue-t1')).toBe("t1 keeps stopping after 'next:'")
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: h.clock.t + 1_000, kind: 'tool' }))

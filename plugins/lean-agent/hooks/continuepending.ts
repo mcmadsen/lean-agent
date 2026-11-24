@@ -11,7 +11,7 @@
 // A 'next' text that says the thread wants a fresh session / a restart / that its context is near the cap is not continued: it is a checkpoint restart (checkpoint.ts, 1.0.29).
 // Config: threads.autoContinue (default true; false = no 'next' continues), threads.continueSeconds (default 20). Every check is repeated when the tick acts:
 // only an OPEN thread whose session is the recorded one (never parked, closed, finished) is continued.
-import { homeDir, readJson, readJsonl, threadsDir, writeJson, leanDir } from './state'
+import { appendJsonl, homeDir, readJson, readJsonl, threadsDir, writeJson, leanDir } from './state'
 import type { Host } from './state'
 import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
@@ -41,7 +41,9 @@ export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_P
 
 export type Kind = 'next' | 'keep' | 'todo'
 export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
-export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number }
+export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean }
+export const logFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-log.jsonl`
+export const continuedLine = (kind: Kind, text: string): string => `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
 export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-pending.json`
 export const stateFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-state.json`
 export const readPending = async (h: Host, home: string, id: string): Promise<Pending | null> => {
@@ -287,7 +289,17 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
     }
     const r = await deps.send(id, p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
     await clearPending(h, home, id)
-    if (r.ok) await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}) })
+    if (!r.ok) continue
+    // the desk sees it (1.0.31): a continue by the open-TODO rule or an announcement is one line in the thread's record and one in the count of `lean_thread list`; the FIRST
+    // one of a thread is also said once in the desk, the rest are only counted. (A plain keep-going continue is the standing order's own: not counted.)
+    const counted = p.kind !== 'keep'
+    const first = counted && !cs.noticedFirst
+    await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}), ...(counted ? { total: (cs.total ?? 0) + 1, noticedFirst: true } : {}) })
+    if (counted) {
+      const line = continuedLine(p.kind, p.text)
+      await appendJsonl(h, logFile(home, id), { at: now, kind: p.kind, text: line }).catch(() => undefined)
+      if (first) out.push({ id, text: `${id} was ${line} (further continues are counted in the list, not announced)` })
+    }
   }
   return out
 }

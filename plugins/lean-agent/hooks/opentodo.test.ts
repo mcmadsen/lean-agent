@@ -152,7 +152,7 @@ test('the loop guard: 6 continues in a row without a tool call or a changed task
     notes.push(...(await tick(h, sent)).map(n => n.text))
   }
   expect(sent).toHaveLength(6)
-  expect(notes).toEqual(['t1 keeps ending its turns without doing the next item'])
+  expect(notes.filter(n => !n.includes('was continued by the mod'))).toEqual(['t1 keeps ending its turns without doing the next item'])
   expect(await peekNotice(h.host, 'continue-t1')).toBe('t1 keeps ending its turns without doing the next item')
   expect(cstate(h).halted).toBeGreaterThan(0) // the stall state reads it (stall.ts)
   // a changed task list lifts the halt: the next turn end is continued again
