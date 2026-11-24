@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.32
+
+### Added
+
+Pane
+- The desk pane is a sessions-first overview: ONE list of every thread (working, waiting, needs you, blocked, done, closed), newest activity first. Done, idle and closed threads are one quiet row; a working, waiting, needs-you or blocked thread is a two-line card (state chip, `N new`, cost, context bar, age). A tap on the title unfolds the last report, the buttons and the messages; a card with a decision to take unfolds by itself.
+- Sort chips (`last active`, `needs you first`, `cost`, `name`; config `pane.sort`) and a cap with one `show more` row (`pane.maxSessions`, default 30; a row with an unread message or something waiting for you is always listed).
+- ONE Health card for every warning, finding and fix, folded on startup (`pane.healthOpen`): one line `Health: 2 findings` (amber, red only for a real failure) plus a header chip `N fix`; unfolded it lists what needs a fix, standing approvals (with Revoke) and info, one line each with its own button. The header is one compact block, no fact drawn twice.
+- No global Inbox and no "Needs you" section: a message sits on the card of its thread (`N new`, Show messages, `ack`); a message from a sender without a thread is a finding in Health. Goals moved into More.
+
+Always report back
+- One fixed rule ("Every turn of yours ends with lean_report (done, blocked or question) ... Silence is a failure, the desk cannot see it.") is the first section of every thread session's system prompt, the top of the thread guide and the first line of the review brief and of each plugin agent file. It is never written into your CLAUDE.md or project files.
+- A turn that ends without a final report, not waiting and with nothing left to continue, gets ONE nudge by script (`threads.endNudge`, default true; at most 2 an hour) and, still unreported after `threads.idleAlertMinutes`, ONE desk alert; `lean_thread list` says "ended without a report, N min". A text that hands over an unchecked claim ("I haven't re-checked", "the worker reports") makes the nudge say: verify it first.
+- A thread whose brief asks for ONE action is nudged at the next tick with the whole rule (`threads.requireReport`, default true; the engine cannot refuse a Stop, so the nudge is the refusal).
+- The pane shows "idle, no report N min" on the card (counted as needs-you) and a short script-made last line, marked "synthesised", for a turn that ended on a tool result; it is display only, never a report. `lean_doctor check` has a "report rule" row.
+
+Old desk
+- `desk.closeOld` (`stop` default, `remove`, `off`): after a desk restart the new desk's session start stops the old desk by script (`claude stop <id>`; `remove` then runs `claude rm <id>`), only the id the restart recorded, only after the handover was saved, never a row that is mid-turn. A failed stop is logged and keeps the reminder. A stopped desk is not mentioned any more; a desktop desk keeps today's reminder. `lean_doctor` has one info row.
+
+Small threads
+- Lite first request (`threads.liteSetup`, default true): a thread started as haiku / low with a one-step brief (under 600 characters, at most one numbered or bulleted item, no "then" chain, no review, PR, work item or forge word) gets a guide without the review, push, work item, forge and memory lines (three "ask the desk" lines stand in; the report rule stays first) and `lean_review`, `lean_script`, `lean_goal`, `lean_remember` behind ToolSearch. About 3k tokens less in the first request; a normal thread is unchanged. The same one-step detection decides which thread gets the immediate report nudge.
+- `node scripts/first-request.mjs` measures what the first request carries (README "Fixed overhead"); its `--check` runs in the skills contract test.
+
+### Changed
+- The old-desk reminder and `claude rm`: `claude rm` runs only with `desk.closeOld: remove` (it used to run for any idle background old desk, with no stop first).
+- The soft budget no longer stops a thread: at 80% of `threads.softUsd` one nudge, at 100% one notice to the desk and the thread goes on; no Agent call is refused. `threads.hardUsd` (none by default) is the only real stop.
+- The task-size estimate counts only what the brief names: no binary or generated files (images, archives, packages, source maps, lock files, minified bundles), a file named twice counts once, a glob counts the files it matches. The "split this task" hint appears only when the brief names files and they add up to `tasks.splitHintTokens` (default 60000, 0 = no floor), and says what it counted.
+
+### Fixed
+- A thread that ended its turn with a plain summary and never called lean_report was missed by every earlier mechanism (keep-going answered with a bare "Continue" and went silent; the idle alert counted ANY earlier report as "reported"). The continue timer's sends never reopen a closed thread.
+- The line "t5 owns PR 4321 ... its replies and moving its own work item to Reviewing go out without a question" was drawn as a red `error:`; it is information, now shown under Standing approvals in Health with a Revoke button.
+- A step-budget refusal records the job type, tool-call count, budget and brief size, and the feedback export summarises per job how many runs used the budget; the budgets are unchanged.
+- A long answer let through after one reminder is a counter in `lean_doctor stats`, not a refusal row.
+- Config: `"off"`, `false`, a numeric string or a negative number is valid again for `budget.daily` / `budget.threadDaily`; the doctor config row names the invalid keys.
+
+Config keys added: `pane.sort`, `pane.maxSessions`, `pane.healthOpen`, `desk.closeOld`, `threads.endNudge`, `threads.requireReport`, `threads.liteSetup`, `threads.hardUsd`, `tasks.splitHintTokens` (122 keys in the registry).
+
 ## 1.0.31
 
 ### Added

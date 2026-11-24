@@ -311,8 +311,8 @@ test('Health groups: a finding that needs a fix, the standing approvals and info
   await openHealth(ui)
   const own = await ui.find({ type: 'Text', text: /t5 owns PR 4321/ })
   expect(own).toBeTruthy()
-  expect(String(own.text)).not.toMatch(/^error/) // 1.0.31 drew this line as "error: ..."
-  expect(own.props?.color).toBeUndefined() // not red, not amber: the normal text colour
+  expect(String(own?.text)).not.toMatch(/^error/) // 1.0.31 drew this line as "error: ..."
+  expect(own?.props?.color).toBeUndefined() // not red, not amber: the normal text colour
   expect(await ui.find({ type: 'Text', text: 'Standing approvals' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: 'Needs a fix' })).toBeFalsy()
   expect((await ui.findAll({ type: 'Box' })).filter((b: any) => b.props?.borderColor === 'error').length).toBe(0)

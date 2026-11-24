@@ -3,6 +3,7 @@
 // (a spec cannot read the plugin's files): every lite line matches exactly one template line and the guide shrinks by at least 800 tokens.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { REPORT_RULE, withReportRule } from './endnudge'
 import { LITE_DEFERRED_TOOLS, LITE_DROP, LITE_LINES, REPORT_SENTENCE, isLite, liteGuide, liteHolds, oneStepBrief } from './firstrequest'
 import { leanThread, resetLocks, threadClaudeMd } from './threads'
 import { liteSetupOn } from './threadlean'
@@ -74,6 +75,31 @@ test('liteGuide never drops a line that holds the report rule, and leaves a text
   const rule = `- Reviews: ${REPORT_SENTENCE} always`
   expect(liteGuide(`a\n${rule}\nb`)).toBe(`a\n${rule}\nb`)
   expect(liteGuide('# t1\nafter')).toBe('# t1\nafter')
+})
+
+test('lite thread: the first prompt section is REPORT_RULE exactly once, the lite guide holds the rule once and is still smaller than the normal one', async () => {
+  const withRule = [REPORT_RULE, '', ...GUIDE.split('\n')].join('\n') // templates/thread.md opens with the rule (hooks/skills-contract.test.sh checks the real file)
+  const lite = liteGuide(withRule)
+  expect(lite.split(REPORT_RULE).length - 1).toBe(1)
+  expect(lite.startsWith(REPORT_RULE)).toBe(true)
+  expect(lite.length).toBeLessThan(withRule.length)
+  // prompt.compose (register.tsx): the rule section leads whatever the thread's sections are, once, also when a section already carries it
+  for (const guide of [withRule, lite]) {
+    const sections = [{ id: 'lean-agent:guide', text: guide, scope: 'session' }, { id: 'lean-agent:report-rule', text: 'stale', scope: 'shared' }]
+    const out = withReportRule({ sections }, 'thread').sections
+    expect(out[0]).toEqual({ id: 'lean-agent:report-rule', text: REPORT_RULE, scope: 'shared' })
+    expect(out.filter(s => s.id === 'lean-agent:report-rule')).toHaveLength(1)
+    expect(out).toHaveLength(2)
+  }
+  // a thread started lite writes that guide: the rule once at its top, the lite lines after it
+  const { h, call } = setup()
+  h.files.set(`${ROOT}/templates/thread.md`, withRule)
+  expect((await call({ action: 'new', title: 'typo', text: ONE, model: 'haiku', effort: 'low' })).ok).toBe(true)
+  const g = guideOf(h)
+  expect(threadOf(h).lite).toBe(true)
+  expect(g.split(REPORT_RULE).length - 1).toBe(1)
+  expect(g.indexOf(REPORT_RULE)).toBeLessThan(g.indexOf(LITE_LINES[0]!))
+  expect(g.length).toBeLessThan((await threadClaudeMd(h.host, ROOT, 't1', 'typo', '', { model: 'sonnet', effort: 'high' }, null)).length)
 })
 
 function setup(config: unknown = {}) {

@@ -83,7 +83,7 @@ test('settings: pane.sort (config, else the mod store, else last active), pane.m
 })
 
 test('severity at the source: an own-PR / own-work-item / PR-link notice is information (never an error), whatever its thread; every other notice keeps its level', async () => {
-  expect(noticeInfo('ownpr_t145_5706')).toEqual({ info: true, thread: 't145' }) // the file name: ':' became '_'
+  expect(noticeInfo('ownpr_t5_4321')).toEqual({ info: true, thread: 't5' }) // the file name: ':' became '_'
   expect(noticeInfo('ownpr:t5:wi9')).toEqual({ info: true, thread: 't5' })
   expect(noticeInfo('wipr_t5_4321')).toEqual({ info: true, thread: 't5' })
   for (const k of ['budget-t5', 'restart-t5', 'old-desk', 'githooks', 'rules-cap', 'grant-flag.g1', 'request-exit.a1', 'ownprx_t5_1', 'other']) expect(noticeInfo(k)).toEqual({})

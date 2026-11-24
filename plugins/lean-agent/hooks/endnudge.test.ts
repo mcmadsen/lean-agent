@@ -7,7 +7,8 @@ import { stallTick } from './stall'
 import { leanThread, resetLocks } from './threads'
 import { resetThreadCache } from './threaddetail'
 import { resetFinish } from './finish'
-import { HINT_KEY, NUDGE_TEXT, REPORT_RULE, REPORT_RULE_SENTENCE, UNVERIFIED_PHRASES, alertText, doctorRow, endedCount, hasUnverifiedClaim, singleAction, withReportRule } from './endnudge'
+import { HINT_KEY, NUDGE_TEXT, REPORT_RULE, REPORT_RULE_SENTENCE, UNVERIFIED_PHRASES, alertText, doctorRow, endedCount, hasUnverifiedClaim, withReportRule } from './endnudge'
+import { oneStepBrief } from './firstrequest'
 import { noteSynthAtTurnEnd, noteToolResult, readSynth, resetSynth, synthDisplay } from './synthline'
 import { loadView, resetViewCache } from './view'
 import { itemsOf, needsUser, sortItems } from './panelist'
@@ -378,9 +379,9 @@ test('the pane: a thread idle with no report gets the chip "idle, no report N mi
 })
 
 // ---- threads.requireReport ------------------------------------------------------------------------------------------------------------------
-test('singleAction: a short brief for ONE action is one; several steps, a list, sequencing words or a long brief are not', () => {
-  for (const b of ['Move /data/old to /data/new.', 'Rename the function parseDate to parseIsoDate in src/date.ts.', 'Find where the retry limit is set and say the file:line.']) expect(singleAction(b)).toBe(true)
-  for (const b of ['1. Move the folder\n2. Update the index', 'Move the folder, then update the index.', '- a\n- b', 'x'.repeat(600), '', null, 'Fix the bug. Next, add a test.']) expect(singleAction(b)).toBe(false)
+test('one-step brief (shared with the lite setup): a short brief for ONE action is one; several steps, a list, sequencing words or a long brief are not', () => {
+  for (const b of ['Move /data/old to /data/new.', 'Rename the function parseDate to parseIsoDate in src/date.ts.', 'Find where the retry limit is set and say the file:line.']) expect(oneStepBrief(b)).toBe(true)
+  for (const b of ['1. Move the folder\n2. Update the index', 'Move the folder, then update the index.', '- a\n- b', 'x'.repeat(600), '', null, 'Fix the bug. Next, add a test.']) expect(oneStepBrief(b)).toBe(false)
 })
 
 test('threads.requireReport: a single-action thread that ends without a report is nudged at the next tick with the whole rule; other briefs and requireReport false keep the normal wait', async () => {

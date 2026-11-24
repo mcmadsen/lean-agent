@@ -80,15 +80,7 @@ export async function endNudgeOn(h: Host, home: string): Promise<boolean> {
 export async function requireReportOn(h: Host, home: string): Promise<boolean> {
   return (await readJson<{ threads?: { requireReport?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null))?.threads?.requireReport !== false
 }
-export const SINGLE_ACTION_CHARS = 600
-// a brief that asks for ONE action (a move, a rename, one edit, one lookup), by script: short, no more than one numbered or bulleted step, no sequencing words
-export function singleAction(brief: unknown): boolean {
-  if (typeof brief !== 'string') return false
-  const b = brief.trim()
-  if (!b || b.length >= SINGLE_ACTION_CHARS) return false
-  if ((b.match(/^\s*\d+[.)]\s/gm) ?? []).length > 1 || (b.match(/^\s*[-*•]\s/gm) ?? []).length > 1) return false
-  return !/\b(?:then|afterwards?|after that|next|finally|and also|step 2|second(?:ly)?)\b/i.test(b)
-}
+// a brief that asks for ONE action: oneStepBrief (firstrequest.ts), the same detection the lite setup uses
 
 // ---- the record (thread side writes, desk side reads) ---------------------------------------------------------------------------
 export type EndRec = { at: number; first: number; sid: string; hint?: boolean; alerted?: number }

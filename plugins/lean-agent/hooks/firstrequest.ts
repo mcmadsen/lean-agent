@@ -10,13 +10,14 @@
 // A normal thread is untouched byte for byte: liteGuide is only called for a thread that is lite. No imports (node loads this file directly).
 
 export const LITE_BRIEF_CHARS = 600
-// a brief that asks for one thing: under 600 characters, at most one numbered / bulleted item or "step N", no "then" chain
+// THE one-step detection, shared by the lite setup (isLite below) and the report rule (endnudge.ts / continuepending.ts, config threads.requireReport):
+// a brief that asks for one thing: under 600 characters, at most one numbered / bulleted item or "step N" line, no sequencing words
 export function oneStepBrief(text: unknown): boolean {
   const t = typeof text === 'string' ? text.trim() : ''
   if (!t || t.length >= LITE_BRIEF_CHARS) return false
   const items = t.split('\n').filter(l => /^\s*(?:\d+[.)]\s|[-*•]\s|step\s*\d+\b)/i.test(l)).length
   if (items > 1) return false
-  return !/\b(?:then|afterwards|after that|and finally|finally)\b/i.test(t)
+  return !/\b(?:then|afterwards?|after that|next|finally|and also|step 2|second(?:ly)?)\b/i.test(t)
 }
 
 // work a one-step small thread has no use for: it never reviews, opens no PR, touches no work item (a brief that names one is not lite)

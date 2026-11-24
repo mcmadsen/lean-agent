@@ -28,7 +28,8 @@ import { NEXT_CONDITIONAL, NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextw
 import { waitingOn } from './waitevent'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { markerOf } from './reviewkind'
-import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded, requireReportOn, singleAction } from './endnudge'
+import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded, requireReportOn } from './endnudge'
+import { oneStepBrief } from './firstrequest'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
 import type { AgentRow, Out, Thread } from './threads'
@@ -169,7 +170,7 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
       if (((await readCState(h, home, id)).endHour ?? []).filter(x => now - x < 3_600_000).length < MAX_NUDGES_PER_HOUR) {
         // threads.requireReport (default true) and a brief that asks for ONE action: the nudge goes out at the next tick, not after continueSeconds, and carries the whole rule
         // (the engine gives a mod no way to refuse a Stop: turn.complete returns text only, so this is the refusal's fallback)
-        const req = (await requireReportOn(h, home)) && singleAction(await Promise.resolve(h.fs.read(`${threadsDir(home)}/${id}/brief.md`)).catch(() => ''))
+        const req = (await requireReportOn(h, home)) && oneStepBrief(await Promise.resolve(h.fs.read(`${threadsDir(home)}/${id}/brief.md`)).catch(() => ''))
         await writeJson(h, pendingFile(home, id), { at: now, sid: o.sid, kind: 'end', text: hint ? HINT_KEY : '', ...(req ? { req: true } : {}) } satisfies Pending)
         return 'end'
       }
