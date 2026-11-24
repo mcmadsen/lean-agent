@@ -213,7 +213,7 @@ test('lean_review record: an unknown project or an unresolvable base is never gr
   h.git.handler = () => ({ exitCode: 1, stdout: '' })
   const r = await tool(h, { sha: H1, base: 'main', green: true, review: { ...base } })
   expect(r.ok).toBe(false)
-  expect(rec(h, H1).green).toBe(false)
+  expect(r.text).toContain('could not read the PR diff: review not recorded') // 1.0.31: nothing is recorded unfiltered
   const u = await threadTool(h.host, 't1', 'lean_review', { project: 'nope', sha: H1, base: 'main', green: true, review: { ...base } })
   expect(u.ok).toBe(false)
 })
@@ -545,13 +545,13 @@ test('lean_review prepare: the reviewer gets per-file stats and a reading plan (
   const p = await tool(h, { action: 'prepare', base: 'main' })
   expect(p.text).toMatch(/Changed files \(1, added\/removed lines, from the script\): src\/plain\.ts \+\d+\/-0/)
   expect(p.text).toContain('Read each changed file once, diff hunks only')
-  expect(p.text).toContain('You have 10 tool calls')
+  expect(p.text).toContain('You have 16 tool calls')
   expect(p.text).not.toContain('review cost for') // no pass ran yet
   const row = (o: Record<string, unknown>) => JSON.stringify({ ts: h.clock.t + 10, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.2, ...o })
   h.files.set(`${L}/ledger.jsonl`, [row({ agentId: 'a1' }), row({ agentId: 'a1', usd: 0.3 }), row({ agentId: 'a2', usd: 0.34 }), row({ agentId: 'z', tN: 't7', usd: 9 })].join('\n') + '\n')
   const again = await tool(h, { action: 'prepare', base: 'main' })
   expect(again.text).toMatch(/\nreview cost for [0-9a-f]{12}: \$0\.84 over 2 passes, 3 requests/)
-  h.files.set(`${L}/config.json`, JSON.stringify({ workers: { stepsByJob: { check: 7 } } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ workers: { steps: 7 } })) // the reviewer's one budget (16), never above the ceiling workers.steps
   expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('You have 7 tool calls')
 })
 

@@ -1,8 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadTool } from './delivery'
-import { analyzeDiff } from './reviewprep'
-import { changeScope, changedText, contextOf, dropNotes, droppedText, insideChange } from './reviewchange'
+import { analyzeDiff, perFileStats } from './reviewprep'
+import { changeScope, changedText, contextOf, dropNotes, droppedText, insideChange, scopeLine, scopedOf, withArea } from './reviewchange'
+import { bigText, partition as part } from './reviewarea'
+import { running, setRunning } from './skew'
 
 const L = '/h/.lean-agent'
 const H2 = 'c'.repeat(40)
@@ -129,7 +131,7 @@ test('prepare (light and full) lists the changed files with their ranges; record
   expect(r.ok).toBe(true)
   expect(r.text).toContain('3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
   expect(r.text).toContain('src/a.ts:11')
-  expect(r.text).not.toContain('src/untouched.ts:4')
+  expect(r.text).not.toContain('] src/untouched.ts:4') // (not an open finding; the dropped line names it)
   expect(r.text).toContain('reviewed 1 changed file (5 lines); 3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
   expect(r.text).toContain('the reviewer reported on files that are not in the PR: src/untouched.ts')
   const a = block([fin(1, 'src/a.ts', 11), fin(2, 'src/untouched.ts', 4)])
@@ -141,7 +143,6 @@ test('prepare (light and full) lists the changed files with their ranges; record
 })
 
 test('the summary line says what was reviewed and dropped; a thread older than the filter is told first; review.contextLines widens the range', { timeoutMs: 20_000 }, async () => {
-  const { scopeLine, scopedOf, withArea } = await import('./reviewchange')
   const prep = await analyzeDiff(DIFF, async () => '')
   const cs = changeScope([f('src/mod.ts', 11), f('src/other.ts', 3), f('lib/x.ts', 4)], prep)
   const s = scopedOf(prep, cs.dropped, '1.0.31')
@@ -151,7 +152,6 @@ test('the summary line says what was reviewed and dropped; a thread older than t
   expect(two.files).toBe(12)
   expect(two.dropped).toBe(3)
   expect(two.notInPr).toEqual(['src/other.ts', 'lib/x.ts', 'a.ts'])
-  const { running, setRunning } = await import('./skew')
   const before = running.version
   const h = setup()
   try {
@@ -170,7 +170,7 @@ test('the summary line says what was reviewed and dropped; a thread older than t
   expect(w.text).toContain('src/a.ts:14')
   const z = await tool(setup(), { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14)]) })
   expect(z.text).toContain('1 finding dropped')
-  expect(z.text).not.toContain('src/a.ts:14')
+  expect(z.text).not.toContain('] src/a.ts:14')
 })
 
 // ---- 1.0.31: never unfiltered; areas only from changed files ----------------------------------------------------------------
@@ -192,9 +192,6 @@ test('merge and record refuse, and write nothing, when the PR diff cannot be rea
 })
 
 test('the areas of a large PR are built from the changed files only, and say how many files and lines they hold', async () => {
-  const { partition: part } = await import('./reviewarea')
-  const { perFileStats } = await import('./reviewprep')
-  const { bigText } = await import('./reviewarea')
   const prep = await analyzeDiff(DIFF, async () => '')
   const stats = perFileStats(DIFF)
   const areas = part(stats)

@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide } from './guard'
 import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, tried, triedWords } from './orchestrate'
+import { REVIEWER_STEPS } from './jobs'
 import { capTo } from './cap'
 import { RUN_TIMEOUT_MS, runSummary, runText } from './runjob'
 import { digest } from './rundigest'
@@ -241,8 +242,7 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   expect(b.result.interrupted).toBe(false)
 })
 
-test('the reviewer has its own budget (REVIEWER_STEPS = 16 tool calls, the number the brief states) and is told what to do at the end', async () => {
-  const { REVIEWER_STEPS } = await import('./jobs')
+test('the reviewer has its own budget (REVIEWER_STEPS = 16 tool calls, the number the brief states) and is told what to do at the end', () => {
   expect(REVIEWER_STEPS).toBe(16)
   orchReset()
   const rv = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'rv1' }

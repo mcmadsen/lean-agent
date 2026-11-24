@@ -16,7 +16,7 @@ function origin(merge: boolean) {
   h.git.handler = (a: string[]) => {
     const s = a.join(' ')
     const ok = (stdout = '') => ({ exitCode: 0, stdout })
-    if (s.includes('remote get-url')) return ok('https://git.example/org/app.git\n')
+    if (s.includes('remote get-url')) return ok('https://github.com/org/app.git\n')
     if (s.includes(' init ')) return ok()
     if (s.includes(' fetch ')) {
       const [src, dst] = a[a.length - 1]!.split(':')
@@ -77,22 +77,23 @@ test('a range far larger than the PR is refused until the user confirms; the for
   expect(refused.text).toContain('Pass base')
   expect(refused.text).toContain('confirm: true')
   const go = await prep(h, { confirm: true })
-  expect(go.ok).toBe(true)
+  expect(go.ok, go.text).toBe(true)
   expect(go.text).toContain(`reviewing ${M!.slice(0, 8)} against merge base ${P1!.slice(0, 8)} (target not merged)`)
   expect(go.text).toContain('against its first parent')
   // the forge lists two files: the range is cut to them, and the sanity check no longer fires
   h.exec.handler = (a: string[]) => (a[0] === 'gh' && a.join(' ').includes('pulls/7/files') ? { exitCode: 0, stdout: 'f0.ts\nf1.ts\n' } : { exitCode: 127, stdout: '' })
   const cut = await prep(h)
-  expect(cut.ok).toBe(true)
+  expect(cut.ok, cut.text).toBe(true)
   expect(cut.text).toContain("range corrected to the PR's own files (forge: 2 files; git range: 200)")
   expect(cut.text).toContain('f1.ts')
   expect(cut.text).not.toContain('f150.ts')
   // a small range is never asked about
-  expect((await prep(bigPr(5))).ok).toBe(true)
+  const small = await prep(bigPr(5))
+  expect(small.ok, small.text).toBe(true)
 })
 
 test('base accepts parent1, merge-base and a commit sha of the scratch repository; a sha it cannot read says what was fetched', { timeoutMs: 20_000 }, async () => {
-  const ok = (v: unknown) => v as Exclude<typeof v, string>
+  const ok = (v: Awaited<ReturnType<typeof fetchExternal>>) => v as Exclude<typeof v, string>
   expect(ok(await fetchExternal(origin(true).host, 'app', '7', 'parent1')).base).toBe(P1!)
   expect(ok(await fetchExternal(origin(true).host, 'app', '7', 'merge-base')).base).toBe(T!)
   const named = ok(await fetchExternal(origin(true).host, 'app', '7', P1))
