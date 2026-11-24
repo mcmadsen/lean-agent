@@ -185,7 +185,7 @@ grep -qF 'standing approvals' "$here/thread/SKILL.md" || fail "the thread skill 
 # standing approval is model-proof: the grant is written in ONE place (deskactions.ts writeGrant, called by answerAction only: the pane press and the
 # human's answer to the desk question); no other source file touches the grant store; answerAction is called only by the pane and by bindAnswers
 [ "$(grep -c 'writeGrant(' "$root/hooks/deskactions.ts")" = "2" ] || fail "writeGrant must be defined once and called once (by answerAction) in deskactions.ts"
-[ "$(grep -n 'writeGrant(' "$root/hooks/deskactions.ts" | grep -vc 'async function writeGrant\|await writeGrant(h, r, now)')" = "0" ] || fail "writeGrant must be called only from answerAction"
+[ "$(grep -n 'writeGrant(' "$root/hooks/deskactions.ts" | grep -vc 'async function writeGrant\|await writeGrant(h, r, now, src)')" = "0" ] || fail "writeGrant must be called only from answerAction"
 users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | tr '\n' ' ')
 [ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')

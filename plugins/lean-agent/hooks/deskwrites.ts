@@ -21,8 +21,8 @@ import { macOf } from './reviews'
 import { parseOrigin } from './prhost'
 import type { PrHost } from './prhost'
 import { listProjects } from './projects'
-import { HUMAN_WI_STATES, STANDING_STATUSES, azureGet, claimAndSend, exclusive, hashOf, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
-import type { ActionKind, Params, Plan } from './deskactions'
+import { HUMAN_WI_STATES, STANDING_STATUSES, answerRecord, auditStatusGrants, azureGet, choiceProblem, claimAndSend, exclusive, flagGrant, flaggedGrants, hashOf, logHistory, revokeGrant, rows, setHumanGrantWriter, sound, standingLabelOf, standingView, targetOf, threadOk } from './deskactions'
+import type { ActionKind, FlaggedGrant, Params, Plan, Via } from './deskactions'
 import { recentPrompts, seenSince } from './humanprompts'
 import { SOFT_WORDS, createIn, instructionIn, revokeIn, typedApproval } from './writeinstr'
 
@@ -520,9 +520,12 @@ function statusCovered(g: WGrant, it: Item): boolean {
   return true
 }
 
+// The words a human-choice grant rests on, with WHERE the choice was made (1.0.31): the audit below tells the three apart and checks each against the answer record
+const humanQuote = (label: string, req: string, via: Via): string =>
+  `${via.how === 'pane' ? `you pressed "${label}" in the pane` : via.how === 'dialog' ? `you chose "${label}" in the desk's dialog` : `you typed "${(via.words ?? '').slice(0, 60)}" in the desk's dialog`} on request ${req}`
 // The dialog's fourth choice for every kind but a thread status (deskactions.ts answerAction calls this through setHumanGrantWriter, only after the human pressed it):
 // a signed written approval of the request's own PR or work item, for exactly the kinds of the request, 24 h, at most 40 writes
-async function writeHumanGrant(h: Host, r: { id: string; thread: string; kind: ActionKind; params: Params }, now: number): Promise<boolean> {
+async function writeHumanGrant(h: Host, r: { id: string; thread: string; kind: ActionKind; params: Params }, now: number, via: Via): Promise<boolean> {
   const items = itemsOf(r.kind, r.params)
   if (!items) return false
   const kinds = new Set<string>()
@@ -537,7 +540,7 @@ async function writeHumanGrant(h: Host, r: { id: string; thread: string; kind: A
   const scope = targetOf(items[0]!.kind, items[0]!.params)
   const cap = await capOf(h)
   // (called inside answerAction's gate: no `exclusive` here)
-  const base = { id: `w${now}-${++wseq}`, thread: r.thread, scope, kinds: [...kinds], statuses, quote: `you pressed "${standingLabelOf(r.kind === 'batch' ? String(items[0]!.kind) : r.kind)}" on request ${r.id}`, qts: now, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
+  const base = { id: `w${now}-${++wseq}`, thread: r.thread, scope, kinds: [...kinds], statuses, quote: humanQuote(standingLabelOf(r.kind === 'batch' ? String(items[0]!.kind) : r.kind), r.id, via), qts: now, cap, used: 0, ts: now, exp: now + WRITES_TTL_MS }
   const g = await resign(h, base)
   if (!g) return false
   const keep = (await grantRows(h, now)).filter(x => !(x.thread === r.thread && lc(x.scope) === lc(scope) && x.statuses.length && x.kinds.join() === g.kinds.join()))
@@ -598,9 +601,13 @@ export async function recordOwnSent(h: Host, rec: { ts: number; thread: string; 
   await h.store.set(WSENT, [...(Array.isArray(prev) ? prev : []), { ...rec, grant: `own:${rec.thread}` } satisfies WSent].slice(-10))
 }
 export async function writesListText(h: Host): Promise<string> {
+  await auditStanding(h).catch(() => []) // a standing approval that rests on no press of the user's is revoked and flagged first
+  const now = await h.clock.now()
+  const flagged = (await flaggedGrants(h)).filter(f => now - f.revoked <= 24 * 3_600_000).slice(-5)
+  const fixes = flagged.length ? `\nstanding approvals REVOKED because they were recorded without the user's choice (kept as evidence, the pane shows a FIX row):${flagged.map(f => `\n  ${f.id} · ${f.thread} · ${f.reason}`).join('')}` : ''
   const v = await writesView(h)
-  if (!v.grants.length) return ''
-  return `\nthe user's written instructions (a request they cover is sent by the mod at once: do not ask the user again; anything else is asked):${v.grants.map(g => `\n  ${g.id} · ${g.thread} · ${g.scope} · ${g.kinds.join(', ')} · ${g.used}/${g.cap} writes · until ${new Date(g.exp).toISOString().slice(0, 16).replace('T', ' ')} UTC (or the thread closes) · "${g.quote.slice(0, 80)}"`).join('')}`
+  if (!v.grants.length) return fixes
+  return `${fixes}\nthe user's written instructions (a request they cover is sent by the mod at once: do not ask the user again; anything else is asked):${v.grants.map(g => `\n  ${g.id} · ${g.thread} · ${g.scope} · ${g.kinds.join(', ')} · ${g.used}/${g.cap} writes · until ${new Date(g.exp).toISOString().slice(0, 16).replace('T', ' ')} UTC (or the thread closes) · "${g.quote.slice(0, 80)}"`).join('')}`
 }
 
 // ---- revoking only takes power away ----------------------------------------------------------------------------------------------------------------
@@ -620,6 +627,25 @@ export async function revokeWrites(h: Host, by: { id?: string; thread?: string; 
   return hit.length ? { ok: true, n: hit.length, text: `revoked ${hit.map(g => `${g.id} (${g.thread}, ${g.scope.replace(/^(Azure DevOps|GitHub) /, '')})`).join('; ')}: the writes of ${[...new Set(hit.map(g => g.thread))].join(', ')} are asked again` } : { ok: false, n: 0, text: by.id ? `no active written approval ${by.id}` : 'no active written approval for that' }
 }
 export const revokeButton = (h: Host, id: string) => revokeWrites(h, { id })
+// 1.0.31: a written approval of the dialog's / pane's 24 h choice must rest on that press: the request it names must have a signed Approve of yours on record that came from the
+// place the quote says. One that does not is flagged ("recorded without your choice"), revoked and kept as evidence (flagGrant: the FIX row). Approvals of your own written
+// words or of an Allow offer are not judged here; a quote of the old form (no place named) is judged only on there being an Approve on record.
+const HUMAN_QUOTE = /^you (pressed|chose|typed) .* on request (a\d{1,16}-\d{1,9})$/
+export async function auditStanding(h: Host): Promise<FlaggedGrant[]> {
+  const out: FlaggedGrant[] = []
+  for (const g of await grantRows(h, await h.clock.now())) {
+    const m = HUMAN_QUOTE.exec(g.quote)
+    if (!m) continue
+    const from = g.quote.endsWith(" in the pane on request " + m[2]) ? 'pane' : g.quote.endsWith(" in the desk's dialog on request " + m[2]) ? (m[1] === 'typed' ? 'typed' : 'option') : null
+    const why = choiceProblem(await answerRecord(h, m[2]!), from)
+    if (!why) continue
+    const gone = await revokeWrites(h, { id: g.id }, 'the mod: recorded without your choice')
+    if (!gone.ok) continue
+    await flagGrant(h, { id: g.id, thread: g.thread, scope: g.scope, quote: g.quote, reason: why })
+    out.push({ id: g.id, thread: g.thread, scope: g.scope, quote: g.quote, reason: why, ts: 0, revoked: 0 })
+  }
+  return [...out, ...(await auditStatusGrants(h))]
+}
 // a thread that closed keeps no written approval
 export async function dropWriteGrants(h: Host, thread: string): Promise<void> {
   await revokeWrites(h, { thread }, 'thread closed').catch(() => undefined)

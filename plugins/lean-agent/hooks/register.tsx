@@ -9,10 +9,10 @@ import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
 import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerJob } from './guard'
-import { bindAnswers, resetActions, runPrChanges, runStanding } from './deskactions'
+import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { holdLines, holdsTick } from './sendhold'
 import { recordHumanPrompt } from './humanprompts'
-import { bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
+import { auditStanding, bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
 import { ownFromGrant } from './ownpr'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
@@ -195,7 +195,7 @@ const TOOL = 'lean_thread'
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'withdraw-action', 'find', 'ask', 'report', 'dismiss'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -568,7 +568,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); withdraw-action (id, text = the user\'s reason: a request still waiting leaves unsent and its thread is told; use it when the user rejected the idea in chat); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
@@ -878,6 +878,9 @@ export const register: Register = on => {
     if (role.kind === 'thread') await sweepGrants(host, role, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined) // stale grants (older than grants.ttlMinutes, other session) go
     if (rotated.length) await announceRotation(host, rotated) // any session may rotate: the notice is what the desk reads
     if (role.kind === 'desk') {
+      // a standing approval that rests on no press of yours is revoked and flagged (FIX row); a request nobody decided in time leaves unsent and says so (deskactions.ts)
+      await soft($, 'standing audit', async () => { await auditStanding(host) })
+      await soft($, 'request expiry', async () => { await sweepExpired(host, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)) })
       // the desk's next prompt says so once, whichever session did it (the pane lists the notice until then)
       const said = await takeNotice(host, 'ledger-rotation')
       if (said) pending.push(`[lean-agent] ${said}`)
@@ -1636,7 +1639,7 @@ export const register: Register = on => {
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
       const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
-      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
+      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await withdrawByWords(host, e.text, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {
