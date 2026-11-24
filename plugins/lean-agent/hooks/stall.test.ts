@@ -51,9 +51,10 @@ test('truthOf: working + no activity for stallMinutes (or an old unread message)
 })
 
 test('threads.stallMinutes / stallRestart config', async () => {
-  expect(await stallConfig(setup().host, '/h')).toEqual({ minutes: 10, restart: false })
-  expect(await stallConfig(setup({ config: { threads: { stallMinutes: 5, stallRestart: true } } }).host, '/h')).toEqual({ minutes: 5, restart: true })
-  expect(await stallConfig(setup({ config: { threads: { stallMinutes: -1, stallRestart: 'yes' } } }).host, '/h')).toEqual({ minutes: 10, restart: false })
+  expect(await stallConfig(setup().host, '/h')).toEqual({ minutes: 10, restart: false, idleAlertMinutes: 10 })
+  expect(await stallConfig(setup({ config: { threads: { stallMinutes: 5, stallRestart: true, idleAlertMinutes: 3 } } }).host, '/h')).toEqual({ minutes: 5, restart: true, idleAlertMinutes: 3 })
+  expect(await stallConfig(setup({ config: { threads: { stallMinutes: -1, stallRestart: 'yes', idleAlertMinutes: -2 } } }).host, '/h')).toEqual({ minutes: 10, restart: false, idleAlertMinutes: 10 })
+  expect((await stallConfig(setup({ config: { threads: { idleAlertMinutes: 0 } } }).host, '/h')).idleAlertMinutes).toBe(0) // 0 = off
 })
 
 test('touchActivity writes the thread\'s own file, at most every 5 s (a report always)', async () => {
@@ -97,7 +98,7 @@ test('tick: a thread that waits for the user, an idle one, a parked one and an u
   const st = { rows: [row({ waitingFor: 'permission' })], restarts: [] as string[] }
   expect(await stallTick(h.host, deps(st))).toEqual([])
   st.rows = [row({ status: 'idle', state: 'idle' })]
-  expect(await stallTick(h.host, deps(st))).toEqual([])
+  expect((await stallTick(h.host, deps(st))).filter(n => n.text.includes('has done nothing'))).toEqual([]) // (an idle thread is no stall; its own "idle with no report" notice is msgstate.test.ts)
   st.rows = [row()]
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', state: 'parked', sid: S1, lastWake: 0 }))
   expect(await stallTick(h.host, deps(st))).toEqual([])

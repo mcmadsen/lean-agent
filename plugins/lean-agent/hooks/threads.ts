@@ -22,9 +22,10 @@ import { ensureGitHooks, gitEnv } from './githooks'
 import { threadEnv, writeThreadSettings } from './mcpenv'
 import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
-import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
+import { ENDED_AT_ONCE, endedAtOnce, idleNoReport, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
-import { aliveRow, answered, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
+import { aliveRow, answered, deliverConfig, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
+import { ageText, answerInfo, answerText, duplicateOf, markAnswer, markHanded, messageRecs, messagesText, readUnverified, sendLine, stateWord, unverifiedText } from './msgstate'
 import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -648,6 +649,7 @@ async function directOut(h: Host, home: string, t: Thread, row: AgentRow | undef
   if (d.delivered) {
     t.delivered = u.upTo
     await save(h, home, t)
+    await markHanded(h, home, t.id, u.upTo - u.msgs.length, u.upTo)
     return { ok: true, text: d.text, data: { resumed: false, direct: true } }
   }
   if (d.text) {
@@ -778,10 +780,12 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
 // is `verbose: true`. The desk's conversation keeps every reply, so the default stays small (a spec pins the size).
 export const LIST_LINE_MAX = 200
 const LAST_CHARS = 80
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean }): string {
-  const word = `${o.state === 'open' ? (o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string }): string {
+  // an answer on its way replaces "waiting for your answer" (1.0.31: "answer queued, not read yet (4 min)"); a stuck session stays named
+  const stuckWord = o.live === 'stuck' || o.live === 'stalled' ? `, ${o.live}` : ''
+  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.live === 'waiting' ? 'waiting for your answer' : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
-  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.unverified, o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
 async function list(h: Host, home: string, root = '', verbose = false): Promise<Out> {
   const listed = await agents(h)
@@ -809,6 +813,12 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stallFor(stall.minutes, t), activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null }) : null
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
+    const answerQ = t.state === 'open' && t.sid ? answerText((await answerInfo(h, home, t.id)).open, now0) : '' // an answer to its question that it has not read yet
+    // idle for threads.idleAlertMinutes with nothing reported (the desk's timer raises the notice once: stall.ts); a flag here so a listing shows it too
+    const idleNo = truth ? idleNoReport({ word: truth.word, keepGoing: t.keepGoing === true, lastAt: truth.lastAt, now: now0, minutes: stall.idleAlertMinutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec }) : null
+    const idleNote = idleNo ? `idle ${Math.max(1, Math.round(idleNo.ms / 60_000))} min, no report` : ''
+    const unvRec = t.state === 'open' ? await readUnverified(h, home, t.id) : null // the old session's findings, until the new one reports (msgstate.ts)
+    const unverified = unvRec ? unverifiedText(unvRec) : ''
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
     const finishing = !!truth && truth.word === 'running' && lastRec?.kind === 'report' && lastRec.state === 'done' && row?.status === 'idle' // reported done, only a background worker's notification is pending
     const ended = !!truth && !!t.sid && t.lastWake > 0 && endedAtOnce({ word: truth.word, req0: t.req0, req: typeof t.req0 === 'number' ? await requestsOf(h, t.id, now0) : null, reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
@@ -822,9 +832,9 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
     const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
-    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
@@ -901,6 +911,7 @@ const USES: Record<string, string[]> = {
   find: TEXTY,
   ask: TEXTY,
   report: ['section', 'full'],
+  messages: [],
   dismiss: ['kind', 'notice'],
 }
 const FIELDS = new Set([...Object.values(USES).flat(), 'action', 'tN'])
@@ -926,10 +937,11 @@ export function unusedField(e: Record<string, unknown>): string | null {
 // window.holdAbove (windows.ts). Everything else is leanThreadCore.
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
   try {
-    if (i.action === 'find' || i.action === 'ask' || i.action === 'report') {
+    if (i.action === 'find' || i.action === 'ask' || i.action === 'report' || i.action === 'messages') {
       const home = await homeDir(h)
       if (i.action === 'find') return await findText(h, home, i.text ?? '')
       if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
+      if (i.action === 'messages') return (await load(h, home, i.tN!)) ? { ok: true, text: await messagesText(h, home, i.tN!, await h.clock.now()) } : err(`no thread ${i.tN}`)
       return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!, { section: typeof i.section === 'string' ? i.section : undefined, full: i.full === true })
     }
     if (i.message !== undefined && i.text === undefined) i = { ...i, text: i.message } // `message` is an alias of `text`
@@ -1082,8 +1094,24 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         case 'send': {
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
-          await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
-          return await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          // the same text, still unread, within 10 minutes: not queued twice (the desk sent one answer twice in the field)
+          const sentAt = await h.clock.now()
+          const dup = await duplicateOf(h, home, id, text, sentAt)
+          if (dup) return { ok: true, text: `already queued as ${dup.id} (${ageText(sentAt - dup.at)} ago, ${stateWord(dup)}); not queued again. lean_thread messages ${id} shows its state`, data: { duplicate: dup.id } }
+          const kind0 = await kindFor(h, home, t, [{ ts: sentAt, text }]) // (before the wake: a direct delivery clears the waiting state it reads)
+          await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: sentAt, text } satisfies Inbox)
+          if (kind0 === 'answer') await markAnswer(h, home, id, [(await messageRecs(h, home, id)).length]) // the answer to its open question: msgstate.ts answerInfo
+          const out = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          // the state of THIS message, said plainly (msgstate.ts): queued / delivered / consumed, and how a queued one reaches the thread
+          const recs = await messageRecs(h, home, id)
+          const mine = recs.at(-1)
+          if (!mine || t.state !== 'open' || !t.sid) return out // (a parked / closed thread: its own reply already says nothing reads it)
+          // still unread: WATCHED from now (deliverToThread's tick): unread for threads.answerWaitSeconds and the session idle or stuck = restarted by script with the text
+          if (kind0 === 'answer') await answered(h, home, id) // queued, not read: it no longer "waits for your answer" (the list says "answer queued, not read yet")
+          const now2 = await load(h, home, id)
+          if (mine.state === 'queued' && now2?.state === 'open' && now2.sid && !/waits on a permission prompt/.test(out.text)) await watchDelivery(h, home, id, { sid: now2.sid, from: (recs.find(r => r.state === 'queued') ?? mine).n - 1, upTo: mine.n, kind: kind0, again: true })
+          const wait = (await deliverConfig(h, home)).answerWaitSeconds
+          return { ...out, text: `${sendLine(mine, { woken: (out.data as { resumed?: boolean } | undefined)?.resumed === true, answerWaitSeconds: wait })}\n${out.text}` }
         }
         case 'wake':
           return await wake(h, home, t, { root, current: installed, explicit: true })

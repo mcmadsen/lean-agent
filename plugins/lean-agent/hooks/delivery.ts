@@ -9,6 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { markWaiting, readWaiting } from './threadstate'
+import { answerInfo, clearUnverified, markMsgRead } from './msgstate'
 import { PROSE_REPLY, proseRequest } from './proserequest'
 import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
@@ -50,8 +51,10 @@ async function consumedN(h: Host, home: string, id: string): Promise<number> {
 }
 
 export async function markConsumed(h: Host, home: string, id: string, n: number): Promise<void> {
-  if (n > (await consumedN(h, home, id))) {
+  const was = await consumedN(h, home, id)
+  if (n > was) {
     await writeJson(h, `${tdir(home, id)}/consumed.json`, { n } satisfies Consumed)
+    await markMsgRead(h, home, id, was, n) // msgstate.ts: the messages became "consumed" at this time
     await writeJson(h, `${tdir(home, id)}/delivered-at.json`, { at: await h.clock.now() }).catch(() => undefined) // when the desk last delivered anything (sendhold.ts)
   }
 }
@@ -90,7 +93,7 @@ export async function consumeWake(h: Host, id: string, prompt: string): Promise<
 // thread's own session (the pane shows "tN needs your yes in its own session" with an Open tN button; the desk never performs it)
 // action: a request for the desk to send one of the typed remote writes (deskactions.ts) once the user said yes at the desk
 export type DeskAction = { id: string; kind: string; headline: string }
-export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string; action?: DeskAction; report?: string /* a question the mod made from the prose of this report (proserequest.ts) */; prose?: boolean; requeued?: string /* a mod row that puts an open item back to the desk (waitrestart.ts) */ }
+export type DeskRec = { ts: number; from: string; kind: 'report' | 'ask'; text: string; state?: string; options?: string[]; superseded?: boolean; approval?: string; action?: DeskAction; report?: string /* a question the mod made from the prose of this report (proserequest.ts) */; prose?: boolean; requeued?: string /* a mod row that puts an open item back to the desk (waitrestart.ts) */; answered?: { at: number; id: string } /* set when the row is read (never stored): the desk already sent the thread an answer after it (msgstate.ts) */ }
 export const APPROVAL_MAX = 300
 export const approvalOf = (r: DeskRec): string => (r.kind === 'report' && r.state === 'blocked' && typeof r.approval === 'string' ? r.approval.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, APPROVAL_MAX) : '')
 export const approvalHint = (r: DeskRec): string => (approvalOf(r) ? ` [needs the user's yes in ${r.from}'s own session: ${approvalOf(r)}; tell the user to press "Open ${r.from}" in the pane and answer there; do not run it yourself, do not ask it with AskUserQuestion and do not send a yes (a relayed yes does not satisfy the permission check)]` : '')
@@ -498,6 +501,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
         return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
       }
+      await clearUnverified(h, home, id) // the new session has reported: what it records is its own again (msgstate.ts)
       await clearReportFailure(h, home, id)
       if (rState === 'blocked' && !approval && !action) await markWaiting(h, home, id, { since: ts, text: rText.slice(0, 300) }) // a blocked report with a question for the user (no approval or action card)
       if (rState === 'waiting') { // restarted while it waited (waitrestart.ts): the desk has the open item; the thread's word stays `waiting` from the original time
@@ -618,7 +622,16 @@ export async function unreadReports(h: Host): Promise<{ recs: DeskRec[]; upTo: n
   const all = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
   const read = (await readJson<{ n: number }>(h, `${deskState(home)}/inbox-read.json`, { n: 0 })).n || 0
   const got = await deliveredKeys(h, home) // rows the desk already received as a direct message
-  return { recs: all.slice(read).filter(r => !got.has(keyOf(r))), upTo: all.length, from: read }
+  const recs = all.slice(read).filter(r => !got.has(keyOf(r)))
+  // a question (or a blocked report that waits for the user) the desk already answered: marked, so it is not asked again (1.0.31; field: a stale row looked live)
+  const answers = new Map<string, Awaited<ReturnType<typeof answerInfo>>>()
+  for (const r of recs) {
+    if (!(r.kind === 'ask' || (r.kind === 'report' && r.state === 'blocked')) || !/^t\d+$/.test(r.from)) continue
+    if (!answers.has(r.from)) answers.set(r.from, await answerInfo(h, home, r.from).catch(() => ({ lastAt: 0, last: null, open: null })))
+    const a = answers.get(r.from)!
+    if (a.last && a.lastAt > r.ts) r.answered = { at: a.lastAt, id: a.last.id }
+  }
+  return { recs, upTo: all.length, from: read }
 }
 
 export async function markRead(h: Host, upTo: number): Promise<void> {
@@ -627,14 +640,14 @@ export async function markRead(h: Host, upTo: number): Promise<void> {
 
 // a done report carries the hint that closing is the desk's job (a thread cannot close itself)
 export const renderReports = (recs: DeskRec[], dg?: Digest) =>
-  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}: ${dg && digestable(r, dg.chars) ? digestText(r, dg) : r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
+  recs.map(r => `[lean-agent] ${r.kind === 'ask' ? 'question' : 'report'} from ${r.from}${r.state ? ` (${r.state})` : ''}${r.superseded ? ' [brief superseded by a later user message]' : ''}${r.answered ? ` [answered by the desk at ${new Date(r.answered.at).toTimeString().slice(0, 5)} (${r.answered.id}): already settled, do not ask the user again]` : ''}: ${dg && digestable(r, dg.chars) ? digestText(r, dg) : r.text}${r.options?.length ? ` [options: ${r.options.join(' | ')}]` : ''}${approvalHint(r)}${actionHint(r)}${r.kind === 'report' && r.state === 'done' ? ` (close ${r.from} when nothing is left)` : ''}`).join('\n')
 
 // ---- relay to an idle desk ---------------------------------------------------------------------------------
 // $.prompt.submit starts a desk turn of its own once the session is idle. Only what needs the user or ends a thread is worth a
 // turn: a question, or a report that is done or blocked; `working` progress waits for the user's next message.
 export const RELAY_GAP_MS = 60_000
 export const BUSY_MAX_MS = 15 * 60_000 // a turn that never reported its end (aborted) stops blocking the relay after this
-export const worthRelay = (recs: DeskRec[]) => recs.some(r => r.kind === 'ask' || r.state === 'done' || r.state === 'blocked')
+export const worthRelay = (recs: DeskRec[]) => recs.some(r => !r.answered && (r.kind === 'ask' || r.state === 'done' || r.state === 'blocked'))
 export const RELAY_LEAD = '[lean-agent] Threads reported while you were idle. Relay this to the user now: ask each question with AskUserQuestion and send the answer to its thread (not an approval: see its hint); when a thread is done and the user needs nothing more, close it and clear its goal.'
 
 // One relay: hands ALL unread reports to `submit` (marked read first; marked unread again if the submit is refused). Returns whether it

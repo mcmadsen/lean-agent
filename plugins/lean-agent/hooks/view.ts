@@ -2,6 +2,7 @@
 import { homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { approvalOf, deskState, unconsumed } from './delivery'
+import { answerInfo, answerText } from './msgstate'
 import { liveApproval } from './approvals'
 import { denialCard, noPromptText, sessionAlive } from './denial'
 import { selfEditView } from './selfedit'
@@ -324,14 +325,17 @@ export async function loadView(h: Host): Promise<View> {
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
-      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', isStuck(truth.word) ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
+      // an answer to its question (msgstate.ts): the question / blocked report older than it is ANSWERED (not "asking", not blocked), and while the thread has not read it the row says so
+      const ans = t.state === 'open' && t.sid ? await answerInfo(h, home, t.id) : { lastAt: 0, last: null, open: null }
+      const lastAskTs = Math.max(0, ...mine.filter(r => r.kind === 'ask').map(r => r.ts))
+      const liveNote = !agentsOk || t.state !== 'open' || !t.sid ? '' : [answerText(ans.open, now), truth.word === 'idle' && truth.unread ? `${truth.unread} unread queued: wake or restart it` : '', isStuck(truth.word) ? `${truth.text}: ${stuckAdvice(ag?.agent)}` : '', stale ? 'its last [working] report is stale: the session is not running' : '', ended ? ENDED_AT_ONCE : ''].filter(Boolean).join(' · ')
       const apv0 = lr && t.state === 'open' ? await liveApproval(h, t.id, approvalOf(lr), lr.ts, !!ag?.working && !paused).catch(() => approvalOf(lr)) : '' // a blocked report that still waits for the user's yes (approvals.ts)
       // "needs your yes in its own session" only when a prompt is really open there (`claude agents --json`: waitingFor / blocked). A classifier or rule denial has none:
       // the card says so and offers the real options instead of an Open button (denial.ts)
       const noPrompt = agentsOk && !!t.sid && !!ag && sessionAlive(ag.agent) && !ag.needsYou // (a stopped session, after "Open tN" stopped its idle process, says nothing about a prompt)
       const den = lr && lr.kind === 'report' && lr.state === 'blocked' && t.state === 'open' ? await denialCard(h, t.id, { blocked: true, approval: apv0, noPrompt, reportTs: lr.ts, working: !!ag?.working && !paused, text: lr.text }).catch(() => null) : null
       const apv = den ? '' : apv0
-      const isBlocked = !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv && !den)
+      const isBlocked = !!lr && lr.kind === 'report' && lr.state === 'blocked' && !(t.state === 'open' && approvalOf(lr) && !apv && !den) && !(ans.lastAt > lr.ts)
       const dts = isBlocked ? await dismissedTs(h, home, t.id) : 0
       const cv = t.state === 'open' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null
       // hard-stopped at the context limit and the mod will restart it (its marker is pending: a give-up drops it): "restarting", amber, nothing for the user to do
@@ -365,7 +369,7 @@ export async function loadView(h: Host): Promise<View> {
         ...(isDone && agentsOk && truth.word === 'running' && ag?.agent.status === 'idle' ? { finishing: true } : {}), // the last report is done and the session's status is idle: it only finishes (a pending background worker)
         working: (!!ag?.working && !paused) || !agentsOk, // an unreadable listing is never "not working": nothing is closed on a guess
         done: isDone,
-        asking: asking.has(t.id) || lr?.kind === 'ask',
+        asking: !(lastAskTs > 0 && ans.lastAt > lastAskTs) && (asking.has(t.id) || lr?.kind === 'ask'),
         ...(isBlocked ? (dts >= lr!.ts ? { blocked: false, blockedDismissed: true } : { blocked: true }) : { blocked: false }), // not once its approval ended: it carried on; not once the user dismissed THIS report (a newer blocked one shows again)
         needsYou: !!ag?.needsYou && !paused,
         ...(ag?.needsYou && !paused ? { waitId: `${t.sid}:${ag.agent.waitingFor || ag.agent.state}` } : {}),

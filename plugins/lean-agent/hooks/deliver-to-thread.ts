@@ -16,7 +16,8 @@ import type { Host } from './state'
 import { wakeMark } from './delivery'
 import { setNotice } from './notices'
 import { MOD_SEND_PREFIX, asMod } from './modsend'
-import { clearWaiting, liveOf, readActivity, readWaiting, stillWaiting, waitingFile } from './threadstate'
+import { clearWaiting, liveOf, readActivity, readWaiting, stallConfig, stallFor, stillWaiting, waitingFile } from './threadstate'
+import { markEscalated, markFailed, messageRecs } from './msgstate'
 import type { AgentRow, Out, Thread } from './threads'
 
 export type MsgKind = 'answer' | 'instruction' | 'fyi'
@@ -160,29 +161,37 @@ async function tickOnce(h: Host, deps: DeliveryDeps): Promise<DeliveryNotice[]> 
     // ---- 2. a delivered message: did it start a turn?
     if (rec) {
       const noun = rec.kind === 'answer' ? 'answer' : 'message'
-      if (rec.sid !== t.sid || (act && act.at > rec.at)) await dropRec(h, home, id) // reacted (a prompt, a tool call, a worker's call) or another session now
+      const ns = Array.from({ length: Math.max(0, Math.min(rec.upTo - rec.from, 50)) }, (_, k) => rec.from + 1 + k)
+      const ids = ns.map(n => `m${n}`).join(', ')
+      const read = rec.upTo > 0 && (await messageRecs(h, home, id))[rec.upTo - 1]?.state === 'consumed' // the thread's mod handed it over (takeBatch / a wake prompt)
+      if (rec.sid !== t.sid || (act && act.at > rec.at) || read) await dropRec(h, home, id) // reacted (a prompt, a tool call, a worker's call), read, or another session now
       else if (now - rec.at > RECHECK_MAX_MS) await dropRec(h, home, id)
       else if (now - rec.at >= cfg.answerWaitSeconds * 1000) {
         const gone = !aliveRow(row)
         const idle = !gone && liveOf(row) === 'idle'
         const waiting = rec.kind === 'answer' || stillWaiting(w, act?.at) // (an answer cleared waiting.json when it was delivered: the kind remembers that the thread was waiting)
+        // stuck (1.0.31; field: 4 messages unread for 12 min in a session that "worked"): alive, no tool call / report / start for threads.stallMinutes. A message it never
+        // reads is no longer left to the desk: the same restart as for an idle one, the text last in the new session's prompt.
+        const stuck = !gone && liveOf(row) === 'working' && now - Math.max(act?.at ?? 0, Number(t.lastWake) || 0, 0) >= stallFor((await stallConfig(h, home)).minutes, t) * 60_000
         // never while a permission prompt is open; a session that works (and asked nothing) reads it at its next step: re-checked
-        if (!gone && (row!.waitingFor || !(idle || waiting || row!.state === 'blocked'))) {
+        if (!gone && (row!.waitingFor || !(idle || waiting || stuck || row!.state === 'blocked'))) {
           /* re-checked at the next tick */
         } else if (!cfg.escalate) {
           await dropRec(h, home, id)
-          out.push({ id, text: `${id} did not react to your ${noun} within ${cfg.answerWaitSeconds} s (threads.escalate is off): restart it with the ${noun}?`, toast: true })
+          out.push({ id, text: `${id} did not react to your ${noun} within ${cfg.answerWaitSeconds} s (threads.escalate is off): restart it with the ${noun}? (${ids})`, toast: true })
         } else {
-          const r = await deps.restart(id, `Its previous session did not react to the desk's ${noun} within ${cfg.answerWaitSeconds} s (no prompt, no tool call); restarted by script, the message is in this prompt.`, rec.from)
+          const r = await deps.restart(id, `Its previous session did not react to the desk's ${noun} within ${cfg.answerWaitSeconds} s (no prompt, no tool call${stuck ? ' for the stall minutes' : ''}); restarted by script, the message is in this prompt.`, rec.from)
           if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
             await dropRec(h, home, id)
             await clearWaiting(h, home, id)
-            out.push({ id, text: `${id} did not react to your ${noun} within ${cfg.answerWaitSeconds} s: restarted it with the ${noun}; its notes are kept`, toast: true })
+            await markEscalated(h, home, id, ns)
+            out.push({ id, text: `${id} did not react to your ${noun} within ${cfg.answerWaitSeconds} s${stuck ? ' (its session was stuck)' : ''}: restarted it with the ${noun}; its notes are kept`, toast: true })
           } else {
             const tries = (rec.tries ?? 0) + 1
             if (tries >= MAX_ESCALATE_TRIES) {
               await dropRec(h, home, id)
-              out.push({ id, text: `${id} did not react to your ${noun} and the automatic restart failed ${tries} times (last reason: ${r.text.slice(0, 160)}); restart it by hand`, toast: true })
+              await markFailed(h, home, id, ns, `automatic restart failed: ${r.text.slice(0, 80)}`)
+              out.push({ id, text: `${id} did not react to your ${noun} and the automatic restart failed ${tries} times (last reason: ${r.text.slice(0, 160)}); restart it by hand (${ids})`, toast: true })
             } else await writeJson(h, recFile(home, id), { ...rec, tries } satisfies DeliveryRec).catch(() => undefined)
           }
         }

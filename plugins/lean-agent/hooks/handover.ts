@@ -5,6 +5,7 @@ import type { Host } from './state'
 import { deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { leadOf, openItemOf, restartWaiting } from './waitrestart'
+import { markUnverified, messageRecs } from './msgstate'
 import { GIT_LINE, readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
 import { HANDOVER_RULE, NOTES_FILE, reviewBlock, scratchList, scratchNotes } from './scratchnotes'
@@ -112,6 +113,24 @@ export function corrections(rows: Inbox[], queued: Inbox[], created: number): { 
   return { lines: all.slice(-CORRECTIONS_MAX).map(line), older: Math.max(0, all.length - CORRECTIONS_MAX) }
 }
 
+// ---- what a replaced session leaves open (1.0.31) -----------------------------------------------------------------------------------------
+// User corrections not yet answered: a message the desk sent this thread (queued, delivered or already read by the OLD session) that no report of the thread
+// answered since (a report is newer than it). They head the new session's first prompt: the old session may have read one and replaced itself before acting.
+// Not an FYI / status check, and not the text given to THIS start (it is at the END of the prompt).
+export const UNANSWERED_MAX = 5
+export const UNANSWERED_EACH = 240
+// A text already printed under "Corrections since the brief" (`shown`: those lines) is NOT printed a second time (that section holds every message once): the row points at it.
+export async function unansweredBlock(h: Host, home: string, id: string, recs: DeskRec[], queuedAll: Inbox[], shown: string[]): Promise<string> {
+  const here = new Set(queuedAll.filter(m => m.instr).map(m => `${m.ts}|${m.text}`))
+  const lastReport = Math.max(0, ...recs.map(r => Number(r.ts) || 0))
+  const open = (await messageRecs(h, home, id).catch(() => [])).filter(m => m.at > lastReport && !/^\s*(?:fyi\b|status check\b)/i.test(m.text) && !here.has(`${m.at}|${m.text}`)).slice(-UNANSWERED_MAX)
+  if (!open.length) return ''
+  const rows = open.map(m => `- ${m.id} (${m.state}, sent ${timeText(m.at)})${shown.some(l => l.includes(flat(m.text).slice(0, 60))) ? ': its text is under "Corrections since the brief" below' : `: ${cut(flat(m.text), UNANSWERED_EACH)}`}`)
+  return `user corrections not yet answered: handle these FIRST, before anything else here; they reached your previous session and no report of yours answered them (it may have read one without acting on it):\n${rows.join('\n')}`
+}
+export const unverifiedLine = (at: number): string =>
+  `Findings and area records your previous session recorded are UNVERIFIED (session replaced at ${timeText(at)}): check each against the files before you rely on it or repeat it; your next report that restates or corrects them confirms them.`
+
 // ---- the pull mode (1.0.27): config.json `handover.mode` ---------------------------------------------------------------------------------
 // "core" (default): the first prompt holds ONLY what changes behaviour (about CORE_TOKENS), script-built; the rest is a pull list of one-line
 // commands with sizes (pull.ts: `lean_run {pull}` returns a section, not the whole store). "full": the bounded prompt (handoverTokens).
@@ -165,6 +184,10 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   // everything the desk sent this thread after its start (queued, delivered, to a session that has ended, the text of a restart / wake / resume, the
   // results of the actions the desk made for it), newest last, right after the brief: it is newer than the brief and wins where they differ.
   const corr = corrections(await readJsonl<Inbox>(h, `${dir}/inbox.jsonl`), queuedAll, Number.isFinite(t.created) ? t.created : 0)
+  // 1.0.31: the corrections no report answered come first, and what the replaced session recorded is distrusted until this one reports (flag: unverified.json, cleared by its report)
+  const unans = await unansweredBlock(h, home, t.id, recs, queuedAll, mode === 'core' ? corr.lines.slice(-CORE_CORRECTIONS) : corr.lines)
+  const unv = t.sid && recs.length ? unverifiedLine(now) : ''
+  if (unv && !preview) await markUnverified(h, home, t.id, { at: now, sid: t.sid })
   if (mode === 'core') {
     // only what changes behaviour; every other source is one line in the pull list, with its size
     const last3 = recs.slice(-REPORT_DIGESTS)
@@ -185,6 +208,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     const core: Part[] = [
       { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
       { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; this prompt holds only what changes your behaviour.`, mode: 'fixed' },
+      { name: 'unanswered', head: '## Unanswered corrections', body: unans, mode: 'fixed' },
+      { name: 'unverified', body: unv, mode: 'fixed' },
       { name: 'brief', head: `## Brief (first ${CORE_BRIEF} characters)`, body: cut(flagForeignPaths(brief, t.id), CORE_BRIEF), file: `${dir}/brief.md`, mode: 'head' },
       { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
       { name: 'open', head: '## Open', body: open, mode: 'fixed' },
@@ -202,6 +227,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
     { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; everything lean-agent kept is below.`, mode: 'fixed' },
     { name: 'check', body: wait ? '' : `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
+    { name: 'unanswered', head: '## Unanswered corrections', body: unans, mode: 'fixed' },
+    { name: 'unverified', body: unv, mode: 'fixed' },
     { name: 'brief', head: '## Brief', body: cut(flagForeignPaths(brief, t.id), BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },

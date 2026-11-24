@@ -773,7 +773,7 @@ test('a huge report and queue cannot blow the handover past one argv string; a c
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 1, from: 't1', kind: 'report', text: 'Z'.repeat(200_000), state: 'done' }) + '\n')
   h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: '', ts: 1 } }))
   expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed, goal cleared; no session in the list (already removed)')
-  for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: 'q'.repeat(10_000) })
+  for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: `${'q'.repeat(10_000)} ${n}` }) // (distinct texts: an identical unread one is deduped, msgstate.ts)
   state.rows = []
   expect((await call({ action: 'reopen', tN: 't1' })).ok).toBe(true)
   const prompt = bg[1]![bg[1]!.length - 1]!
