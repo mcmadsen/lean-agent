@@ -11,10 +11,10 @@ import { logRefusal } from './feedback'
 import { noteReviewed, reviewedBy } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
-import { MIN_FILTER_VERSION, changeScope, changedText, contextOf, droppedText, scopeLine, scopedOf, withArea } from './reviewchange'
+import { MIN_FILTER_VERSION, changeScope, changedText, contextOf, dropNotes, droppedText, scopeLine, scopedOf, withArea } from './reviewchange'
 import { compareVersions, running, runningOf } from './skew'
 import { areaOf, areasOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
-import { STEPS_BY_JOB, stepBudget } from './jobs'
+import { REVIEWER_STEPS, reviewerBudget } from './jobs'
 import { loadOrch } from './orchestrate'
 import type { Range } from './reviewprep'
 import { requiredRuns, wantSecondOpinion, wantedModel } from './reviewrisk'
@@ -270,8 +270,12 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     lines.push(earlier!.carry.open.length ? `Open findings from the last review:\n${earlier!.carry.open.map(findingLine).join('\n')}` : 'Open findings from the last review: none.')
   }
   const orch = await loadOrch(h).catch(() => undefined)
-  const plan = statsText(areaDiff, orch ? stepBudget('check', orch.steps, orch.stepsByJob) : STEPS_BY_JOB.check)
+  const plan = statsText(areaDiff, orch ? reviewerBudget(orch.steps) : REVIEWER_STEPS) // the one number the guard enforces (jobs.ts REVIEWER_STEPS)
   if (plan) lines.push(plan)
+  if (area) { // the area's whole diff in ONE file (written by script): one Read instead of a git diff call per directory
+    const patch = await spill(h, thread, `diff-${area.name}.patch`, areaDiff)
+    if (patch) lines.push(`Patch file of ${area.name} (the whole diff of this area, new-side line numbers in its @@ headers; Read it once instead of one git diff per directory): ${patch}`)
+  }
   lines.push(changedText(brief, { diff: areaDiff, context: await contextCfg(h) })) // the changed hunks with new-side line numbers (over the budget: the ranges): the reviewer reports on these only (reviewchange.ts)
   lines.push(prepText(capPrep(brief)))
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
@@ -372,7 +376,7 @@ async function doMerge(h: Host, project: string, i: any, thread = ''): Promise<O
   const block = roundTrip(result)
   const digest = digestOf(block)
   await rememberMerged(h, project, digest)
-  const head = `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).${droppedNote ? ` ${droppedNote}.` : ''}`
+  const head = `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).${droppedNote ? ` ${droppedNote}.` : ''}${dropNotes(cs.dropped) ? `\n${dropNotes(cs.dropped)}` : ''}`
   const file = await spill(h, thread, `review-merged-${digest.slice(0, 12)}.json`, JSON.stringify(block))
   // COMPACT (1.0.28): counts by severity, the top 10 findings, the path of the full merged JSON; never the whole list into the thread's context
   if (file) return { ok: true, text: `${head}\nverdict: ${result.verdict || 'none'}; ${countsText(result.findings) || 'no findings'}.${result.findings.length ? `\ntop ${Math.min(10, result.findings.length)} of ${result.findings.length}:\n${topRows(result.findings).join('\n')}` : ''}\nThe full merged JSON (every finding, the lists) is in ${file}: pass that path, unchanged, as review to lean_review record (or pass the two blocks as reviews). Read it only for the findings you must fix.` }
@@ -434,6 +438,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   // an area record: the checks (new symbols, edited tests) cover this area's files only
   let area: ReturnType<typeof areaOf>
   let areasAll: ReturnType<typeof partition> = []
+  let replaced = '' // an area record that replaces an earlier one of the same area says so
   if (scope) {
     areasAll = partition(perFileStats(diff))
     area = areaOf(areasAll, scope)
@@ -482,7 +487,9 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (area) {
     // an area record joins the earlier ones of this sha (one record per sha): the area's verdict, its findings tagged with the area, summed counts
     const prev = await readReview(h, project, sha)
-    const areas = { ...(prev?.areas ?? {}), [area.name]: { verdict: res.verdict || 'none', open: v.open.length, counts: { ...rec.counts } } }
+    const before = prev?.areas?.[area.name]
+    if (before) replaced = `replaces the record of ${area.name} from ${typeof before.ts === 'number' && before.ts > 0 ? `${new Date(before.ts).toISOString().slice(11, 16)} UTC` : 'an earlier pass'} (${before.open} open finding${before.open === 1 ? '' : 's'}, ${before.verdict})`
+    const areas = { ...(prev?.areas ?? {}), [area.name]: { verdict: res.verdict || 'none', open: v.open.length, counts: { ...rec.counts }, ts: await h.clock.now() } }
     const mine = (s: string) => s.startsWith(`[${area!.name}] `)
     rec.areas = areas
     rec.scoped = withArea(prev?.scoped, area.name, scoped)
@@ -495,10 +502,10 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
-  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', scopeLine(rec.scoped ?? scoped)].filter(Boolean).join('\n')
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped)].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
-  const areaLine = area ? `\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
+  const areaLine = area ? `${replaced ? `\n${replaced}` : ''}\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
   return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
 }

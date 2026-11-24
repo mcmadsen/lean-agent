@@ -7,6 +7,7 @@
 // completeness) is kept only when it names a changed file. Deleted files have no new-side lines: a finding about a deleted file (its removal)
 // stays. A removal is reported at the line where it was cut (a deletion-only hunk marks that spot), or at the added line that replaces it.
 import type { Prep } from './reviewprep'
+import { formatRanges } from './anchor'
 
 export const CONTEXT_LINES = 0
 export const MIN_FILTER_VERSION = '1.0.29'
@@ -14,7 +15,7 @@ export const CROSS_FILE = new Set(['tests', 'docs', 'documentation', 'scope', 'c
 const ABSENCE = /\b(no|none|missing|lacks?|lacking|without|absent|absence|unprotected|unvalidated|unbounded|not (?:covered|validated|checked|rate[- ]?limited|tested|handled|protected|enforced|authenticated|documented))\b/i
 export const isAbsence = (text: string): boolean => ABSENCE.test(text)
 type Row = { path: string; line: number; category: string; text: string }
-export type Dropped = { n: number; files: string[]; notInPr?: string[] }
+export type Dropped = { n: number; files: string[]; notInPr?: string[]; notes?: string[] }
 
 // config review.contextLines: a whole number of lines of context around each changed hunk (0..20); anything else is the default
 export const contextOf = (v: unknown): number => {
@@ -38,18 +39,20 @@ export function insideChange(path: string, line: number, prep: Pick<Prep, 'chang
   return line > 0 && ranges.some(([a, b]) => line >= a - context && line <= b + context)
 }
 
-export function changeScope<T extends Row>(findings: T[], prep: Pick<Prep, 'changed' | 'hunks'>, context = CONTEXT_LINES): { kept: T[]; dropped: Dropped & { notInPr: string[] }; crossFile: number } {
+export function changeScope<T extends Row>(findings: T[], prep: Pick<Prep, 'changed' | 'hunks'>, context = CONTEXT_LINES): { kept: T[]; dropped: Dropped & { notInPr: string[]; notes: string[] }; crossFile: number } {
   const kept: T[] = []
   const files = new Set<string>()
   const notInPr = new Set<string>()
+  const notes: string[] = [] // why each was dropped, with the ranges that would have been accepted for the file
   let n = 0
   let crossFile = 0
-  const drop = (label: string, outside?: string) => { n++; files.add(label); if (outside) notInPr.add(outside) }
+  const drop = (label: string, why: string, outside?: string) => { n++; files.add(label); if (outside) notInPr.add(outside); if (notes.length < 30) notes.push(why) }
+  const accepted = (c: string) => `${formatRanges((prep.hunks[c] ?? []).map(([a, b]) => [Math.max(1, a - context), b + context] as [number, number]))}`
   for (const f of findings) {
     const p = clean(f.path ?? '')
-    if (!p) { drop('(no file)'); continue } // never kept: a finding with no file is about no changed line
+    if (!p) { drop('(no file)', `a finding with no file: ${String(f.text ?? '').slice(0, 60)}`); continue } // never kept: a finding with no file is about no changed line
     const c = changedFile(p, prep.changed)
-    if (!c) { drop(p, p); continue }
+    if (!c) { drop(p, `${p}${f.line > 0 ? `:${f.line}` : ''} is in a file the PR does not change`, p); continue }
     const ranges = prep.hunks[c]
     if (!ranges?.length) { kept.push(f); continue } // a deleted file (or one with no line ranges): its removal
     const cross = CROSS_FILE.has(f.category)
@@ -58,14 +61,16 @@ export function changeScope<T extends Row>(findings: T[], prep: Pick<Prep, 'chan
       if (cross && !(isAbsence(f.text) && f.category !== 'tests' && f.category !== 'docs' && f.category !== 'documentation')) {
         crossFile++
         kept.push(/\[cross-file\]/.test(f.text) ? f : { ...f, text: `${f.text} [cross-file: names ${c}, no line]` })
-      } else drop(`${p} (no line)`)
+      } else drop(`${p} (no line)`, `${p} has no line: name a changed line (accepted: ${accepted(c)})`)
       continue
     }
     if (ranges.some(([a, b]) => f.line >= a - context && f.line <= b + context)) kept.push(f)
-    else drop(p)
+    else drop(p, `${p}:${f.line} is outside the changed ranges ${accepted(c)}`)
   }
-  return { kept, dropped: { n, files: [...files], notInPr: [...notInPr] }, crossFile }
+  return { kept, dropped: { n, files: [...files], notInPr: [...notInPr], notes }, crossFile }
 }
+// "why each was dropped" for the reply (the first few)
+export const dropNotes = (d: Dropped, max = 6): string => (d.notes?.length ? `dropped: ${d.notes.slice(0, max).join('; ')}${d.notes.length > max ? `; and ${d.notes.length - max} more` : ''}` : '')
 export const droppedText = (d: Dropped, max = 8): string =>
   d.n ? `${d.n} finding${d.n === 1 ? '' : 's'} dropped: outside the change (files: ${d.files.slice(0, max).join(', ')}${d.files.length > max ? `, and ${d.files.length - max} more` : ''})` : ''
 

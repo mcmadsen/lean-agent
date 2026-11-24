@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadTool } from './delivery'
 import { analyzeDiff } from './reviewprep'
-import { changeScope, changedText, contextOf, droppedText, insideChange } from './reviewchange'
+import { changeScope, changedText, contextOf, dropNotes, droppedText, insideChange } from './reviewchange'
 
 const L = '/h/.lean-agent'
 const H2 = 'c'.repeat(40)
@@ -39,6 +39,11 @@ test('findings outside the changed lines (context 0) are dropped and counted; ch
   expect(r.dropped.n).toBe(7)
   expect(r.dropped.files).toEqual(['src/mod.ts', 'src/new.ts', 'src/other.ts', 'lib/util.ts', 'src/cut.ts', 'src/mod.ts (no line)'])
   expect(r.dropped.notInPr).toEqual(['src/other.ts', 'lib/util.ts'])
+  expect(r.dropped.notes).toContain('src/mod.ts:13 is outside the changed ranges 10-12') // names the ranges that would have been accepted
+  expect(r.dropped.notes).toContain('src/other.ts:3 is in a file the PR does not change')
+  expect(r.dropped.notes).toContain('src/mod.ts has no line: name a changed line (accepted: 10-12)')
+  expect(dropNotes(r.dropped, 2)).toBe('dropped: src/mod.ts:13 is outside the changed ranges 10-12; src/mod.ts:9 is outside the changed ranges 10-12; and 5 more')
+  expect(changeScope([f('src/mod.ts', 20)], prep, 3).dropped.notes).toEqual(['src/mod.ts:20 is outside the changed ranges 7-15'])
   expect(droppedText(r.dropped)).toBe('7 findings dropped: outside the change (files: src/mod.ts, src/new.ts, src/other.ts, lib/util.ts, src/cut.ts, src/mod.ts (no line))')
   expect(droppedText({ n: 0, files: [] })).toBe('')
   expect(droppedText({ n: 1, files: ['a.ts'] })).toBe('1 finding dropped: outside the change (files: a.ts)')
@@ -59,7 +64,7 @@ test('a finding with no file or no line, or about something absent, is dropped; 
   const prep = await analyzeDiff(DIFF, async () => '')
   const nofile = changeScope([f('', 0, 'tests', 'no test for the empty case'), f('', 0, 'docs', 'the readme is not updated'), f('', 0, 'scope', 'siblings share it'), f('', 0, 'correctness', 'something somewhere')], prep)
   expect(nofile.kept).toEqual([])
-  expect(nofile.dropped).toEqual({ n: 4, files: ['(no file)'], notInPr: [] })
+  expect(nofile.dropped).toMatchObject({ n: 4, files: ['(no file)'], notInPr: [] })
   const open = changeScope([f('src/Program.cs', 0, 'security', 'the anonymous Open endpoint has no rate limiting'), f('src/Program.cs', 40, 'security', 'no rate limiting'), f('src/mod.ts', 0, 'correctness', 'it breaks'), f('src/mod.ts', 0, 'completeness', 'missing validation of the input')], prep)
   expect(open.kept).toEqual([])
   expect(open.dropped.notInPr).toEqual(['src/Program.cs'])

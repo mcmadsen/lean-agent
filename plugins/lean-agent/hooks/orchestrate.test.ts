@@ -241,16 +241,18 @@ test('capTo: any tool result over the limit keeps head and tail, the full text i
   expect(b.result.interrupted).toBe(false)
 })
 
-test('the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) and is told what to do at the end', () => {
+test('the reviewer has its own budget (REVIEWER_STEPS = 16 tool calls, the number the brief states) and is told what to do at the end', async () => {
+  const { REVIEWER_STEPS } = await import('./jobs')
+  expect(REVIEWER_STEPS).toBe(16)
   orchReset()
   const rv = { ...worker, agentType: 'lean-agent:reviewer', agentId: 'rv1' }
   const bash = { tool: 'Bash', command: 'git -C /r/app diff main...abc' }
-  for (let n = 1; n <= 10; n++) expect(call(rv, bash), `call ${n}`).toBeNull()
-  const over = call(rv, bash)
-  expect(over).toContain("the reviewer's budget (10 tool calls")
+  for (let n = 1; n <= 16; n++) expect(call(rv, bash, orchConfig({ workers: { steps: 24 } })), `call ${n}`).toBeNull()
+  const over = call(rv, bash, orchConfig({ workers: { steps: 24 } }))
+  expect(over).toContain("the reviewer's budget (16 tool calls")
   expect(over).toContain('write the json block')
-  expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull()
-  const small = orchConfig({ workers: { stepsByJob: { check: 2 } } })
+  expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull() // (the check job's own number does not apply to it)
+  const small = orchConfig({ workers: { steps: 2 } })
   expect([call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small)].map(x => x === null)).toEqual([true, true, false])
   // another subagent type (explorer, auditor) is not counted by this rule
   const ex = { ...worker, agentType: 'lean-agent:explorer', agentId: 'ex1' }

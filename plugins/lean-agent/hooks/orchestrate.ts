@@ -2,7 +2,7 @@
 // small step for a haiku worker. Enforced here by the guard (guard.ts calls orchDecide), not by text a model has to remember.
 // Pure rules over a call plus a little in-memory state (per-turn direct reads, workers in flight, per-worker step counts).
 import { plainPipeline } from './shell'
-import { jobOf, retryDenial, retryRan, retryReset, stepBudget, stepNote } from './jobs'
+import { jobOf, retryDenial, retryRan, retryReset, reviewerBudget, stepBudget, stepNote } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 import { forgeRefusal, isForgeWrite } from './forgewrite'
@@ -336,7 +336,7 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   const n = (steps.get(k) ?? 0) + 1
   if (!steps.has(k) && steps.size >= MAX_TRACKED) steps.delete(steps.keys().next().value as string)
   steps.set(k, n)
-  const budget = stepBudget(ctx.job, c.steps, c.stepsByJob)
+  const budget = bare(ctx.agentType) === 'reviewer' ? reviewerBudget(c.steps) : stepBudget(ctx.job, c.steps, c.stepsByJob)
   const note = n <= budget ? stepNote(n, budget) : null // 75% of the budget used: the result of THIS call carries the line (takeStepNote)
   if (note) notes.set(k, note)
   else notes.delete(k)
@@ -344,14 +344,14 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
     if (budgetHit.size >= MAX_TRACKED) budgetHit.delete(budgetHit.values().next().value as string)
     budgetHit.add(k)
   }
-  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, the check job's) is used: write the json block with what you have and answer; list what you could not check in unverified`
+  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, REVIEWER_STEPS) is used: write the json block with what you have and answer; list what you could not check in unverified`
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
 // null = allow, a string = the refusal
 export function orchDecide(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   if (!c.on) return null
-  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : bare(ctx.agentType) === 'reviewer' ? workerDenial(c, { ...ctx, job: 'check' }, e) : null // the reviewer has the budget of a check job (10 tool calls, workers.stepsByJob.check) so it cannot explore
+  if (ctx.agentType || ctx.agentId) return isSmall(ctx.agentType) ? workerDenial(c, ctx, e) : bare(ctx.agentType) === 'reviewer' ? workerDenial(c, { ...ctx, job: 'check' }, e) : null // the reviewer has its own budget (REVIEWER_STEPS, jobs.ts: 16 tool calls) so it cannot explore
   if (ctx.kind === 'desk') return isAgentTool(e) ? DESK_ROUTE : null
   if (ctx.kind === 'thread') return threadDenial(c, ctx, e)
   return null

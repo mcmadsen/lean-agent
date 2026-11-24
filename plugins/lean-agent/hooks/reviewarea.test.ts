@@ -100,3 +100,20 @@ test('an area record is never green and joins the earlier ones of the sha; more 
   expect(rec?.verdicts).toEqual([`${names[0]}: changes-requested`, `${names[1]}: approve`])
   expect(rec?.findings?.length).toBe(14) // the second area added none, the first one's stay
 })
+
+test('an area prepare writes the area diff to one patch file; recording an area again says it replaces the earlier record', { timeoutMs: 20_000 }, async () => {
+  const h = setup(bigDiff(320))
+  const prep = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const names = [...prep.text.matchAll(/^- (area-\d+):/gm)].map(m => m[1]!)
+  const a = await tool(h, { action: 'prepare', base: 'main', level: 'full', scope: names[0] })
+  expect(a.text).toContain(`Patch file of ${names[0]}`)
+  expect([...h.files.keys()].some(k => k.includes(`diff-${names[0]}.patch`))).toBe(true)
+  expect(a.text).toContain('16 tool calls') // the reviewer's one budget number
+  const finding = { n: 1, severity: 'minor', category: 'correctness', path: 'api/mod5/file5.txt', line: 1, text: 'it breaks on empty input', fix: 'guard it' }
+  const block = (k: number) => ({ verdict: 'changes-requested', goal: 'g', findings: Array.from({ length: k }, () => finding), reuse: [], coverage: [] })
+  const first = await tool(h, { sha: H2, base: 'main', level: 'full', scope: names[0], review: block(1) })
+  expect(first.text).not.toContain('replaces the record')
+  const again = await tool(h, { sha: H2, base: 'main', level: 'full', scope: names[0], review: block(0) })
+  expect(again.text).toContain(`replaces the record of ${names[0]} from`)
+  expect(again.text).toContain('1 open finding, changes-requested')
+})
