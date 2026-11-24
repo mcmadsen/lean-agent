@@ -16,6 +16,7 @@ import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
 import { turnState } from './autorestart'
 import { waitingOn } from './waitevent'
+import { idleNoReport } from './threadstate'
 
 // ---- the rule (A): one place ----------------------------------------------------------------------------------------------------
 export const REPORT_RULE_SENTENCE = 'Every turn of yours ends with lean_report (done, blocked or question) or, for a worker, with its answer to the thread.'
@@ -53,7 +54,9 @@ export const hasUnverifiedClaim = (text: unknown): boolean => {
 // ---- the nudge ------------------------------------------------------------------------------------------------------------------
 export const MAX_NUDGES_PER_HOUR = 2
 export const HINT_KEY = 'unverified' // the pending record's text when the ending text hands over a claim nobody checked
-export const NUDGE_TEXT = (hint: boolean): string =>
+// req (threads.requireReport, a single-action brief): the whole rule leads the text
+export const NUDGE_TEXT = (hint: boolean, req = false): string =>
+  (req ? `Refused: your task is one action and you ended your turn without reporting it.\n${REPORT_RULE}\n` : '') +
   'Your turn ended without a lean_report: the desk saw nothing. End with lean_report done, blocked, or a question (lean_ask); if work is left, do it now, never end a turn on a summary or a promise.' +
   (hint
     ? ' Your last text hands over a result you did not check yourself: verify it first (one lean_run ls / stat, or a worker check), then report; report "done (unverified)" with what is missing only if it cannot be verified.'
@@ -65,6 +68,21 @@ const mins = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 // ---- config ---------------------------------------------------------------------------------------------------------------------
 export async function endNudgeOn(h: Host, home: string): Promise<boolean> {
   return (await readJson<{ threads?: { endNudge?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null))?.threads?.endNudge !== false
+}
+
+// threads.requireReport (default true): for a thread whose brief asks for ONE action the nudge is immediate and carries the whole rule. The engine gives a mod no way to
+// refuse a Stop (turn.complete returns text only), so the nudge is the refusal.
+export async function requireReportOn(h: Host, home: string): Promise<boolean> {
+  return (await readJson<{ threads?: { requireReport?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null))?.threads?.requireReport !== false
+}
+export const SINGLE_ACTION_CHARS = 600
+// a brief that asks for ONE action (a move, a rename, one edit, one lookup), by script: short, no more than one numbered or bulleted step, no sequencing words
+export function singleAction(brief: unknown): boolean {
+  if (typeof brief !== 'string') return false
+  const b = brief.trim()
+  if (!b || b.length >= SINGLE_ACTION_CHARS) return false
+  if ((b.match(/^\s*\d+[.)]\s/gm) ?? []).length > 1 || (b.match(/^\s*[-*•]\s/gm) ?? []).length > 1) return false
+  return !/\b(?:then|afterwards?|after that|next|finally|and also|step 2|second(?:ly)?)\b/i.test(b)
 }
 
 // ---- the record (thread side writes, desk side reads) ---------------------------------------------------------------------------
@@ -110,6 +128,13 @@ export async function endDue(h: Host, home: string, t: { id: string; state?: str
   if (turnState(o.recs, t.id, rec.first) !== 'work') return null
   if (await waitingOn(h, home, t.id)) return null
   return { ms: o.now - rec.first, rec }
+}
+// the pane chip (1.0.32): "idle, no report 12 min"
+export const noReportChip = (ms: number): string => `idle, no report ${mins(ms)} min`
+// the 1.0.31 idle alert's condition as ms (threadstate.ts idleNoReport), for the pane: a thread that waits for something (waitevent.ts) is not flagged
+export async function idleNoReportMs(h: Host, home: string, t: { id: string; keepGoing?: unknown; lastWake?: unknown; created?: unknown }, o: { word: string | undefined; lastAt: number | null; now: number; minutes: number; lastRec?: { ts: number; kind: string; state?: string } }): Promise<number | null> {
+  const idle = idleNoReport({ word: o.word, keepGoing: t.keepGoing === true, lastAt: o.lastAt, now: o.now, minutes: o.minutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec: o.lastRec })
+  return idle && !(await waitingOn(h, home, t.id)) ? idle.ms : null
 }
 export const markAlerted = (h: Host, home: string, id: string, rec: EndRec, now: number): Promise<void> => writeJson(h, endFile(home, id), { ...rec, alerted: now }).catch(() => undefined)
 export const deskInbox = async (h: Host, home: string): Promise<DeskRec[]> => readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[])

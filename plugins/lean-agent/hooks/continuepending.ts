@@ -28,7 +28,7 @@ import { NEXT_CONDITIONAL, NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextw
 import { waitingOn } from './waitevent'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { markerOf } from './reviewkind'
-import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded } from './endnudge'
+import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded, requireReportOn, singleAction } from './endnudge'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
 import type { AgentRow, Out, Thread } from './threads'
@@ -49,7 +49,7 @@ export const haltText = (id: string) => `${id} keeps stopping after 'next:'`
 export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_PER_HOUR} times in the last hour and keeps stopping: no more automatic continues for now`
 
 export type Kind = 'next' | 'keep' | 'todo' | 'remind' | 'end'
-export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
+export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string; req?: boolean /* 'end' of a single-action brief (threads.requireReport): sent at once, with the whole rule */ } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
 export type CState = { endHour?: number[]; consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean }
 export const logFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-log.jsonl`
 export const continuedLine = (kind: Kind, text: string): string => kind === 'end' ? 'nudged by the mod: its turn ended without a report' : kind === 'remind' ? 'reminded by the mod: nothing is pending that wakes it' : `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
@@ -57,7 +57,7 @@ export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${
 export const stateFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-state.json`
 export const readPending = async (h: Host, home: string, id: string): Promise<Pending | null> => {
   const p = await readJson<Partial<Pending> | null>(h, pendingFile(home, id), null)
-  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo' || p.kind === 'remind' || p.kind === 'end') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}) } : null
+  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo' || p.kind === 'remind' || p.kind === 'end') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}), ...(p.req === true ? { req: true } : {}) } : null
 }
 export const clearPending = (h: Host, home: string, id: string): Promise<void> => writeJson(h, pendingFile(home, id), {}).catch(() => undefined)
 export const readCState = async (h: Host, home: string, id: string): Promise<CState> => {
@@ -167,7 +167,10 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
       const hint = hasUnverifiedClaim(o.lastText)
       await noteEnded(h, home, id, { sid: o.sid, now, hint, recs: await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`) })
       if (((await readCState(h, home, id)).endHour ?? []).filter(x => now - x < 3_600_000).length < MAX_NUDGES_PER_HOUR) {
-        await writeJson(h, pendingFile(home, id), { at: now, sid: o.sid, kind: 'end', text: hint ? HINT_KEY : '' } satisfies Pending)
+        // threads.requireReport (default true) and a brief that asks for ONE action: the nudge goes out at the next tick, not after continueSeconds, and carries the whole rule
+        // (the engine gives a mod no way to refuse a Stop: turn.complete returns text only, so this is the refusal's fallback)
+        const req = (await requireReportOn(h, home)) && singleAction(await Promise.resolve(h.fs.read(`${threadsDir(home)}/${id}/brief.md`)).catch(() => ''))
+        await writeJson(h, pendingFile(home, id), { at: now, sid: o.sid, kind: 'end', text: hint ? HINT_KEY : '', ...(req ? { req: true } : {}) } satisfies Pending)
         return 'end'
       }
     } else await clearEnded(h, home, id) // continued by an open task / announcement / reminder, or the nudge is off: not an unreported end
@@ -234,7 +237,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id) // it did something since: not stalled
       continue
     }
-    if (now - p.at < cfg.seconds * 1000) continue
+    if (!p.req && now - p.at < cfg.seconds * 1000) continue
     // the report-rule nudge (kind 'end'): threads.endNudge decides, not autoContinue; at most MAX_NUDGES_PER_HOUR a thread an hour (then only the desk alert, stall.ts)
     if (p.kind === 'end' && (!(await endNudgeOn(h, home)) || (cs.endHour ?? []).filter(x => now - x < 3_600_000).length >= MAX_NUDGES_PER_HOUR)) {
       await clearPending(h, home, id)
@@ -327,7 +330,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id)
       continue
     }
-    const r = await deps.send(id, p.kind === 'end' ? NUDGE_TEXT(p.text === HINT_KEY) : p.kind === 'remind' ? REMIND_TEXT : p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
+    const r = await deps.send(id, p.kind === 'end' ? NUDGE_TEXT(p.text === HINT_KEY, p.req === true) : p.kind === 'remind' ? REMIND_TEXT : p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
     await clearPending(h, home, id)
     if (!r.ok) continue
     if (p.kind === 'end') {

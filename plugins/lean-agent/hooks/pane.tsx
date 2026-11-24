@@ -876,16 +876,23 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const sc = stateOf(t)
       const myNeeds = needs.filter(n => n.thread === t.id)
       // a done or idle thread with something waiting for the user (a report ready to push, a question) is a card, not a quiet row
-      const quiet = ['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) && !t.liveNote && !t.pending && myNeeds.length === 0
+      const quiet = ['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) && !t.liveNote && !t.pending && !t.noReport && myNeeds.length === 0
       const held = holdsOf(t.id)
       const open = expanded(t.id) || myNeeds.some(n => DECIDE.includes(n.kind)) || held.length > 0
       const blockedWord = ['blocked', 'stuck', 'stalled'].includes(sc.word)
       // the status chip: working / needs you / done / restarting (amber is the chip, never the body)
       const chipWord = ['waiting', 'approval', 'asking'].includes(sc.word) ? 'needs you' : sc.word
       const chip = (
-        <Text bold color={sc.color}>
-          {`[${chipWord}]`}
-        </Text>
+        <>
+          <Text bold color={sc.color}>
+            {`[${chipWord}]`}
+          </Text>
+          {t.noReport ? (
+            <Text bold color="warning">
+              {`[${t.noReport}]`}
+            </Text>
+          ) : null}
+        </>
       )
       const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
       const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{`$${t.cost.toFixed(2)} today`}</Text> : null
@@ -936,7 +943,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           {msg.body}
         </Box>
       ) : null
-      const attention = chipWord === 'needs you' || blockedWord || myNeeds.length > 0 || !!t.pending
+      const attention = chipWord === 'needs you' || blockedWord || myNeeds.length > 0 || !!t.pending || !!t.noReport
       if (quiet) {
         return (
           <Box key={`t-${t.id}`} flexDirection="column" {...(open ? { borderStyle: 'round' as const, borderDimColor: true, paddingX: 1 } : {})}>

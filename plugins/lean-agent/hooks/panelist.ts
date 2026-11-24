@@ -18,7 +18,7 @@ export type Item = { id: string; title: string; activity: number; cost: number; 
 
 // the states that wait for the user (the same words the widget counts as blocked): they sit on top under "needs you first"
 const WAITING_WORDS = ['waiting', 'waiting for answer', 'approval', 'asking', 'blocked', 'stuck', 'stalled']
-export const needsUser = (t: ThreadRow, needs: Pick<NeedRow, 'thread'>[] = []): boolean => WAITING_WORDS.includes(stateOf(t).word) || !!t.pending || needs.some(n => n.thread === t.id)
+export const needsUser = (t: ThreadRow, needs: Pick<NeedRow, 'thread'>[] = []): boolean => WAITING_WORDS.includes(stateOf(t).word) || !!t.pending || !!t.noReport /* "idle, no report N min" (endnudge.ts) */ || needs.some(n => n.thread === t.id)
 const num = (id: string) => Number(id.replace(/^\D+/, '')) || 0
 
 export function itemsOf(threads: ThreadRow[], closed: ClosedRow[], needs: Pick<NeedRow, 'thread'>[] = []): Item[] {

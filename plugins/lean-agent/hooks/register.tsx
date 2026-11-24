@@ -50,6 +50,7 @@ import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
 import { withReportRule } from './endnudge'
+import { noteSynthAtTurnEnd, noteToolResult } from './synthline'
 import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, isAuditorCall, isLeanCall, markAuditStarted, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
@@ -406,7 +407,9 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
-    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null, tasks: currentTasks() }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
+    const lastText = text ? await text() : null
+    await noteSynthAtTurnEnd(host, await homeDir(host), id, { lastText, since: turnStartedAt }) // no assistant text, a tool result came last: a short line for the list (synthline.ts, display only)
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText, tasks: currentTasks() }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
@@ -1629,6 +1632,7 @@ export const register: Register = on => {
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
     // call counts for the thread. This is what a project profile is learned from.
     if (role.kind === 'thread' && r?.deny === undefined) await noteToolUse(host, role.id, String(e.tool ?? ''), e).catch(() => false)
+    if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) noteToolResult(String(e.tool ?? ''), texts((r as any)?.result).join(' '), await host.clock.now()) // the last tool result, in memory (synthline.ts)
     // a thread that reported blocked with an approval and now calls a tool has carried on: its "needs your yes" card ends (approvals.ts)
     if (role.kind === 'thread' && !e.agentId) await noteCall(host, role.id, String(e.tool ?? '')).catch(() => false)
     // learned rules for a thread and its subagents: the engine loads them only beneath the session root, so the mod appends the rules

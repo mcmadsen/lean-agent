@@ -7,7 +7,10 @@ import { stallTick } from './stall'
 import { leanThread, resetLocks } from './threads'
 import { resetThreadCache } from './threaddetail'
 import { resetFinish } from './finish'
-import { HINT_KEY, NUDGE_TEXT, REPORT_RULE, REPORT_RULE_SENTENCE, UNVERIFIED_PHRASES, alertText, doctorRow, endedCount, hasUnverifiedClaim, withReportRule } from './endnudge'
+import { HINT_KEY, NUDGE_TEXT, REPORT_RULE, REPORT_RULE_SENTENCE, UNVERIFIED_PHRASES, alertText, doctorRow, endedCount, hasUnverifiedClaim, singleAction, withReportRule } from './endnudge'
+import { noteSynthAtTurnEnd, noteToolResult, readSynth, resetSynth, synthDisplay } from './synthline'
+import { loadView, resetViewCache } from './view'
+import { itemsOf, needsUser, sortItems } from './panelist'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const L = '/h/.lean-agent'
@@ -29,7 +32,7 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown; activity
   h.clock.t = T0
   h.files.set(`/p/templates/thread.md`, '# {{id}} {{title}}')
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'move the files', project: 'acme', state: 'open', sid: S1, created: 1, lastWake: T0 - 60 * MIN, delivered: 0, model: 'sonnet', effort: 'medium', ...o.thread }))
-  h.files.set(`${T1}/brief.md`, 'move the files\n')
+  h.files.set(`${T1}/brief.md`, '1. move the files\n2. update the index\n') // (several steps: threads.requireReport has its own spec)
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: T0 - (o.activityMinAgo ?? 1) * MIN, kind: 'tool' }))
   h.files.set(`${L}/config.json`, JSON.stringify(o.config ?? { threads: { keepGoing: false } }))
   h.claude.handler = (a: string[]) => (a[0] === 'agents' && a[1] === '--json' ? { exitCode: 0, stdout: JSON.stringify([{ sessionId: S1, name: 't1 · move', cwd: T1, status: 'idle', state: 'idle', startedAt: 1, pid: 42, id: 'abcd1234' }]) } : { exitCode: 0, stdout: '' })
@@ -286,4 +289,95 @@ test('lean_doctor row: report rule injected, N turns ended without a report in 7
   h.files.set(`${L}/threads/t2/end-log.jsonl`, JSON.stringify({ at: T0 - 8 * 86_400_000 }) + '\n' + JSON.stringify({ at: T0 + 1 }) + '\n')
   expect(await endedCount(h.host)).toBe(3)
   expect(await doctorRow(h.host)).toBe('ok   report rule: injected (threads), 3 turns ended without a report in 7 days')
+})
+
+// ---- the synthesised last line (synthline.ts) -------------------------------------------------------------------------------------------
+test('a turn that ends on a tool result with no text: a short synthesised line (tool + 100 chars), shown in the list while idle; a turn end WITH text clears it; never a report', { timeoutMs: 20_000 }, async () => {
+  const h = setup()
+  resetSynth()
+  noteToolResult('mcp__lean-agent__lean_run', `exit 0\n${'x'.repeat(300)}`, T0 - 60_000)
+  await noteSynthAtTurnEnd(h.host, '/h', 't1',{ lastText: null, since: T0 - 2 * MIN })
+  const f = json(h, `${T1}/synth-line.json`)
+  expect(f.text).toBe(`lean_run: exit 0 ${'x'.repeat(100 - 'exit 0 '.length)}`)
+  expect(f.text.length).toBe('lean_run: '.length + 100)
+  expect(await readSynth(h.host, '/h', 't1',{ idle: true, lastReportTs: 0 })).toBe(f.text)
+  expect(await readSynth(h.host, '/h', 't1',{ idle: false, lastReportTs: 0 })).toBeNull() // it works again: nothing stale
+  expect(await readSynth(h.host, '/h', 't1',{ idle: true, lastReportTs: T0 })).toBeNull() // a newer report wins
+  h.clock.t = T0 + 4 * MIN
+  h.files.set(`${T1}/activity.json`, JSON.stringify({ at: T0, kind: 'tool' }))
+  const text = (await leanThread(h.host, '/p', { action: 'list' })).text
+  expect(text).toContain('lean_run: exit 0')
+  expect(text).toContain('(synthesised)')
+  // not a report: the idle alert still fires after idleAlertMinutes (no record reached the desk inbox)
+  expect(h.files.get(`${L}/desk/inbox.jsonl`)).toBeUndefined()
+  h.clock.t = T0 + 12 * MIN
+  expect((await stallTick(h.host, deps)).filter(n => n.text.includes('t1 idle for'))).toHaveLength(1)
+  // a turn end with text, or one from before this turn's tool result: cleared
+  await noteSynthAtTurnEnd(h.host, '/h', 't1',{ lastText: 'Done.', since: T0 - 2 * MIN })
+  expect(json(h, `${T1}/synth-line.json`)).toEqual({})
+  await noteSynthAtTurnEnd(h.host, '/h', 't1',{ lastText: null, since: T0 })
+  expect(json(h, `${T1}/synth-line.json`)).toEqual({})
+  expect(synthDisplay('lean_run: ok')).toBe('lean_run: ok (synthesised)')
+})
+
+// ---- the pane flag ---------------------------------------------------------------------------------------------------------------------
+test('the pane: a thread idle with no report gets the chip "idle, no report N min" and counts as needs-you in the sort; a thread that reported or waits does not; a synthesised line is marked and is not a report', { timeoutMs: 20_000 }, async () => {
+  const h = setup({ activityMinAgo: 12 })
+  resetViewCache()
+  h.files.set(`${T1}/synth-line.json`, JSON.stringify({ at: T0 - 11 * MIN, text: 'lean_run: mv exited 0' }))
+  const v = await loadView(h.host)
+  const t = v.threads.find(x => x.id === 't1')!
+  expect(t.noReport).toBe('idle, no report 12 min')
+  expect(t.lastReport).toBe('lean_run: mv exited 0 (synthesised)')
+  expect(t.synth).toBe(true)
+  expect(needsUser(t)).toBe(true)
+  const items = itemsOf([{ ...t, id: 't2', noReport: undefined, activity: T0 }, t], [])
+  expect(sortItems(items, 'needs').map(i => i.id)).toEqual(['t1', 't2'])
+  // after a final report: no chip, no needs-you, no synthesised line
+  h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: T0 - 6 * MIN, from: 't1', kind: 'report', state: 'done', text: 'verified: moved' }) + '\n')
+  resetViewCache()
+  const v2 = await loadView(h.host)
+  const t2 = v2.threads.find(x => x.id === 't1')!
+  expect(t2.noReport).toBeUndefined()
+  expect(t2.synth).toBeUndefined()
+  expect(needsUser(t2)).toBe(false)
+  // idle for less than idleAlertMinutes: no chip
+  const g = setup({ activityMinAgo: 3 })
+  resetViewCache()
+  expect((await loadView(g.host)).threads.find(x => x.id === 't1')!.noReport).toBeUndefined()
+})
+
+// ---- threads.requireReport ------------------------------------------------------------------------------------------------------------------
+test('singleAction: a short brief for ONE action is one; several steps, a list, sequencing words or a long brief are not', () => {
+  for (const b of ['Move /data/old to /data/new.', 'Rename the function parseDate to parseIsoDate in src/date.ts.', 'Find where the retry limit is set and say the file:line.']) expect(singleAction(b)).toBe(true)
+  for (const b of ['1. Move the folder\n2. Update the index', 'Move the folder, then update the index.', '- a\n- b', 'x'.repeat(600), '', null, 'Fix the bug. Next, add a test.']) expect(singleAction(b)).toBe(false)
+})
+
+test('threads.requireReport: a single-action thread that ends without a report is nudged at the next tick with the whole rule; other briefs and requireReport false keep the normal wait', async () => {
+  const h = setup()
+  h.files.set(`${T1}/brief.md`, 'Move /data/old to /data/new.\n')
+  expect(await end(h, EXAMPLE)).toBe('end')
+  expect(pend(h).req).toBe(true)
+  const sent: string[] = []
+  h.clock.t = T0 + 11_000 // 10 s tick, well under continueSeconds (20)
+  await tick(h, sent)
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toBe(`t1|${NUDGE_TEXT(true, true)}`)
+  expect(sent[0]).toContain(REPORT_RULE)
+  expect(sent[0]).toContain('Refused')
+  // a multi-step brief: the usual 20 s
+  const m = setup()
+  m.files.set(`${T1}/brief.md`, '1. Move the folder\n2. Update the index\n')
+  await end(m, EXAMPLE)
+  expect(pend(m).req).toBeUndefined()
+  m.clock.t = T0 + 11_000
+  const s2: string[] = []
+  await tick(m, s2)
+  expect(s2).toEqual([])
+  // switched off
+  const o = setup({ config: { threads: { keepGoing: false, requireReport: false } } })
+  o.files.set(`${T1}/brief.md`, 'Move /data/old to /data/new.\n')
+  await end(o, EXAMPLE)
+  expect(pend(o).req).toBeUndefined()
+  expect(NUDGE_TEXT(false)).not.toContain('Refused')
 })

@@ -18,6 +18,8 @@ import type { Spend, ThreadCost } from './stats'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stallFor, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
+import { endDue, idleNoReportMs, noReportChip } from './endnudge'
+import { readSynth, synthDisplay } from './synthline'
 import { isLimitRow, pausedRec, readLimit } from './limits'
 import type { AgentRow, Thread } from './threads'
 import { deskChoice } from './models'
@@ -53,7 +55,7 @@ export type Verdict = 'green' | 'red' | 'none'
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
-export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; keepGoing?: boolean /* the standing order "keep going" (continuepending.ts) */; rules?: number /* standing rules of this thread (threadrules.ts): the pane says "N rules" */; approval?: string; pending?: string /* "waiting for your Approve: reply to thread 7": a request for a remote write waits (the thread's state stays working, 1.0.28) */; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */; activity?: number /* ms of its last event: the later of its last report, its recorded activity, its last wake and its newest queued message (the pane sorts by it) */ }
+export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; keepGoing?: boolean /* the standing order "keep going" (continuepending.ts) */; rules?: number /* standing rules of this thread (threadrules.ts): the pane says "N rules" */; approval?: string; pending?: string /* "waiting for your Approve: reply to thread 7": a request for a remote write waits (the thread's state stays working, 1.0.28) */; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */; noReport?: string /* "idle, no report 12 min": the turn ended with no report (endnudge.ts); a chip, and needs-you in the sort */; synth?: boolean /* lastReport is a script-made line from the last tool result (synthline.ts) */; activity?: number /* ms of its last event: the later of its last report, its recorded activity, its last wake and its newest queued message (the pane sorts by it) */ }
 export type ClosedRow = { id: string; title: string; last: string; activity: number /* ms of its last sign of life (closedAt, last record, last wake) */; cost: number /* today's usd */ }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
@@ -275,6 +277,7 @@ export async function loadView(h: Host): Promise<View> {
   await guard('threads', async () => {
     const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes // (once per refresh, not per thread)
     const stallMinutes = (await stallConfig(h, home)).minutes
+    const idleAlertMinutes = (await stallConfig(h, home)).idleAlertMinutes
     const ctxLimits = await threadLimits(h)
     let ents: { name: string }[] = []
     try {
@@ -328,6 +331,11 @@ export async function loadView(h: Host): Promise<View> {
       const truth = truthOf({ threadState: t.state, finished: typeof t.finished === 'number' && t.finished > 0, row: t.sid ? ag?.agent : undefined, queued, now, stuckMinutes, stallMinutes: stallFor(stallMinutes, t), activityAt: actAt, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null })
       const stale = agentsOk && !!lr && lr.kind === 'report' && staleWorking(lr.state, truth.word)
       const mine = recsOf.get(t.id) ?? []
+      // "idle, no report N min" (1.0.32): the turn ended with no final report (endnudge.ts) or nothing reported since the start (threadstate.ts idleNoReport) and nothing it waits for:
+      // a chip on the card and "needs you" in the pane's sort. A synthesised last line (synthline.ts) is display only: it never counts as a report.
+      const idleOpen = agentsOk && t.state === 'open' && !!t.sid
+      const noRepMs = !idleOpen || idleAlertMinutes <= 0 ? null : (await endDue(h, home, t, { word: truth.word, now, minutes: idleAlertMinutes, recs: mine }))?.ms ?? (await idleNoReportMs(h, home, t, { word: truth.word, lastAt: actAt, now, minutes: idleAlertMinutes, lastRec: lr }))
+      const synth = idleOpen ? await readSynth(h, home, t.id, { idle: truth.word === 'idle', lastReportTs: lr?.ts ?? 0 }) : null
       const ended = agentsOk && t.state === 'open' && !!t.sid && t.lastWake > 0 && (truth.word === 'idle' || truth.word === 'done') && typeof t.req0 === 'number' && endedAtOnce({ word: truth.word, req0: t.req0, req: await requestsOf(h, t.id, now), reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
       // an answer to its question (msgstate.ts): the question / blocked report older than it is ANSWERED (not "asking", not blocked), and while the thread has not read it the row says so
       const ans = t.state === 'open' && t.sid ? await answerInfo(h, home, t.id) : { lastAt: 0, last: null, open: null }
@@ -355,7 +363,9 @@ export async function loadView(h: Host): Promise<View> {
         unread: truth.unread,
         ...(liveNote ? { liveNote } : {}),
         ...(used ? { agents: used } : {}),
-        lastReport: flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
+        lastReport: synth ? synthDisplay(synth) : flat(lr?.text ?? '') || flat(lastLine(typeof notes === 'string' ? notes : '')),
+        ...(synth ? { synth: true } : {}),
+        ...(noRepMs !== null ? { noReport: noReportChip(noRepMs) } : {}),
         ...(branch ? { branch } : {}),
         ...(sha ? { sha } : {}),
         review,
