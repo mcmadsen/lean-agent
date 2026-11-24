@@ -3,6 +3,8 @@
 // register.tsx wraps it fail-closed: a throwing guard denies.
 import { homeDir, leanDir, mkdirp, readJson, realPath, threadsDir, writeJson } from './state'
 import { greenReview, hasApproval, takeApproval } from './reviews'
+import { markerOf } from './reviewkind'
+import { reviewGitDenial } from './reviewguard'
 import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyForge, type Verdict } from './shell'
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
@@ -1186,6 +1188,11 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
     if (d) return orch.on ? DESK_ROUTE : d
   }
   if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'AskUserQuestion') return 'lean-agent: a thread never asks the user directly; use lean_ask (the desk relays it)'
+  // a review thread (the mod's marker), its workers and its reviewers: the PR's checkout is read-only (reviewguard.ts)
+  if (ctx.role.kind === 'thread' && e.tool === 'Bash') {
+    const ro = reviewGitDenial(String(e.command ?? ''))
+    if (ro && (await markerOf($, ctx.role.id))) return `lean-agent: ${ro}`
+  }
   if ((ctx.agentType || ctx.agentId) && e.tool === 'Bash') {
     const u = await unauditedRun($, String(e.command ?? '')) // a subagent never runs an adopted script that was edited by hand
     if (u) return u

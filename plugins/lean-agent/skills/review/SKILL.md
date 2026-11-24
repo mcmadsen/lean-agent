@@ -27,7 +27,7 @@ The desk never reviews itself (it has no reviewer agents and no review tool): it
 
 ## Thread
 
-Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it (the tool drops findings outside the changed lines and counts them). Every finding is `file:line` of a changed range prepare lists plus a one-line reason: a finding with no changed line, or about something absent (no rate limiting, missing validation), is dropped, never kept as cross-file.
+Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it (the tool drops findings outside the changed lines and counts them). Every finding is `file:line` of a changed range prepare lists plus a one-line reason: a finding with no changed line, or about something absent (no rate limiting, missing validation), is dropped, never kept as cross-file. Read-only: never pull, merge or rebase the target into the PR; the diff is against the merge base (the guard refuses it in a review thread).
 
 Run in a thread, in the repo or worktree to push. With no argument, or only a base, review this worktree as below. With a PR, branch, sha or
 URL of someone else's work (a review thread the desk started has one in its brief), follow "External review" below, then the steps 2 to 9
