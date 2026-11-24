@@ -2,6 +2,8 @@
 // (a signed written approval of the request's own PR or work item: 24 h, at most 40 writes, Revoke). Canned curl / gh output, synthetic names only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { STANDING_LABEL, STANDING_LABEL_WI, addActionRequest, answerAction, approveAction, bindAnswers, questionOf, resetActions } from './deskactions'
 import { revokeWrites, runGranted, writesView } from './deskwrites'
 import { resetLocks } from './threads'

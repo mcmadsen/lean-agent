@@ -2,6 +2,8 @@
 // Synthetic names only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { BATCH_MAX, THREAD_STATUS, addActionRequest, answerAction, approveAction, bindAnswers, checkAction, listActions, questionOf, resetActions } from './deskactions'
 import { resetLocks } from './threads'
 

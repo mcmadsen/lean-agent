@@ -2,6 +2,8 @@
 // Canned curl output, synthetic names only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { addActionRequest, answerAction, approveAction, resetActions } from './deskactions'
 import { revokeByWords, revokeWrites, writesView } from './deskwrites'
 import { lintText, noteBrief, ownConfig, recordPassedPr, recordPushPr, runOwnPr } from './ownpr'

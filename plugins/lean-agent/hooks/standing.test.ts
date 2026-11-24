@@ -1,6 +1,8 @@
 // 1.0.24 standing approval: a status change (never text) the user allowed once, by a human choice or a rule written by hand in config.json
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { STANDING_LABEL, actionListText, addActionRequest, answerAction, approveAction, bindAnswers, dropGrants, listActions, questionOf, resetActions, revokeGrant, runStanding, standingView } from './deskactions'
 import { threadTool } from './delivery'
 import { decide } from './guard'

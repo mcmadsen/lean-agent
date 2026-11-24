@@ -190,6 +190,16 @@ export async function ownersOf(h: Host, home: string, kind: 'wi' | 'pr', n: numb
   }
   return out
 }
+// every work item some thread holds (the map): {wi, thread, title}
+export async function knownItems(h: Host, home: string): Promise<{ wi: number; thread: string; title: string }[]> {
+  const m = (await readMap(h, home)) ?? (await rebuildMap(h, home))
+  const out: { wi: number; thread: string; title: string }[] = []
+  for (const [k, ids] of Object.entries(m.wi)) for (const id of ids) {
+    const t = await readJson<RefHolder | null>(h, tfile(home, id), null).catch(() => null)
+    if (t?.workItem?.id === Number(k)) out.push({ wi: Number(k), thread: id, title: t.title ?? '' })
+  }
+  return out
+}
 // the thread to send a follow-up to: a live one first, else the newest
 export const pickOwner = (o: Owner[]): Owner | undefined => o.find(x => x.state === 'open') ?? o.find(x => x.state !== 'closed') ?? o[o.length - 1]
 export const ownersText = (kind: 'wi' | 'pr', n: number, o: Owner[]): string => `${kind === 'wi' ? 'WI' : 'PR'} ${n}: ${o.map(x => `${x.id} "${x.title.slice(0, 50)}" (${x.state})`).join(', ')}`

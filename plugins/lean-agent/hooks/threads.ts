@@ -46,7 +46,8 @@ import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
 import { briefLintLine, isForgeWrite } from './forgewrite'
 import { prepareRules, ruleAction, ruleCount, storeRules } from './threadrules'
-import { afterRefs, applyRefs, newLine, prepareRefs, refsShort, setRefAction } from './workitems'
+import { afterRefs, applyRefs, isNone, newLine, parsePr, prepareRefs, refsShort, setRefAction } from './workitems'
+import { afterPrOpened } from './workitemflow'
 import type { PrRef, WorkItemRef } from './workitems'
 import { threadSettings as leanThreadSettings } from './leantools'
 
@@ -1111,7 +1112,11 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         case 'set': {
           // `set tN workitem|pr <value>`: what a script took from the brief or the user's prompt is corrected here ("none" clears it)
           const o = await setRefAction(h, home, id, i, x => save(h, home, x as Thread), t)
-          return o.ok ? { ok: true, text: o.text } : err(o.text)
+          if (!o.ok) return err(o.text)
+          // a PR reported with its full URL while the thread has a work item: the mod builds the one link + Reviewing request (own task only, workitemflow.ts)
+          const rp = i.pr !== undefined && !isNone(i.pr) ? parsePr(i.pr) : null
+          const after = rp && typeof rp !== 'string' && rp.host === 'azure' && rp.org && rp.project && rp.repo ? await afterPrOpened(h, id, { org: rp.org, project: rp.project, repo: rp.repo, number: rp.number }).catch(() => null) : null
+          return { ok: true, text: after ? `${o.text}\n${after}` : o.text }
         }
         case 'wake':
           return await wake(h, home, t, { root, current: installed, explicit: true })

@@ -1,6 +1,8 @@
 // 1.0.25 approval in advance: the user's own written instruction covers a thread's remote writes on the PR or work item it names (deskwrites.ts)
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { addActionRequest, answerAction, dropGrants, listActions } from './deskactions'
 import { allowWrites, dropWriteGrants, namesTarget, resolveTarget, revokeByWords, revokeWrites, runGranted, scopeOfUrl, writesListText, writesView } from './deskwrites'
 import { instructionIn, revokeIn } from './writeinstr'

@@ -23,6 +23,7 @@ import { setNotice } from './notices'
 import type { ActionKind, Params } from './deskactions'
 import { ownActive, ownRevoked, parseForgeUrl, recordOwnSent, remoteOf, resolveRef } from './deskwrites'
 import type { ForgeRef } from './deskwrites'
+import { afterPrOpened, setOwnRunner } from './workitemflow'
 import { afterRefs, prNumber } from './workitems'
 import type { RefHolder } from './workitems'
 
@@ -93,7 +94,10 @@ const asOwn = (r: ForgeRef): Ref => ({ host: r.host, org: r.org, project: r.proj
 export async function recordPushPr(h: Host, thread: string, url: string): Promise<string | null> {
   const ref = parseForgeUrl(url)
   if (!ref || ref.type !== 'pr' || !threadOk(thread)) return null
-  return (await takePr(h, thread, asOwn(ref), url, 'it opened the PR').catch(() => null))?.line ?? null
+  const line = (await takePr(h, thread, asOwn(ref), url, 'it opened the PR').catch(() => null))?.line ?? null
+  // the PR was opened by the desk: when the thread has a stored work item and it is the user's own task, the mod builds ONE request to link it and move it to Reviewing (workitemflow.ts)
+  if (ref.host === 'azure') await afterPrOpened(h, thread, { org: ref.org, project: ref.project, repo: ref.repo, number: ref.n }).catch(() => null)
+  return line
 }
 
 // the PR the user passed: `new` with `pr` (a number, read against the thread's project remote, or a URL checked against it), or a review thread's `review.pr`
@@ -265,3 +269,5 @@ export async function runOwnPr(h: Host, id: string): Promise<{ sent: boolean; li
   await logHistory(h, r.thread, { kind: 'own-pr-default', id, action: r.kind, pr: pr.id, count: taken, result: what.slice(0, 300) })
   return { sent: true, line }
 }
+
+setOwnRunner(runOwnPr) // the after-PR request (workitemflow.ts) may be covered by the own-PR default

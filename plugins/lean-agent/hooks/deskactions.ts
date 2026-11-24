@@ -32,6 +32,8 @@ import { setNotice } from './notices'
 import { holdCovered } from './sendhold'
 import { CANNOT_VERIFY, changesTable, lintReviewText, prKey, verifyAnchors } from './anchor'
 import type { Anchor, AnchorInfo, Reader } from './anchor'
+import { checkMove } from './owntask'
+import { createCheck } from './workitemflow'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -490,10 +492,13 @@ function checkBatch(x: Record<string, unknown>): Checked {
     if (!c.ok) return refuse(`batch item ${i + 1}: ${c.text}`)
     checked.push(c)
   }
-  const target = targetOf(checked[0]!.kind, checked[0]!.params)
+  // (a PR <-> work item link belongs to both its PR and its work item: it can share a batch with a state change of that work item)
+  const keys = (c: Extract<Checked, { ok: true }>): string[] => (c.kind === 'ado-pr-workitem-link' ? [targetOf(c.kind, c.params), targetOf('ado-workitem-update', { org: c.params.org, project: c.params.project, id: c.params.workitem })] : [targetOf(c.kind, c.params)])
+  const first = keys(checked[0]!)
+  const target = first[0]!
   for (const [i, c] of checked.entries()) {
-    const t = targetOf(c.kind, c.params)
-    if (t !== target) return refuse(`batch item ${i + 1} is for another target (${t}; item 1 is ${target}): one batch is for ONE PR or ONE work item, make a second request`)
+    const t = keys(c)[0]!
+    if (!keys(c).some(k => first.includes(k))) return refuse(`batch item ${i + 1} is for another target (${t}; item 1 is ${target}): one batch is for ONE PR or ONE work item, make a second request`)
   }
   const steps: Plan[] = checked.flatMap((c, i) => (c.plan.steps ?? [c.plan]).map(s => ({ ...s, tag: c.plan.steps ? `${i + 1} ${s.tag}` : `${i + 1}` })))
   const n = checked.length
@@ -668,8 +673,15 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
     const bad = anchored.map((s, i) => ({ tag: s.tag, text: seen.refusals[i] })).filter(b => b.text)
     if (bad.length) return { ok: false, text: c.plan.steps ? `${bad.map(b => `batch item ${b.tag}: ${b.text}`).join('\n')}\nnothing was sent and nothing was shown to the user: drop or fix ${bad.length === 1 ? 'this item' : `these ${bad.length} items`}, then send the batch again` : bad[0]!.text! }
   }
+  // only YOUR tasks are moved (owntask.ts, reads from the forge): a PR link / state change of a work item that is not assigned to the user, or for a PR the user did not create,
+  // is refused here with exactly the reason, and nothing is shown to the user
+  const notMine = await checkMove(h, c.kind, c.params).catch(() => 'could not verify the owner/assignee: not moving it')
+  if (notMine) return { ok: false, text: notMine }
+  // a create is checked against what the task already has (workitemflow.ts): a stored work item refuses it; the closest known items are shown to the user in the card
+  const dup = c.kind === 'ado-workitem-create' ? await createCheck(h, thread, c.params).catch(() => null) : null
+  if (dup?.refuse) return { ok: false, text: dup.refuse }
   const hash = hashOf(renderingOf(c.plan))
-  const why = (typeof a.why === 'string' ? a.why : '').replace(/\s+/g, ' ').trim().slice(0, 300)
+  const why = [dup?.note, typeof a.why === 'string' ? a.why : ''].filter(Boolean).join(' · ').replace(/\s+/g, ' ').trim().slice(0, 400)
   return exclusive(async () => {
     const ts = await h.clock.now()
     const all = await rows(h)
@@ -1233,7 +1245,9 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   }
   try {
     // the check right before sending: what goes out is exactly what the user saw
-    if (hashOf(renderingOf(plan)) !== r.hash) sent = { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
+    const notMine = hashOf(renderingOf(plan)) === r.hash ? await checkMove(h, r.kind, r.params).catch(() => 'could not verify the owner/assignee: not moving it') : null // (again right before the send: the assignee may have changed)
+    if (notMine) sent = { ok: false, text: notMine, refused: true }
+    else if (hashOf(renderingOf(plan)) !== r.hash) sent = { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
     else if (plan.steps) {
       const ran = await runSteps(h, r.thread, plan)
       sent = ran.sent
@@ -1256,6 +1270,10 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     // some writes went out, one failed, the rest did not run: the request is used (never repeated whole); the thread asks for the rest as a NEW request
     if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but only partly done: ${sent.text}. Nothing is repeated: make a NEW request for what failed or did not run, if it is still needed.`).catch(() => undefined)
     return { ok: false, text: `partly done: ${sent.text}. The request is marked used (never repeated whole); ${r.thread} was told to ask again for the rest` }
+  }
+  if (sent.refused && /: not (moving|linking) it$/.test(sent.text)) {
+    if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but NOT sent, nothing was written: ${sent.text}. Only the user's own tasks are moved: leave the work item as it is.`).catch(() => undefined)
+    return { ok: false, text: `not sent: ${sent.text}. Nothing was written; the request is closed, ${r.thread} was told` }
   }
   if (sent.refused) {
     // the PR's diff no longer has the line (a push since the request, or a wrong line): nothing was written; the request is closed and the thread corrects the anchor

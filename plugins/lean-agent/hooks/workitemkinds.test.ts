@@ -1,6 +1,8 @@
 // 1.0.28 new action kinds: `ado-workitem-create` and `ado-pr-workitem-link` (deskactions.ts), with canned curl output (no network). Synthetic names only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { addActionRequest, answerAction, approveAction, checkAction, resetActions } from './deskactions'
 import { allowWrites, runGranted } from './deskwrites'
 import { recordHumanPrompt } from './humanprompts'
