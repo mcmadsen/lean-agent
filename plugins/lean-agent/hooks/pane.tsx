@@ -540,14 +540,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const approveWriteStanding = (a: ActionView) =>
       twoStep(`action:standing:${a.id}`, async () => {
         resetViewCache()
-        const said = await answerAction(host, a.id, 'approve', 'pane', tellAction, true)
+        // a request already approved once (the plain Approve, in the dialog): the first answer wins, so it is sent once as approved and NO 24 h approval is made (and this says so)
+        const already = a.state === 'approved'
+        const said = already ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction, true)
         if (!said.ok) {
           sayModel(said.text, true)
           return tell()
         }
         const out = await approveAction(host, a.id, tellAction)
         resetViewCache()
-        sayModel(`${out.text}; this kind of write on this ${a.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} is allowed for 24 h (Revoke in the pane)`, !out.ok)
+        sayModel(already ? `${out.text}; it had already been approved once with the plain Approve, so NO 24 h approval was made (the first answer wins): the thread's next request of this kind asks again` : `${out.text}; this kind of write on this ${a.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} is allowed for 24 h (Revoke in the pane; your own approved send is not counted in its 40 writes)`, !out.ok)
         tell()
       })
     const revokeStanding = (grant: string) => async () => {

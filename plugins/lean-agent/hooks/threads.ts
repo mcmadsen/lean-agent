@@ -9,7 +9,7 @@ import { projectsAction, unknownProject } from './projects'
 import { settingsKeys, threadChoice } from './models'
 import type { Choice } from './models'
 import { addRequest, dropRequests, familyOf, isExpensiveModel, modelAllowed, revokeModelApprovals } from './expensive'
-import { actionListText, approveAction, dropActions, dropGrants } from './deskactions'
+import { actionListText, approveAction, dropActions, dropGrants, withdrawAction } from './deskactions'
 import { allowWrites, askWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
 import { noteBrief, ownFromGrant, recordPassedPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
@@ -897,6 +897,7 @@ const USES: Record<string, string[]> = {
   keep: ['on'],
   'keep-going': ['on'],
   'action-cancel': ['id'],
+  'withdraw-action': ['id', 'text'],
   find: TEXTY,
   ask: TEXTY,
   report: ['section', 'full'],
@@ -1020,6 +1021,11 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
       const tell = (thread: string, text: string): Promise<void> => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined)
       if (i.action === 'action-list') return { ok: true, text: `${await actionListText(h, tell)}${await writesListText(h).catch(() => '')}` }
       const o = await approveAction(h, (i.id ?? '').trim(), tell)
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
+    }
+    // a request still waiting is withdrawn, unsent, with the user's reason in `text`; the thread is told (deskactions.ts withdrawAction)
+    if (i.action === 'withdraw-action') {
+      const o = await withdrawAction(h, (i.id ?? '').trim(), i.text ?? '', (thread, text) => leanThread(h, root, { action: 'send', tN: thread, text }).then(() => undefined))
       return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     // a covered reply that waits in its hold window (sendhold.ts): the desk cancels it

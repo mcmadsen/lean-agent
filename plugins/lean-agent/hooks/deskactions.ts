@@ -16,7 +16,7 @@
 //      check code and its exact text, and the answer is one of the three labels. The pane's Approve / Deny presses are the same decision
 //      (`answerAction` with by: 'pane'). Nothing else writes an answer, and a spec reads the sources to keep it so.
 //   3. The desk calls `lean_thread approve-action <id>`: refused unless a signed human Approve for THAT request id and rendering is on
-//      record, the request is unexpired (2 h) and unused. The rendering is derived again from the params and its hash compared right before
+//      record, the request is unexpired (24 h, config actions.pendingHours) and unused. The rendering is derived again from the params and its hash compared right before
 //      sending. Single use: the request is used once the write went out. A failing executor leaves it unused and says why.
 //   4. The mod sends, records the result (id / URL, never the token) in the thread's history.jsonl and tells the thread, so it goes on.
 //
@@ -33,7 +33,7 @@ import { holdCovered } from './sendhold'
 import { CANNOT_VERIFY, changesTable, lintReviewText, prKey, verifyAnchors } from './anchor'
 import type { Anchor, AnchorInfo, Reader } from './anchor'
 
-export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
+export const ACTION_TTL_MS = 24 * 60 * 60 * 1000 // the default wait (config actions.pendingHours; was 2 h before 1.0.31)
 export const ACTIONS_MAX = 40 // requests kept in the store
 export const PENDING_MAX = 5 // open requests one thread may have at a time
 export const BODY_MAX = 10_000
@@ -538,9 +538,12 @@ export function reviewListing(items: ReviewItem[], cutAt?: number): string {
 }
 
 // ---- the stored request ---------------------------------------------------------------------------------------------------------------
-export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string }
-type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string }
-export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired'
+// `exit` (1.0.31): how and why the request left the pending list (set once, never removed: the record stays as evidence)
+export type RequestExit = { kind: 'executed' | 'denied' | 'expired' | 'withdrawn' | 'edit'; reason: string; ts: number }
+export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string; exit?: RequestExit }
+// `via` (1.0.31): where the answer came from when it was not the plain press of an option: the user's typed words in the dialog
+export type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string; via?: 'typed' }
+export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired' | 'withdrawn'
 // a request as the desk and the pane see it (never carries a signature)
 export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */ }
 
@@ -576,7 +579,9 @@ export const standingEligible = (kind: ActionKind, p: Params): boolean => {
   const items = Array.isArray(p.items) ? (p.items as { kind?: unknown; params?: Params }[]) : []
   return items.length > 0 && items.every(it => itemEligible(it?.kind, it?.params ?? {}))
 }
-let humanGrant: null | ((h: Host, r: ActionRequest, now: number) => Promise<boolean>) = null
+// where a standing choice came from, written into the grant's own record (1.0.31): the pane's button, the dialog's fourth option, or the user's typed words
+export type Via = { how: 'pane' | 'dialog' | 'typed'; words?: string }
+let humanGrant: null | ((h: Host, r: ActionRequest, now: number, via: Via) => Promise<boolean>) = null
 export const setHumanGrantWriter = (f: typeof humanGrant): void => {
   humanGrant = f
 }
@@ -606,7 +611,90 @@ export async function rows(h: Host): Promise<ActionRequest[]> {
   const v = await h.store.get(REQUESTS).catch(() => null)
   return (Array.isArray(v) ? v : []).filter((r): r is ActionRequest => !!r && idOk(r.id) && threadOk(r.thread) && isKind(r.kind) && typeof r.hash === 'string' && typeof r.sig === 'string' && Number.isFinite(r.ts) && Number.isFinite(r.exp) && !!r.params && typeof r.params === 'object')
 }
-const save = (h: Host, all: ActionRequest[]) => h.store.set(REQUESTS, all.slice(-ACTIONS_MAX))
+// Room is made by dropping the OLDEST FINISHED requests (one with an exit); an open request is never dropped for room (1.0.31)
+function pruned(all: ActionRequest[]): ActionRequest[] {
+  let extra = all.length - ACTIONS_MAX
+  if (extra <= 0) return all
+  return all.filter(r => {
+    if (extra > 0 && r.exit) {
+      extra--
+      return false
+    }
+    return true
+  })
+}
+const save = (h: Host, all: ActionRequest[]) => h.store.set(REQUESTS, pruned(all))
+
+// ---- how a request leaves the pending list (1.0.31): executed, denied, expired or withdrawn, each written to its record with the reason and the time ----------------------------
+// A non-executed exit says so in one line to the thread AND to the desk (a notice: the pane lists it, the desk reads it); markExit runs inside the gate, announceExit after it.
+export const exitLine = (r: Pick<ActionRequest, 'id'>, e: Pick<RequestExit, 'kind' | 'reason'>): string =>
+  e.kind === 'executed' ? `request ${r.id} executed: ${e.reason}` : e.kind === 'denied' ? `request ${r.id} denied: nothing was sent` : e.kind === 'expired' ? `request ${r.id} expired unsent: ${e.reason}` : e.kind === 'edit' ? `request ${r.id} not sent: ${e.reason}` : `request ${r.id} withdrawn unsent: ${e.reason}`
+async function markExit(h: Host, id: string, exit: RequestExit): Promise<ActionRequest | null> {
+  const all = await rows(h)
+  const r = all.find(x => x.id === id)
+  if (!r || r.exit) return null
+  await save(h, all.map(x => (x.id === id ? { ...x, exit } : x)))
+  return { ...r, exit }
+}
+async function announceExit(h: Host, r: ActionRequest, tell?: Tell, toThread = true): Promise<void> {
+  const e = r.exit!
+  await logHistory(h, r.thread, { kind: 'action-exit', id: r.id, action: r.kind, exit: e.kind, reason: e.reason.slice(0, 200) })
+  if (e.kind === 'executed') return
+  const line = exitLine(r, e)
+  await setNotice(h, `request-exit.${r.id}`, `${r.thread}: ${line}`)
+  if (toThread && tell) await tell(r.thread, `Your ${line}.${e.kind === 'expired' || e.kind === 'withdrawn' ? ' Send it again as a NEW request if it is still needed, or continue without it.' : ''}`).catch(() => undefined)
+}
+// the config key actions.pendingHours (default 24): how long a request waits for the user's decision, fixed when it is made
+export async function pendingMsOf(h: Host): Promise<number> {
+  const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
+  const raw = cfg && typeof cfg === 'object' ? (cfg.actions?.pendingHours ?? cfg['actions.pendingHours']) : undefined
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() ? Number(raw) : NaN
+  return (Number.isFinite(n) && n >= 0.05 && n <= 720 ? n : 24) * 3_600_000
+}
+// every request whose time ran out without being sent leaves the list as expired, with its reason, and the thread and the desk are told. Returns the lines.
+export async function sweepExpired(h: Host, tell?: Tell): Promise<string[]> {
+  const now = await h.clock.now()
+  const done: ActionRequest[] = []
+  await exclusive(async () => {
+    for (const r of await rows(h)) {
+      if (r.exit || now <= r.exp || (await usedOf(h, r.id))) continue
+      const a = await answerOf(h, r)
+      if (a && a.answer !== 'approve') continue
+      const reason = a ? `approved, but never sent within ${hoursOf(r)} h` : `nobody decided in ${hoursOf(r)} h`
+      const m = await markExit(h, r.id, { kind: 'expired', reason, ts: now })
+      if (m) done.push(m)
+    }
+  })
+  for (const r of done) await announceExit(h, r, tell)
+  return done.map(r => exitLine(r, r.exit!))
+}
+// withdraw a request that is still waiting (the desk's withdraw-action, or the user's typed words): it leaves unsent, with the reason, and the thread is told
+export async function withdrawAction(h: Host, id: string, reason: string, tell?: Tell): Promise<{ ok: boolean; text: string }> {
+  const why = reason.replace(/\s+/g, ' ').trim().slice(0, 200)
+  if (!idOk(id)) return { ok: false, text: 'withdraw-action needs the request id (like a1700000000000-1, from lean_thread action-list)' }
+  if (!why) return { ok: false, text: `withdraw-action needs a reason (the user's words, for example "you rejected it in chat"): request ${id} stays as it is` }
+  const res = await exclusive(async () => {
+    const r = (await rows(h)).find(x => x.id === id)
+    if (!r) return { ok: false as const, text: `no request ${id} (never made, or already cleared): nothing to withdraw` }
+    const now = await h.clock.now()
+    const st = await stateOf(h, r, now)
+    if (st !== 'pending' && st !== 'approved') return { ok: false as const, text: `request ${id} is ${stateWhy(r, st)}: nothing to withdraw` }
+    const m = await markExit(h, id, { kind: 'withdrawn', reason: why, ts: now })
+    return m ? { ok: true as const, r: m } : { ok: false as const, text: `request ${id} already left the list: nothing to withdraw` }
+  })
+  if (!res.ok) return res
+  await announceExit(h, res.r, tell)
+  return { ok: true, text: `withdrew ${id} (${res.r.kind}) unsent: ${why}; ${res.r.thread} was told` }
+}
+// the user's own typed words ("withdraw a1700000000000-1 ..."), from a recorded human prompt only: the named request that is still waiting is withdrawn, the words are the reason
+export async function withdrawByWords(h: Host, text: string, tell?: Tell): Promise<number> {
+  if (!/(?<![\w-])(withdraw|withdrawn|retract)(?![\w-])/i.test(text)) return 0
+  let n = 0
+  for (const id of new Set([...text.matchAll(/(?<![\w-])a\d{1,16}-\d{1,9}(?![\w-])/g)].map(m => m[0]))) {
+    if ((await withdrawAction(h, id, `you said so: "${text.replace(/\s+/g, ' ').trim().slice(0, 100)}"`, tell)).ok) n++
+  }
+  return n
+}
 
 // the request's own checks: signed by this mod, and what it would send is still exactly what was hashed. A plan is returned only for a sound request.
 export async function sound(h: Host, r: ActionRequest): Promise<Plan | null> {
@@ -627,6 +715,7 @@ const usedOf = async (h: Host, id: string): Promise<boolean> => typeof (await h.
 
 export async function stateOf(h: Host, r: ActionRequest, now: number): Promise<ActionState> {
   if (await usedOf(h, r.id)) return 'used'
+  if (r.exit?.kind === 'withdrawn') return 'withdrawn'
   const a = await answerOf(h, r)
   if (a?.answer === 'deny') return 'denied'
   if (a?.answer === 'edit') return 'edit'
@@ -634,6 +723,16 @@ export async function stateOf(h: Host, r: ActionRequest, now: number): Promise<A
   return a ? 'approved' : 'pending'
 }
 
+// why an answer cannot be recorded for a request in this state (the reason code of a refusal, 1.0.31)
+export const stateWhy = (r: ActionRequest, st: ActionState): string =>
+  st === 'used' ? `already resolved (executed${r.exit?.kind === 'executed' ? `: ${r.exit.reason}` : ''})`
+  : st === 'denied' ? 'already resolved (denied)'
+  : st === 'expired' ? `already resolved (expired after ${hoursOf(r)} h)`
+  : st === 'withdrawn' ? `already resolved (withdrawn: ${r.exit?.reason ?? 'no reason given'})`
+  : st === 'edit' ? 'already resolved (the user asked to edit it first: the thread sends a NEW request)'
+  : st === 'approved' ? 'not pending (already approved and waiting to be sent: lean_thread approve-action sends it)'
+  : st
+const hoursOf = (r: Pick<ActionRequest, 'ts' | 'exp'>): number => Math.round(((r.exp - r.ts) / 3_600_000) * 10) / 10
 const cut = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`)
 export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<ActionView | null> {
   const plan = await sound(h, r)
@@ -710,7 +809,7 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
     let open = 0
     for (const r of all) if (r.thread === thread && ts <= r.exp && ['pending', 'approved'].includes(await stateOf(h, r, ts))) open++
     if (open >= PENDING_MAX) return { ok: false, text: `${thread} already has ${open} requests waiting for the user: wait for them` }
-    const base = { id: `a${ts}-${++seq}`, thread, kind: c.kind, hash, ts, exp: ts + ACTION_TTL_MS }
+    const base = { id: `a${ts}-${++seq}`, thread, kind: c.kind, hash, ts, exp: ts + (await pendingMsOf(h)) }
     const sig = await macOf(h, sigText(base), true)
     if (!sig) return { ok: false, text: 'no key to sign the request with' }
     const rec: ActionRequest = { ...base, params: c.params, why, sig }
@@ -723,24 +822,28 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
 
 // ---- the human's answer ---------------------------------------------------------------------------------------------------------------------
 // ONLY bindAnswers (the desk's AskUserQuestion result) and answerAction (the pane's press) write an answer. First answer wins.
-export async function answerAction(h: Host, id: string, answer: 'approve' | 'deny' | 'edit', by: 'ask' | 'pane', tell?: Tell, standing = false): Promise<{ ok: boolean; text: string }> {
+export async function answerAction(h: Host, id: string, answer: 'approve' | 'deny' | 'edit', by: 'ask' | 'pane', tell?: Tell, standing = false, via?: Via): Promise<{ ok: boolean; text: string }> {
   const rec = await exclusive(async () => {
     const r = (await rows(h)).find(x => x.id === id)
-    if (!r) return { ok: false as const, text: `no request ${id}` }
+    if (!r) return { ok: false as const, text: `no request ${id}: never made, or already cleared` }
     const now = await h.clock.now()
     if (!(await sound(h, r))) return { ok: false as const, text: `request ${id} does not verify (not signed by this mod, or its text changed): refused` }
     const st = await stateOf(h, r, now)
-    if (st !== 'pending') return { ok: false as const, text: `request ${id} is ${st}: no answer recorded` }
+    if (st !== 'pending') return { ok: false as const, text: `request ${id} is ${stateWhy(r, st)}: no answer recorded` }
     if (standing && (answer !== 'approve' || !standingEligible(r.kind, r.params))) return { ok: false as const, text: `request ${id} cannot carry a standing approval (only a reply, a GitHub comment, a PR link, a thread status of fixed, closed or active, a GitHub thread resolve or a work item state of Reviewing, Active, In Progress or Resolved, or a batch of those): no answer recorded` }
+    const src: Via = via ?? { how: by === 'pane' ? 'pane' : 'dialog' }
     const base = { id: r.id, hash: r.hash, answer, by, ts: now }
     const sig = await macOf(h, answerText(base), true)
     if (!sig) return { ok: false as const, text: 'no key to sign the answer with' }
-    await h.store.set(answerKey(r.id), { ...base, sig } satisfies Answer)
-    if (standing && !(statusStanding(r.kind, r.params) ? await writeGrant(h, r, now) : humanGrant ? await humanGrant(h, r, now) : false)) return { ok: true as const, r, noGrant: true }
-    return { ok: true as const, r }
+    await h.store.set(answerKey(r.id), { ...base, sig, ...(src.how === 'typed' ? { via: 'typed' as const } : {}) } satisfies Answer)
+    // a Deny and an Edit first end the request here, with the reason on its record (an Approve ends it when it is sent: approveAction)
+    const left = answer === 'deny' ? await markExit(h, r.id, { kind: 'denied', reason: 'you denied it', ts: now }) : answer === 'edit' ? await markExit(h, r.id, { kind: 'edit', reason: 'you asked to edit it first: the thread sends a NEW request', ts: now }) : null
+    if (standing && !(statusStanding(r.kind, r.params) ? await writeGrant(h, r, now, src) : humanGrant ? await humanGrant(h, r, now, src) : false)) return { ok: true as const, r, left, noGrant: true }
+    return { ok: true as const, r, left }
   })
   if (!rec.ok) return rec
-  const { r } = rec
+  const { r, left } = rec
+  if (left) await announceExit(h, left, tell, answer === 'edit') // (a Deny already tells the thread below, in its own words)
   await logHistory(h, r.thread, { kind: `action-${answer}`, id, action: r.kind, hash: checkCode(r.hash), by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk' })
   if (standing && !('noGrant' in rec)) await logHistory(h, r.thread, { kind: 'standing-grant', id, action: r.kind, scope: targetOf(r.kind, r.params), statuses: r.kind === 'gh-pr-thread-resolve' ? undefined : STANDING_STATUSES, by: by === 'pane' ? 'user, in the pane' : 'user, asked by the desk', hours: 24 })
   if (answer === 'deny' && tell) await tell(r.thread, `The user denied your request ${id} (${r.kind}): nothing was sent. Denied: report blocked if you cannot go on, or continue without it. Do not send the same text again.`).catch(() => undefined)
@@ -749,6 +852,36 @@ export async function answerAction(h: Host, id: string, answer: 'approve' | 'den
 
 const LABEL: Record<string, 'approve' | 'deny' | 'edit' | 'approve-standing'> = { Approve: 'approve', Deny: 'deny', 'Edit first': 'edit', [STANDING_LABEL]: 'approve-standing', [STANDING_LABEL_WI]: 'approve-standing' }
 type Q = { question?: unknown; options?: unknown }
+const HEADER = /\[request (a\d{1,16}-\d{1,9}), check ([0-9a-f]{12})\]/
+const firstDiff = (a: string, b: string): number => {
+  let i = 0
+  while (i < a.length && i < b.length && a[i] === b[i]) i++
+  return i
+}
+const snip = (s: string, i: number): string => JSON.stringify(s.slice(Math.max(0, i - 6), i + 24))
+const STILL = 'The request is still pending: nothing was approved, nothing was sent, no standing approval was made. Paste the question from lean_thread action-list exactly as it is, or the user presses Approve on the request\'s card in the pane'
+// Why the user's answer to a question about request r cannot be recorded (1.0.31): null when it can. Names the first thing that is wrong: the request's state, then the
+// id, the check code, the text (and which part of it), the options, the multi-select flag, and the label chosen not being one of the options offered.
+export function unrecorded(r: ActionRequest, v: ActionView | null, canon: { question: string; options: { label: string; description: string }[] } | null, text: string, opts: { label?: unknown; description?: unknown }[], multi: boolean, label: string | null): string | null {
+  if (!v || !canon) return `request ${r.id} does not verify (not signed by this mod, or its text changed since it was made): refused, nothing was approved or sent`
+  if (v.state !== 'pending') return `request ${r.id} is ${stateWhy(r, v.state)}: nothing was changed`
+  const m = HEADER.exec(text)
+  if (!m) return `the question has no "[request <id>, check <code>]" part. ${STILL}`
+  if (m[1] !== r.id) return `id mismatch: the question's header names request ${m[1]}, the request it was matched to is ${r.id}. ${STILL}`
+  if (m[2] !== checkCode(v.hash)) return `check code mismatch: the question says ${m[2]}, request ${r.id} has ${checkCode(v.hash)}. ${STILL}`
+  if (text !== canon.question) {
+    const i = firstDiff(text, canon.question)
+    const bodyAt = canon.question.indexOf('\n---\n') + 5
+    const endAt = canon.question.lastIndexOf('\n---\nTarget:')
+    const part = i < bodyAt ? 'the heading line' : i <= endAt ? 'the exact text to be sent' : 'the target line'
+    return `text differs in ${part}, first at character ${i + 1}: the question shown has ${snip(text, i)}, request ${r.id} has ${snip(canon.question, i)}. ${STILL}`
+  }
+  const same = opts.length === canon.options.length && canon.options.every((c, k) => opts[k]?.label === c.label && opts[k]?.description === c.description)
+  if (!same) return `the options differ: expected exactly ${canon.options.map(o => `"${o.label}"`).join(' | ')} with their descriptions, got ${opts.map(o => JSON.stringify(typeof o?.label === 'string' ? o.label : '?')).join(' | ') || 'none'}. ${STILL}`
+  if (multi) return `the question allowed several answers (multiSelect): one choice is needed. ${STILL}`
+  if (label !== null && !canon.options.some(o => o.label === label)) return `the answer ${JSON.stringify(label.slice(0, 80))} is not exactly one of the options offered (${canon.options.map(o => `"${o.label}"`).join(' | ')}). ${STILL}`
+  return null
+}
 // The desk's AskUserQuestion, after the user answered it: `questions` is what was asked, `answers` the tool result's (question text -> the
 // label chosen). An answer is recorded only for a question that names exactly ONE pending request, with its id, its check code and its exact
 // text, and offers the three labels; the answer must be one of the labels. Returns the lines to hand to the desk (what to do next).
@@ -760,8 +893,19 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
   const all = await rows(h)
   for (const q of qs) {
     const text = typeof q?.question === 'string' ? q.question : ''
+    const hm = HEADER.exec(text)
+    if (hm && !all.some(x => x.id === hm[1])) {
+      // the question names a request that is not there: say so (only for a question the user actually answered)
+      if (given && typeof given[text] === 'string' && (given[text] as string).trim()) notes.push(`the answer to the question about ${hm[1]} was NOT recorded: no such request (never made, or already cleared). Nothing was approved or sent. Ask again with a question from lean_thread action-list`)
+      continue
+    }
     const ids = [...new Set([...text.matchAll(/\ba\d{1,16}-\d{1,9}\b/g)].map(m => m[0]))].filter(id => all.some(r => r.id === id))
-    if (ids.length !== 1) continue // not about a request, or about several: nothing is bound
+    if (ids.length === 0) continue // not about a request: nothing is bound
+    if (ids.length > 1) {
+      // about several: nothing is bound, and an answered question says so
+      if (given && typeof given[text] === 'string' && (given[text] as string).trim()) notes.push(`the answer to the question naming ${ids.join(' and ')} was NOT recorded: id mismatch, a question must name exactly one request (id, check code and text). Those requests are still pending: ask one question per request, as lean_thread action-list gives them`)
+      continue
+    }
     const r = all.find(x => x.id === ids[0])!
     if (!given) {
       notes.push(`the answer to the question about ${r.id} could not be read by the mod: ask the user to press Approve or Deny on its card in the pane`)
@@ -788,14 +932,15 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
     // the question must be the canonical one (questionOf): the desk model may not frame the text or the options differently
     const canon = v ? questionOf(v) : null
     const opts = Array.isArray(q.options) ? (q.options as { label?: unknown; description?: unknown }[]) : []
-    const sameOptions = !!canon && opts.length === canon.options.length && canon.options.every((c, i) => opts[i]?.label === c.label && opts[i]?.description === c.description)
-    if (!v || !canon || v.state !== 'pending' || text !== canon.question || !sameOptions || (q as { multiSelect?: unknown }).multiSelect === true) {
-      notes.push(`the answer to the question about ${r.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`)
+    const why = unrecorded(r, v, canon, text, opts, (q as { multiSelect?: unknown }).multiSelect === true, typed ? null : a)
+    if (why) {
+      notes.push(`the answer to the question about ${r.id} was NOT recorded: ${why}`)
       continue
     }
-    // a typed "always" counts as the fourth choice only where the request carries it; else it is the plain Approve of this one request (and says so)
-    const standing = answer === 'approve-standing' && (!typed || !!v.standing)
-    const o = await answerAction(h, r.id, answer === 'approve-standing' ? 'approve' : answer, 'ask', tell, standing) // (the fourth choice exists only in the canonical question of an eligible request, checked above)
+    // a typed "always" counts as the fourth choice only where the request carries it; else it is the plain Approve of this one request (and says so).
+    // A press of the option counts only by its EXACT label (LABEL above: never a prefix, a part of a label or a position): the plain Approve is never a standing one
+    const standing = answer === 'approve-standing' && (!typed || !!v!.standing)
+    const o = await answerAction(h, r.id, answer === 'approve-standing' ? 'approve' : answer, 'ask', tell, standing, typed ? { how: 'typed', words: a.replace(/\s+/g, ' ') } : { how: 'dialog' }) // (the fourth choice exists only in the canonical question of an eligible request, checked above)
     notes.push(typed && answer === 'approve-standing' && !standing ? `${o.text} (the user typed '${a.slice(0, 80)}': it cannot be allowed for 24 h, only this request was approved)` : o.text)
     if (typed && o.ok) await logHistory(h, r.thread, { kind: 'typed-approval', id: r.id, text: a.replace(/\s+/g, ' ').slice(0, 80), standing })
   }
@@ -808,12 +953,13 @@ export async function bindAnswers(h: Host, questions: unknown, answers: unknown,
 // writeGrant is not exported (a spec reads the sources to keep it so). A RULE is what the user wrote by hand in config.json `actions.standing`
 // (a session cannot write that file: the guard refuses it). With either, a request of the two status kinds is sent by the mod at once, by the
 // SAME executor (approveAction: signature, hash re-check, token on stdin). A batch is covered only when EVERY item is.
-type Grant = { id: string; thread: string; scope: string; kinds: ActionKind[]; statuses: string[]; ts: number; exp: number; sig: string }
+// `req` + `src` (1.0.31, signed when present): the request whose fourth choice made it, and where the choice came from (the pane's button, the dialog's option, typed words)
+type Grant = { id: string; thread: string; scope: string; kinds: ActionKind[]; statuses: string[]; ts: number; exp: number; sig: string; req?: string; src?: string }
 type SentRec = { ts: number; thread: string; text: string; grant?: string }
 const GRANTS = 'action.grants'
 const SENT = 'action.standing.sent'
 const SENT_SHOWN_MS = 30 * 60 * 1000
-const grantText = (g: Omit<Grant, 'sig'>) => `desk-standing\n${g.id}\n${g.thread}\n${g.scope}\n${g.kinds.join(',')}\n${g.statuses.join(',')}\n${g.ts}\n${g.exp}`
+const grantText = (g: Omit<Grant, 'sig'>) => `desk-standing\n${g.id}\n${g.thread}\n${g.scope}\n${g.kinds.join(',')}\n${g.statuses.join(',')}\n${g.ts}\n${g.exp}${g.req ? `\n${g.req}\n${g.src ?? ''}` : ''}`
 let gseq = 0
 
 // the grants that verify and have not expired (a forged or edited row is not a grant)
@@ -822,15 +968,17 @@ async function grantRows(h: Host, now: number): Promise<Grant[]> {
   const out: Grant[] = []
   for (const g of Array.isArray(v) ? v : []) {
     if (!g || typeof g.id !== 'string' || !threadOk(g.thread) || typeof g.scope !== 'string' || !Array.isArray(g.kinds) || !Array.isArray(g.statuses) || !Number.isFinite(g.ts) || !Number.isFinite(g.exp) || typeof g.sig !== 'string' || now > g.exp) continue
+    if ((g.req !== undefined && typeof g.req !== 'string') || (g.src !== undefined && typeof g.src !== 'string')) continue
     if (![...g.kinds, ...g.statuses].every(x => typeof x === 'string')) continue
     const want = await macOf(h, grantText(g), false)
     if (want && want.length === g.sig.length && want === g.sig) out.push(g)
   }
   return out
 }
-async function writeGrant(h: Host, r: ActionRequest, now: number): Promise<boolean> {
+async function writeGrant(h: Host, r: ActionRequest, now: number, via: Via): Promise<boolean> {
   const scope = targetOf(r.kind, r.params)
-  const base = { id: `g${now}-${++gseq}`, thread: r.thread, scope, kinds: [r.kind], statuses: r.kind === 'gh-pr-thread-resolve' ? [] : [...STANDING_STATUSES], ts: now, exp: now + STANDING_TTL_MS }
+  const src = via.how === 'pane' ? `the pane's button "${standingLabelOf(r.kind)}"` : via.how === 'dialog' ? `the dialog's option "${standingLabelOf(r.kind)}"` : `typed words "${(via.words ?? '').slice(0, 60)}"`
+  const base = { id: `g${now}-${++gseq}`, thread: r.thread, scope, kinds: [r.kind], statuses: r.kind === 'gh-pr-thread-resolve' ? [] : [...STANDING_STATUSES], ts: now, exp: now + STANDING_TTL_MS, req: r.id, src }
   const sig = await macOf(h, grantText(base), true)
   if (!sig) return false
   const all = (await grantRows(h, now)).filter(g => !(g.thread === r.thread && g.scope === scope && g.kinds.join() === base.kinds.join()))
@@ -950,7 +1098,7 @@ export async function standingView(h: Host): Promise<StandingView> {
   return { grants: grants.map(g => ({ id: g.id, thread: g.thread, scope: g.scope, statuses: g.statuses, exp: g.exp })), sent, rules: (await configRules(h)).length }
 }
 // revoking only ever takes power away: the pane's Revoke button
-export async function revokeGrant(h: Host, id: string): Promise<{ ok: boolean; text: string }> {
+export async function revokeGrant(h: Host, id: string, by = 'user, in the pane'): Promise<{ ok: boolean; text: string }> {
   const g = await exclusive(async () => {
     const all = await grantRows(h, await h.clock.now())
     const hit = all.find(x => x.id === id)
@@ -959,8 +1107,55 @@ export async function revokeGrant(h: Host, id: string): Promise<{ ok: boolean; t
     return hit
   })
   if (!g) return { ok: false, text: `no active standing approval ${id}` }
-  await logHistory(h, g.thread, { kind: 'standing-revoked', id, scope: g.scope, by: 'user, in the pane' })
+  await logHistory(h, g.thread, { kind: 'standing-revoked', id, scope: g.scope, by })
   return { ok: true, text: `revoked the standing approval for ${g.thread} on ${g.scope}: its status changes are asked again` }
+}
+
+// ---- a standing record must rest on the user's own choice (1.0.31) -------------------------------------------------------------------------------
+// The signed answer on record for a request (the request's own row may be gone by now): null when none verifies
+export async function answerRecord(h: Host, id: string): Promise<Answer | null> {
+  const a = (await h.store.get(answerKey(id)).catch(() => null)) as Answer | null
+  if (!a || typeof a !== 'object' || a.id !== id || !['approve', 'deny', 'edit'].includes(a.answer) || typeof a.sig !== 'string' || !Number.isFinite(a.ts)) return null
+  const want = await macOf(h, answerText(a), false)
+  return want && want.length === a.sig.length && want === a.sig ? a : null
+}
+// what a standing record says it rests on, against the answer on record: null when they agree. `from`: where the record says the choice was made (null: it does not say)
+export function choiceProblem(a: Answer | null, from: 'pane' | 'option' | 'typed' | null): string | null {
+  if (!a) return 'no answer of yours is on record for the request it names'
+  if (a.answer !== 'approve') return `the answer on record for the request it names is ${a.answer}, not Approve`
+  if (from === 'pane' && a.by !== 'pane') return 'it says you pressed the pane\'s button, but the answer on record did not come from the pane'
+  if ((from === 'option' || from === 'typed') && a.by !== 'ask') return 'it says you chose it in the desk\'s dialog, but the answer on record did not come from the dialog'
+  if (from === 'option' && a.via === 'typed') return 'it says you pressed the dialog\'s option, but the answer on record is typed words'
+  if (from === 'typed' && a.via !== 'typed') return 'it says you typed words, but the answer on record is a press of an option'
+  return null
+}
+export type FlaggedGrant = { id: string; thread: string; scope: string; quote: string; reason: string; ts: number; revoked: number }
+const FLAGGED = 'action.grants.flagged'
+// Evidence is kept: the record of the revoked grant, with the reason and the time, stays in the store (and its history line); the user is told in a notice (the FIX row)
+export async function flagGrant(h: Host, f: Omit<FlaggedGrant, 'ts' | 'revoked'>): Promise<void> {
+  const now = await h.clock.now()
+  const prev = await h.store.get(FLAGGED).catch(() => null)
+  await h.store.set(FLAGGED, [...(Array.isArray(prev) ? prev : []), { ...f, ts: now, revoked: now } satisfies FlaggedGrant].slice(-20))
+  await logHistory(h, f.thread, { kind: 'standing-flagged', id: f.id, scope: f.scope, quote: f.quote.slice(0, 200), reason: f.reason, by: 'the mod (recorded without your choice: revoked)' })
+  await setNotice(h, `grant-flag.${f.id}`, `FIX: standing approval ${f.id} of ${f.thread} on ${f.scope.replace(/^(Azure DevOps|GitHub) /, '')} was recorded without your choice (${f.reason}). It was revoked and kept as evidence; press the 24 h choice again if you want it`)
+}
+export async function flaggedGrants(h: Host): Promise<FlaggedGrant[]> {
+  const v = await h.store.get(FLAGGED).catch(() => null)
+  return (Array.isArray(v) ? v : []).filter((x): x is FlaggedGrant => !!x && typeof x.id === 'string' && typeof x.reason === 'string')
+}
+// the thread-status grants (this file): one whose record names no matching press of the 24 h choice is flagged and revoked. A grant made before 1.0.31 names no request: not judged
+export async function auditStatusGrants(h: Host): Promise<FlaggedGrant[]> {
+  const out: FlaggedGrant[] = []
+  for (const g of await grantRows(h, await h.clock.now())) {
+    if (!g.req) continue
+    const from = g.src?.startsWith("the pane's") ? 'pane' : g.src?.startsWith("the dialog's") ? 'option' : g.src?.startsWith('typed words') ? 'typed' : null
+    const why = choiceProblem(await answerRecord(h, g.req), from)
+    if (!why) continue
+    if (!(await revokeGrant(h, g.id, 'the mod: recorded without your choice')).ok) continue
+    await flagGrant(h, { id: g.id, thread: g.thread, scope: g.scope, quote: g.src ?? '', reason: why })
+    out.push({ id: g.id, thread: g.thread, scope: g.scope, quote: g.src ?? '', reason: why, ts: 0, revoked: 0 })
+  }
+  return out
 }
 // a thread that closed keeps no standing approval
 export async function dropGrants(h: Host, thread: string): Promise<void> {
@@ -1249,10 +1444,12 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     const st = await stateOf(h, r, now)
     if (st === 'used') return { ok: false as const, text: `request ${id} was already used: one approval sends once` }
     if (st === 'expired') {
-      await dropOne(h, id)
-      if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) expired unanswered (2 h): send it again if it is still needed, or continue without it.`).catch(() => undefined)
-      return { ok: false as const, text: `request ${id} expired (2 h): ${r.thread} was told to send it again if still needed` }
+      const a = await answerOf(h, r)
+      const m = await markExit(h, id, { kind: 'expired', reason: a ? `approved, but never sent within ${hoursOf(r)} h` : `nobody decided in ${hoursOf(r)} h`, ts: now })
+      if (m) await announceExit(h, m, tell)
+      return { ok: false as const, text: `request ${id} expired unsent (${hoursOf(r)} h): ${r.thread} was told to send it again if still needed` }
     }
+    if (st === 'withdrawn') return { ok: false as const, text: `request ${id} was withdrawn (${r.exit?.reason ?? 'no reason given'}): nothing was sent` }
     if (st === 'denied') return { ok: false as const, text: `request ${id} was denied by the user: ${r.thread} was told (denied: report blocked / continue without it)` }
     if (st === 'edit') return { ok: false as const, text: `the user asked to edit request ${id} first: nothing is sent; tell ${r.thread} what to change, it sends a NEW request` }
     if (st !== 'approved') return { ok: false as const, text: `no human Approve is on record for request ${id} (ask the user with the question from lean_thread action-list, or they press Approve in the pane): refused` }
@@ -1289,6 +1486,12 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     inflight.delete(id)
   }
   await logHistory(h, r.thread, { kind: sent.ok ? 'action-sent' : sent.unknown ? 'action-unknown' : 'action-failed', id, action: r.kind, hash: checkCode(r.hash), target: plan.url, result: sent.text.slice(0, 300) })
+  // the exit is on the record: sent (or sent with an unknown outcome, or partly done) = executed; an anchor that does not stand = withdrawn unsent (the thread is told below, in its own words)
+  const now2 = await h.clock.now()
+  // (a definite failure that sent nothing leaves it approved and unused for a retry: no exit yet)
+  const exit: RequestExit | null = sent.ok ? { kind: 'executed', reason: `sent at ${new Date(now2).toISOString().slice(0, 16).replace('T', ' ')} UTC`, ts: now2 } : sent.unknown ? { kind: 'executed', reason: 'sent, outcome unknown', ts: now2 } : progress ? { kind: 'executed', reason: 'partly done', ts: now2 } : sent.refused ? { kind: 'withdrawn', reason: 'its anchor does not stand: nothing was written', ts: now2 } : null
+  const exited = exit ? await exclusive(() => markExit(h, id, exit)).catch(() => null) : null
+  if (exited) await announceExit(h, exited, tell, exit!.kind === 'executed') // (an executed one announces nothing; a refused one was told below in its own words)
   if (sent.ok || progress) await noteOwnItems(h, r, sent.text).catch(() => undefined)
   if (sent.ok && tell) await tell(r.thread, `The user approved your request ${id} and the desk sent it (${r.kind}): ${sent.text}. Carry on.`).catch(() => undefined)
   if (sent.unknown && tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved and sent, but the outcome is unknown (${sent.text}). Check the target before asking again.`).catch(() => undefined)
@@ -1304,7 +1507,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   }
   if (sent.ok && r.thread === DESK_THREAD) return { ok: true, text: `posted: ${sent.text}` }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
-  return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused for its 2 h: try again, or tell ${r.thread}` }
+  return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused until it expires (${hoursOf(r)} h after it was made): try again, or tell ${r.thread}` }
 }
 
 // The work items a thread OWNS (thread.json `workItems`): the ones it created through `ado-workitem-create`, and the ones its own PR was linked to
@@ -1332,34 +1535,30 @@ async function noteOwnItems(h: Host, r: ActionRequest, sentText: string): Promis
   for (const id of ids) await setNotice(h, `ownpr:${r.thread}:wi${id}`, `${r.thread} owns work item ${id} (it created the work item): moving it to Reviewing goes out without a question when ${r.thread} owns a PR (revoke: Revoke button or 'stop writes'); other changes still ask`).catch(() => undefined)
 }
 
-async function dropOne(h: Host, id: string): Promise<void> {
-  const all = await rows(h)
-  if (all.some(r => r.id === id)) await save(h, all.filter(r => r.id !== id))
-}
-// a thread that closed keeps no open request
+// a thread that closed keeps no open request: each one that was still waiting leaves as withdrawn (the thread is gone: the desk is told, in a notice); its record stays
 export async function dropActions(h: Host, thread: string): Promise<void> {
+  const gone: ActionRequest[] = []
   await exclusive(async () => {
-    const all = await rows(h)
-    if (all.some(r => r.thread === thread)) await save(h, all.filter(r => r.thread !== thread))
+    const now = await h.clock.now()
+    for (const r of await rows(h)) {
+      if (r.thread !== thread || r.exit || (await usedOf(h, r.id))) continue
+      const m = await markExit(h, r.id, { kind: 'withdrawn', reason: `${thread} was closed`, ts: now })
+      if (m) gone.push(m)
+    }
   })
+  for (const r of gone) await announceExit(h, r, undefined, false)
 }
 
 // the desk's `action-list`: what waits, each with the question to ask the user, word for word (and the expired ones, told to their thread)
 export async function actionListText(h: Host, tell?: Tell): Promise<string> {
   const now = await h.clock.now()
-  for (const r of await rows(h)) {
-    if (now > r.exp && !(await usedOf(h, r.id))) {
-      const a = await answerOf(h, r)
-      if (!a) {
-        await exclusive(() => dropOne(h, r.id))
-        if (tell) await tell(r.thread, `Your request ${r.id} (${r.kind}) expired unanswered (2 h): send it again if it is still needed, or continue without it.`).catch(() => undefined)
-      }
-    }
-  }
+  const swept = await sweepExpired(h, tell) // a request nobody decided in time leaves unsent, on the record, and the thread and the desk are told
+  const left = (await rows(h)).filter(r => r.exit && now - r.exit.ts <= 24 * 3_600_000 && !swept.includes(exitLine(r, r.exit))).slice(-8)
+  const exits = `${swept.length ? `\njust left the list: ${swept.join('; ')}` : ''}${left.length ? `\nleft the list in the last 24 h (a request leaves only executed, denied, expired or withdrawn; the thread was told of each that was not sent):${left.map(r => `\n  ${r.id} · ${r.thread} · ${r.kind} · ${r.exit!.kind}: ${r.exit!.reason}`).join('')}` : ''}`
   const list = await listActions(h)
   const st = await standingView(h).catch(() => null)
   const stand = st && (st.grants.length || st.rules) ? `\nstanding approvals (a request they cover is sent by the mod at once: do not ask the user again):${st.grants.map(g => `\n  ${g.id} · ${g.thread} · ${g.scope} · status changes (${g.statuses.join(', ') || 'resolve'}) · until ${new Date(g.exp).toISOString().slice(0, 16).replace('T', ' ')} UTC (or the thread closes); the user revokes it in the pane`).join('')}${st.rules ? `\n  ${st.rules} rule${st.rules === 1 ? '' : 's'} in config.json actions.standing (written by the user)` : ''}` : ''
-  if (!list.length) return `no request waits for the user${stand}`
+  if (!list.length) return `no request waits for the user${exits}${stand}`
   return `${list
     .map(v => {
       const head = `${v.id} · ${v.thread} · ${v.kind} · ${v.state}${v.why ? ` · why: ${cut(v.why, 160)}` : ''}`
@@ -1367,5 +1566,5 @@ export async function actionListText(h: Host, tell?: Tell): Promise<string> {
       const q = questionOf(v)
       return `${head}\n  AskUserQuestion, question (paste it exactly): ${JSON.stringify(q.question)}\n  options (exactly these labels): ${q.options.map(o => `${o.label}: ${o.description}`).join(' | ')}`
     })
-    .join('\n')}${stand}`
+    .join('\n')}${exits}${stand}`
 }

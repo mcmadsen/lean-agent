@@ -353,7 +353,7 @@ test('an answer is recorded only when the question the user saw named that reque
   // the right question, answered: recorded (for that request only)
   expect((await human(s, v, 'Approve')).join(' ')).toContain('approved')
   // and the first answer wins: a Deny afterwards changes nothing
-  expect(await human(s, v, 'Deny')).toEqual([`the answer to the question about ${v.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`])
+  expect(await human(s, v, 'Deny')).toEqual([`the answer to the question about ${v.id} was NOT recorded: request ${v.id} is not pending (already approved and waiting to be sent: lean_thread approve-action sends it): nothing was changed`])
   expect((await listActions(s.h.host)).map(x => `${x.id}:${x.state}`)).toEqual([`${v.id}:approved`, `${other.id}:pending`])
 })
 
@@ -398,7 +398,7 @@ test('a changed text is refused: the stored parameters no longer match the signe
   expect((await answerAction(s.h.host, v.id, 'approve', 'pane')).ok).toBe(false)
 })
 
-test('a request expires after 2 h: no late answer, no send, the thread is told', async () => {
+test('a request expires after 24 h (actions.pendingHours): no late answer, no send, the thread is told', async () => {
   const s = setup()
   const v = await ask(s, 'gh-pr-comment')
   await human(s, v, 'Approve')
@@ -413,10 +413,10 @@ test('a request expires after 2 h: no late answer, no send, the thread is told',
   const s2 = setup()
   const w = await ask(s2, 'gh-pr-comment')
   s2.h.clock.t += ACTION_TTL_MS + 1
-  expect(await human(s2, w, 'Approve')).toEqual([`the answer to the question about ${w.id} was NOT recorded: the question the user saw did not name that request's id, check code and exact text (or the request is no longer pending). Ask again with the question from lean_thread action-list`])
-  expect(await actionListText(s2.h.host, s2.tell)).toBe('no request waits for the user')
+  expect(await human(s2, w, 'Approve')).toEqual([`the answer to the question about ${w.id} was NOT recorded: request ${w.id} is already resolved (expired after 24 h): nothing was changed`])
+  expect(await actionListText(s2.h.host, s2.tell)).toContain(`no request waits for the user\njust left the list: request ${w.id} expired unsent: nobody decided in 24 h`)
   expect(s2.told).toHaveLength(1)
-  expect(await actionListText(s2.h.host, s2.tell)).toBe('no request waits for the user')
+  expect(await actionListText(s2.h.host, s2.tell)).toContain('no request waits for the user')
   expect(s2.told).toHaveLength(1)
 })
 
