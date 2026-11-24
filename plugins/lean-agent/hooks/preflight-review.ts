@@ -11,7 +11,7 @@ import { parseExt } from './reviewext'
 import { projectPath } from './reviewprep'
 import { parseOrigin } from './prhost'
 import { cfgBool, cfgNum } from './budgetcfg'
-import { readerOf } from './deskactions'
+import { forgeReader } from './forgereader'
 
 type Target = Pick<Anchor, 'host' | 'org' | 'project' | 'repo' | 'pr'>
 
@@ -25,7 +25,7 @@ async function targetOf(h: Host, project: string, thread: string, ref: string): 
     return o.kind === 'github' ? { host: 'github', org: o.owner, project: '', repo: `${o.owner}/${o.repo}`, pr: parsed.pr } : { host: 'azure', org: o.org, project: o.project, repo: o.repo, pr: parsed.pr }
   }
   if (ref || !/^t\d+$/.test(thread)) return null // a branch or a sha names no PR
-  const pr = (await readJson<{ pr?: { host?: string; org?: string; project?: string; repo?: string; id?: number } }>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, {}).catch(() => ({})))?.pr
+  const pr = (await readJson<{ pr?: { host?: string; org?: string; project?: string; repo?: string; id?: number } }>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, {}).catch(() => null))?.pr
   if (!pr || typeof pr.id !== 'number' || typeof pr.repo !== 'string' || typeof pr.org !== 'string') return null
   return pr.host === 'github' ? { host: 'github', org: pr.org, project: '', repo: `${pr.org}/${pr.repo}`, pr: pr.id } : { host: 'azure', org: pr.org, project: String(pr.project ?? ''), repo: pr.repo, pr: pr.id }
 }
@@ -43,7 +43,7 @@ export async function forgeCountStop(h: Host, project: string, thread: string, r
   if (prepared <= minFiles) return null // (cheap: no forge read for a small diff)
   const t = await targetOf(h, project, thread, ref).catch(() => null)
   if (!t) return null
-  const r = reader ?? readerOf(h)
+  const r = reader ?? forgeReader(h)
   const c = await forgeFileCount(r, t).catch(() => null)
   if (!c || c.truncated) return null // an unreadable or cut-short list proves nothing
   const m = mismatch(prepared, c.files, minFiles, (await cfgNum(h, 'review.preflightRatio')) ?? 3)
