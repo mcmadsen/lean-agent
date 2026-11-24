@@ -214,6 +214,26 @@ test('1.0.32 what waits for the user: nothing when nothing waits; otherwise appr
 })
 
 // ---- thread cards ------------------------------------------------------------------------------------------------------
+test('1.0.32 an idle thread with no report: the chip "idle, no report N min" on its card, and a synthesised last line marked as such (display only)', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'idle', startedAt: 1, pid: 42 }])
+  h.clock.t = 10_000_000
+  const now = h.clock.t
+  thr(h, 't1', { sid: SID(1), lastWake: now - 15 * 60_000 })
+  h.files.set(`${L}/threads/t1/activity.json`, JSON.stringify({ at: now - 12 * 60_000, kind: 'tool' }))
+  h.files.set(`${L}/threads/t1/synth-line.json`, JSON.stringify({ at: now - 11 * 60_000, text: 'lean_run: mv exited 0' }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  let all = await texts(ui)
+  expect(all).toContain('[idle]')
+  expect(all).toContain('[idle, no report 12 min]')
+  await openCard(ui, 't1')
+  all = await texts(ui)
+  expect(all).toContain('lean_run: mv exited 0 (synthesised)')
+  expect(all).not.toContain('no report yet')
+  await ui.unmount()
+})
+
 test('1.0.32 a thread card: two lines collapsed (id and the whole title, state chip, cost, context bar, age); model, branch, verdict, the last report on one line and the buttons on a tap', { timeoutMs: 20_000 }, async ($, on) => {
   const title = 'Rename the synthetic widget registry across all four example modules, then update every example that mentions the old name'
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])

@@ -883,17 +883,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       // the status chip: working / needs you / done / restarting (amber is the chip, never the body)
       const chipWord = ['waiting', 'approval', 'asking'].includes(sc.word) ? 'needs you' : sc.word
       const chip = (
-        <>
-          <Text bold color={sc.color}>
-            {`[${chipWord}]`}
-          </Text>
-          {t.noReport ? (
-            <Text bold color="warning">
-              {`[${t.noReport}]`}
-            </Text>
-          ) : null}
-        </>
+        <Text bold color={sc.color}>
+          {`[${chipWord}]`}
+        </Text>
       )
+      // "idle, no report N min" (endnudge.ts): a second chip beside the status chip
+      const noRepChip = t.noReport ? (
+        <Text bold color="warning">
+          {`[${t.noReport}]`}
+        </Text>
+      ) : null
       const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
       const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{`$${t.cost.toFixed(2)} today`}</Text> : null
       const age = <Text dimColor>{ageText(t.activity ?? t.recTs, now2)}</Text>
@@ -950,6 +949,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Box flexWrap="wrap" columnGap={1}>
               {title}
               {chip}
+              {noRepChip}
               {msg.newChip}
               {costNode}
               {age}
@@ -964,6 +964,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box flexWrap="wrap" columnGap={1}>
             {title}
             {chip}
+            {noRepChip}
             {msg.newChip}
             {!open && primary}
           </Box>

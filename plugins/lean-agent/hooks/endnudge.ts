@@ -61,7 +61,12 @@ export const NUDGE_TEXT = (hint: boolean, req = false): string =>
   (hint
     ? ' Your last text hands over a result you did not check yourself: verify it first (one lean_run ls / stat, or a worker check), then report; report "done (unverified)" with what is missing only if it cannot be verified.'
     : ' If a claim in your text is not verified yet, verify it first (lean_run or a worker check), then report.')
-export const alertText = (id: string, ms: number, title: string): string => `${id} ended its turn without a report ${mins(ms)} min ago${title ? ` (${title})` : ''}: it was nudged; ask it for lean_report done / blocked / question`
+export const alertText = (id: string, ms: number, title: string, nudged = true): string => `${id} ended its turn without a report ${mins(ms)} min ago${title ? ` (${title})` : ''}: ${nudged ? 'it was nudged; ' : ''}ask it for lean_report done / blocked / question`
+// was a nudge sent since the first unreported end of this spell? (continue-state.json endHour, the desk's count)
+export async function wasNudged(h: Host, home: string, id: string, first: number): Promise<boolean> {
+  const cs = await readJson<{ endHour?: unknown } | null>(h, `${threadsDir(home)}/${id}/continue-state.json`, null)
+  return Array.isArray(cs?.endHour) && cs!.endHour.some(x => Number(x) >= first)
+}
 export const endedNote = (ms: number): string => `ended without a report, ${mins(ms)} min`
 const mins = (ms: number) => Math.max(1, Math.round(ms / 60_000))
 
@@ -122,7 +127,7 @@ export const doctorRow = async (h: Host): Promise<string> => `ok   report rule: 
 // ---- desk side: is the alert due? -----------------------------------------------------------------------------------------------
 // idle for `minutes` since the turn end, still no final report since the first unreported end, waits for nothing (waitevent.ts), same session, open thread
 export async function endDue(h: Host, home: string, t: { id: string; state?: string; sid?: string; finished?: unknown }, o: { word: string | undefined; now: number; minutes: number; recs: DeskRec[] }): Promise<{ ms: number; rec: EndRec } | null> {
-  if (o.word !== 'idle' || !(o.minutes > 0) || t.state !== 'open' || !t.sid || t.finished) return null
+  if (o.word !== 'idle' || !(o.minutes > 0) || t.state !== 'open' || !t.sid || t.finished || !(await endNudgeOn(h, home))) return null
   const rec = await readEnd(h, home, t.id)
   if (!rec || rec.sid !== t.sid || o.now - rec.at < o.minutes * 60_000) return null
   if (turnState(o.recs, t.id, rec.first) !== 'work') return null
@@ -136,5 +141,9 @@ export async function idleNoReportMs(h: Host, home: string, t: { id: string; kee
   const idle = idleNoReport({ word: o.word, keepGoing: t.keepGoing === true, lastAt: o.lastAt, now: o.now, minutes: o.minutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec: o.lastRec })
   return idle && !(await waitingOn(h, home, t.id)) ? idle.ms : null
 }
-export const markAlerted = (h: Host, home: string, id: string, rec: EndRec, now: number): Promise<void> => writeJson(h, endFile(home, id), { ...rec, alerted: now }).catch(() => undefined)
+// (re-read first: the thread's own turn end may have rewritten the record since endDue read it; only the same spell is marked)
+export async function markAlerted(h: Host, home: string, id: string, rec: EndRec, now: number): Promise<void> {
+  const cur = await readEnd(h, home, id)
+  if (cur && cur.first === rec.first && cur.sid === rec.sid) await writeJson(h, endFile(home, id), { ...cur, alerted: now }).catch(() => undefined)
+}
 export const deskInbox = async (h: Host, home: string): Promise<DeskRec[]> => readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[])

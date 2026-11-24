@@ -14,7 +14,7 @@ import { setNotice } from './notices'
 import { idleNoReport, lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
 import { haltedSince } from './continuepending'
 import { waitingOn } from './waitevent'
-import { alertText, endDue, endNudgeOn, markAlerted } from './endnudge'
+import { alertText, endDue, endNudgeOn, markAlerted, wasNudged } from './endnudge'
 import { kTokens, readContext, threadLimits } from './threadcontext'
 import type { AgentRow, Out, Thread } from './threads'
 
@@ -81,7 +81,7 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     const ended = t && truth && (await endNudgeOn(h, home)) ? await endDue(h, home, t, { word: truth.word, now, minutes: cfg.idleAlertMinutes, recs: deskRecs }) : null
     if (ended && t && !ended.rec.alerted) {
       await markAlerted(h, home, id, ended.rec, now)
-      out.push({ id, text: `${alertText(id, ended.ms, t.title ?? '')}${ended.rec.hint ? '; its last text handed over a result it did not verify itself' : ''}` })
+      out.push({ id, text: `${alertText(id, ended.ms, t.title ?? '', await wasNudged(h, home, id, ended.rec.first))}${ended.rec.hint ? '; its last text handed over a result it did not verify itself' : ''}` })
     }
     // a thread that really waits (for the push result, an action, your answer, CI: waitevent.ts) is not idle without a report: no alert
     const idle = ended || (idle0 && (await waitingOn(h, home, id))) ? null : idle0

@@ -135,7 +135,7 @@ async function tasksOfTurn(h: Host, home: string, id: string, o: TurnEndIn): Pro
 }
 
 // ---- thread side -------------------------------------------------------------------------------------------------------------------
-export type TurnEndIn = { sid: string; since: number; lastText?: string | null; tasks?: unknown }
+export type TurnEndIn = { sid: string; since: number; lastText?: string | null; tasks?: unknown; human?: boolean /* the user's own typed words started or joined this turn: a chat reply is not an unreported end */ }
 // Returns what was recorded: 'next' | 'keep' | 'todo' | 'remind' | 'end' (the report-rule nudge, endnudge.ts) | 'none'. Never throws (the turn end is not the place for a failure).
 export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Kind | 'none'> {
   try {
@@ -161,7 +161,7 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     else if (announced && cfg.auto) kind = 'next'
     // the report rule (1.0.32, endnudge.ts): none of the above and no final report in this turn = "ended without a report": the record, and ONE nudge (kind 'end', at most
     // MAX_NUDGES_PER_HOUR an hour; over that the keep-going continue below is what it was)
-    const endOn = !kind && (await endNudgeOn(h, home))
+    const endOn = !kind && o.human !== true && (await endNudgeOn(h, home))
     const now = await h.clock.now()
     if (endOn) {
       const hint = hasUnverifiedClaim(o.lastText)

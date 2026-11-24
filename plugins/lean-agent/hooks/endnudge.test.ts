@@ -131,6 +131,25 @@ test('a turn with a final report (done, blocked, a question) is not nudged and c
   }
 })
 
+test('the user chatting in the thread pane (human turn) is not an unreported end: no nudge, no record, no alert; a plain-text question from a work turn IS nudged (it never reached the desk), and a nudge that was sent says so in the alert', { timeoutMs: 20_000 }, async () => {
+  const h = setup()
+  inbox(h, { ts: T0 - 30 * MIN, from: 't1', kind: 'report', state: 'done', text: 'finished the move' })
+  expect(await noteTurnEnd(h.host, 't1', { sid: S1, since: T0 - 2 * MIN, lastText: 'Yes, it is in /data/new.', human: true })).toBe('none')
+  expect(pend(h)).toEqual({})
+  expect(ended(h)).toEqual({})
+  h.clock.t = T0 + 12 * MIN
+  expect(await stallTick(h.host, deps)).toEqual([])
+  const q = setup()
+  expect(await end(q, 'Which folder do you want?')).toBe('end') // deliberately nudged: lean_ask is how a question reaches the desk
+  const r = setup()
+  expect(await end(r, EXAMPLE)).toBe('end')
+  const sent: string[] = []
+  r.clock.t = T0 + 25_000
+  await tick(r, sent)
+  r.clock.t = T0 + 12 * MIN
+  expect((await stallTick(r.host, deps))[0]!.text).toContain('it was nudged; ask it for')
+})
+
 test('a thread that really waits (ready to push, no push yet) is NOT nudged; a "once the desk reports ..." ending with no record is reminded, not nudged', async () => {
   const a = setup()
   inbox(a, { ts: T0 - 1000, from: 't1', kind: 'report', state: 'working', text: 'ready to push 1a2b3c4 (feature/x, Move the files)' })
@@ -235,8 +254,9 @@ test('still no report idleAlertMinutes after the turn end: ONE desk alert (not b
   const n = await stallTick(h.host, deps)
   expect(n).toHaveLength(1)
   expect(n[0]!.id).toBe('t1')
-  expect(n[0]!.text).toBe(`${alertText('t1', 11 * MIN, 'move the files')}; its last text handed over a result it did not verify itself`)
+  expect(n[0]!.text).toBe(`${alertText('t1', 11 * MIN, 'move the files', false)}; its last text handed over a result it did not verify itself`) // (no tick ran: nothing was nudged, and the text does not say so)
   expect(n[0]!.text).toContain('ended its turn without a report')
+  expect(n[0]!.text).not.toContain('it was nudged')
   h.clock.t = T0 + 30 * MIN
   expect(await stallTick(h.host, deps)).toEqual([]) // told once
   expect(ended(h).alerted).toBe(T0 + 11 * MIN)
@@ -263,6 +283,8 @@ test('no alert when it reported meanwhile, when it waits for something, when it 
   const e = await mk()
   e.files.set(`${L}/config.json`, JSON.stringify({ threads: { endNudge: false } }))
   expect((await stallTick(e.host, deps)).filter(x => x.text.includes('ended its turn'))).toEqual([])
+  expect((await leanThread(e.host, '/p', { action: 'list' })).text).not.toContain('ended without a report') // a stale record shows nothing once the nudge is off
+  expect((await loadView(e.host)).threads[0]!.noReport).toBe('idle, no report 13 min') // (the 1.0.31 idle rule still applies: nothing was ever reported)
   const f = await mk({ threads: { keepGoing: false, idleAlertMinutes: 20 } })
   expect(await stallTick(f.host, deps)).toEqual([]) // 12 min < 20
 })
@@ -295,11 +317,12 @@ test('lean_doctor row: report rule injected, N turns ended without a report in 7
 test('a turn that ends on a tool result with no text: a short synthesised line (tool + 100 chars), shown in the list while idle; a turn end WITH text clears it; never a report', { timeoutMs: 20_000 }, async () => {
   const h = setup()
   resetSynth()
-  noteToolResult('mcp__lean-agent__lean_run', `exit 0\n${'x'.repeat(300)}`, T0 - 60_000)
+  noteToolResult('mcp__lean-agent__lean_run', `exit 0\n${'ab '.repeat(100)}`, T0 - 60_000)
   await noteSynthAtTurnEnd(h.host, '/h', 't1',{ lastText: null, since: T0 - 2 * MIN })
   const f = json(h, `${T1}/synth-line.json`)
-  expect(f.text).toBe(`lean_run: exit 0 ${'x'.repeat(100 - 'exit 0 '.length)}`)
-  expect(f.text.length).toBe('lean_run: '.length + 100)
+  expect(f.text.startsWith('lean_run: exit 0 ab ab ab')).toBe(true)
+  expect(f.text.length).toBeGreaterThanOrEqual('lean_run: '.length + 98)
+  expect(f.text.length).toBeLessThanOrEqual('lean_run: '.length + 100)
   expect(await readSynth(h.host, '/h', 't1',{ idle: true, lastReportTs: 0 })).toBe(f.text)
   expect(await readSynth(h.host, '/h', 't1',{ idle: false, lastReportTs: 0 })).toBeNull() // it works again: nothing stale
   expect(await readSynth(h.host, '/h', 't1',{ idle: true, lastReportTs: T0 })).toBeNull() // a newer report wins
@@ -318,6 +341,13 @@ test('a turn that ends on a tool result with no text: a short synthesised line (
   await noteSynthAtTurnEnd(h.host, '/h', 't1',{ lastText: null, since: T0 })
   expect(json(h, `${T1}/synth-line.json`)).toEqual({})
   expect(synthDisplay('lean_run: ok')).toBe('lean_run: ok (synthesised)')
+  // a tool that returns file or web content shows its name only; token-like strings are cut
+  noteToolResult('Read', 'password=hunter2 AKIAABCDEFGHIJKLMNOP', T0)
+  await noteSynthAtTurnEnd(h.host, '/h', 't1', { lastText: null, since: T0 - MIN })
+  expect(json(h, `${T1}/synth-line.json`).text).toBe('Read: (content not shown)')
+  noteToolResult('Bash', `token ${'A1b2'.repeat(12)} done`, T0)
+  await noteSynthAtTurnEnd(h.host, '/h', 't1', { lastText: null, since: T0 - MIN })
+  expect(json(h, `${T1}/synth-line.json`).text).toBe('Bash: token … done')
 })
 
 // ---- the pane flag ---------------------------------------------------------------------------------------------------------------------

@@ -615,7 +615,7 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `threads.autoContinue` | threads | boolean | true | now | Continue a thread that ends its turn with "next: ..." (off: no automatic continue). |
 | `threads.continueSeconds` | threads | number >= 1 | 20 | now | Seconds a "next: ..." turn waits before the continue message is sent. |
 | `threads.keepGoing` | threads | boolean | true | now | Keep going is the standing order of every work thread (review threads excluded); a thread's own keep-going on / off wins. |
-| `threads.endNudge` | threads | boolean | true | now | A turn that ends without lean_report (done, blocked, question) is nudged once by script and, still unreported after idleAlertMinutes, raised to the desk. |
+| `threads.endNudge` | threads | boolean | true | now | A turn that ends without lean_report (done, blocked, question) is nudged by script (once per ended turn, at most twice an hour) and, still unreported after idleAlertMinutes, raised to the desk. |
 | `threads.requireReport` | threads | boolean | true | now | A thread whose brief asks for ONE action that ends its turn without lean_report is nudged at once with the whole report rule (a mod cannot refuse a Stop). |
 | `threads.idleAlertMinutes` | threads | number >= 0 | 10 | now | Minutes a thread may be idle without a report before the desk gets one notice (0 = off). |
 | `threads.softCheckpointTokens` | threads | number >= 20000 <= 400000 | 80000 | next session | A work thread this big is told once to checkpoint at its next boundary (an idle one is checkpointed by script). |

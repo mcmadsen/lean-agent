@@ -12,7 +12,7 @@ import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { noteRun, runPrGuide } from './prchecks'
 import { holdLines, holdsTick } from './sendhold'
-import { recordHumanPrompt } from './humanprompts'
+import { isHumanPrompt, recordHumanPrompt } from './humanprompts'
 import { auditStanding, bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
 import { ownFromGrant } from './ownpr'
 import { bindConfigAnswers, configTool } from './configtool'
@@ -162,6 +162,7 @@ export const resetModState = () => {
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
+let humanTurn = false // the turn that is running (or just ended) was started or joined by the user's own typed words in this thread's pane
 let rulesSection: string | null = null // the thread's `_project.md`, a session section of prompt.compose (set at the role's setup)
 let projectOfThread: string | undefined // the thread's project (thread.json), read once per session; '' = none
 async function threadProject(host: Host): Promise<string> {
@@ -409,7 +410,9 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
     const lastText = text ? await text() : null
     await noteSynthAtTurnEnd(host, await homeDir(host), id, { lastText, since: turnStartedAt }) // no assistant text, a tool result came last: a short line for the list (synthline.ts, display only)
-    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText, tasks: currentTasks() }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
+    const human = humanTurn
+    humanTurn = false
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText, tasks: currentTasks(), human }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
@@ -1709,6 +1712,8 @@ export const register: Register = on => {
       const gone = await retiredInfo(host, lastSid)
       if (gone) return next({ ...e, context: [...(e.context ?? []), retiredLine(gone)] })
     }
+    // the user's own typed words in a thread's pane: a chat turn, not a work turn: the end-nudge leaves its end alone (endnudge.ts, noteTurnEnd `human`)
+    if (role.kind === 'thread' && !e.agentId && isHumanPrompt(e, await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false))) humanTurn = true
     if (role.kind === 'desk') {
       await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session

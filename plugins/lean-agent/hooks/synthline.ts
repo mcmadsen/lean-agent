@@ -15,8 +15,11 @@ export const resetSynth = () => {
 }
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
 // the main loop's tool result (a thread's own call, not a worker's): remembered in memory only
+// A tool that returns file, web or other servers' content shows its name only (a line must not carry file content or a secret into the list); long token-like strings are cut
+const CONTENT_TOOL = /^(?:Read|Grep|Glob|NotebookRead|WebFetch|WebSearch)$|^mcp__(?!lean-agent__)/
 export const noteToolResult = (tool: string, text: string, now: number): void => {
-  last = { at: now, tool: tool.replace(/^mcp__lean-agent__/, '') || 'tool', text: flat(text).slice(0, SYNTH_CHARS) }
+  const body = CONTENT_TOOL.test(tool) ? '(content not shown)' : flat(text).replace(/[A-Za-z0-9+/_=-]{32,}/g, '…').slice(0, SYNTH_CHARS)
+  last = { at: now, tool: tool.replace(/^mcp__lean-agent__/, '') || 'tool', text: body }
 }
 export const synthLine = (tool: string, text: string): string => `${tool}: ${flat(text).slice(0, SYNTH_CHARS) || '(no output)'}`
 // the turn end: no assistant text and a tool result of THIS turn came last = the line; any other turn end clears it. Never throws.
