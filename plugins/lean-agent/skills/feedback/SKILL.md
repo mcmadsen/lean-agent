@@ -33,6 +33,7 @@ empty. It is anonymised by code (home dir and user name, project names as projec
 ticket numbers, tokens) and refuses to write the file when a known private string survived, saying which rule missed. Over 40 KB
 the oldest and least repeated items are summarised.
 
-Show the user the path and what it covers. They paste the file to the maintainers, or, only after an explicit yes, thread: post
-it (`gh issue create --repo mcmadsen/lean-agent --body-file <path>` when `gh` is installed; otherwise say it is not); desk: `send` the yes and the path to a thread. Never
-paste its content into a chat or a ticket on your own.
+The destination is the user's config (`config.json` `feedback.destination`: local, folder, github, folder+github; `feedback.folder`); never post without the user's Approve on the card the export returns.
+
+Show the user the path and what it covers. The mod copies to the configured folder itself; for github it makes ONE Approve card (a public issue on mcmadsen/lean-agent: exact title and body) and posts only after that Approve. Otherwise they paste the file to the maintainers. Never
+paste its content into a chat or a ticket on your own, and never run `gh issue create` yourself.

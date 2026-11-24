@@ -190,7 +190,11 @@ users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --inc
 [ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
-[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "17" ] || fail "the action table (PARAM_KEYS) must hold exactly seventeen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label)"
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "18" ] || fail "the action table (PARAM_KEYS) must hold exactly eighteen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label + the desk's own gh-issue-create)"
+# the feedback export's public issue (1.0.31): desk-only, one request, never covered by a standing approval; the guides name the destination config and the Approve card
+grep -qF 'never post to GitHub without the user'"'"'s Approve' "$root/templates/front-desk.md" || fail "front-desk.md must say the feedback destination is the user's config and a GitHub post needs the Approve card"
+grep -qF 'never post without the user'"'"'s Approve' "$root/skills/feedback/SKILL.md" || fail "the feedback skill must say the destination is the user's config and a post needs the Approve card"
+[ "$(grep -c "gh-issue-create" "$root/hooks/deskactions.ts")" -ge 3 ] && ! grep -q "gh-issue-create" "$root/hooks/standing.ts" 2>/dev/null || fail "gh-issue-create must be a desk-only kind and never a standing kind"
 # the user's dialog answer as the written yes (1.0.28): a grant offer is signed and stored only in deskwrites.ts, and only the desk's AskUserQuestion hook reads the
 # answer (bindOfferAnswers); a skill the desk invokes is never the user's accept; no slash command in a bash code fence (its Run button runs it in a shell)
 callers=$(grep -rlE "bindOfferAnswers\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')

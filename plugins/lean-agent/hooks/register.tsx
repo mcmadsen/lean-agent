@@ -905,7 +905,7 @@ export const register: Register = on => {
     }
     // the command is role-free: registered once here
     await $.command.register({ name: 'lean-agent', description: 'Open the lean-agent pane (setup, desk, threads)' }).catch(() => undefined)
-    await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path (never posts); optional notes as the argument' }).catch(() => undefined)
+    await $.command.register({ name: 'lean-agent-feedback', description: 'Write ONE anonymised feedback export file and print its path; then copy it to the configured folder or ask the user to approve a GitHub issue (config.json feedback.destination); never posts without the Approve card; optional notes as the argument' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-restart-desk', description: 'Desk only: write the desk handover and open a new desk session that reads it' }).catch(() => undefined)
     await $.command.register({ name: 'lean-agent-setup', description: 'Set up or repair lean-agent (desk folder, login opener, trust); no model turn needed' }).catch(() => undefined)
     // what the role setup has to say (stale or over-cap rules): `session.start` carries no context, so it goes with the first prompt
