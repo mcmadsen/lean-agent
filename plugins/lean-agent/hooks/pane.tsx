@@ -352,7 +352,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       await patchUi($, u => ({ ...u, rows: { ...u.rows, [key]: !u.rows[key] } }))
       tell()
     }
-    // an inbox group: open by default when it has something unread; the press flips what is drawn now
+    // a cardless inbox group: folded by default (dflt); the press flips what is drawn now
     const toggleGroup = (from: string, dflt: boolean) => async () => {
       await patchUi($, u => ({ ...u, rows: { ...u.rows, [`g${from}`]: !(u.rows[`g${from}`] ?? dflt) } }))
       tell()
@@ -619,6 +619,12 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // (read rows older than a week are not in `v.inbox`: archived, still in the inbox file)
     const inbox = v?.inbox ?? []
     const inboxOpen = isOpen(ui, 'inbox', true)
+    // 1.0.31: the inbox is on each card (folded); the global section only holds senders that have no card (the desk, closed threads, notices)
+    const cardIds = new Set((v?.threads ?? []).map(t => t.id))
+    const inboxOf = new Map(inbox.map(g => [g.from, g] as const))
+    const cardless = inbox.filter(g => !cardIds.has(g.from))
+    const cardlessUnread = cardless.reduce((n, g) => n + g.unread.length, 0)
+    const showGlobalInbox = cardless.length > 0 || cardIds.size === 0
     type Row = (typeof inbox)[number]['unread'][number]
     const inboxRow = (a: Row) => {
       const ex = ui.rows[`a${a.n}`] === true
@@ -644,30 +650,38 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
       )
     }
-    const inboxGroup = (g: (typeof inbox)[number]) => {
-      const gOpen = ui.rows[`g${g.from}`] ?? g.unread.length > 0 // a thread with something unread is open, the others folded
+    // one thread's rows, as drawn when unfolded (a card's inbox part and a cardless group): unread first, then up to READ_SHOWN read, "show all", capped at GROUP_ROWS
+    const inboxRows = (g: (typeof inbox)[number]) => {
       const all = ui.rows[`all${g.from}`] === true
-      const shownRead = all ? g.read.slice(0, GROUP_ROWS) : g.read.slice(0, READ_SHOWN)
+      const unreadShown = g.unread.slice(0, GROUP_ROWS)
+      const shownRead = all ? g.read.slice(0, Math.max(0, GROUP_ROWS - unreadShown.length)) : g.read.slice(0, READ_SHOWN)
+      return (
+        <Box flexDirection="column">
+          {unreadShown.map(inboxRow)}
+          {shownRead.map(inboxRow)}
+          {g.read.length > READ_SHOWN && !all && <Button key={`answers-more-${g.from}`} plain label={`show all (${g.read.length} read)`} onPress={toggleRow(`all${g.from}`)} />}
+          {all && g.read.length > READ_SHOWN && <Button key={`answers-less-${g.from}`} plain label="show fewer" onPress={toggleRow(`all${g.from}`)} />}
+          {g.unread.length > GROUP_ROWS && <Text dimColor>{`(${g.unread.length - GROUP_ROWS} older unread not shown)`}</Text>}
+          {all && g.read.length > shownRead.length && <Text dimColor>{`(${g.read.length - shownRead.length} older not shown)`}</Text>}
+        </Box>
+      )
+    }
+    const inboxGroup = (g: (typeof inbox)[number]) => {
+      const gOpen = ui.rows[`g${g.from}`] ?? false // folded by default, even with something unread: the header carries the unread count
       const label = `${gOpen ? '▾' : '▸'} ${g.from}${g.title ? ` ${short(g.title, narrow ? 16 : 40)}` : ''} (${g.unread.length ? `${g.unread.length} unread${g.read.length ? `, ${g.read.length} read` : ''}` : `${g.read.length} read`})`
       const newest = [...g.unread, ...g.read].reduce((p, a) => (a.n > p.n ? a : p))
       return (
         <Box key={`grp-${g.from}`} flexDirection="column">
-          <Button key={`grp-btn-${g.from}`} plain label={label} onPress={toggleGroup(g.from, g.unread.length > 0)} />
+          <Button key={`grp-btn-${g.from}`} plain label={label} onPress={toggleGroup(g.from, false)} />
           {gOpen ? (
-            <Box flexDirection="column">
-              {g.unread.map(inboxRow)}
-              {shownRead.map(inboxRow)}
-              {g.read.length > READ_SHOWN && !all && <Button key={`answers-more-${g.from}`} plain label={`show all (${g.read.length} read)`} onPress={toggleRow(`all${g.from}`)} />}
-              {all && g.read.length > READ_SHOWN && <Button key={`answers-less-${g.from}`} plain label="show fewer" onPress={toggleRow(`all${g.from}`)} />}
-              {all && g.read.length > GROUP_ROWS && <Text dimColor>{`(${g.read.length - GROUP_ROWS} older not shown)`}</Text>}
-            </Box>
+            inboxRows(g)
           ) : (
             <Text dimColor>{`    ${short(newest.rec.text, narrow ? 28 : 70)}`}</Text>
           )}
         </Box>
       )
     }
-    const unreadLabel = v?.unread ? `${v.unread} unread` : 'all read'
+    const unreadLabel = cardlessUnread ? `${cardlessUnread} unread` : 'all read'
     // ---- Needs you: one card per thing that waits for the user, its button on the same card ----
     const needs = v?.needs ?? []
     const restartLabel = confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'
@@ -854,20 +868,42 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const closeBtn = !t.working && !t.needsYou && <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />
       const startBtn = t.resumable && <Button key={`start-${t.id}`} label="Start new session" onPress={thread('start', t.id)} />
       const moreBtn = <Button key={`more-${t.id}`} plain label={more ? 'less' : 'more'} onPress={toggleRow(`more${t.id}`)} />
+      // this thread's inbox: folded by default (the pane's own ui state, never persisted as an ack); the chip always says how many are unread
+      const grp = inboxOf.get(t.id)
+      const unfolded = !!grp && ui.rows[`inb${t.id}`] === true
+      const amberChip = !!t.needsYou || !!t.approval || !!t.asking || sc.color === 'warning' || (v?.needs ?? []).some(n => n.thread === t.id)
+      const newChip = grp?.unread.length ? (
+        <Text key={`new-${t.id}`} bold color={amberChip ? 'warning' : 'cyan'}>
+          {`${grp.unread.length} new`}
+        </Text>
+      ) : null
+      const inboxToggle = grp ? <Button key={`inbox-toggle-${t.id}`} plain label={unfolded ? 'Hide messages' : 'Show messages'} onPress={toggleRow(`inb${t.id}`)} /> : null
+      const inboxBody = unfolded && grp ? inboxRows(grp) : null
       const primary = blockedWord ? [restartBtn] : done || quiet ? [openBtn, resumeBtn] : [openBtn]
       const rest = more ? (blockedWord ? [openBtn, resumeBtn, startBtn, closeBtn] : done || quiet ? [startBtn, restartBtn, closeBtn] : [resumeBtn, startBtn, restartBtn, closeBtn]) : []
       // a done thread is ONE row: title, chip, cost, context, Open | Resume, more
-      if (done && !more)
-        return (
-          <Box key={`t-${t.id}`} flexWrap="wrap" columnGap={1} borderStyle="round" borderDimColor paddingX={1}>
+      // (its unread chip is the inbox toggle; with nothing unread the toggle is in "more")
+      if (done && !more) {
+        const oneRow = (
+          <Box key={`t-${t.id}`} flexWrap="wrap" columnGap={1} {...(unfolded ? {} : { borderStyle: 'round' as const, borderDimColor: true, paddingX: 1 })}>
             <Text bold wrap="wrap">{`${t.id} ${t.title}`}</Text>
             {chip}
+            {grp?.unread.length ? <Button key={`inbox-chip-${t.id}`} plain label={`${grp.unread.length} new`} onPress={toggleRow(`inb${t.id}`)} /> : null}
             {costNode}
             {ctxNode}
             {primary}
             {moreBtn}
           </Box>
         )
+        return unfolded ? (
+          <Box key={`t-${t.id}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+            {oneRow}
+            {inboxBody}
+          </Box>
+        ) : (
+          oneRow
+        )
+      }
       return (
         <Box key={`t-${t.id}`} flexDirection="column" borderStyle="round" borderColor={blockedWord ? sc.color : undefined} borderDimColor={!blockedWord} paddingX={1}>
           <Text bold wrap="wrap">
@@ -875,6 +911,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>
           <Box flexWrap="wrap" columnGap={1}>
             {chip}
+            {newChip}
             {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''}`}</Text> : null}
             {costNode}
             {ctxNode}
@@ -894,8 +931,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box flexWrap="wrap" columnGap={1}>
             {primary}
             {rest}
+            {inboxToggle}
             {moreBtn}
           </Box>
+          {inboxBody}
         </Box>
       )
     }
@@ -1008,6 +1047,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {selfEditBlock}
         <Box flexWrap="wrap" columnGap={1}>
           {section('threads', `Threads (${v?.threads.length ?? 0})`, true)}
+          {!!v?.unread && <Text dimColor>{`${v.unread} unread`}</Text>}
+          {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
           {doneThreads.length >= 2 && closable.length > 0 && (
             <Button key="close-done" label={confirming(ui, 'close:done', now2) ? `Confirm close all done (${closable.length})` : `Close all done (${closable.length})`} onPress={closeDone} />
           )}
@@ -1018,13 +1059,12 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {v?.threads.map(threadCard)}
           </Box>
         )}
-        {section('inbox', `Inbox (${unreadLabel})`, true)}
-        {inboxOpen && (
+        {showGlobalInbox && section('inbox', `Inbox (${unreadLabel})`, true)}
+        {showGlobalInbox && inboxOpen && (
           <Box flexDirection="column">
-            {!inbox.length && <Text dimColor>{v?.archived ? 'Nothing unread.' : 'Nothing from the threads yet.'}</Text>}
-            {inbox.map(inboxGroup)}
+            {!cardless.length && <Text dimColor>{v?.archived ? 'Nothing unread.' : 'Nothing from the threads yet.'}</Text>}
+            {cardless.map(inboxGroup)}
             {!!v?.archived && <Text dimColor>{`${v.archived} read message(s) older than 7 days are archived (still in the inbox file)`}</Text>}
-            {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
           </Box>
         )}
         {(v?.goals.length ?? 0) > 0 && section('goals', `Goals (${v?.goals.length ?? 0})`, true)}
