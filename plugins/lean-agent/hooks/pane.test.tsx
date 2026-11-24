@@ -5,6 +5,7 @@ import { deskClaudeMd, resetLocks } from './threads'
 import { hashText } from './recipe'
 
 const SID = '11111111-2222-3333-4444-555555555555'
+const ROOT = decodeURIComponent(new URL('..', (import.meta as any).url).pathname).replace(/\/$/, '')
 const PANE = {
   plugin: 'lean-agent',
   component: 'Pane',
@@ -18,6 +19,10 @@ function setup(on: any = null, rows: any[] = []) {
   resetViewCache()
   const h = fakeHost(on)
   const f = (p: string, o: unknown) => h.files.set(`/h/.lean-agent/${p}`, typeof o === 'string' ? o : JSON.stringify(o))
+  // what the setup copies from the plugin: with these a press of "Set up lean-agent" finishes the setup (see setUp)
+  h.files.set(`${ROOT}/opener/open-desk.sh`, '#!/bin/sh\necho open\n')
+  h.files.set(`${ROOT}/templates/front-desk.md`, 'desk {{lean}}')
+  h.files.set(`${ROOT}/templates/thread.md`, '# {{id}}')
   f('goals.json', { t1: { text: 'ship it', ts: 1_000_000 }, t2: { text: 'old goal', ts: 1 } })
   f('desk/inbox.jsonl', [{ ts: 1, from: 't1', kind: 'report', text: 'first done' }, { ts: 2, from: 't2', kind: 'ask', text: 'which db?' }].map(r => JSON.stringify(r)).join('\n') + '\n')
   f('threads/t1/thread.json', { id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0 })
@@ -32,9 +37,19 @@ function setup(on: any = null, rows: any[] = []) {
   if (on) on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   return h
 }
-// 1.0.30: a card's other actions (Close, Restart, Start) are behind its "more"; open it once (the open state is kept across mounts)
+// 1.0.32: a card's other actions (Resume, Close, Restart, Start) and its messages are on its unfolded part: a tap on the title unfolds it (kept across mounts)
 const openMore = async (ui: any, id: string) => {
-  if (await ui.find({ type: 'Button', key: `more-${id}`, text: 'more' })) await ui.press({ key: `more-${id}` })
+  const b = await ui.find({ type: 'Button', key: `card-${id}` })
+  if (b && String(b.text).startsWith('▸')) await ui.press({ key: `card-${id}` })
+}
+// the fake home is not set up (the doctor finds the desk folder missing: a finding, so Health is unfolded and counts it): one press of "Set up lean-agent" so Health starts quiet
+const setUp = async (ui: any) => {
+  if (await ui.find({ type: 'Button', key: 'setup' })) await ui.press({ key: 'setup' })
+}
+// the Health card is folded on startup: one press unfolds it (kept across mounts)
+const openHealth = async (ui: any) => {
+  const b = await ui.find({ type: 'Button', key: 'sec-health' })
+  if (b && String(b.text).startsWith('▸')) await ui.press({ key: 'sec-health' })
 }
 // a pane test runs in the desk unless it says otherwise
 const inDesk = ($: any, cwd = '/h/lean-agent-desk') => $.session.start({ cwd, surface: 'desktop', isInteractive: true } as any)
@@ -98,11 +113,12 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', {
   await inDesk($)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
-    expect((await ui.find({ type: 'Text', text: /ship it/ }))?.text).toContain('t1')
+    expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toContain('t1 one')
     expect(await ui.find({ type: 'Text', text: /1\.0\.31/ })).toBeTruthy()
     await ui.unmount()
   }
   const ui = await $.ui.mount(PANE as any)
+  await openMore(ui, 't1')
   await ui.press({ key: 'resume-t1' })
   const resumes = h.claudeCalls().filter((a: string[]) => a.includes('--resume'))
   expect(resumes.length).toBe(1)
@@ -141,7 +157,9 @@ test('view and pane: an open question shows until an answer row closes it', { ti
   expect(v.openQuestions.map(x => [x.q, x.from, x.question])).toEqual([[1, 't1', 'which db?']])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: 'Text', text: /t1 asks: which db\?/ }))?.text).toBeTruthy() // in "Needs you"
+  expect(await ui.find({ type: 'Text', text: /t1 asks: which db\?/ })).toBeFalsy() // on t1's card, folded
+  await openMore(ui, 't1')
+  expect((await ui.find({ type: 'Text', text: /t1 asks: which db\?/ }))?.text).toBeTruthy() // 1.0.32: there is no "Needs you" section, the question is on its thread's card
   expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
   await ui.unmount()
 })
@@ -153,11 +171,11 @@ test('pane More section (projects and scripts): name, private, open threads, sta
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ private: 'off' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▸ More \(1 projects, 0 scripts\)/ })).toBeTruthy() // folded by default
+  expect(await ui.find({ type: 'Button', text: /▸ More \(2 goals, 1 projects, 0 scripts\)/ })).toBeTruthy() // folded by default
   expect(await ui.find({ type: 'Text', text: /p · open/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /Projects/ })).toBeFalsy() // no section of its own any more
   await ui.press({ key: 'sec-more' })
-  expect(await ui.find({ type: 'Button', text: /▾ More \(1 projects, 0 scripts\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /▾ More \(2 goals, 1 projects, 0 scripts\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Scripts: 0 candidates, 0 adopted/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /p · open · 2 thread\(s\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /1 rule area\(s\) stale/ })).toBeTruthy()
@@ -170,6 +188,8 @@ test('pane thread card shows the thread\'s model/effort badge', { timeoutMs: 20_
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Text', text: 'opus/high' })).toBeFalsy() // on the unfolded part, not on the two-line card
+  await openMore(ui, 't1')
   expect(await ui.find({ type: 'Text', text: 'opus/high' })).toBeTruthy()
   await ui.unmount()
 })
@@ -179,25 +199,26 @@ const rec = (o: unknown) => JSON.stringify(o) + '\n'
 const thr = (h: any, id: string, o: Record<string, unknown> = {}) => h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ id, title: `title ${id}`, project: 'p', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, ...o }))
 const SID_OF = (n: number) => `0000000${n}-2222-3333-4444-555555555555`
 
-test('sections are toggle buttons with counts; the state survives a remount; defaults: goals, threads and inbox open, closed and More folded', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.32 the pane is ONE list of sessions (open and closed) with Health and More folded; the state survives a remount', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▾ Goals \(2\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '2 unread' })).toBeTruthy() // 1.0.31: the total; the inbox itself is on the cards (t1, t2), so no global section
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: 1 finding/ })).toBeTruthy() // a missing setup is a finding and is never hidden
+  await setUp(ui)
+  expect(await ui.find({ type: 'Text', text: 'Sessions (3)' })).toBeTruthy() // t1, t2 and the closed t3 in one list
+  expect(await ui.find({ type: 'Text', text: '2 unread' })).toBeTruthy() // the total; the messages are on the cards (t1, t2), there is no global inbox
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', text: /▸ More \(0 projects, 0 scripts\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▾ Threads \(2\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▸ Closed \(1\)/ })).toBeTruthy()
+  for (const old of [/▾ Threads/, /▸ Closed/, /▾ Goals/]) expect(await ui.find({ type: 'Button', text: old })).toBeFalsy() // no sections of their own
+  expect(await ui.find({ type: 'Button', text: /▸ More \(2 goals, 0 projects, 0 scripts\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: all good/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy() // the goals are in More
+  await ui.press({ key: 'sec-more' })
   expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeTruthy()
-  await ui.press({ key: 'sec-goals' })
-  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', text: /▸ Goals \(2\)/ })).toBeTruthy()
   await ui.unmount()
-  ui = await $.ui.mount(PANE as any) // redraw: still folded
-  expect(await ui.find({ type: 'Button', text: /▸ Goals \(2\)/ })).toBeTruthy()
-  await ui.press({ key: 'sec-goals' })
-  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeTruthy()
+  ui = await $.ui.mount(PANE as any) // redraw: still unfolded
+  expect(await ui.find({ type: 'Button', text: /▾ More \(2 goals/ })).toBeTruthy()
+  await ui.press({ key: 'sec-more' })
+  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy()
   void h
   await ui.unmount()
 })
@@ -213,8 +234,10 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   expect(await ui.find({ type: 'Text', text: '12 unread' })).toBeTruthy() // the one total
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy() // every sender has a card: no global section
   expect(await ui.find({ type: 'Text', text: 'Nothing from the threads yet.' })).toBeFalsy()
-  expect(await ui.findAll({ type: 'Text', text: '6 new' })).toHaveLength(2) // a chip on each card, nothing hidden silently
+  expect(await ui.findAll({ type: 'Button', text: '6 new' })).toHaveLength(2) // a chip on each collapsed card, nothing hidden silently
   expect(await rowsDrawn()).toBe(0) // folded by default, even with unread rows
+  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t1' })).toBeFalsy() // the toggle is on the unfolded card
+  await openMore(ui, 't1')
   expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Show messages')
   await ui.press({ key: 'inbox-toggle-t1' })
   expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Hide messages')
@@ -225,66 +248,102 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   await ui.press({ key: 'row-11' })
   await ui.press({ key: 'ack-11' }) // one row: only it
   expect(await ui.find({ type: 'Text', text: '11 unread' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '5 new' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '6 new' })).toBeTruthy() // t2's chip is untouched
+  expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: '6 new' })).toBeTruthy() // t2's chip is untouched
   expect(await ui.find({ type: 'Button', key: 'ack-11' })).toBeFalsy() // read: no ack button, dimmed, after the unread rows
   expect(await ui.find({ type: 'Button', key: 'row-11' })).toBeTruthy()
   expect(h.files.has('/h/.lean-agent/desk/inbox-read.json')).toBe(false) // the pane ack never moves the desk marker
   await ui.press({ key: 'inbox-toggle-t1' }) // fold again: nothing acked by folding
   expect(await rowsDrawn()).toBe(0)
-  expect(await ui.find({ type: 'Text', text: '5 new' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
+  // ack per card: one press reads all of t2's rows, t1's stay
+  await openMore(ui, 't2')
+  await ui.press({ key: 'ack-card-t2' })
+  expect(await ui.find({ type: 'Text', text: '5 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: '6 new' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   await ui.unmount()
 })
 
-test('1.0.31 inbox on the card: a thread with nothing unread has no chip; its read rows are behind the toggle; a cardless sender stays in the global Inbox section, folded, and the section is hidden when none is left', { timeoutMs: 20_000 }, async ($, on) => {
-  const h = setup(on, [])
-  h.files.set('/h/.lean-agent/desk/inbox.jsonl', [{ ts: h.clock.t - 3000, from: 't1', kind: 'report', text: 'already seen', state: 'working' }, { ts: h.clock.t - 2000, from: 'desk', kind: 'report', text: 'system notice a', state: 'working' }, { ts: h.clock.t - 1000, from: 't3', kind: 'report', text: 'from a closed thread', state: 'working' }].map(rec).join(''))
-  h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 1, ns: [] })) // the first row (t1's) is read
-  await inDesk($)
-  const ui = await $.ui.mount(PANE as any)
-  expect(await ui.findAll({ type: 'Text', text: /\d+ new/ })).toHaveLength(0) // t1: read only, t2: nothing: no chip
-  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Show messages')
-  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy() // nothing at all: no toggle
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(2 unread\)/ })).toBeTruthy() // only desk and closed t3 (no card)
-  expect(await ui.find({ type: 'Button', text: /▸ desk .*\(1 unread\)/ })).toBeTruthy() // groups folded by default
-  expect(await ui.find({ type: 'Button', text: /▸ t3 .*\(1 unread\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /system notice a/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', text: /already seen/ })).toBeFalsy() // t1 is on its card, not in the global section
-  await ui.press({ key: 'grp-btn-desk' })
-  expect(await ui.find({ type: 'Button', text: /system notice a/ })).toBeTruthy()
-  await ui.press({ key: 'ack-all' })
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(all read\)/ })).toBeTruthy()
-  await ui.unmount()
-})
-
-test('1.0.31 inbox on the card: when every row belongs to a card the global Inbox section is hidden (no empty-state line)', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.32 a chip "N new" on a collapsed card unfolds the card and its messages in one tap', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 't2', kind: 'report', text: 'only on a card', state: 'working' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /Nothing from the threads yet|Nothing unread/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: '1 new' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy() // collapsed
+  await ui.press({ key: 'new-t2' })
+  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t2' }))?.text).toBe('Hide messages')
+  expect(await ui.find({ type: 'Button', text: /only on a card/ })).toBeTruthy()
   await ui.unmount()
 })
 
-test('1.0.31 inbox on the card: Needs you stays on top, unfolded, and a card with a need wears its chip in amber', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.32 messages: a thread with nothing unread has no chip; its read rows are behind the toggle; a message from a CLOSED thread is on that thread\'s row; one from a sender with NO thread (desk) is in Health, not in an inbox section', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', [{ ts: h.clock.t - 3000, from: 't1', kind: 'report', text: 'already seen', state: 'working' }, { ts: h.clock.t - 2000, from: 'desk', kind: 'report', text: 'system notice a', state: 'working' }, { ts: h.clock.t - 1000, from: 't3', kind: 'report', text: 'from a closed thread', state: 'working' }, { ts: h.clock.t - 500, from: 't99', kind: 'report', text: 'from an unknown id', state: 'working' }].map(rec).join(''))
+  h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 1, ns: [] })) // the first row (t1's) is read
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  expect(await ui.findAll({ type: 'Button', text: /^\d+ new$/ })).toHaveLength(1) // t1: read only, t2: nothing: no chip; the closed t3 has one
+  expect((await ui.find({ type: 'Button', key: 'new-t3' }))?.text).toBe('1 new') // on the CLOSED thread's row
+  expect(await ui.find({ type: 'Text', text: '[closed]' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy() // no global inbox
+  expect(await ui.find({ type: 'Button', text: /system notice a|from an unknown id/ })).toBeFalsy() // folded in Health
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 2 findings/ })).toBeTruthy() // desk and t99 have no thread: two unread groups wait in Health
+  await ui.press({ key: 'new-t3' }) // the chip unfolds the closed row and its messages
+  expect(await ui.find({ type: 'Button', text: /from a closed thread/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'reopen-t3' })).toBeTruthy()
+  await openMore(ui, 't1')
+  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Show messages')
+  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy() // nothing at all: no toggle
+  await openMore(ui, 't2')
+  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /already seen/ })).toBeFalsy() // t1's read rows: behind its toggle
+  await openHealth(ui)
+  expect(await ui.find({ type: 'Button', text: /▸ desk .*\(1 unread\)/ })).toBeTruthy() // the groups, folded
+  expect(await ui.find({ type: 'Button', text: /▸ t99 \(1 unread\)/ })).toBeTruthy()
+  await ui.press({ key: 'grp-btn-desk' })
+  expect(await ui.find({ type: 'Button', text: /system notice a/ })).toBeTruthy()
+  await ui.press({ key: 'ack-all' })
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: all good/ })).toBeTruthy() // nothing unread any more
+  expect(await ui.find({ type: 'Button', key: 'new-t3' })).toBeFalsy()
+  await ui.unmount()
+})
+
+test('1.0.32 messages: a message from an unknown sender is never lost: it is a finding in Health, with its own rows; once every row belongs to a card Health has no message group', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 't2', kind: 'report', text: 'only on a card', state: 'working' }))
+  await inDesk($)
+  let ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /Nothing from the threads yet|Nothing unread/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /Health: all good/ })).toBeTruthy()
+  await ui.unmount()
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 'mod', kind: 'report', text: 'a note from the mod itself', state: 'working' }))
+  ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: /^\d+ new$/ })).toBeFalsy() // no card carries it
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 1 finding$/ })).toBeTruthy()
+  await openHealth(ui)
+  await ui.press({ key: 'grp-btn-mod' })
+  expect(await ui.find({ type: 'Button', text: /a note from the mod itself/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('1.0.32 a card with a need wears an amber border; the need (here a question) is on the card, unfolded on a tap', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/questions.jsonl', rec({ ts: 1, from: 't2', question: 'which cache?' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  // t2's open question is in Needs you, as before (a card with its own text, never folded)
+  expect(await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ })).toBeFalsy() // folded: no Needs-you section any more
+  expect(await ui.findAll({ type: 'Button', text: '1 new' })).toHaveLength(2) // a chip on each card (t1, t2); the rows are behind the toggle
+  const amber = (await ui.findAll({ type: 'Box' })).filter((b: any) => b.props?.borderColor === 'warning')
+  expect(amber.length).toBeGreaterThan(0) // t2 waits for an answer
+  await ui.press({ key: 'new-t2' })
   expect((await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ }))?.text).toBeTruthy()
-  // t2's unread inbox row: its card chip says "1 new" (t1's too); the row itself is behind the toggle
-  expect(await ui.findAll({ type: 'Text', text: '1 new' })).toHaveLength(2)
-  expect(await ui.find({ type: 'Button', text: /which db\?/ })).toBeFalsy()
-  await ui.press({ key: 'inbox-toggle-t2' })
   expect(await ui.find({ type: 'Button', text: /\? which db\?/ })).toBeTruthy()
-  expect((await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ }))?.text).toBeTruthy() // still there
-  const chips = (await ui.findAll({ type: 'Text', text: '1 new' })).map((c: any) => JSON.stringify(c)) // cards in order: t2, t1
-  expect(chips[0]).toContain('"warning"') // t2 waits for an answer: amber chip
-  expect(chips[1]).not.toContain('"warning"') // t1 does not
   await ui.unmount()
 })
 
@@ -303,11 +362,12 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '1 new' })).toBeTruthy() // t1's chip: the 2 old read rows are archived, not even counted
-  await ui.press({ key: 'inbox-toggle-t1' })
+  expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy() // t1's chip: the 2 old read rows are archived, not even counted
+  await ui.press({ key: 'new-t1' }) // the chip unfolds the card and its messages
   expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /fresh/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /recent/ })).toBeFalsy() // t2 is folded
+  await openMore(ui, 't2')
   await ui.press({ key: 'inbox-toggle-t2' }) // nothing unread: no chip, the toggle still opens its read rows
   const drawn = async () => (await ui.findAll({ type: 'Button', text: /recent/ })).length
   expect(await drawn()).toBe(5) // the last 5 read rows
@@ -319,7 +379,7 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   expect(await drawn()).toBe(5)
   // ack all: the unread row is read; the read rows stay in the file
   await ui.press({ key: 'ack-all' })
-  expect(await ui.find({ type: 'Text', text: /\d+ new/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /\d+ new/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /unread/ })).toBeFalsy()
   expect(h.files.get('/h/.lean-agent/desk/inbox.jsonl')!.split('\n').filter(Boolean)).toHaveLength(12)
   await ui.unmount()
@@ -338,7 +398,12 @@ test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reje
   waiting('drop')
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /Needs you \(2\)/ })).toBeTruthy() // a script that waits for the user's decision is a need
+  await setUp(ui)
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy() // 1.0.32: no such section; a script has no thread card, so it waits in Health
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 2 findings/ })).toBeTruthy() // highlighted: two things wait for the user
+  expect(await ui.find({ type: 'Button', key: 'health-chip', text: '2 fixes' })).toBeTruthy() // and the header chip says so
+  await ui.press({ key: 'health-chip' }) // a tap on the chip opens Health
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: 2 findings/ })).toBeTruthy()
   await ui.press({ key: 'sec-more' })
   expect((await ui.find({ type: 'Text', text: /2 waiting for you/ }))).toBeTruthy() // and counted in More's scripts line
   expect(await ui.find({ type: 'Text', text: /keep \(global\) waits for you: uses the network/ })).toBeTruthy()
@@ -374,9 +439,9 @@ test('Close is two-step (arm, confirm within 10 s); it closes through lean_threa
   await ui2.press({ key: 'close-t2' })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t2/thread.json')!).state).toBe('closed')
   expect(JSON.parse(h.files.get('/h/.lean-agent/goals.json')!).t2).toBeUndefined()
-  expect(await ui2.find({ type: 'Button', text: /▸ Closed \(2\)/ })).toBeTruthy()
-  expect(await ui2.find({ type: 'Button', text: /▾ Threads \(1\)/ })).toBeTruthy()
-  await ui2.press({ key: 'sec-closed' })
+  expect(await ui2.findAll({ type: 'Text', text: '[closed]' })).toHaveLength(2) // t2 joins t3: the same list, one quiet row each
+  expect(await ui2.find({ type: 'Text', text: /^closed (just now|\d+ min ago)$/ })).toBeTruthy() // with its age: the close time is recorded
+  await openMore(ui2, 't2')
   await ui2.press({ key: 'reopen-t2' }) // a fresh session: claude --bg, never --resume
   const calls = h.claudeCalls()
   expect(calls.some((a: string[]) => a[0] === '--bg')).toBe(true)
@@ -519,7 +584,7 @@ test('a finished thread is ONE row (chip done, Open); the "next message starts a
   expect(await ui.find({ type: 'Text', text: '[done]' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'view-t6' })).toBeTruthy()
   for (const k of ['restart-t6', 'close-t6', 'start-t6']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // behind "more"
-  await ui.press({ key: 'more-t6' })
+  await openMore(ui, 't6')
   expect(await ui.find({ type: 'Text', text: /finished: the next message starts a new session/ })).toBeTruthy()
   for (const k of ['restart-t6', 'close-t6']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   await ui.unmount()
@@ -548,6 +613,10 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   await feed($, 85_000) // 85 % of the limit: the button is beside the bar
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   const ui = await $.ui.mount(DESKPANE as any)
+  await setUp(ui)
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // the restart prompt is in Health, folded on startup ...
+  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('restart desk') // ... and the header chip says what to do
+  await openHealth(ui)
   await ui.press({ key: 'restart-desk' })
   expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy()
   expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
@@ -581,6 +650,7 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   await inDesk($)
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   let ui = await $.ui.mount(DESKPANE as any)
+  await setUp(ui)
   expect(await ui.find({ type: 'Text', text: /desk context: known after the next request/ })).toBeTruthy() // nothing was asked yet
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // no context figure yet: still there
@@ -595,7 +665,11 @@ test('header: a desk under 80 % of its limit has the bar and no Restart desk but
   await feed($, 85_000)
   ui = await $.ui.mount(DESKPANE as any)
   expect(await ui.find({ type: 'Text', text: /85k of 100k/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeTruthy() // ONE amber line, with the button next to it
+  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('restart desk') // the header chip
+  expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 1 finding/ })).toBeTruthy() // highlighted, folded
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeFalsy()
+  await ui.press({ key: 'health-chip' }) // a tap on the chip opens Health
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeTruthy() // ONE line, with the button next to it
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
   await ui.unmount()
   // 1.0.30: over the limit it is the same ONE row (no card, no second line, no "type /compact"); the desk restarts itself, so the row says "restarting" and has no button

@@ -164,6 +164,8 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 
 ## The pane
 
+(1.0.32 redrew the desk pane as one list of sessions with a Health card: see "The pane overview" below. The description here is the 1.0.31 layout; the "Needs you" and "Inbox" sections of it are gone.)
+
 Top to bottom (the desk's pane; any other session sees only the way to the desk or to setup):
 
 1. **Header.** The desk's model and effort as a chip (`[sonnet/high]`; `≠ pin` and a yellow line when the desk really runs another
@@ -562,6 +564,16 @@ A polish of the desk pane, and one optional look. **It was not judged visually h
 
 in `~/.lean-agent/config.json`. When on, the look (a calm palette, cool grays and one teal accent, light and dark; danger, success and warning keep red, green and amber) is sent once at each session start with `$.theme.set`, built by `makeColors` (`hooks/make-colors.js`, copied unchanged from the plugin-authoring skill; a spec checks that nothing in its `problems` makes Desktop ignore the theme and that every color name is real). With the config off, or never set, lean-agent sets nothing and clears nothing. The theme is cleared only when the config goes from on to off (the mod keeps one record, `~/.lean-agent/look.json`, so it clears a look it set and never another plugin's at any other time). `lean_doctor` has one row: `pane theme: off`, `on, drawn`, or `on, not drawn: <the reason>` (the terminal and editors draw no look).
 
+## The pane overview (1.0.32)
+
+The desk pane is a sessions-first overview. All of it is drawn from state the mod already holds: no model call, no polling. **It was not judged visually here** (specs read the rendered tree); send a screenshot if anything looks off.
+
+- **Header, one compact block:** the desk's model chip, today's and 7 days' spend, the 5 h window bar, the desk context bar and the version line. A small chip next to the desk bar says `N fix` when the Health card holds something that needs you (a tap opens it), or `restart desk` when the desk is over its limit.
+- **Health card** (right under the header, **folded on startup**): everything that is a warning, a finding or a fix, in one place. Folded it is one line, `Health: 2 findings`, with an amber border (red only for a real failure); when nothing needs a fix it is grey and quiet, `Health: all good`. Unfolded it has three groups, one line each with its own Dismiss or action button: *Needs a fix* (the doctor's findings with Run fix, the desk restart prompt with Restart desk, notices such as the old desk that is not archived, a script waiting for Adopt / Reject, the desk's own model request, MCP servers that need a value, unread messages from senders without a thread), *Standing approvals* (your written and standing approvals, the threads you let edit their worktree, and the own-PR lines "t5 owns PR 4321 ..." with a Revoke button: these are information, not errors) and *Info* (the other doctor lines, the "N dismissed" list with show). `pane.healthOpen` (true) starts it unfolded; a missing setup is never folded.
+- **Sessions, one list:** every thread (working, waiting, needs you, blocked, done and closed) sorted by **last activity**, newest first (its last report, its recorded activity, its last wake or its newest queued message; a closed thread by its close time). Chips under the list title change the order: `last active`, `needs you first` (what waits for you on top, each group by last activity), `cost`, `name`. The choice is remembered in the mod's store and in config `pane.sort`. The list stops at `pane.maxSessions` (30) with one `show more` row; a row with an unread message or something waiting for you is always listed.
+- **Cards are small.** A working, waiting, needs-you or blocked thread is two lines: title, state chip and `N new`; then cost, a small context bar with the number and the age of its last activity. One button only when it matters (needs you: Open, blocked: Restart). A done, idle or closed thread is one row (title, chip, cost, age such as `closed 3 h ago`, Open). A tap on the title unfolds the rest: model, branch, review, the last report, Resume, Start, Restart, Close, Reopen (a closed one) and the messages; a second tap folds it. A card with a decision to take (Approve / Deny of a remote write or a model, a held send) is unfolded by itself while it lasts.
+- **Where the messages are:** on the card of the thread they came from (`N new` chip, **Show messages**, **ack N** for the card, **ack all** once in the list's line). A closed thread is a row too, so its messages show on its row. A message from a sender with no thread (the desk, the mod, an unknown id) is a finding in the Health card. There is no global inbox.
+
 ## Settings (lean_config)
 
 Every setting of `~/.lean-agent/config.json` can be listed, read, changed and checked from the chat: you never need to edit the file by hand. The desk has one tool for it, `lean_config`; a thread or a worker never has it (a thread that needs a setting changed reports that to the desk, and the desk asks you).
@@ -665,6 +677,9 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `window.capFiveHourPct` | budget | number >= 1 <= 100 | none | now | Your own cap in percent of the 5 h window: at it all new work is held until the window resets (none by default). |
 | `window.holdAbove` | budget | number >= 1 <= 100 | 85 | now | Percent of the usage window above which starting a thread warns and holds. |
 | `pane.theme` | pane | on / off | off | desk restart | Give the app lean-agent's own look (on) or leave it alone (off). |
+| `pane.sort` | pane | active / needs / cost / name | active | now | How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), cost or name. The pane's sort chips set it. |
+| `pane.maxSessions` | pane | number >= 5 <= 500 | 30 | now | Sessions the desk pane lists before one "show more" row (a session with an unread message or something waiting for you is always listed). |
+| `pane.healthOpen` | pane | boolean | false | now | Start the pane's Health card (findings, fixes, standing approvals) unfolded (true); by default it starts folded and is highlighted when something needs a fix. |
 | `feedback.destination` | feedback | local / folder / github / folder+github | local | now | Where the feedback export goes: local, folder, github or folder+github. |
 | `feedback.folder` | feedback | path | none | now | Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads. |
 | `memory.maxPerScope` | memory | number >= 1 | 12 | now | Items one memory scope (desk, always, a project, a thread, a task) may hold; an add over it asks you to retire one. |

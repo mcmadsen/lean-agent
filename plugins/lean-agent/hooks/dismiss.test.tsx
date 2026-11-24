@@ -150,8 +150,15 @@ test('the pane: each card has a two-press Dismiss that logs it; the count leaves
   items(h)
   h.files.set(`${L}/notices/budget-t5.txt`, 'budget: t5 has spent $12.34 today, over its $10.00 daily alert\n')
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /Needs you \(5\)/ })).toBeTruthy()
+  const unfold = async (key: string) => {
+    const b = await ui.find({ type: 'Button', key })
+    if (b && String(b.text).startsWith('▸')) await ui.press({ key })
+  }
+  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy() // 1.0.32: the cards are on their thread cards, folded
+  expect(await ui.find({ type: 'Button', key: 'dismiss-t7-question' })).toBeFalsy()
+  for (const id of ['t3', 't4', 't5', 't7', 't8']) await unfold(`card-${id}`)
   for (const k of ['t3-blocked', 't4-prompt', 't5-approval', 't7-question', 't8-blocked']) expect([k, !!(await ui.find({ type: 'Button', key: `dismiss-${k}` }))]).toEqual([k, true])
+  await unfold('sec-health') // the notice is in Health
   expect(await has(ui, /^budget: t5 has spent/)).toBe(true) // an alert: "budget:", no "error:" in front
   expect(await has(ui, /error: budget/)).toBe(false)
   await ui.press({ key: 'dismiss-t7-question' })
@@ -159,13 +166,13 @@ test('the pane: each card has a two-press Dismiss that logs it; the count leaves
   expect(hist(h, 't7')).toEqual([])
   await ui.press({ key: 'dismiss-t7-question' })
   expect(hist(h, 't7')[0]).toMatchObject({ kind: 'dismiss', what: 'question', id: '1' })
-  expect(await ui.find({ type: 'Text', text: /Needs you \(4\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'dismiss-t7-question' })).toBeFalsy() // gone from t7's card
   expect(await has(ui, /^t7 asks/)).toBe(false)
   expect(await has(ui, /t8 is blocked/)).toBe(true) // another thread's card stays
   expect(await has(ui, /^1 dismissed$/)).toBe(true)
   await ui.press({ key: 'dismissed-toggle' })
   expect(await has(ui, /^t7 asks: Post it\?.*\(dismissed: a newer one will show again\)/)).toBe(true)
-  expect(await ui.find({ type: 'Text', text: /Needs you \(4\)/ })).toBeTruthy() // shown, still not counted
+  expect(await ui.find({ type: 'Button', key: 'dismiss-t7-question' })).toBeFalsy() // shown dim, no buttons, still not an item that waits
   await ui.press({ key: 'dismissed-toggle' })
   expect(await has(ui, /^t7 asks/)).toBe(false)
   await ui.press({ key: 'notice-dismiss-budget-t5' }) // one press
