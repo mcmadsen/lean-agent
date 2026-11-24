@@ -9,6 +9,7 @@ import { resetThreadCache } from './threaddetail'
 import { resetActivity } from './threadstate'
 import { renderReports, takeBatch, unreadReports, worthRelay } from './delivery'
 import { loadView } from './view'
+import { stallTick } from './stall'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const NEW = '99999999-8888-7777-6666-555555555555'
@@ -277,6 +278,67 @@ test('a desk inbox row whose question was already answered is marked answered an
   expect(text).not.toMatch(/from t2.*\[answered/)
   expect(worthRelay(u.recs.filter(r => r.from === 't1'))).toBe(false) // nothing left to ask the user for t1
   expect(worthRelay(u.recs)).toBe(true) // t2's question still needs them
+  after(() => 0)
+})
+
+// ---- 4. idle without a report: ONE desk notice by script, a flag in the list -------------------------------------------------------------------
+const idleRow = { status: 'idle', state: 'idle' }
+const report = (h: any, rec: object) => h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify(rec) + '\n')
+
+test('a thread idle for 12 min with no report raises ONE notice by script (not before idleAlertMinutes, never twice for the same idle spell)', { timeoutMs: 20_000 }, async () => {
+  const { h, deps } = setup({ row: idleRow })
+  const sd = { agents: deps.agents, restart: deps.restart as any }
+  activity(h, T0 - 5 * 60_000)
+  expect(await stallTick(h.host, sd)).toEqual([]) // 5 min: not yet
+  h.clock.t = T0 + 7 * 60_000 // 12 min idle
+  const n = await stallTick(h.host, sd)
+  expect(n).toHaveLength(1)
+  expect(n[0]!.id).toBe('t1')
+  expect(n[0]!.text).toContain('t1 idle for 12 min with no report')
+  expect(n[0]!.text).toContain('fix login')
+  h.clock.t = T0 + 20 * 60_000
+  expect(await stallTick(h.host, sd)).toEqual([]) // the same spell: told once
+  // it works again, then idles again: a new spell, a new notice
+  activity(h, T0 + 21 * 60_000)
+  h.clock.t = T0 + 22 * 60_000
+  expect(await stallTick(h.host, sd)).toEqual([])
+  h.clock.t = T0 + 40 * 60_000
+  expect(await stallTick(h.host, sd)).toHaveLength(1)
+  after(() => 0)
+})
+
+test('idle but it reported done or blocked, or it is a keep-going thread, or the alert is off (threads.idleAlertMinutes 0): no notice; a [working] report that was the last word still counts as no report', { timeoutMs: 20_000 }, async () => {
+  const a = setup({ row: idleRow })
+  activity(a.h, T0 - 12 * 60_000)
+  report(a.h, { ts: T0 - 12 * 60_000, from: 't1', kind: 'report', state: 'done', text: 'finished' })
+  expect(await stallTick(a.h.host, { agents: a.deps.agents, restart: a.deps.restart as any })).toEqual([])
+  const b = setup({ row: idleRow })
+  activity(b.h, T0 - 12 * 60_000)
+  report(b.h, { ts: T0 - 12 * 60_000, from: 't1', kind: 'report', state: 'blocked', text: 'needs the user' })
+  expect(await stallTick(b.h.host, { agents: b.deps.agents, restart: b.deps.restart as any })).toEqual([])
+  const c = setup({ row: idleRow })
+  c.h.files.set(`${T1}/thread.json`, JSON.stringify({ ...json(c.h, `${T1}/thread.json`), keepGoing: true }))
+  activity(c.h, T0 - 12 * 60_000)
+  expect(await stallTick(c.h.host, { agents: c.deps.agents, restart: c.deps.restart as any })).toEqual([])
+  const d = setup({ row: idleRow, config: { threads: { idleAlertMinutes: 0 } } })
+  activity(d.h, T0 - 12 * 60_000)
+  expect(await stallTick(d.h.host, { agents: d.deps.agents, restart: d.deps.restart as any })).toEqual([])
+  const e = setup({ row: idleRow })
+  activity(e.h, T0 - 12 * 60_000)
+  report(e.h, { ts: T0 - 12 * 60_000, from: 't1', kind: 'report', state: 'working', text: 'half way through the parser' })
+  const n = await stallTick(e.h.host, { agents: e.deps.agents, restart: e.deps.restart as any })
+  expect(n).toHaveLength(1)
+  expect(n[0]!.text).toContain('half way through the parser')
+  after(() => 0)
+})
+
+test('idleAlertMinutes is configurable; `lean_thread list` flags the idle thread with no report, the stall features stay as they were', { timeoutMs: 20_000 }, async () => {
+  const { h, deps } = setup({ row: idleRow, config: { threads: { idleAlertMinutes: 3 } } })
+  activity(h, T0 - 4 * 60_000)
+  expect(await listText(h)).toContain('idle 4 min, no report')
+  expect(await stallTick(h.host, { agents: deps.agents, restart: deps.restart as any })).toHaveLength(1)
+  report(h, { ts: T0, from: 't1', kind: 'report', state: 'done', text: 'finished' })
+  expect(await listText(h)).not.toContain('no report')
   after(() => 0)
 })
 

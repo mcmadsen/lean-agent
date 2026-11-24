@@ -6,11 +6,12 @@
 // The desk's timer (stallTick) raises ONE notice + toast per stall, keeps desk/stalls.json for the reminder line the desk gets once per desk turn
 // while the stall lasts (stallLines), and, when `threads.stallRestart` is true (default false), restarts the thread by script through the same
 // stop + fresh session path as the automatic restart at the context limit (leanThread action stall-restart, force) and says so.
-import { homeDir, readJson, threadsDir, writeJson } from './state'
+import { homeDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { deskState, unconsumed } from './delivery'
+import type { DeskRec } from './delivery'
 import { setNotice } from './notices'
-import { lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
+import { idleNoReport, lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
 import { haltedSince } from './continuepending'
 import { kTokens, readContext, threadLimits } from './threadcontext'
 import type { AgentRow, Out, Thread } from './threads'
@@ -20,6 +21,7 @@ export const MAX_STALL_TRIES = 3 // a failed stall restart: tried at most this o
 export type StallRec = { since: number; idleSince: number; unread: number; tries?: number }
 export type Stalls = Record<string, StallRec>
 export const stallsFile = (home: string) => `${deskState(home)}/stalls.json`
+export const idleFile = (home: string) => `${deskState(home)}/idle-alerts.json` // tN -> the last-activity time of the idle spell the desk was told about
 const readStalls = async (h: Host, home: string): Promise<Stalls> => {
   const s = await readJson<Stalls | null>(h, stallsFile(home), null)
   return s && typeof s === 'object' && !Array.isArray(s) ? s : {}
@@ -53,6 +55,9 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
   const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes
   const stalls = await readStalls(h, home)
   const before = JSON.stringify(stalls)
+  const idles = await readJson<Record<string, number>>(h, idleFile(home), {})
+  const idlesBefore = JSON.stringify(idles)
+  const deskRecs = ids.length ? await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) : []
   const out: StallNotice[] = []
   const rows = ids.length ? await deps.agents() : null
   if (!rows) return [] // no listing: nothing is claimed, the records stay
@@ -66,6 +71,16 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     // a thread that keeps stopping after "next:" (continuepending.ts gave up continuing it) is in the stall state even while its session is idle
     const halted = truth && (truth.word === 'idle' || truth.word === 'running' || truth.word === 'stuck') ? await haltedSince(h, home, id) : null
     if (truth && halted) truth = { ...truth, word: 'stalled', stalledMs: Math.max(0, now - halted) }
+    // idle with no report (1.0.31; field: three threads sat "idle · no report yet" and only a full listing found them): ONE notice per idle spell (keyed by the last activity)
+    const lastRec = t ? deskRecs.filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask')).pop() : undefined
+    const idle = t && truth ? idleNoReport({ word: truth.word, keepGoing: t.keepGoing === true, lastAt: truth.lastAt, now, minutes: cfg.idleAlertMinutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec }) : null
+    if (idle && t) {
+      if (idles[id] !== idle.since) {
+        idles[id] = idle.since
+        const said = lastRec && lastRec.ts >= Math.max(Number(t.lastWake) || 0, Number(t.created) || 0) ? `; its last word was a progress report: "${String(lastRec.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)}"` : ''
+        out.push({ id, text: `${id} idle for ${mins(idle.ms)} min with no report: ${t.title ?? ''}${said}` })
+      }
+    } else delete idles[id]
     if (!truth || truth.word !== 'stalled') {
       delete stalls[id] // not (or no longer) stalled: the next stall gets its own notice
       continue
@@ -107,7 +122,9 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     }
   }
   for (const id of Object.keys(stalls)) if (!ids.includes(id)) delete stalls[id]
+  for (const id of Object.keys(idles)) if (!ids.includes(id)) delete idles[id]
   if (JSON.stringify(stalls) !== before) await writeJson(h, stallsFile(home), stalls)
+  if (JSON.stringify(idles) !== idlesBefore) await writeJson(h, idleFile(home), idles)
   return out
 }
 

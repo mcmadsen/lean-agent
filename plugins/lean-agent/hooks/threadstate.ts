@@ -41,10 +41,23 @@ export async function threadsConfig(h: Host, home: string): Promise<ThreadsConfi
 export const STALL_MINUTES = 10 // (1.0.28: was 20; a thread at 80% of its context limit is restarted at once instead, stall.ts)
 export const KEEPGOING_STALL_MINUTES = 5 // a thread under the keep-going standing order (continuepending.ts) is flagged this early
 export const stallFor = (minutes: number, t: { keepGoing?: unknown } | null | undefined): number => (t?.keepGoing === true ? Math.min(minutes, KEEPGOING_STALL_MINUTES) : minutes)
-export async function stallConfig(h: Host, home: string): Promise<{ minutes: number; restart: boolean }> {
-  const cfg = await readJson<{ threads?: { stallMinutes?: unknown; stallRestart?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
+// threads.idleAlertMinutes (1.0.31, default 10; 0 = off): a thread whose turn ended and that has reported nothing raises ONE desk notice after this long (stall.ts)
+export const IDLE_ALERT_MINUTES = 10
+export async function stallConfig(h: Host, home: string): Promise<{ minutes: number; restart: boolean; idleAlertMinutes: number }> {
+  const cfg = await readJson<{ threads?: { stallMinutes?: unknown; stallRestart?: unknown; idleAlertMinutes?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null)
   const m = Number(cfg?.threads?.stallMinutes)
-  return { minutes: Number.isFinite(m) && m > 0 ? m : STALL_MINUTES, restart: cfg?.threads?.stallRestart === true }
+  const ia = cfg?.threads?.idleAlertMinutes
+  return { minutes: Number.isFinite(m) && m > 0 ? m : STALL_MINUTES, restart: cfg?.threads?.stallRestart === true, idleAlertMinutes: typeof ia === 'number' && Number.isFinite(ia) && ia >= 0 ? ia : IDLE_ALERT_MINUTES }
+}
+// Idle with no report: the session's turn ended (word idle), it is not a keep-going thread (continuepending.ts has its own rule), and the desk inbox holds no report of
+// THIS session since its start, or its last word was a [working] progress report (nothing says it finished or is blocked). `lastAt`: its last activity.
+export function idleNoReport(o: { word: Word | string | undefined; keepGoing?: boolean; lastAt: number | null | undefined; now: number; minutes: number; since: number; lastRec?: { ts: number; kind: string; state?: string } }): { ms: number; since: number } | null {
+  if (o.word !== 'idle' || o.keepGoing === true || !(o.minutes > 0) || !o.lastAt || o.lastAt <= 0) return null
+  const ms = o.now - o.lastAt
+  if (ms < o.minutes * 60_000) return null
+  const r = o.lastRec
+  const reported = !!r && r.ts >= o.since && !(r.kind === 'report' && (r.state === undefined || r.state === '' || r.state === 'working'))
+  return reported ? null : { ms, since: o.lastAt }
 }
 export const activityFile = (home: string, id: string) => `${threadsDir(home)}/${id}/activity.json`
 export type Activity = { at: number; kind: string }
