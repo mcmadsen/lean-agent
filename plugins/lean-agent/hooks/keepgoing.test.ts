@@ -35,7 +35,7 @@ const flag = (h: any) => JSON.parse(h.files.get(`${T1}/thread.json`)!).keepGoing
 
 test('keep-going tN on|off (desk): stored in thread.json, said back, shown in the list; without on/off it only says what is set', async () => {
   const h = setup()
-  expect((await leanThread(h.host, '/p', { action: 'keep-going', tN: 't1' })).text).toBe('t1 keep-going off')
+  expect((await leanThread(h.host, '/p', { action: 'keep-going', tN: 't1' })).text).toContain('t1 keep-going on (the default, threads.keepGoing)') // 1.0.31: on unless told off
   const on = await leanThread(h.host, '/p', { action: 'keep-going', tN: 't1', on: true })
   expect(on.ok).toBe(true)
   expect(on.text).toContain('t1 keep-going on')
@@ -43,8 +43,9 @@ test('keep-going tN on|off (desk): stored in thread.json, said back, shown in th
   expect((await leanThread(h.host, '/p', { action: 'list' })).text).toContain('keep-going')
   h.files.set(`${T1}/continue-pending.json`, JSON.stringify({ at: T0, sid: S1, kind: 'keep', text: '' }))
   expect((await leanThread(h.host, '/p', { action: 'keep-going', tN: 't1', on: false })).text).toBe('t1 keep-going off')
-  expect(flag(h)).toBeUndefined()
+  expect(flag(h)).toBe(false) // an explicit off (the default is on)
   expect(JSON.parse(h.files.get(`${T1}/continue-pending.json`)!)).toEqual({}) // switched off: nothing pending
+  expect((await leanThread(h.host, '/p', { action: 'keep-going', tN: 't1' })).text).toBe('t1 keep-going off')
   expect((await leanThread(h.host, '/p', { action: 'list' })).text).not.toContain('keep-going')
 })
 

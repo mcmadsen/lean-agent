@@ -34,6 +34,7 @@ import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, pr
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
+import { continueConfig, keepGoingOf } from './continuepending'
 import { dismissAction } from './dismiss'
 import { loadView } from './view'
 import { loadOrch, threadToolsArgv } from './orchestrate'
@@ -506,7 +507,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
-  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : {}) }
+  const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : i.keepGoing === false ? { keepGoing: false } : {}) }
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -997,15 +998,15 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
 
 // the standing order "keep going, no asks" (continuepending.ts): stored in thread.json (the flag only; the desk rewrites the file whole, so it is re-read first)
 async function setKeepGoing(h: Host, home: string, t: Thread, on: boolean): Promise<void> {
+  // (1.0.31: keep-going is on by default, config threads.keepGoing: `off` is stored as an explicit false, which beats the default)
   const { keepGoing: _was, ...rest } = (await load(h, home, t.id)) ?? t
-  if (on) t.keepGoing = true
-  else delete t.keepGoing
-  await save(h, home, { ...rest, ...(on ? { keepGoing: true } : {}) })
+  t.keepGoing = on
+  await save(h, home, { ...rest, keepGoing: on })
   if (!on) await writeJson(h, `${tpath(home, t.id)}/continue-pending.json`, {}).catch(() => undefined)
 }
-const keepGoingText = (id: string, on: boolean): string =>
+const keepGoingText = (id: string, on: boolean, byDefault = false): string =>
   on
-    ? `${id} keep-going on: a turn end that is not done, blocked or a question is continued by script after threads.continueSeconds ("Continue with the next step of your task.", at most 30 an hour); it is flagged stalled after 5 minutes without a tool call`
+    ? `${id} keep-going on${byDefault ? ' (the default, threads.keepGoing)' : ''}: a turn end that is not done, blocked, a question or a pending request is continued by script after threads.continueSeconds ("Continue with the next step of your task.", at most 30 an hour)${byDefault ? '' : '; it is flagged stalled after 5 minutes without a tool call'}`
     : `${id} keep-going off`
 
 async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
@@ -1124,7 +1125,10 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         }
         case 'keep-going': {
           // `keep-going tN on|off`: the standing order "keep going, no asks" (continuepending.ts); without on/off it only says what is set
-          if (i.on === undefined) return { ok: true, text: keepGoingText(id, t.keepGoing === true), data: { keepGoing: t.keepGoing === true } }
+          if (i.on === undefined) {
+            const eff = await keepGoingOf(h, t, (await continueConfig(h, home)).keepGoing)
+            return { ok: true, text: keepGoingText(id, eff, eff && t.keepGoing !== true), data: { keepGoing: eff } }
+          }
           await setKeepGoing(h, home, t, i.on)
           return { ok: true, text: keepGoingText(id, i.on), data: { keepGoing: i.on } }
         }
@@ -1199,7 +1203,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
             else delete t.keep
             await save(h, home, { ...rest, ...(i.keep === true ? { keep: true } : {}) }) // (only the keep flag: needs added above stay unsaved until a session starts)
           }
-          if (i.keepGoing !== undefined && (t.keepGoing === true) !== (i.keepGoing === true)) await setKeepGoing(h, home, t, i.keepGoing === true)
+          if (i.keepGoing !== undefined && t.keepGoing !== i.keepGoing) await setKeepGoing(h, home, t, i.keepGoing === true)
           const live = t.sid ? await agents(h) : []
           if (!live) return err(`${id}: cannot list sessions (claude agents failed), so it is not started`)
           const srow = t.sid ? live.find(a => a.sid === t.sid) : undefined

@@ -21,6 +21,7 @@ import { readStop } from './contextstop'
 import { liveOf, readActivity, readWaiting, stillWaiting } from './threadstate'
 import { NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextwords'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
+import { markerOf } from './reviewkind'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
 import { listActions } from './deskactions'
@@ -40,7 +41,7 @@ export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_P
 
 export type Kind = 'next' | 'keep' | 'todo'
 export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
-export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string }
+export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number }
 export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-pending.json`
 export const stateFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-state.json`
 export const readPending = async (h: Host, home: string, id: string): Promise<Pending | null> => {
@@ -58,10 +59,17 @@ export async function haltedSince(h: Host, home: string, id: string): Promise<nu
   return typeof h0 === 'number' && h0 > 0 ? h0 : null
 }
 
-export async function continueConfig(h: Host, home: string): Promise<{ auto: boolean; seconds: number }> {
-  const t = (await readJson<{ threads?: { autoContinue?: unknown; continueSeconds?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null))?.threads
+export async function continueConfig(h: Host, home: string): Promise<{ auto: boolean; seconds: number; keepGoing: boolean }> {
+  const t = (await readJson<{ threads?: { autoContinue?: unknown; continueSeconds?: unknown; keepGoing?: unknown } } | null>(h, `${leanDir(home)}/config.json`, null))?.threads
   const s = Number(t?.continueSeconds)
-  return { auto: t?.autoContinue !== false, seconds: Number.isFinite(s) && s > 0 ? s : CONTINUE_SECONDS }
+  return { auto: t?.autoContinue !== false, seconds: Number.isFinite(s) && s > 0 ? s : CONTINUE_SECONDS, keepGoing: t?.keepGoing !== false }
+}
+// Is the standing order "keep going" in force for this thread? The thread's own `keep-going on|off` (thread.json keepGoing true|false) wins; without one the config
+// threads.keepGoing (default true) decides, for a work thread: a review thread (marker in the mod's store) is never covered by the default.
+export async function keepGoingOf(h: Host, t: { id: string; keepGoing?: unknown }, cfgKeep: boolean): Promise<boolean> {
+  if (t.keepGoing === true) return true
+  if (t.keepGoing === false || !cfgKeep) return false
+  return !(await markerOf(h, t.id).catch(() => null))
 }
 
 // ---- what a last text announces (pure) ----------------------------------------------------------------------------------------------
@@ -133,9 +141,10 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     const tasks = await tasksOfTurn(h, home, id, o)
     const open = cfg.auto && !question && !(announced && announcesRestart(announced)) ? firstOpen(tasks) : null
     let kind: Kind | null = null
-    if (open && !(await hasPendingRequest(h, id))) kind = 'todo'
+    if (!question && (await hasPendingRequest(h, id))) return await drop(h, home, id) // a request waits for the user's Approve: no continue of any kind
+    if (open) kind = 'todo'
     else if (announced && cfg.auto) kind = 'next'
-    else if (t.keepGoing === true && !question) kind = 'keep'
+    else if (!question && (await keepGoingOf(h, t, cfg.keepGoing))) kind = 'keep'
     if (!kind) return await drop(h, home, id)
     await writeJson(h, pendingFile(home, id), { at: await h.clock.now(), sid: o.sid, kind, text: kind === 'todo' ? open!.text : (announced ?? ''), ...(kind === 'todo' ? { sig: tasksSig(tasks) } : {}) } satisfies Pending)
     return kind
@@ -181,9 +190,9 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await writeJson(h, stateFile(home, id), n).catch(() => undefined)
     }
     // a tool call (or a report) after the last continue ends the "in a row" count and the halt
-    if (act && TOOL_KINDS.has(act.kind) && act.at > (cs.sentAt ?? 0) && ((cs.consec ?? 0) > 0 || (cs.todoRun ?? 0) > 0 || cs.halted)) {
+    if (act && TOOL_KINDS.has(act.kind) && act.at > (cs.sentAt ?? 0) && ((cs.consec ?? 0) > 0 || (cs.todoRun ?? 0) > 0 || (cs.keepRun ?? 0) > 0 || cs.halted)) {
       if (cs.halted) await setNotice(h, `continue-${id}`, null).catch(() => undefined)
-      await save({ ...cs, consec: 0, todoRun: 0, halted: undefined })
+      await save({ ...cs, consec: 0, todoRun: 0, keepRun: 0, halted: undefined })
     }
     const p = await readPending(h, home, id)
     if (!p) continue
@@ -202,8 +211,14 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id)
       continue
     }
-    if (p.kind === 'keep' && t.keepGoing !== true) {
+    if (p.kind === 'keep' && !(await keepGoingOf(h, t, cfg.keepGoing))) {
       await clearPending(h, home, id) // keep-going was switched off meanwhile
+      continue
+    }
+    // by the default (no `keep-going on` of the user's): a thread that ends its turn 6 times in a row without a tool call has nothing left to do (a finished thread that did not
+    // report): silent, no alarm
+    if (p.kind === 'keep' && t.keepGoing !== true && (cs.keepRun ?? 0) >= MAX_TODO_CONSECUTIVE) {
+      await clearPending(h, home, id)
       continue
     }
     const w = await readWaiting(h, home, id)
@@ -272,7 +287,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
     }
     const r = await deps.send(id, p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
     await clearPending(h, home, id)
-    if (r.ok) await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}) })
+    if (r.ok) await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}) })
   }
   return out
 }
