@@ -10,6 +10,7 @@ import { indexText } from './memoryindex'
 import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
+import { refsLine } from './workitems'
 
 export const REPORT_DIGESTS = 3 // 1.0.27: the restart prompt carries the last 3 reports as digests (state, first 200 characters, file path), the rest is a count
 export const DIGEST_CHARS = 200
@@ -189,6 +190,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
       { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
       { name: 'open', head: '## Open', body: open, mode: 'fixed' },
       { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
+      { name: 'refs', head: '## Task references', body: refsLine(t), mode: 'fixed' }, // the work item and PR of the task (workitems.ts): in every restart, by script
       { name: 'git', head: '## Git', body: git, mode: 'fixed' },
       { name: 'next', head: '## Next step (your task list)', body: nextTask ? `[${nextTask.status}] ${cut(nextTask.text, 300)}` : '', mode: 'fixed' },
       { name: 'pull', head: '## Pull list', body: pull.length ? `Read only what the next step needs from the pull list; a pull returns a section, not the whole store.\n${pull.join('\n')}` : '', mode: 'fixed' },
@@ -205,6 +207,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'brief', head: '## Brief', body: cut(flagForeignPaths(brief, t.id), BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },
+    { name: 'refs', head: '## Task references', body: refsLine(t), mode: 'fixed' },
     { name: 'goal', head: '## Goal', body: goalText, mode: 'fixed' },
     { name: 'snapshot', head: '## State at the end of the last turn (state.json)', body: snap ? capped(snapshotText(snap, now, { git: !gitInPre, scratch: false }), SNAPSHOT_MAX, snapshotFile(home, t.id)) : '', file: snapshotFile(home, t.id), mode: 'head' },
     { name: 'preflight', head: '## Preflight', body: capped(pre, PREFLIGHT_MAX, `${dir}/preflight`), file: `${dir}/preflight`, mode: 'head' },

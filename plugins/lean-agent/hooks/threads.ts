@@ -46,6 +46,8 @@ import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
 import { briefLintLine, isForgeWrite } from './forgewrite'
 import { prepareRules, ruleAction, ruleCount, storeRules } from './threadrules'
+import { afterRefs, applyRefs, newLine, prepareRefs, refsShort, setRefAction } from './workitems'
+import type { PrRef, WorkItemRef } from './workitems'
 import { threadSettings as leanThreadSettings } from './leantools'
 
 export const WAKE_GAP_MS = 30_000
@@ -73,6 +75,9 @@ export type Thread = {
   keepGoing?: boolean // the standing order "keep going, no asks" (continuepending.ts): a turn end that is not done / blocked / a question is continued by script
   gen?: number // how many sessions this thread has had (1 = the first): the name of the session is "tN · title", "tN · title (2)" ... (threadstate.ts sessionName)
   req0?: number // the thread's request count in the ledger when its session was started or woken: a session that ended its turn at once added at most two
+  workItem?: WorkItemRef // the task's work item (workitems.ts): set by `new` (workitem, continues, or taken from the brief), corrected with `set`; in every handover
+  pr?: Partial<PrRef> & Record<string, unknown> // the task's PR (a reference); the own-PR ownership record of ownpr.ts (id, since, url, how) lives in the same field
+  task?: string // the memory `task` scope of this thread: wi-<id> (or pr-<n>), written with the references
   checkpoints?: number // 1.0.6 only (context checkpoints were removed): still readable, nothing writes it
   lastCheckpoint?: number // 1.0.6 only
 }
@@ -244,7 +249,7 @@ export async function deskClaudeMd(h: Host, root: string): Promise<string> {
 }
 
 // ---- the tool ------------------------------------------------------------------------------------------------
-export type Input = { action: string; rewind?: number /* answer-restart only (the delivery tick) */; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; keepGoing?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string; rules?: string[]; inherit?: string | boolean; trigger?: string; output?: string }
+export type Input = { action: string; rewind?: number /* answer-restart only (the delivery tick) */; tN?: string; text?: string; message?: string; title?: string; project?: string; model?: string; effort?: string; path?: string; on?: boolean; keep?: boolean; keepGoing?: boolean; all?: boolean; confirm?: boolean; sha?: string; reason?: string; needs?: string[]; mcp?: string[]; plugins?: string[]; fill?: boolean; pr?: PrInput; id?: string; allowEdit?: string[]; allowCmd?: string[]; force?: boolean; kind?: string; notice?: string; target?: { pr?: number | string; workitem?: number | string }; kinds?: string[]; section?: string; full?: boolean; verbose?: boolean; file?: string; to?: string; name?: string; rules?: string[]; inherit?: string | boolean; trigger?: string; output?: string; workitem?: number | string; continues?: string }
 export type Out = { ok: boolean; text: string; data?: unknown }
 
 const err = (text: string): Out => ({ ok: false, text })
@@ -504,12 +509,16 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   }
   const needs = needsOf(i.needs)
   if (typeof needs === 'string') return err(needs)
-  const ruled = await prepareRules(h, home, i) // the thread's own standing rules (and the ones it inherits when the user said so): refused here, before any folder exists
+  // (continues + inherit: true = the rules of the thread this one continues, when the user said so)
+  const ruled = await prepareRules(h, home, i.inherit === true && !i.tN && i.continues ? { ...i, tN: i.continues } : i) // the thread's own standing rules (and the ones it inherits when the user said so): refused here, before any folder exists
   if (typeof ruled === 'string') return err(ruled)
+  const refd = await prepareRefs(h, home, { ...i, text: i.text ?? '' }) // the work item / PR of the task (workitem, continues, the brief, the user's prompt) and the one-thread-per-work-item rule
+  if (typeof refd === 'string') return err(refd)
   const id = await nextId(h, home)
   const dir = tpath(home, id)
   await mkdirp(h, dir)
   const t: Thread = { id, title, project, state: 'open', sid: '', created: await h.clock.now(), lastWake: 0, delivered: 0, ...(needs?.length ? { needs } : {}), ...(i.keep === true ? { keep: true } : {}), ...(i.keepGoing === true ? { keepGoing: true } : {}) }
+  applyRefs(t, refd.refs) // (in the row before the first save: the session start saves this object again)
   await h.fs.write(`${dir}/CLAUDE.md`, await threadClaudeMd(h, root, id, title, t.project, pre, await resolveLoaded(h, home, t.project, t.needs ?? [])))
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   await h.fs.write(`${dir}/.claude/settings.json`, await threadSettings(h, id, hooks, pre))
@@ -517,6 +526,8 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   await h.fs.write(`${dir}/brief.md`, brief + '\n')
   await save(h, home, t)
   const ruleNote = ruled.rules.length || ruled.from ? await storeRules(h, home, id, ruled).catch(() => '') : '' // before the session starts: its first prompt has them
+  await afterRefs(h, home, t).catch(() => undefined) // the WI -> threads map and the task's memory item, before the session starts
+  const refNote = newLine(id, refd, t)
   await trustFolder(h, dir)
   const r = await startSession(h, home, t, brief, i, installed, root)
   // A PR is the thread's own ONLY when `pr` was passed (or a review thread's review.pr), never because the brief mentions one (ownpr.ts); the reply says which
@@ -524,7 +535,7 @@ async function create(h: Host, root: string, home: string, i: Input, installed =
   const own = r.ok && passed !== undefined ? await recordPassedPr(h, id, passed, (i as { pr?: unknown }).pr !== undefined ? 'you passed pr' : 'you started a review for it').catch(() => ({}) as { line?: string; note?: string }) : null
   const mention = r.ok && passed === undefined ? await noteBrief(h, id, brief).catch(() => null) : null
   const more = own?.line ? `${own.line}. Tell the user this in one line` : own?.note ?? mention
-  return r.ok ? { ...r, ...(more || ruleNote ? { text: `${r.text}${ruleNote ? `\n${ruleNote}` : ''}${more ? `\n${more}` : ''}` } : {}), data: t } : r
+  return r.ok ? { ...r, ...(more || ruleNote || refNote ? { text: `${r.text}${ruleNote ? `\n${ruleNote}` : ''}${refNote ? `\n${refNote}` : ''}${more ? `\n${more}` : ''}` } : {}), data: t } : r
 }
 
 // Stop a finished-but-alive session before anything takes its place (a resume, a fresh session). null = it is gone, go on; an Out =
@@ -782,10 +793,10 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
 // is `verbose: true`. The desk's conversation keeps every reply, so the default stays small (a spec pins the size).
 export const LIST_LINE_MAX = 200
 const LAST_CHARS = 80
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean; rules?: number }): string {
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean; rules?: number; refs?: string }): string {
   const word = `${o.state === 'open' ? (o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
-  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.refs, o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
 async function list(h: Host, home: string, root = '', verbose = false): Promise<Out> {
   const listed = await agents(h)
@@ -826,9 +837,9 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
     const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
-    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.refs ? ` · ${o.refs}` : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
@@ -871,8 +882,9 @@ const CARRY = new Set(['restart', 'reopen', 'start', 'wake', 'resume', 'auto-res
 // ---- the fields each action uses (the tool entry refuses the others: a dropped field is a lost instruction) ----------------------------------
 const TEXTY = ['text', 'message']
 const USES: Record<string, string[]> = {
-  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'keepGoing', 'allowEdit', 'allowCmd', 'needs', 'reason', 'rules', 'inherit'],
+  new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'keepGoing', 'allowEdit', 'allowCmd', 'needs', 'reason', 'rules', 'inherit', 'workitem', 'continues', 'force'],
   rule: [...TEXTY, 'on', 'trigger', 'output'], // a standing rule of one thread (threadrules.ts)
+  set: ['workitem', 'pr'], // the thread's work item / PR (workitems.ts): "none" clears one
   send: TEXTY,
   wake: TEXTY,
   close: [],
@@ -1083,7 +1095,23 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
           await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
+          // a follow-up for the work item of a CLOSED thread reopens that thread by script (a new session with its handover and this text), never a replacement thread
+          // (an open thread that reported done is restarted the same way by wake: the done rule)
+          if (t.state === 'closed' && (t.workItem || t.pr)) {
+            t.state = 'open'
+            const r = await freshSession(h, root, home, t, installed, `It was closed (${refsShort(t)}) and a follow-up for its task arrived: it is reopened with its handover.`, i)
+            if (!fresh(r)) {
+              t.state = 'closed' // nothing was saved: it stays closed
+              return r
+            }
+            return { ...r, text: `${id} was closed: reopened as a new session with its handover and your text (old conversation kept read-only). ${r.text}` }
+          }
           return await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+        }
+        case 'set': {
+          // `set tN workitem|pr <value>`: what a script took from the brief or the user's prompt is corrected here ("none" clears it)
+          const o = await setRefAction(h, home, id, i, x => save(h, home, x as Thread), t)
+          return o.ok ? { ok: true, text: o.text } : err(o.text)
         }
         case 'wake':
           return await wake(h, home, t, { root, current: installed, explicit: true })

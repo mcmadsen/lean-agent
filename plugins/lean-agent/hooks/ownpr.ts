@@ -23,11 +23,13 @@ import { setNotice } from './notices'
 import type { ActionKind, Params } from './deskactions'
 import { ownActive, ownRevoked, parseForgeUrl, recordOwnSent, remoteOf, resolveRef } from './deskwrites'
 import type { ForgeRef } from './deskwrites'
+import { afterRefs, prNumber } from './workitems'
+import type { RefHolder } from './workitems'
 
 export const OWN_MAX_DAY = 20
 export const OWN_STATES = ['Reviewing', 'Active', 'In Progress', 'Resolved']
 export const TEXT_MAX = 2000
-export type OwnPr = { host: 'azure' | 'github'; org: string; project: string; repo: string; id: number; url: string; since: number; how?: string }
+export type OwnPr = { host: 'azure' | 'github'; org: string; project: string; repo: string; id: number; number?: number; url: string; since: number; how?: string }
 // `workItems`: owned by creation or by the user's grant; `briefItems`: the work items the brief names (AB#N / work item N), owned only with the branch token
 type TJ = Record<string, unknown> & { state?: unknown; pr?: OwnPr; workItems?: number[]; briefItems?: number[] }
 const lc = (s: unknown) => String(s ?? '').toLowerCase()
@@ -75,8 +77,9 @@ async function takePr(h: Host, thread: string, ref: Omit<OwnPr, 'since' | 'url' 
   const t = await readT(h, thread)
   if (!t || t.state === 'closed') return null
   if (t.pr && sameRef(t.pr, ref)) return null
-  const pr: OwnPr = { ...ref, url: url.slice(0, 300), since: await h.clock.now(), how }
+  const pr: OwnPr = { ...ref, number: ref.id, url: url.slice(0, 300), since: await h.clock.now(), how } // (`number`: the task's PR reference of workitems.ts, same field)
   await writeJson(h, await tfile(h, thread), { ...t, pr })
+  await afterRefs(h, await homeDir(h), { ...(t as RefHolder), id: thread, pr: pr as unknown as Record<string, unknown> }, { wi: (t as RefHolder).workItem?.id, pr: prNumber(t as RefHolder) }).catch(() => undefined) // the WI -> threads map follows the PR
   const cfg = await ownConfig(h)
   if (!cfg.on) return null
   const line = ownLine(thread, pr)

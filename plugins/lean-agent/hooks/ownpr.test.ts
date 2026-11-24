@@ -259,7 +259,7 @@ test('through lean_thread: new with pr owns it and says how; a brief that mentio
   const said = await leanThread(h.host, '/p', { action: 'new', title: 'mention', text: 'look at PR 4321 for me', project: 'app' })
   expect(said.ok, said.text).toBe(true)
   expect(said.text).toContain('brief mentions PR 4321: it is not owned; pass pr to let t1 reply without a question')
-  expect(JSON.parse(h.files.get(`${L}/threads/t1/thread.json`)!).pr).toBeUndefined()
+  expect(JSON.parse(h.files.get(`${L}/threads/t1/thread.json`)!).pr).toEqual({ number: 4321 }) // 1.0.31: a reference of the task (workitems.ts), no ownership (no id / since)
   const passed = await leanThread(h.host, '/p', { action: 'new', title: 'for it', text: 'answer the comments', project: 'app', pr: 4321 } as any)
   expect(passed.ok, passed.text).toBe(true)
   expect(passed.text).toContain('t2 owns PR 4321 (you passed pr)')

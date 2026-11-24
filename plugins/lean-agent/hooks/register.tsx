@@ -200,7 +200,7 @@ const MEMORY = 'lean_memory' // the desk's memory tool (memorytool.ts); a thread
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss', 'rule'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss', 'rule', 'set'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -218,7 +218,7 @@ const SCHEMA = {
     sha: { type: 'string', description: 'approve-push, push: the full sha the user approved, naming this sha and branch' },
     reason: { type: 'string', description: 'approve-push: why. An expensive model (opus): why sonnet is not enough (required; the request waits for the user\'s Approve)' },
     review: { type: 'object', description: 'new: start a review thread: exactly one of pr, branch, sha (+ base); needs project', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
-    pr: { type: ['object', 'number', 'string'], description: 'new: the PR number or URL the thread is started FOR (it then owns it). push: open a pull request {title, body?, base?, draft?} after the push', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } } },
+    pr: { type: ['object', 'number', 'string'], description: 'new, set: the PR number or URL the thread is started FOR (new: it then owns it; set: "none" clears). push: open a pull request {title, body?, base?, draft?} after the push', properties: { title: { type: 'string' }, body: { type: 'string' }, base: { type: 'string' }, draft: { type: 'boolean' } } },
     model: { type: 'string', enum: ['haiku', 'sonnet', 'opus'], description: 'default sonnet. Never choose opus yourself: only when the user asked, with a reason' },
     effort: { type: 'string', enum: ['low', 'medium', 'high'], description: 'new/start: default high' },
     path: { type: 'string', description: 'project-add: folder (must exist)' },
@@ -227,6 +227,9 @@ const SCHEMA = {
     keepGoing: { type: 'boolean', description: 'new/start: the standing order "keep going, no asks"' },
     rules: { type: 'array', items: { type: 'string' }, description: 'new: standing rules of THIS thread (200 characters each): in its first prompt and every restart; see action rule' },
     inherit: { type: ['string', 'boolean'], description: 'new: "tN" (or true with tN): carry that thread\'s rules over, ONLY when the user said so in their own words' },
+    workitem: { type: ['number', 'string'], description: 'new, set: the task\'s work item (id or URL; set: "none" clears). The mod also takes WI / PR numbers from the brief and the user\'s prompt and says so' },
+    continues: { type: 'string', description: 'new: "tN", the thread this one follows: it inherits its work item and PR (rules only with inherit)' },
+    force: { type: 'boolean', description: 'new: a thread for a work item that has one; ONLY when the user said "new thread"' },
     trigger: { type: 'string', description: 'rule: after-commit | after-step | before-push | on-pr-open' },
     output: { type: 'string', description: 'rule: the path the thread updates at the trigger (~/...)' },
     allowEdit: { type: 'array', items: { type: 'string' }, description: 'ignored' },
