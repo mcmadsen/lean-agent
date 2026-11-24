@@ -186,7 +186,6 @@ export function checkPaths(paths: string[], files: string[] | null): { keep: str
   }
   return { keep, notes }
 }
-const GENERIC = new Set(['logger', 'log', 'metric', 'comment', 'mock', 'candidate', 'test', 'value', 'field', 'name', 'code', 'function', 'file', 'check', 'add', 'change'])
 // derived globs: the finding's own file, else the top 3 directories whose file names the lesson's words match
 export function derivePaths(text: string, files: string[], file = ''): { paths: string[]; how: string } {
   const low = lowFiles(files)
@@ -667,8 +666,77 @@ async function learnTool(h: Host, project: string, i: any): Promise<{ ok: boolea
   return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
 }
 
+// ---- audit and repair of a store whose lines were learned before paths were validated ------------------------------------------------
+// lessons-check is read-only; lessons-repair writes the derived globs into the project's own local store file (a .bak copy first; never remote).
+const GENERIC_WORDS = new Set(['logger', 'loggers', 'logging', 'logged', 'log', 'logs', 'metric', 'metrics', 'comment', 'comments', 'mock', 'mocks', 'mocking', 'candidate', 'candidates', 'test', 'tests', 'value', 'values', 'field', 'fields', 'name', 'names', 'code', 'function', 'functions', 'file', 'files', 'check', 'checks', 'add', 'change', 'changes'].flatMap(w => [w, stem(w)]))
+type AuditRow = { l: Lesson; junk: string; generic: boolean; suggest: string[]; how: string }
+async function auditRows(h: Host, project: string, repo: string): Promise<{ rows: AuditRow[]; files: string[] | null; liveN: number; total: number }> {
+  const all = await readLessons(h, project)
+  const lv = live(all).filter(l => l.family === 'review-checklist')
+  const files = await repoFiles(h, repo)
+  const rows: AuditRow[] = []
+  for (const l of lv) {
+    const c = checkPaths(l.paths, files)
+    const bad = l.broad ? '' : !l.paths.length ? 'empty paths' : c.notes.some(n => n.includes('rejected')) || !c.keep.length ? `junk paths (${l.paths.slice(0, 3).join(', ')})` : ''
+    const strong = l.keywords.filter(isStrong)
+    const generic = !strong.length && l.keywords.filter(k => !isStrong(k) && !GENERIC_WORDS.has(k)).length < 2 && !c.keep.length
+    if (!bad && !generic) continue
+    let suggest: string[] = []
+    let how = ''
+    if (files) {
+      const d = c.keep.length ? { paths: [] as string[], how: '' } : derivePaths(l.text, files)
+      suggest = [...c.keep, ...d.paths].slice(0, 6)
+      how = c.keep.length ? 'the valid paths it has' : d.how
+    }
+    rows.push({ l, junk: bad, generic, suggest, how })
+  }
+  return { rows, files, liveN: lv.length, total: all.length }
+}
+async function checkTool(h: Host, project: string, repo: string): Promise<{ ok: boolean; text: string }> {
+  const a = await auditRows(h, project, repo)
+  const ids = (xs: AuditRow[]) => xs.map(r => `#${r.l.id}`).join(' ')
+  const junk = a.rows.filter(r => r.junk)
+  const gen = a.rows.filter(r => r.generic)
+  const out = [`review lessons of ${project}: ${a.total} lines (${a.liveN} live checklist lines checked${a.files ? `, paths matched against ${a.files.length} repo files` : ', no repo read: syntax only, no suggestions: pass repo'})`]
+  out.push(`empty or junk paths: ${junk.length}${junk.length ? ` (${ids(junk)})` : ''}`, `only generic words (logger, metric, comment, mock, candidate ...) and no path: ${gen.length}${gen.length ? ` (${ids(gen)})` : ''}`)
+  for (const r of a.rows.slice(0, 40)) out.push(`#${r.l.id} [${r.l.topic}] ${r.junk || 'generic words only'}: ${r.l.text.slice(0, 80)}\n    suggest ${r.suggest.length ? `${r.suggest.join(', ')} (${r.how})` : a.files ? 'nothing found: give it a file or paths, or broad: true (lessons-rm to drop it)' : '(needs the repo)'}`)
+  if (a.rows.length > 40) out.push(`... and ${a.rows.length - 40} more`)
+  out.push(a.rows.length ? 'Nothing was changed. lessons-repair writes the suggested globs (a .bak copy of the store file is kept; lessons-undo reverts the batch).' : 'Every live checklist line has a usable path or words.')
+  return { ok: true, text: out.join('\n') }
+}
+async function repairTool(h: Host, project: string, repo: string): Promise<{ ok: boolean; text: string }> {
+  if (!repo.startsWith('/')) return { ok: false, text: 'lessons-repair needs repo (an absolute path) or a registered project: the globs are derived from its files' }
+  const home = await homeDir(h)
+  const now = await h.clock.now()
+  const files = await repoFiles(h, repo)
+  if (!files) return { ok: false, text: `lessons-repair: git ls-files failed in ${repo}: nothing changed` }
+  return withFolderLock(h, lockOf(home, project), async () => {
+    const a = await auditRows(h, project, repo)
+    const todo = a.rows.filter(r => r.junk && r.suggest.length)
+    if (!todo.length) return { ok: true, text: `lessons-repair: nothing to repair (${a.rows.filter(r => r.junk).length} line(s) with junk paths, none with a derivable glob); nothing changed` }
+    const file = lessonFile(home, project)
+    const raw = await h.fs.read(file).catch(() => null)
+    let bak = `${file}.bak`
+    if (await h.fs.exists(bak).catch(() => false)) bak = `${file}.bak.${now}` // (the first backup is the untouched original: never overwritten)
+    if (typeof raw === 'string') await atomicWrite(h, bak, raw)
+    const all = await readLessons(h, project)
+    const ops: Op[] = []
+    const lines: string[] = []
+    for (const r of todo) {
+      const l = all.find(x => x.id === r.l.id && x.text === r.l.text && !x.dropped)
+      if (!l) continue
+      ops.push({ kind: 'update', id: l.id, old: { ...l } })
+      lines.push(`#${l.id}: ${l.paths.length ? l.paths.join(', ') : '(none)'} -> ${r.suggest.join(', ')} (${r.how})`)
+      l.paths = r.suggest
+    }
+    await logBatch(h, home, project, ops, now) // (the undo entry first)
+    await writeLessons(h, home, project, all)
+    return { ok: true, text: `lessons-repair: ${ops.length} line(s) got paths in ${file}; the copy before is ${bak} (lessons-undo reverts the batch). Nothing remote was touched.\n${lines.slice(0, 40).join('\n')}${lines.length > 40 ? `\n... and ${lines.length - 40} more` : ''}` }
+  })
+}
+
 // ---- the lean_review actions of the lesson store (reviewtool.ts hands them over; null = not one of mine) ------------------------------
-export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify']
+export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'lessons-check', 'lessons-repair']
 export async function lessonsTool(h: Host, project: string, i: any): Promise<{ ok: boolean; text: string } | null> {
   const action = typeof i?.action === 'string' ? i.action.trim() : ''
   if (!LESSON_ACTIONS.includes(action)) return null
@@ -680,6 +748,8 @@ export async function lessonsTool(h: Host, project: string, i: any): Promise<{ o
   if (action === 'lessons-list') return { ok: true, text: await listLessons(h, project) }
   if (action === 'lessons-rm') return str(i.which) ? removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
   if (action === 'lessons-undo') return undoLessons(h, project)
+  if (action === 'lessons-check') return checkTool(h, project, await repoOf(h, project, str(i.repo) || undefined))
+  if (action === 'lessons-repair') return repairTool(h, project, await repoOf(h, project, str(i.repo) || undefined))
   const repo = await repoOf(h, project, str(i.repo) || undefined)
   if (!repo.startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path) or a registered project' }
   return { ok: true, text: (await verifyLessons(h, project, repo, i.apply === true)).lines.join('\n') }

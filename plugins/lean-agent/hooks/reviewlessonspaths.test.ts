@@ -89,3 +89,61 @@ test('learn without a repo to read: the syntax is checked, the lesson is stored,
   expect((await readLessons(h.host, 'proj'))).toHaveLength(1)
   expect(makeLesson(1, 'review-checklist', 'x', { source: 't', added: '2026-01-01' }).paths).toEqual([])
 })
+
+test('lessons-check lists junk and empty paths and generic-only lines with a derived suggestion, changing nothing; lessons-repair keeps a .bak and writes the globs; undo reverts', { timeoutMs: 20_000 }, async () => {
+  const { h, tool } = rig([...TREE, 'src/lib/logger.ts'])
+  const mk = (id: number, text: string, paths: string[], extra: Record<string, unknown> = {}) => ({ ...makeLesson(id, 'review-checklist', text, { source: 't', added: '2026-01-01' }), paths, ...extra })
+  const rows = [
+    mk(1, 'When changing vaultId/groupId handling, check the vault group membership', ['vaultId/groupId']),
+    mk(2, 'Prefer the logger over a mock comment candidate', []),
+    mk(3, 'Before adding a date parser, reuse the dates helper', ['src/lib/dates.ts']),
+    mk(4, 'Never ship a feature flag without an owner', [], { broad: true }),
+    mk(5, 'Phoneless/SSO users must not hit the SMS step', ['Phoneless/SSO']),
+    mk(6, 'An old vault line', ['vaultId/groupId'], { dropped: '2026-02-01' }),
+  ]
+  const STORE = `${L}/proj/review-lessons.jsonl`
+  const before = rows.map(r => JSON.stringify(r)).join('\n') + '\n'
+  h.files.set(STORE, before)
+  const c = await tool({ action: 'lessons-check' })
+  expect(c.ok).toBe(true)
+  expect(c.text).toContain('6 lines (5 live checklist lines checked, paths matched against 8 repo files)')
+  expect(c.text).toContain('empty or junk paths: 3 (#1 #2 #5)')
+  expect(c.text).toContain('only generic words')
+  expect(c.text).toMatch(/generic words \(logger, metric, comment, mock, candidate \.\.\.\) and no path: 1 \(#2\)/)
+  expect(c.text).toContain('#1 [other] junk paths (vaultId/groupId)')
+  expect(c.text).toContain('suggest src/vault/** (the words of the line matched file names in src/vault)')
+  expect(c.text).toContain('suggest src/lib/**')
+  expect(c.text).toContain('nothing found: give it a file or paths, or broad: true')
+  expect(c.text).not.toContain('#3 ')
+  expect(c.text).not.toContain('#4 ')
+  expect(c.text).not.toContain('#6 ')
+  expect(h.files.get(STORE)).toBe(before) // read-only
+  expect(h.files.has(`${STORE}.bak`)).toBe(false)
+  const r = await tool({ action: 'lessons-repair' })
+  expect(r.ok).toBe(true)
+  expect(r.text).toContain('2 line(s) got paths')
+  expect(r.text).toContain('Nothing remote was touched')
+  expect(h.files.get(`${STORE}.bak`)).toBe(before)
+  const after = await readLessons(h.host, 'proj')
+  const p = (id: number) => after.find(l => l.id === id)!.paths
+  expect(p(1)).toEqual(['src/vault/**'])
+  expect(p(2)).toEqual(['src/lib/**'])
+  expect(p(3)).toEqual(['src/lib/dates.ts'])
+  expect(p(4)).toEqual([])
+  expect(p(5)).toEqual(['Phoneless/SSO']) // (nothing derivable: left for the learner)
+  expect(p(6)).toEqual(['vaultId/groupId'])
+  // a second repair finds nothing derivable and keeps the first backup
+  const again = await tool({ action: 'lessons-repair' })
+  expect(again.text).toContain('nothing to repair')
+  expect(h.files.get(`${STORE}.bak`)).toBe(before)
+  expect((await tool({ action: 'lessons-check' })).text).toContain('empty or junk paths: 1 (#5)')
+  // undo brings the old paths back
+  expect((await tool({ action: 'lessons-undo' })).ok).toBe(true)
+  expect((await readLessons(h.host, 'proj')).find(l => l.id === 1)!.paths).toEqual(['vaultId/groupId'])
+  // repair needs a repo to derive from
+  const none = rig(null)
+  none.h.files.set(STORE, before)
+  const nr = await none.tool({ action: 'lessons-repair' })
+  expect(nr.ok).toBe(false)
+  expect(none.h.files.get(STORE)).toBe(before)
+})

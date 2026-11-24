@@ -53,7 +53,9 @@ roles: desk, thread
 5. Manage the store with `lean_review`: `lessons-list`, `lessons-rm` (`which` = the number or a unique piece of text),
    `lessons-undo` (the last batch), `lessons-verify` (`repo` = absolute path; flags helper lines whose code path or symbol
    cannot be found; `apply: true` removes them; run it after a refactor). Nothing is deleted for good: a removed line is
-   marked dropped and `lessons-undo` brings it back.
+   marked dropped and `lessons-undo` brings it back. `lessons-check` (read-only; `repo` as above) lists lines with empty or junk paths or
+   only generic words, with the derived globs; `lessons-repair` writes them into the project's local store (a `.bak` copy is kept). Run
+   them only when the user asks.
 6. Report which themes were added, which skipped, how many lines went into the store (and how many were duplicates), which helpers were
    refused, which lines went to an area rule, and the comment counts: the last line of the `learn` answer gives them from the `prs`
    fetch ("comments seen N, kept K; excluded: the owner's own A, system threads B, deleted C; dropped as approval D, as typo fix E");
