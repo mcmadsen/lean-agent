@@ -8,6 +8,7 @@ import type { Inbox, Thread } from './threads'
 import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, verifyRules } from './rules'
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
+import { rememberTool } from './memorytool'
 import { markWaiting, readWaiting } from './threadstate'
 import { answerInfo, clearUnverified, markMsgRead } from './msgstate'
 import { PROSE_REPLY, proseRequest } from './proserequest'
@@ -160,7 +161,7 @@ export const THREAD_TOOLS: Tool[] = [
   { name: 'lean_report', description: 'Report progress or the result to the desk. state: working | blocked | done | waiting (only when restarted while the desk still holds your open question: "still waiting on <id>"). Never report a checkpoint or your context size: the mod does it. A request that needs the user\'s answer or approval goes out as lean_ask or lean_report with `action`, never as plain prose in a working report. A done report is the handover for whoever continues (branch, worktree, last commit, pushed or not, open items, next step) and ends this session.', inputSchema: obj({ text: { type: 'string' }, state: { type: 'string', enum: ['working', 'blocked', 'done', 'waiting'] }, superseded: { type: 'boolean', description: 'true: a later message from the user supersedes the brief (say which in text)' }, important: { type: 'boolean', description: 'true: a working report the desk should see at once' }, approval: { type: 'string', description: 'blocked only: the exact command the permission check denied and the user must approve in YOUR session' }, action: { type: 'object', description: 'blocked only: a remote write you may not make, for the DESK to send after the user said yes (kinds and params: your guide). You get the result as a message', properties: { kind: { type: 'string', enum: THREAD_KINDS() }, params: { type: 'object' }, items: { type: 'array', description: 'batch: up to 10 {kind, params} (60 PR comments)', items: { type: 'object' } }, continueOnError: { type: 'boolean' }, why: { type: 'string', description: 'one line: why' } }, required: ['kind'] } }, ['text']) },
   { name: 'lean_ask', description: 'Ask the user a question through the desk, with optional answer options.', inputSchema: obj({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } } }, ['question']) },
   { name: 'lean_goal', description: 'Update the goal this thread serves (one line).', inputSchema: obj({ update: { type: 'string' } }, ['update']) },
-  { name: 'lean_remember', description: 'Save a durable fact for future sessions.', inputSchema: obj({ text: { type: 'string' }, project: { type: 'string' } }, ['text']) },
+  { name: 'lean_remember', description: 'Remember a rule, fact, decision, preference or correction (max 200 chars, no secrets). scope: project:<name> | task:<id> (default this thread). trigger: after-commit | after-step | before-push | on-pr-open; output: path to update.', inputSchema: obj({ text: { type: 'string' }, scope: { type: 'string' }, kind: { type: 'string' }, trigger: { type: 'string' }, output: { type: 'string' } }, ['text']) },
   { name: 'lean_compare', description: 'Compare a project clean vs as a thread (the compare skill): mode task (costs money: only when the brief says so), overhead, history.', inputSchema: obj({ project: { type: 'string' }, mode: { type: 'string', enum: ['task', 'overhead', 'history'] }, task: { type: 'string', description: 'task mode: the read-only task' }, model: { type: 'string' }, maxUsd: { type: 'number', description: 'task mode: cap per run' } }, ['mode']) },
   {
     name: 'lean_rules',
@@ -547,8 +548,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
     }
     if (name === 'lean_remember') {
       if (!str(i.text)) return { ok: false, text: 'lean_remember needs text' }
-      await appendJsonl(h, `${leanDir(home)}/memory/notes.jsonl`, { ts, from: id, project: str(i.project), text: str(i.text) })
-      return { ok: true, text: 'remembered' }
+      return rememberTool(h, home, id, i) // the one memory store (memory.ts): scripts decide scope, refusals, dedup and the cap
     }
     if (name === 'lean_rules') {
       const th = await readJson<Partial<Thread>>(h, `${tdir(home, id)}/thread.json`, {})

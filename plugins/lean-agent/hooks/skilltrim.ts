@@ -15,7 +15,7 @@ export const SKILL_ROLES: Record<string, Role[]> = {
   allow: ['desk'], 'allow-edit': ['desk'], list: ['desk'], new: ['desk'], revoke: ['desk'], 'revoke-edit': ['desk'], threads: ['desk'], // commands/*.md
   branch: ['thread'], budget: ['desk', 'thread'], compare: ['desk', 'thread'], config: ['desk'], doctor: ['desk'], feedback: ['desk', 'thread'],
   find: ['desk', 'thread'], goals: ['desk', 'thread'], handover: ['desk', 'thread'], 'lean-mode': ['thread'], learn: ['thread'],
-  pr: ['desk', 'thread'], review: ['desk', 'thread'], 'review-learn': ['desk', 'thread'], 'rules-pr': ['desk', 'thread'],
+  pr: ['desk', 'thread'], remember: ['desk', 'thread'], review: ['desk', 'thread'], 'review-learn': ['desk', 'thread'], 'rules-pr': ['desk', 'thread'],
   scripts: ['desk', 'thread'], stats: ['desk', 'thread'], thread: ['desk'], todo: ['desk', 'thread'], worktree: ['thread'],
 }
 // does a lean-agent skill name (`lean-agent:review`) belong in the listing of this role

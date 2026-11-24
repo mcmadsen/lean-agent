@@ -167,8 +167,8 @@ test('a second session.start in the same process registers by name again, never 
   const s = await start($, on, '/h/lean-agent-desk')
   await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
   // the engine replaces a tool registered under the same name: two registrations of a name are one tool
-  expect(new Set(s.reg).size).toBe(4) // lean_thread, lean_doctor, lean_script, lean_config
-  expect(s.reg.length).toBe(8)
+  expect(new Set(s.reg).size).toBe(5) // lean_thread, lean_doctor, lean_script, lean_config, lean_memory
+  expect(s.reg.length).toBe(10)
 })
 
 // the AgentInfo the engine really returned for a lean-agent:explorer spawn (live run, claude 2.1.327): `type` carries the

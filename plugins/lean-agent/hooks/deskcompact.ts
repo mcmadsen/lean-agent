@@ -25,6 +25,7 @@ import { readConfig } from './budget'
 import { deskState } from './delivery'
 import type { DeskRec } from './delivery'
 import { openQuestions } from './extras'
+import { indexText } from './memoryindex'
 import { listActions, standingView } from './deskactions'
 import { writesView } from './deskwrites'
 import { readSnapshot } from './snapshot'
@@ -396,9 +397,11 @@ async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid:
   const read = (await readJson<{ n?: number }>(h, `${deskState(home)}/inbox-read.json`, {})).n || 0
   const unread = Math.max(0, recs.length - read)
   const when = new Date(await h.clock.now()).toISOString()
+  const deskMem = await indexText(h, home, 'desk').catch(() => '')
   const parts = [
     `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'})`,
     `This desk session replaces the previous one (restarted, or its context was too large). Read this at the start, then carry on; the full report texts are in ${deskState(home)}/inbox.jsonl (${unread} row(s) unread), earlier handoff notes in ${deskState(home)}/notes.md.`,
+    deskMem ? `## Standing orders\n${deskMem}` : '', // the desk's own and the user's habits (memoryindex.ts: its own token budget)
     `## Unanswered thread questions\n${qs.length ? qs.join('\n') : 'none'}`,
     `## Pending requests (wait for the user's yes)\n${reqs.length ? reqs.join('\n') : 'none'}`,
     `## Pending approvals\n${waiting.length ? waiting.join('\n') : 'none known to the mod (a push approval the user gave in the old chat is single use: ask again if needed)'}`,

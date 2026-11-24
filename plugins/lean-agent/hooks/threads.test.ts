@@ -667,7 +667,8 @@ test('reopen of a closed thread starts a NEW session (claude --bg, never --resum
   h.files.set('/h/.lean-agent/worktrees.json', JSON.stringify({ 'app/fix-login': { path: '/h/.lean-agent/worktrees/app/fix-login', repo: '/r/app', branch: 'fix-login', thread: 't1' }, 'app/other': { path: '/w/other', branch: 'other', thread: 't2' } }))
   h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: 'login fixed and reviewed', ts: 1 } }))
   h.files.set(tfile(h, 'notes.md'), '# notes\nthe flaky part is the clock\n')
-  h.files.set('/h/.lean-agent/memory/notes.jsonl', JSON.stringify({ from: 't1', text: 'api uses pnpm' }) + '\n' + JSON.stringify({ from: 't2', text: 'someone elses' }) + '\n')
+  const mem = (id: string, scope: string, text: string) => ({ id, scope, kind: 'rule', text, created: 1, source: 'desk', uses: 0, lastUsed: 0, status: 'active' })
+  h.files.set('/h/.lean-agent/memory/items.json', JSON.stringify({ next: 3, items: [mem('m1', 'thread:t1', 'api uses pnpm'), mem('m2', 'thread:t2', 'someone elses')] })) // the standing orders (memory.ts): t1's own, never t2's
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', [
     { ts: 1, from: 't1', kind: 'report', text: 'first look done', state: 'working' },
     { ts: 2, from: 't2', kind: 'report', text: 'unrelated thread', state: 'done' },

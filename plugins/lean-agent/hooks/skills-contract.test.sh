@@ -245,4 +245,11 @@ done
 grep -qF 'exactly the options Approve, Not now' "$here/config/SKILL.md" || fail "the config skill must name the Approve / Not now question"
 # the settings registry: every config key the hooks read is in hooks/configkeys.ts, every entry has a description, the README table matches (scripts/config-table.mjs)
 if [ -f "$root/../../scripts/config-table.mjs" ]; then node "$root/../../scripts/config-table.mjs" --check || fail "settings registry or README table (see above; regenerate with: node scripts/config-table.mjs --write)"; fi
+# 1.0.31: memory is ONE store: both guides say WHEN to remember and what never goes in (the skill carries the same), and the skill is short
+grep -qF 'only a standing rule or preference, a correction the user repeats, a decision with its reason, or a fact the user had to repeat (200 characters at most; no secrets, nothing the repo shows)' "$root/templates/front-desk.md" || fail "front-desk.md lacks the memory line (when to remember, what never)"
+grep -qF 'only a standing preference, a correction the user repeats, a decision with its reason or a fact the user had to repeat (200 characters at most; no secrets, nothing the repo shows)' "$root/templates/thread.md" || fail "thread.md lacks the memory line (when to remember, what never)"
+need remember 'ONE private store'
+need remember 'never CLAUDE.md'
+need remember 'Never:'
+[ "$(wc -l < "$here/remember/SKILL.md")" -le 30 ] || fail "the remember skill must stay one screen (30 lines)"
 echo "ok skills-contract"

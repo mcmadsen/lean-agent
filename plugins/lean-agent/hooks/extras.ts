@@ -4,23 +4,14 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, thread
 import type { Host } from './state'
 import type { Role } from './role'
 import { deskState } from './delivery'
-import { retireText } from './forgewrite'
+import { sessionIndex } from './memoryindex'
 
 // ---- memory (prompt.compose, session section) ----------------------------------------------------------------
-type Note = { ts?: number; from?: string; project?: string; type?: string; text: string }
+// 1.0.31: the one memory store (memory.ts): the standing orders of the desk or a thread as a session section, under a token budget (memoryindex.ts);
+// facts and decisions are not in it (found by words or reminded by relevance)
 export async function memorySection(h: Host, role: Role): Promise<string | null> {
-  if (role.kind !== 'thread') return null
-  const home = await homeDir(h)
-  const th = await readJson<{ project?: string }>(h, `${threadsDir(home)}/${role.id}/thread.json`, {})
-  const notes = (await readJsonl<Note>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(n => n && typeof n.text === 'string' && n.text.trim() && (!n.project || n.project === th.project)).map(n => ({ ...n, text: retireText(n.text) })) // (a forge write by script is retired, not passed on)
-  if (!notes.length) return null
-  let out = ''
-  for (const n of notes.slice(-20).reverse()) {
-    const line = `- ${n.text.trim().replace(/\s+/g, ' ').slice(0, 300)}\n`
-    if (out.length + line.length > 2000) break
-    out = line + out
-  }
-  return `# lean-agent memory${th.project ? ` (${th.project})` : ''}\nDurable facts earlier sessions saved; lean_remember adds one.\n${out}`
+  const ix = await sessionIndex(h, role)
+  return ix ? `# lean-agent memory\n${ix}` : null
 }
 
 // ---- handoff notes on compaction -----------------------------------------------------------------------------

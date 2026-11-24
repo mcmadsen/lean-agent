@@ -71,9 +71,12 @@ test('1.0.24: a remembered item that describes a forge write by script is retire
   const rows = [{ ts: 1, from: 't1', text: old }, { ts: 2, from: 't1', text: 'the build uses pnpm' }, { ts: 3, from: 't2', text: 'use gh pr comment 3 --body x for notes' }]
   h.files.set('/h/.lean-agent/memory/notes.jsonl', rows.map(r => JSON.stringify(r)).join('\n') + '\n')
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app' }))
+  // 1.0.31: what a thread is given is its standing orders (memory.ts); an order that describes a forge write by script is retired as it is shown
+  const item = (id: string, text: string) => ({ id, scope: 'thread:t1', kind: 'rule', text, created: 1, source: 'thread', uses: 0, lastUsed: 0, status: 'active' })
+  h.files.set('/h/.lean-agent/memory/items.json', JSON.stringify({ next: 4, items: [item('m1', old.slice(0, 190)), item('m2', 'the build uses pnpm'), item('m3', 'use gh pr comment 3 --body x for notes')] }))
   const before = retiredAtLoad()
   const sec = String(await memorySection(h.host, { kind: 'thread', id: 't1' } as any))
-  expect(sec).toContain('- the build uses pnpm')
+  expect(sec).toContain('the build uses pnpm')
   expect(sec).toContain('(retired: forge writes go through action kinds)')
   expect(sec).not.toContain('curl')
   expect(sec).not.toContain('Bearer')
