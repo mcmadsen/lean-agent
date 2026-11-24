@@ -9,7 +9,7 @@ import { logRefusal } from './feedback'
 import { noteReviewed } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
-import { changeScope, changedText, droppedText } from './reviewchange'
+import { changeScope, changedText, contextOf, droppedText } from './reviewchange'
 import { areaOf, areasOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
 import { STEPS_BY_JOB, stepBudget } from './jobs'
 import { loadOrch } from './orchestrate'
@@ -296,6 +296,9 @@ async function blockOf(h: Host, thread: string, v: unknown): Promise<unknown> {
   return typeof t === 'string' ? t : v
 }
 
+// config review.contextLines (default 0): lines of context around each changed hunk that still count as "in the change"
+const contextCfg = async (h: Host): Promise<number> => contextOf(((await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { contextLines?: unknown } })?.review?.contextLines)
+
 // The changed files and line ranges of the range a merge or record is about (best effort: null when the range cannot be read)
 async function changePrep(h: Host, project: string, i: any, thread: string): Promise<Context['prep'] | null> {
   try {
@@ -321,7 +324,7 @@ async function doMerge(h: Host, project: string, i: any, thread = ''): Promise<O
   const prep = await changePrep(h, project, i, thread)
   let droppedNote = ''
   if (prep) {
-    const cs = changeScope(result.findings, prep)
+    const cs = changeScope(result.findings, prep, await contextCfg(h))
     result.findings = cs.kept
     droppedNote = droppedText(cs.dropped)
   }
@@ -388,7 +391,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const light = str(i.level).toLowerCase() === 'light' || (await preparedLevel(h, project, sha)) === 'light'
   const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
   // only changed code counts (reviewchange.ts): a finding about a file the change does not touch, or a line outside every changed hunk (+-3), is dropped and counted
-  const cs = failed ? null : changeScope(res.findings, ctx.prep)
+  const cs = failed ? null : changeScope(res.findings, ctx.prep, await contextCfg(h))
   if (cs) res.findings = cs.kept
   const droppedNote = cs ? droppedText(cs.dropped) : ''
   // an area record: the checks (new symbols, edited tests) cover this area's files only
