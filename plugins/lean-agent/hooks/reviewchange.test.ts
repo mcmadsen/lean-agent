@@ -1,8 +1,10 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { threadTool } from './delivery'
-import { analyzeDiff } from './reviewprep'
-import { changeScope, changedText, droppedText, insideChange } from './reviewchange'
+import { analyzeDiff, perFileStats } from './reviewprep'
+import { changeScope, changedText, contextOf, dropNotes, droppedText, insideChange, scopeLine, scopedOf, withArea } from './reviewchange'
+import { bigText, partition as part } from './reviewarea'
+import { running, setRunning } from './skew'
 
 const L = '/h/.lean-agent'
 const H2 = 'c'.repeat(40)
@@ -28,35 +30,69 @@ test('the hunk ranges are right for added, modified, deleted, renamed files and 
   expect(p.hunks['src/cut.ts']).toEqual([[19, 20]]) // lines removed inside a file: the spot
 })
 
-test('findings in unchanged files and outside the hunks (+-3) are dropped and counted; changed lines, deletions and cross-file categories stay', async () => {
+const f = (path: string, line: number, category = 'correctness', text = 'it breaks') => ({ n: 1, severity: 'major', category, path, line, text, fix: '' })
+
+test('findings outside the changed lines (context 0) are dropped and counted; changed lines and deletions stay; context lines widen it', async () => {
   const prep = await analyzeDiff(DIFF, async () => '')
-  const f = (path: string, line: number, category = 'correctness', text = 'it breaks') => ({ n: 1, severity: 'major', category, path, line, text, fix: '' })
-  const kept = [f('src/mod.ts', 11), f('src/mod.ts', 15), f('src/mod.ts', 7), f('src/new.ts', 3), f('src/gone.ts', 2), f('src/gone.ts', 0), f('src/new-name.ts', 1), f('src/cut.ts', 21), f('/r/app/src/mod.ts', 12), f('./src/mod.ts', 0)]
-  const out = [f('src/mod.ts', 16), f('src/mod.ts', 6), f('src/new.ts', 9), f('src/other.ts', 3), f('lib/util.ts', 40), f('src/cut.ts', 30)]
+  const kept = [f('src/mod.ts', 11), f('src/mod.ts', 10), f('src/mod.ts', 12), f('src/new.ts', 3), f('src/gone.ts', 2), f('src/gone.ts', 0), f('src/new-name.ts', 1), f('src/cut.ts', 20), f('/r/app/src/mod.ts', 12)]
+  const out = [f('src/mod.ts', 13), f('src/mod.ts', 9), f('src/new.ts', 9), f('src/other.ts', 3), f('lib/util.ts', 40), f('src/cut.ts', 30), f('./src/mod.ts', 0)]
   const r = changeScope([...kept, ...out], prep)
   expect(r.kept.map(x => `${x.path}:${x.line}`)).toEqual(kept.map(x => `${x.path}:${x.line}`))
-  expect(r.dropped.n).toBe(6)
-  expect(r.dropped.files).toEqual(['src/mod.ts', 'src/new.ts', 'src/other.ts', 'lib/util.ts', 'src/cut.ts'])
-  expect(droppedText(r.dropped)).toBe('6 findings dropped: outside the change (files: src/mod.ts, src/new.ts, src/other.ts, lib/util.ts, src/cut.ts)')
+  expect(r.dropped.n).toBe(7)
+  expect(r.dropped.files).toEqual(['src/mod.ts', 'src/new.ts', 'src/other.ts', 'lib/util.ts', 'src/cut.ts', 'src/mod.ts (no line)'])
+  expect(r.dropped.notInPr).toEqual(['src/other.ts', 'lib/util.ts'])
+  expect(r.dropped.notes).toContain('src/mod.ts:13 is outside the changed ranges 10-12') // names the ranges that would have been accepted
+  expect(r.dropped.notes).toContain('src/other.ts:3 is in a file the PR does not change')
+  expect(r.dropped.notes).toContain('src/mod.ts has no line: name a changed line (accepted: 10-12)')
+  expect(dropNotes(r.dropped, 2)).toBe('dropped: src/mod.ts:13 is outside the changed ranges 10-12; src/mod.ts:9 is outside the changed ranges 10-12; and 5 more')
+  expect(changeScope([f('src/mod.ts', 20)], prep, 3).dropped.notes).toEqual(['src/mod.ts:20 is outside the changed ranges 7-15'])
+  expect(droppedText(r.dropped)).toBe('7 findings dropped: outside the change (files: src/mod.ts, src/new.ts, src/other.ts, lib/util.ts, src/cut.ts, src/mod.ts (no line))')
   expect(droppedText({ n: 0, files: [] })).toBe('')
   expect(droppedText({ n: 1, files: ['a.ts'] })).toBe('1 finding dropped: outside the change (files: a.ts)')
-  // no file: kept only in a cross-file category, and it says so
-  const nofile = changeScope([f('', 0, 'tests', 'no test for the empty case'), f('', 0, 'docs', 'the readme is not updated'), f('', 0, 'scope', 'siblings share it'), f('', 0, 'correctness', 'something somewhere')], prep)
-  expect(nofile.kept.map(x => x.category)).toEqual(['tests', 'docs', 'scope'])
-  expect(nofile.kept[0]!.text).toContain('[cross-file: no file or line]')
-  expect(nofile.crossFile).toBe(3)
-  expect(nofile.dropped).toEqual({ n: 1, files: ['(no file)'] })
-  expect(insideChange('src/mod.ts', 13, prep)).toBe(true)
-  expect(insideChange('src/mod.ts', 16, prep)).toBe(false)
+  expect(insideChange('src/mod.ts', 12, prep)).toBe(true)
+  expect(insideChange('src/mod.ts', 13, prep)).toBe(false)
+  expect(insideChange('src/mod.ts', 13, prep, 3)).toBe(true) // review.contextLines 3
+  expect(insideChange('src/mod.ts', 16, prep, 3)).toBe(false)
+  expect(changeScope([f('src/mod.ts', 15), f('src/mod.ts', 7)], prep, 3).kept.length).toBe(2)
+  expect(changeScope([f('src/mod.ts', 15), f('src/mod.ts', 7)], prep).kept.length).toBe(0)
+  expect(contextOf(undefined)).toBe(0)
+  expect(contextOf(3)).toBe(3)
+  expect(contextOf('3')).toBe(3)
+  expect(contextOf(-1)).toBe(0)
+  expect(contextOf(99)).toBe(0)
 })
 
-test('the text prepare hands the reviewer names the changed files with their ranges, and says to read them first', async () => {
+test('a finding with no file or no line, or about something absent, is dropped; a cross-file category is kept only when it names a changed file', async () => {
   const prep = await analyzeDiff(DIFF, async () => '')
-  const t = changedText(prep)
+  const nofile = changeScope([f('', 0, 'tests', 'no test for the empty case'), f('', 0, 'docs', 'the readme is not updated'), f('', 0, 'scope', 'siblings share it'), f('', 0, 'correctness', 'something somewhere')], prep)
+  expect(nofile.kept).toEqual([])
+  expect(nofile.dropped).toMatchObject({ n: 4, files: ['(no file)'], notInPr: [] })
+  const open = changeScope([f('src/Program.cs', 0, 'security', 'the anonymous Open endpoint has no rate limiting'), f('src/Program.cs', 40, 'security', 'no rate limiting'), f('src/mod.ts', 0, 'correctness', 'it breaks'), f('src/mod.ts', 0, 'completeness', 'missing validation of the input')], prep)
+  expect(open.kept).toEqual([])
+  expect(open.dropped.notInPr).toEqual(['src/Program.cs'])
+  expect(open.dropped.n).toBe(4)
+  const cross = changeScope([f('src/mod.ts', 0, 'tests', 'the new branch is not covered'), f('src/new.ts', 0, 'docs', 'the readme does not mention it'), f('src/mod.ts', 0, 'scope', 'a sibling shares the problem'), f('README.md', 0, 'docs', 'readme not updated'), f('tests', 0, 'tests', 'coverage lost')], prep)
+  expect(cross.kept.map(x => x.category)).toEqual(['tests', 'docs', 'scope'])
+  expect(cross.kept[0]!.text).toContain('[cross-file: names src/mod.ts, no line]')
+  expect(cross.crossFile).toBe(3)
+  expect(cross.dropped.files).toEqual(['README.md', 'tests'])
+})
+
+test('the text prepare hands the reviewer names the changed files with their ranges and the rule, and the hunks within the budget', async () => {
+  const prep = await analyzeDiff(DIFF, async () => '')
+  const t = changedText(prep, { diff: DIFF })
+  expect(t).toContain('CHANGED CODE ONLY (6 changed files')
   expect(t).toContain('src/mod.ts 10-12')
   expect(t).toContain('src/new.ts 1-5')
   expect(t).toContain('src/gone.ts (deleted or no line ranges: the whole file counts)')
-  expect(t).toContain('Read the changed files first, other files only to understand a caller or a definition used in the change')
+  expect(t).toContain('Report only on lines in these ranges; read other files only to understand them, never to report on them; every finding is file:line of a listed range')
+  expect(t).toContain('### src/mod.ts\n-: x\n-: y\n10: x1\n11: y1\n12: z1')
+  expect(t).not.toContain('over the size budget')
+  const big = changedText(prep, { diff: DIFF, budget: 20 })
+  expect(big).toContain('over the size budget')
+  expect(big).toContain('read only these ranges')
+  expect(big).not.toContain('11: y1')
+  expect(changedText(prep, { diff: DIFF, context: 3 })).toContain('(or within 3 lines of it)')
 })
 
 // ---- through the tool: prepare (light too), merge and record ----------------------------------------------------------------
@@ -82,23 +118,88 @@ const tool = (h: any, input: Record<string, unknown>) => threadTool(h.host, 't1'
 const fin = (n: number, path: string, line: number, extra: Record<string, unknown> = {}) => ({ n, severity: 'minor', category: 'correctness', path, line, text: `problem ${n} in the code`, fix: 'fix it', ...extra })
 const block = (findings: unknown[]) => ({ verdict: 'changes-requested', goal: 'g', findings, reuse: [], coverage: [] })
 
-test('prepare (light and full) lists the changed files with their ranges; record and merge drop findings outside the change and say how many', async () => {
+test('prepare (light and full) lists the changed files with their ranges; record and merge drop findings outside the change and say how many', { timeoutMs: 20_000 }, async () => {
   const h = setup()
   for (const level of ['light', 'full']) {
     const p = await tool(h, { action: 'prepare', base: 'main', level })
     expect(p.text).toContain('CHANGED CODE ONLY')
     expect(p.text).toContain('src/a.ts 10-12')
+    expect(p.text).toContain('### src/a.ts\n-: x\n-: y\n10: x1\n11: y1\n12: z1') // the hunks with new-side line numbers
+    expect(p.text).toContain('every finding is file:line of a listed range')
   }
   const r = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 11), fin(2, 'src/untouched.ts', 4), fin(3, 'src/a.ts', 90), fin(4, '', 0, { category: 'tests', text: 'no test for the empty case' })]) })
   expect(r.ok).toBe(true)
-  expect(r.text).toContain('2 findings dropped: outside the change (files: src/untouched.ts, src/a.ts)')
+  expect(r.text).toContain('3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
   expect(r.text).toContain('src/a.ts:11')
-  expect(r.text).not.toContain('src/untouched.ts:4')
-  expect(r.text).toContain('[cross-file: no file or line]')
+  expect(r.text).not.toContain('] src/untouched.ts:4') // (not an open finding; the dropped line names it)
+  expect(r.text).toContain('reviewed 1 changed file (5 lines); 3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
+  expect(r.text).toContain('the reviewer reported on files that are not in the PR: src/untouched.ts')
   const a = block([fin(1, 'src/a.ts', 11), fin(2, 'src/untouched.ts', 4)])
   const b = block([fin(1, 'src/a.ts', 12, { text: 'problem 1 in the code, again' }), fin(2, 'src/elsewhere.ts', 8)])
   const m = await tool(h, { action: 'merge', reviews: [a, b] })
   expect(m.ok).toBe(true)
   expect(m.text).toMatch(/2 findings dropped: outside the change \(files: src\/untouched\.ts, src\/elsewhere\.ts\)/)
   expect(m.text).toContain('top 1 of 1')
+})
+
+test('the summary line says what was reviewed and dropped; a thread older than the filter is told first; review.contextLines widens the range', { timeoutMs: 20_000 }, async () => {
+  const prep = await analyzeDiff(DIFF, async () => '')
+  const cs = changeScope([f('src/mod.ts', 11), f('src/other.ts', 3), f('lib/x.ts', 4)], prep)
+  const s = scopedOf(prep, cs.dropped, '1.0.31')
+  expect(scopeLine(s)).toBe('reviewed 6 changed files (21 lines); 2 findings dropped: outside the change (files: src/other.ts, lib/x.ts)\nthe reviewer reported on files that are not in the PR: src/other.ts, lib/x.ts (dropped)\nthis thread ran lean-agent 1.0.31')
+  expect(scopeLine(scopedOf(prep, { n: 0, files: [] }))).toBe('reviewed 6 changed files (21 lines); 0 findings dropped')
+  const two = withArea(withArea(undefined, 'area-1', s), 'area-2', scopedOf(prep, { n: 1, files: ['a.ts'], notInPr: ['a.ts'] }))
+  expect(two.files).toBe(12)
+  expect(two.dropped).toBe(3)
+  expect(two.notInPr).toEqual(['src/other.ts', 'lib/x.ts', 'a.ts'])
+  const before = running.version
+  const h = setup()
+  try {
+    setRunning('1.0.28')
+    const old = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+    expect(old.text.split('\n')[0]).toBe('this thread runs lean-agent 1.0.28: the changed-code filter needs 1.0.29 or newer: restart it')
+    setRunning('1.0.31')
+    expect((await tool(h, { action: 'prepare', base: 'main', level: 'full' })).text).not.toContain('this thread runs lean-agent')
+  } finally {
+    setRunning(before)
+  }
+  // review.contextLines 3 keeps what context 0 drops
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { contextLines: 3 } }))
+  const w = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14), fin(2, 'src/a.ts', 16)]) })
+  expect(w.text).toContain('1 finding dropped')
+  expect(w.text).toContain('src/a.ts:14')
+  const z = await tool(setup(), { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14)]) })
+  expect(z.text).toContain('1 finding dropped')
+  expect(z.text).not.toContain('] src/a.ts:14')
+})
+
+// ---- 1.0.31: never unfiltered; areas only from changed files ----------------------------------------------------------------
+test('merge and record refuse, and write nothing, when the PR diff cannot be read', { timeoutMs: 20_000 }, async () => {
+  const h = setup()
+  const good = h.git.handler
+  h.git.handler = (a: string[]) => (a.join(' ').includes(' diff ') ? { exitCode: 1, stdout: '' } : good(a, {} as any))
+  const r = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 11)]) })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('could not read the PR diff: review not recorded')
+  expect([...h.files.keys()].some(k => k.includes('/reviews/'))).toBe(false)
+  const m = await tool(h, { action: 'merge', reviews: [block([fin(1, 'src/a.ts', 11)]), block([fin(1, 'src/a.ts', 12, { text: 'another problem' })])] })
+  expect(m.ok).toBe(false)
+  expect(m.text).toContain('could not read the PR diff: review not recorded')
+  // an external record without its prepare (no scratch repository to read) is refused the same way
+  const e = await tool(h, { sha: H2, mode: 'external', review: block([fin(1, 'src/a.ts', 11)]) })
+  expect(e.ok).toBe(false)
+  expect(e.text).toContain('could not read the PR diff: review not recorded')
+})
+
+test('the areas of a large PR are built from the changed files only, and say how many files and lines they hold', async () => {
+  const prep = await analyzeDiff(DIFF, async () => '')
+  const stats = perFileStats(DIFF)
+  const areas = part(stats)
+  const named = areas.flatMap(a => a.keys.map(k => k.key))
+  expect(named.every(k => k === '.' || stats.some(s => s.path.startsWith(`${k}/`)))).toBe(true)
+  expect(areas.reduce((n, a) => n + a.files, 0)).toBe(6)
+  const t = bigText(stats, prep, areas)
+  expect(t).toContain('6 changed files only')
+  expect(t).toContain('changed files,')
+  expect(t).toContain('are in no area and are not reviewed')
 })

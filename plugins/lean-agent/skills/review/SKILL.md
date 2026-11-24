@@ -27,7 +27,7 @@ The desk never reviews itself (it has no reviewer agents and no review tool): it
 
 ## Thread
 
-Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it (the tool drops findings outside the changed lines and counts them).
+Review only what this change adds or changes: existing code is context only; report nothing about a file or line outside the changed hunks; if an unchanged file shows a problem the change makes worse (a caller broken by the change), report it as a finding ON THE CHANGED LINE that causes it (the tool drops findings outside the changed lines and counts them). Every finding is `file:line` of a changed range prepare lists plus a one-line reason: a finding with no changed line, or about something absent (no rate limiting, missing validation), is dropped, never kept as cross-file. Read-only: never pull, merge or rebase the target into the PR; the diff is against the merge base (the guard refuses it in a review thread).
 
 Run in a thread, in the repo or worktree to push. With no argument, or only a base, review this worktree as below. With a PR, branch, sha or
 URL of someone else's work (a review thread the desk started has one in its brief), follow "External review" below, then the steps 2 to 9
@@ -63,7 +63,7 @@ tool's refusal: do what it says.
    (renamed, flipped, deleted, skipped), new parameters with defaults, new module-level state, changed or removed exported symbols,
    the user's declines for this branch, and on a later pass the open findings and the delta since the last reviewed sha. The first
    line is `LEAN-REVIEW-PREP {...}` (the model, the number of runs and why, whether a second opinion comes first, whether this is a
-   re-review; `summary`: level, passes and expected cost). If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
+   re-review; `summary`: level, passes and expected cost). A line before it saying `this thread runs lean-agent <v>: the changed-code filter needs 1.0.29 or newer: restart it`, or a prepare text without `CHANGED CODE ONLY`, means this thread would review unfiltered: stop and tell the user to restart it. If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
    worktree path (git -C <worktree> ...). Print the reviewer line (`reviewer: sonnet x2
    (risk: ...)`, or `reviewer: sonnet (...)`) and the expected cost line so the user sees who reviews, why and what it costs. The reviewer is **always sonnet**; never pass
    `model` to prepare yourself: it is only for a model the brief explicitly names.

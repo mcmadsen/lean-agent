@@ -56,6 +56,7 @@ import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, h
 import { deskStartLines, retiredInfo, retiredLine } from './deskauto'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
+import { saveReviewerBlock } from './reviewsave'
 import { takeTip } from './tips'
 import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
@@ -1542,6 +1543,8 @@ export const register: Register = on => {
       if (classifierDenial(said)) await noteDenied($, role, cwd, deniedSeen, { tool_name: e.tool, tool_use_id: e.toolUseId, tool_input: { subagent_type: e.subagent_type, prompt: e.prompt } }, 'Agent call result', said).catch(() => undefined)
     }
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
+    // the reviewer's JSON block is saved to scratch/review-<area>-<pass>.json before anything cuts the result: a restart of the thread keeps it (reviewsave.ts)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && /(^|:)reviewer$/.test(String(e.subagent_type ?? '')) && r?.deny === undefined && !launch?.async) await saveReviewerBlock(host, role.id, String(e.prompt ?? ''), texts(r?.result).join('\n')).catch(() => undefined)
     await feedbackOf(host, e, r).catch(() => undefined)
     // a worker brief over 1500 characters while the thread has notes / scratch files: one soft hint, point at the file (briefsize.ts)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && octx?.threadDir && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {

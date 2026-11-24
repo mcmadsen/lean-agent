@@ -310,7 +310,7 @@ export function statsText(diff: string, steps: number, max = 40): string {
   const st = perFileStats(diff)
   if (!st.length) return ''
   const rows = st.slice(0, max).map(s => `${s.path} +${s.add}/-${s.del}`).join('; ')
-  return `Changed files (${st.length}, added/removed lines, from the script): ${rows}${st.length > max ? `; and ${st.length - max} more` : ''}.\nRead each changed file once, diff hunks only (git diff of the range for that file), then only the surrounding lines a finding needs; do not explore. You have ${steps} tool calls (the budget of a check job); write the json block when "N tool calls left" appears.`
+  return `Changed files (${st.length}, added/removed lines, from the script): ${rows}${st.length > max ? `; and ${st.length - max} more` : ''}.\nRead each changed file once, diff hunks only (git diff of the range for that file), then only the surrounding lines a finding needs; do not explore. You have ${steps} tool calls (the reviewer's budget); write the json block when "N tool calls left" appears.`
 }
 
 // the lists as the reviewer's brief reads them

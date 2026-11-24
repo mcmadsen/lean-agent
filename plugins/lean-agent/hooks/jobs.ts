@@ -9,6 +9,9 @@ import { mapTexts } from './cap'
 export type Job = 'lookup' | 'edit' | 'run' | 'check'
 export const JOBS: readonly Job[] = ['lookup', 'edit', 'run', 'check']
 export const STEPS_BY_JOB: Record<Job, number> = { lookup: 10, edit: 16, run: 6, check: 10 }
+// the reviewer's tool-call budget: ONE number for the guard, the brief and agents/reviewer.md (a 10-call budget needed ~12 turns: 1.0.31 makes it 16)
+export const REVIEWER_STEPS = 16
+export const reviewerBudget = (ceiling: number): number => Math.min(REVIEWER_STEPS, Math.max(1, ceiling))
 export const STEP_WARN = 0.75 // at this share of the budget the worker's next tool result says how many calls are left
 export const RESULT_LINES = 20
 

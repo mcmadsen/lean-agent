@@ -7,7 +7,7 @@ import type { DeskRec } from './delivery'
 import { leadOf, openItemOf, restartWaiting } from './waitrestart'
 import { GIT_LINE, readSnapshot, snapshotFile, snapshotText } from './snapshot'
 import { retireText } from './forgewrite'
-import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
+import { HANDOVER_RULE, NOTES_FILE, reviewBlock, scratchList, scratchNotes } from './scratchnotes'
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
 
@@ -211,7 +211,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'reports', head: `## Your reports so far (last ${Math.min(REPORT_DIGESTS, recs.length)}, oldest first${hist.omitted ? `; ${hist.omitted} older reports: lean_thread report ${t.id}` : ''})`, body: hist.lines.join('\n'), file: inbox, mode: 'lines' },
     { name: 'notes', head: '## Your notes (end of notes.md)', body: notes ? cut(notes, NOTES_MAX, true) : '', file: `${dir}/notes.md`, mode: 'tail' },
     { name: 'progress', head: `## Your notes (end of ${progress?.path})`, body: progressText ? cut(progressText, NOTES_MAX, true) : '', file: `${dir}/${progress?.path}`, mode: 'tail' },
-    { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
+    { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.${scratchFiles.some(f => reviewBlock(f.name)) ? ` Reviewer answers the mod saved (do not ask the reviewer again; pass the block to lean_review merge or record): ${scratchFiles.filter(f => reviewBlock(f.name)).map(f => `${dir}/scratch/${f.name}`).join(', ')}.` : ''}` : '', mode: 'fixed' },
     { name: 'scratchnotes', head: '## Your scratch notes (end of scratch/notes.md)', body: scratchNotesText, file: `${dir}/scratch/${NOTES_FILE}`, mode: 'tail' },
     { name: 'scratchlist', head: `## Other notes and scratch files: ${READ_FIRST} (newest first; path, size, first line)`, body: nl.listed.length ? `${nl.listed.map(noteLine).join('\n')}${nl.left.length ? `\n(+${nl.left.length} older, not listed: ${nl.left.map(f => f.path).join(', ')})` : ''}` : '', file: dir, mode: 'lines' },
     { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },

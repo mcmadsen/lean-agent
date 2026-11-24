@@ -22,12 +22,14 @@ export const STOP_NOTES = 'your reading is kept in scratch/notes.md and the scra
 export const HANDOVER_RULE = 'read scratch/notes.md and the first lines of the listed scratch files (their summaries); do NOT re-read the sources they cover, that is what filled the last session'
 
 export type ScratchFile = { name: string; size: number; first: string }
+// a reviewer's JSON block the mod saved when the reviewer answered (reviewsave.ts): listed right after notes.md, so a restart finds it
+export const reviewBlock = (name: string): boolean => /^review-[\w.-]+-\d+\.json$/.test(name)
 
 // the files of <thread folder>/scratch (not folders), largest list capped; the first non-empty line of each is its summary. Never throws.
 export async function scratchList(h: Host, dir: string): Promise<ScratchFile[]> {
   try {
     const out: ScratchFile[] = []
-    const rows = (await h.fs.list(`${dir}/scratch`)).filter(r => r && r.kind === 'file' && /^[\w.-]{1,80}$/.test(r.name)).sort((a, b) => (a.name === NOTES_FILE ? -1 : b.name === NOTES_FILE ? 1 : a.name < b.name ? -1 : 1))
+    const rows = (await h.fs.list(`${dir}/scratch`)).filter(r => r && r.kind === 'file' && /^[\w.-]{1,80}$/.test(r.name)).sort((a, b) => (a.name === NOTES_FILE ? -1 : b.name === NOTES_FILE ? 1 : reviewBlock(a.name) !== reviewBlock(b.name) ? (reviewBlock(a.name) ? -1 : 1) : a.name < b.name ? -1 : 1))
     for (const r of rows.slice(0, SCRATCH_LIST_MAX)) {
       const size = Number((await h.fs.stat(`${dir}/scratch/${r.name}`).catch(() => null))?.size) || 0
       let first = ''
