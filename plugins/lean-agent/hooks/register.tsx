@@ -14,6 +14,7 @@ import { holdLines, holdsTick } from './sendhold'
 import { recordHumanPrompt } from './humanprompts'
 import { bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
 import { ownFromGrant } from './ownpr'
+import { bindConfigAnswers, configTool } from './configtool'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
@@ -188,6 +189,9 @@ export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
 const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+// settings (configtool.ts, the config skill): the desk's only way to change ~/.lean-agent/config.json; a thread or worker never has it
+const CONFIG = 'lean_config'
+const CONFIG_SPEC = { name: CONFIG, description: 'Settings (config skill): list [group], get, set, unset, validate. A safety-loosening key changes only on the user\'s typed words.', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'get', 'set', 'unset', 'validate'] }, group: { type: 'string', description: 'list: one group' }, key: { type: 'string', description: 'get, set, unset: dotted key' }, value: { type: ['string', 'number', 'boolean', 'array'], description: 'set: the new value' } }, required: ['action'] } }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight'], description: 'INSTEAD of command: read a part of your restart store (the pull list of your first prompt); no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight a word' }, checkpoint: { type: 'object', description: 'INSTEAD of command: restart yourself at once (context near the cap): after writing scratch/notes.md, {next: "<the next step, 1-3 sentences>"}; end your turn after the answer, a fresh session continues with it', properties: { next: { type: 'string' } }, required: ['next'] }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] }, 'pr-changes': { type: 'object', description: 'INSTEAD of command: a PR\'s changed files with added / removed line ranges, no checkout. {forge: "ado"|"github", org, project, repo, pr, iteration?}', properties: { forge: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, iteration: { type: 'number' } }, required: ['forge', 'pr'] } }, required: [] } }
@@ -579,6 +583,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         isDeferred: false,
       } as any)
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
+      await registerOnce($, { ...CONFIG_SPEC, isDeferred: false })
     })
     await step('desk timers', async () => {
       setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text })) // desk -> thread, direct (deliver-to-thread.ts)
@@ -1197,6 +1202,7 @@ export const register: Register = on => {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
       // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
       notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
+      notes.push(...(await bindConfigAnswers(host, e.questions, r?.result?.answers).catch(() => []))) // an Approve of lean_config's own question for a safety-loosening setting (configtool.ts)
       // and an Allow to a grant offer (deskwrites.ts bindOfferAnswers): the user's dialog answer is the written yes; the PR or work item it names becomes the thread's own
       const offer = await bindOfferAnswers(host, e.questions, r?.result?.answers).catch(() => ({ notes: [] as string[], granted: [] as { thread: string; target: undefined }[] }))
       notes.push(...offer.notes)
@@ -1284,6 +1290,17 @@ export const register: Register = on => {
       }
     }
     return r
+  })
+
+  on('tool.call', { tool: `mcp__lean-agent__${CONFIG}` as const }, async ($, e: any) => {
+    if (role.kind !== 'desk') await redetect($, undefined, true)
+    if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: CONFIG, need: 'desk', role, startDir, sid: lastSid }), isError: true } as any // a thread or worker never changes settings
+    try {
+      const o = await configTool(hostOf($), e)
+      return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+    } catch (err) {
+      return { result: `lean_config: ${String((err as Error)?.message ?? err).slice(0, 200)}`, isError: true } as any
+    }
   })
 
   on('tool.call', { tool: `mcp__lean-agent__${DOCTOR}` as const }, async ($, e: any) => {
