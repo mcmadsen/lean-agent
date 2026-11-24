@@ -19,7 +19,7 @@ import { setNotice } from './notices'
 import { turnState } from './autorestart'
 import { readStop } from './contextstop'
 import { liveOf, readActivity, readWaiting, stillWaiting } from './threadstate'
-import { NEXT_LINE, NEXT_SENTENCE } from './nextwords'
+import { NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextwords'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
@@ -77,11 +77,25 @@ export function announcedNext(text: unknown): string | null {
     const m = re.exec(low)
     if (m) return flat(last.slice(last.length - (m[1] ?? '').length)).replace(/[.!*_`]+$/, '').slice(0, TEXT_MAX) || null
   }
-  const sentences = (last.match(/[^.!?]+(?:[.!?]+|$)/g) ?? [last]).map(s => s.trim()).filter(Boolean)
+  const sentencesOf = (s: string) => (s.match(/[^.!?]+(?:[.!?]+|$)/g) ?? [s]).map(x => x.trim()).filter(Boolean)
+  const textOf = (sent: string, re: RegExp): string | null => {
+    const m = re.exec(sent.toLowerCase())
+    return m ? flat(sent.slice(sent.length - (m[1] ?? '').length)).replace(/[.!*_`]+$/, '').slice(0, TEXT_MAX) || flat(sent).slice(0, TEXT_MAX) : null
+  }
+  const sentences = sentencesOf(last)
   const sent = sentences[sentences.length - 1] ?? ''
   for (const re of NEXT_SENTENCE) {
-    const m = re.exec(sent.toLowerCase())
-    if (m) return flat(sent.slice(sent.length - (m[1] ?? '').length)).replace(/[.!*_`]+$/, '').slice(0, TEXT_MAX) || flat(sent).slice(0, TEXT_MAX)
+    const t = textOf(sent, re)
+    if (t) return t
+  }
+  // the whole last paragraph: an announcement followed by a sentence or two of detail ("... I'm continuing with the seed data. Both tables are in place.")
+  const paragraph = text.trim().split(/\n\s*\n/).pop() ?? ''
+  const all = sentencesOf(flat(paragraph))
+  for (let i = all.length - 1; i >= 0; i--) {
+    for (const re of NEXT_PHRASE) {
+      const t = textOf(all[i]!, re)
+      if (t) return t
+    }
   }
   return null
 }
