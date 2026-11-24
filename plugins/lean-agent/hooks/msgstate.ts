@@ -80,6 +80,19 @@ export async function answerInfo(h: Host, home: string, id: string): Promise<Ans
   const last = as[as.length - 1] ?? null
   return { lastAt: last?.at ?? 0, last, open: [...as].reverse().find(unread) ?? null }
 }
+// ---- a replaced session's findings (1.0.31) ---------------------------------------------------------------------------------------------
+// threads/tN/unverified.json {at, sid}: written when a NEW session replaced the thread's old one (handover.ts buildHandover); the old session's recorded findings and
+// area records stay in their stores (signed review records are never edited) but count as UNVERIFIED until the new session reports (delivery.ts lean_report clears it).
+export type Unverified = { at: number; sid: string }
+export const unverifiedFile = (home: string, id: string) => `${threadsDir(home)}/${id}/unverified.json`
+export async function readUnverified(h: Host, home: string, id: string): Promise<Unverified | null> {
+  const u = await readJson<Partial<Unverified> | null>(h, unverifiedFile(home, id), null)
+  return u && Number(u.at) > 0 ? { at: Number(u.at), sid: String(u.sid ?? '') } : null
+}
+export const markUnverified = (h: Host, home: string, id: string, u: Unverified): Promise<void> => writeJson(h, unverifiedFile(home, id), u).catch(() => undefined)
+export const clearUnverified = (h: Host, home: string, id: string): Promise<void> => writeJson(h, unverifiedFile(home, id), {}).catch(() => undefined)
+export const unverifiedText = (u: Unverified): string => `unverified (session replaced at ${new Date(u.at).toTimeString().slice(0, 5)})`
+
 // the row text while an answer is on its way: "answer queued, not read yet (4 min)"
 export const answerText = (r: MsgRec | null, now: number): string => (r ? `answer ${r.state === 'delivered' ? 'delivered, not read back yet' : 'queued, not read yet'} (${ageText(now - r.at)})` : '')
 

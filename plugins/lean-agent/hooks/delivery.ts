@@ -9,7 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { markWaiting, readWaiting } from './threadstate'
-import { answerInfo, markMsgRead } from './msgstate'
+import { answerInfo, clearUnverified, markMsgRead } from './msgstate'
 import { PROSE_REPLY, proseRequest } from './proserequest'
 import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
@@ -501,6 +501,7 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
         await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })
         return { ok: false, text: `lean_report FAILED: the desk did NOT get this report (${failed}). Paste the text below to the user in your final message, and say the report failed.\n--- report (${rec.state}) ---\n${rec.text}` }
       }
+      await clearUnverified(h, home, id) // the new session has reported: what it records is its own again (msgstate.ts)
       await clearReportFailure(h, home, id)
       if (rState === 'blocked' && !approval && !action) await markWaiting(h, home, id, { since: ts, text: rText.slice(0, 300) }) // a blocked report with a question for the user (no approval or action card)
       if (rState === 'waiting') { // restarted while it waited (waitrestart.ts): the desk has the open item; the thread's word stays `waiting` from the original time

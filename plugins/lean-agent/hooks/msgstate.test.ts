@@ -7,7 +7,7 @@ import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
 import { resetActivity } from './threadstate'
-import { renderReports, takeBatch, unreadReports, worthRelay } from './delivery'
+import { renderReports, takeBatch, threadTool, unreadReports, worthRelay } from './delivery'
 import { loadView } from './view'
 import { stallTick } from './stall'
 
@@ -339,6 +339,74 @@ test('idleAlertMinutes is configurable; `lean_thread list` flags the idle thread
   expect(await stallTick(h.host, { agents: deps.agents, restart: deps.restart as any })).toHaveLength(1)
   report(h, { ts: T0, from: 't1', kind: 'report', state: 'done', text: 'finished' })
   expect(await listText(h)).not.toContain('no report')
+  after(() => 0)
+})
+
+// ---- 5. a restart keeps the in-flight corrections and distrusts the old findings ---------------------------------------------------------------
+const restart = (h: any) => leanThread(h.host, ROOT, { action: 'restart', tN: 't1' })
+const lastPrompt = (h: any): string => {
+  const bg = h.claudeCalls().filter((x: string[]) => x[0] === '--bg')
+  const a = bg[bg.length - 1] ?? []
+  return String(a[a.length - 1] ?? '')
+}
+
+test('a restart carries the user corrections no report answered into the NEW session\'s first prompt (queued AND read-but-unanswered ones)', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 15 * 60_000)
+  report(h, { ts: T0 - 10 * 60_000, from: 't1', kind: 'report', state: 'working', text: 'parser done, now the writer' })
+  await send(h, 'the writer must use sqlite, not postgres') // m1
+  await takeBatch(h.host, 't1') // the old session read it, then went quiet
+  h.clock.t = T0 + 60_000
+  await send(h, 'also keep the old export format') // m2, never read
+  h.clock.t = T0 + 120_000
+  const r = await restart(h)
+  expect(r.ok).toBe(true)
+  const p = lastPrompt(h)
+  expect(p.toLowerCase()).toContain('user corrections not yet answered')
+  expect(p).toContain('m1 (consumed')
+  expect(p).toContain('the writer must use sqlite, not postgres')
+  expect(p).toContain('m2 (queued')
+  expect(p).toContain('also keep the old export format')
+  after(() => 0)
+})
+
+test('a correction a later report answered is not carried; an FYI is not a correction', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 15 * 60_000)
+  await send(h, 'the writer must use sqlite, not postgres')
+  await send(h, 'status check: how far are you?')
+  await takeBatch(h.host, 't1')
+  h.clock.t = T0 + 60_000
+  report(h, { ts: T0 + 30_000, from: 't1', kind: 'report', state: 'working', text: 'switched the writer to sqlite' })
+  await restart(h)
+  expect(lastPrompt(h).toLowerCase()).not.toContain('user corrections not yet answered')
+  after(() => 0)
+})
+
+test('the old session\'s findings are marked "unverified (session replaced at <time>)" until the new session reports; the handover says so', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 15 * 60_000)
+  report(h, { ts: T0 - 10 * 60_000, from: 't1', kind: 'report', state: 'working', text: 'found two issues in the parser' })
+  await restart(h)
+  expect(lastPrompt(h)).toMatch(/UNVERIFIED \(session replaced at \d{4}-\d\d-\d\d \d\d:\d\dZ\)/)
+  const flag = json(h, `${T1}/unverified.json`)
+  expect(flag.at).toBe(T0)
+  expect(flag.sid).toBe(S1)
+  const v = (await leanThread(h.host, ROOT, { action: 'list', verbose: true })).text
+  expect(v).toMatch(/unverified \(session replaced at \d\d:\d\d\)/)
+  // the new session reports: its findings are its own again
+  await threadTool(h.host, 't1', 'lean_report', { text: 'checked: both issues still there', state: 'working' })
+  expect(json(h, `${T1}/unverified.json`)).toEqual({})
+  expect((await leanThread(h.host, ROOT, { action: 'list', verbose: true })).text).not.toContain('unverified')
+  after(() => 0)
+})
+
+test('a thread with no report of its own has nothing to distrust: no unverified line', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 15 * 60_000)
+  await restart(h)
+  expect(lastPrompt(h)).not.toContain('UNVERIFIED')
+  expect(json(h, `${T1}/unverified.json`)).toEqual({})
   after(() => 0)
 })
 
