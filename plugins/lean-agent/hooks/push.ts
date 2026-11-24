@@ -323,7 +323,7 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
       notes.push(`history not written (${String((e as Error)?.message ?? e).slice(0, 100)})`)
     }
     try {
-      await appendJsonl(h, `${threadsDir(home)}/${id}/inbox.jsonl`, { ts: await h.clock.now(), text: tell, from: 'desk' } satisfies Inbox) // queued, nothing is woken: its next session reads it
+      await appendJsonl(h, `${threadsDir(home)}/${id}/inbox.jsonl`, { ts: await h.clock.now(), text: tell, from: 'desk' } satisfies Inbox) // queued: the desk's 10 s sweep (delivery.ts sweep) wakes an idle thread with it, a running one reads it after its next tool call
     } catch (e) {
       notes.push(`thread not told (${String((e as Error)?.message ?? e).slice(0, 100)})`)
     }

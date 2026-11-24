@@ -399,7 +399,7 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
-    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null }) // "next:" at the end of a turn / keep-going: the desk's timer continues it by script
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null, tasks: currentTasks() }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */

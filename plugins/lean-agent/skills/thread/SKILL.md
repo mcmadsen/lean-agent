@@ -17,7 +17,7 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 | `start` | `tN`, `model?`, `effort?`, `reason?`, `needs?`, `keep?` | starts a thread that has no session yet |
 | `park` / `close` / `reopen` | `tN` | `close` stops a finished session, clears the goal, never deletes the folder; `reopen` of a closed thread starts a NEW session with a handover |
 | `keep` | `tN`, `on?` | keep mode: follow-ups to a done thread resume it until its context passes the limit; offer it only for many small follow-ups |
-| `keep-going` | `tN`, `on?` | when the user says "keep going / no asks": the mod continues the thread by script at every turn end that is not done, blocked or a question (also `keepGoing: true` on `new` / `start`) |
+| `keep-going` | `tN`, `on?` | keep-going is ON by default for work threads (config `threads.keepGoing`); `on: false` turns it off for one thread, `on: true` forces it: the mod continues the thread by script at every turn end that is not done, blocked, waiting or a question, and always when its task list still has an open item (also `keepGoing: true|false` on `new` / `start`) |
 | `action-cancel` | `id` | cancels a covered reply that waits in its 30 s hold window (the pane has Send now / Cancel) |
 | `list` | none | state, running / idle / stuck, queued, model, `ctx` size, agents |
 | `messages` | `tN` | the last messages sent to it with id, state (`queued` / `delivered` / `consumed` / `failed`) and age, from the files, no model |

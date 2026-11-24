@@ -18,7 +18,7 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown } = {}) {
   const h = fakeHost(null)
   h.clock.t = T0
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 3_600_000, delivered: 0, ...o.thread }))
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  h.files.set(`${L}/config.json`, JSON.stringify(o.config ?? { threads: { keepGoing: false } })) // (keep-going is on by default since 1.0.31: these specs are about "next:")
   return h
 }
 const end = (h: any, lastText: string | null, since = T0 - 60_000) => noteTurnEnd(h.host, 't1', { sid: S1, since, lastText })
@@ -64,7 +64,7 @@ test('no record for a done, blocked or asking thread, a hard stop, an open quest
   expect(await end(h, text)).toBe('none')
   expect(await end(setup({ thread: { state: 'parked' } }), text)).toBe('none')
   expect(await end(setup({ thread: { finished: T0 - 5 } }), text)).toBe('none')
-  expect(await end(setup({ config: { threads: { autoContinue: false } } }), text)).toBe('none')
+  expect(await end(setup({ config: { threads: { autoContinue: false, keepGoing: false } } }), text)).toBe('none')
 })
 
 test('the desk timer delivers the continue after threads.continueSeconds, and only if nothing newer happened', async () => {
@@ -89,7 +89,7 @@ test('the desk timer delivers the continue after threads.continueSeconds, and on
   expect(s2).toEqual([])
   expect(pend(g)).toEqual({})
   // config threads.continueSeconds
-  const c = setup({ config: { threads: { continueSeconds: 60 } } })
+  const c = setup({ config: { threads: { continueSeconds: 60, keepGoing: false } } })
   await end(c, 'Next: wire the timer')
   c.clock.t = T0 + 30_000
   const s3: string[] = []
@@ -111,7 +111,7 @@ test('at most 3 continues in a row without a tool call: then ONE notice and the 
     notes.push(...(await tick(h, sent)).map(n => n.text))
   }
   expect(sent).toHaveLength(3)
-  expect(notes).toEqual(["t1 keeps stopping after 'next:'"]) // once
+  expect(notes.filter(n => !n.includes('was continued by the mod'))).toEqual(["t1 keeps stopping after 'next:'"]) // once (the first continue's own notice is the desk-sees-it one)
   expect(cstate(h).halted).toBeGreaterThan(0)
   expect(await peekNotice(h.host, 'continue-t1')).toBe("t1 keeps stopping after 'next:'")
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: h.clock.t + 1_000, kind: 'tool' }))
@@ -146,7 +146,7 @@ test('keep-going: every plain turn end is continued ("Continue with the next ste
   const g = setup({ thread: { keepGoing: true } })
   await end(g, 'ok')
   const t = JSON.parse(g.files.get(`${T1}/thread.json`)!)
-  delete t.keepGoing
+  t.keepGoing = false // `keep-going off` stores an explicit off (the default is on)
   g.files.set(`${T1}/thread.json`, JSON.stringify(t))
   g.clock.t = T0 + 25_000
   const s2: string[] = []
