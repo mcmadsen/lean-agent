@@ -111,7 +111,7 @@ const tool = (h: any, input: Record<string, unknown>) => threadTool(h.host, 't1'
 const fin = (n: number, path: string, line: number, extra: Record<string, unknown> = {}) => ({ n, severity: 'minor', category: 'correctness', path, line, text: `problem ${n} in the code`, fix: 'fix it', ...extra })
 const block = (findings: unknown[]) => ({ verdict: 'changes-requested', goal: 'g', findings, reuse: [], coverage: [] })
 
-test('prepare (light and full) lists the changed files with their ranges; record and merge drop findings outside the change and say how many', async () => {
+test('prepare (light and full) lists the changed files with their ranges; record and merge drop findings outside the change and say how many', { timeoutMs: 20_000 }, async () => {
   const h = setup()
   for (const level of ['light', 'full']) {
     const p = await tool(h, { action: 'prepare', base: 'main', level })
@@ -135,7 +135,7 @@ test('prepare (light and full) lists the changed files with their ranges; record
   expect(m.text).toContain('top 1 of 1')
 })
 
-test('the summary line says what was reviewed and dropped; a thread older than the filter is told first; review.contextLines widens the range', async () => {
+test('the summary line says what was reviewed and dropped; a thread older than the filter is told first; review.contextLines widens the range', { timeoutMs: 20_000 }, async () => {
   const { scopeLine, scopedOf, withArea } = await import('./reviewchange')
   const prep = await analyzeDiff(DIFF, async () => '')
   const cs = changeScope([f('src/mod.ts', 11), f('src/other.ts', 3), f('lib/x.ts', 4)], prep)
@@ -166,10 +166,10 @@ test('the summary line says what was reviewed and dropped; a thread older than t
   const z = await tool(setup(), { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14)]) })
   expect(z.text).toContain('1 finding dropped')
   expect(z.text).not.toContain('src/a.ts:14')
-}, { timeoutMs: 20_000 })
+})
 
 // ---- 1.0.31: never unfiltered; areas only from changed files ----------------------------------------------------------------
-test('merge and record refuse, and write nothing, when the PR diff cannot be read', async () => {
+test('merge and record refuse, and write nothing, when the PR diff cannot be read', { timeoutMs: 20_000 }, async () => {
   const h = setup()
   const good = h.git.handler
   h.git.handler = (a: string[]) => (a.join(' ').includes(' diff ') ? { exitCode: 1, stdout: '' } : good(a, {} as any))
@@ -184,7 +184,7 @@ test('merge and record refuse, and write nothing, when the PR diff cannot be rea
   const e = await tool(h, { sha: H2, mode: 'external', review: block([fin(1, 'src/a.ts', 11)]) })
   expect(e.ok).toBe(false)
   expect(e.text).toContain('could not read the PR diff: review not recorded')
-}, { timeoutMs: 20_000 })
+})
 
 test('the areas of a large PR are built from the changed files only, and say how many files and lines they hold', async () => {
   const { partition: part } = await import('./reviewarea')
