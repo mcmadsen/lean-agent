@@ -30,6 +30,7 @@ const costNote = async (h: Host, project: string, thread: string, sha: string): 
   return l ? `\n${l}` : ''
 }
 import { readRegistry, worktreeState } from './worktreereg'
+import { forgeCountStop } from './preflight-review'
 
 type Out = { ok: boolean; text: string }
 // light: the carry of a light pass (never green); a full review does not take it as "the last reviewed sha", a light one does
@@ -180,6 +181,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   // a diff over 300 files or 20000 lines (generated files out) is not reviewed in one: counts only, and the areas to review one by one (reviewarea.ts)
   const scopeArg = str(i.scope)
   const whole = perFileStats(diff)
+  const stop = await forgeCountStop(h, project, thread, refAsked, whole.length) // the forge's own file count (preflight-review.ts)
+  if (stop) return { ok: false, text: stop }
   const areasAll = partition(whole)
   if (!scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))) {
     await noteAreas(h, project, range.head, areasAll.map(a => a.name))
