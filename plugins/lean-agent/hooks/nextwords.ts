@@ -24,6 +24,20 @@ export const NEXT_PHRASE: RegExp[] = [
   /\b(?:will|'ll) do (?:that|this|it) next\b(?!\s+(?:week|month|year|time|quarter|sprint|release))/,
   /(?:^|[,;:]\s*|\b(?:and|now)\s+)on to\s+(.+)/, // "on to the cache layer" (not "hold on to")
 ]
+// CONDITIONAL openers: a last paragraph that announces something conditional on an EXTERNAL event ("once the desk reports the push, I request ...", "when ci is green",
+// "until you answer", "waiting for ...", "i will wait") is not a stall announcement: it is NOT continued as one. Whether the thread really waits is decided by
+// records (waitevent.ts); one that waits for nothing any record will deliver gets the reminder instead (continuepending.ts). Tested on the lower-cased last paragraph.
+export const NEXT_CONDITIONAL: RegExp[] = [
+  /\b(?:once|when|after|as soon as|the moment|right after)\s+(?:the\s+|a\s+|your\s+)?(?:desk|push(?:ed)?|ci\b|pipeline|build\b|you\b|user\b|reviewers?|review\b|approval|approved|answers?\b|results?\b|repl(?:y|ies)|merge[ds]?|deploy(?:ment)?|tests? (?:run|finish)|run\b)/,
+  /\buntil\s+(?:the|you|your|it|ci|a|an|i hear|there is)\b/,
+  /\bwait(?:s|ed|ing)?\s+(?:for|on|until)\b/,
+  /\bi(?:'ll| will) wait\b/,
+  /\bawait(?:s|ing)?\b/,
+  /\bpending (?:the|your|a|an)\b/,
+  /\bdepends on (?:the|your)\b/,
+  /\bonce (?:that|this|it) (?:is|has been|gets) (?:done|in|merged|pushed|approved|green|reported)\b/,
+  /\bif (?:you|the user) (?:approve|say|confirm|agree|want|prefer)\b/,
+]
 export const NEXT_SENTENCE: RegExp[] = [
   /^(?:next(?: steps?)?)\s*:\s*(.+)/, // (a label after an earlier sentence on the same line)
   ...NEXT_PHRASE,

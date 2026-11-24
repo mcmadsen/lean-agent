@@ -19,12 +19,12 @@ import { setNotice } from './notices'
 import { turnState } from './autorestart'
 import { readStop } from './contextstop'
 import { liveOf, readActivity, readWaiting, stillWaiting } from './threadstate'
-import { NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextwords'
+import { NEXT_CONDITIONAL, NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextwords'
+import { waitingOn } from './waitevent'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { markerOf } from './reviewkind'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
-import { listActions } from './deskactions'
 import type { AgentRow, Out, Thread } from './threads'
 
 export const CONTINUE_SECONDS = 20
@@ -35,20 +35,23 @@ export const NEXT_TEXT = (text: string) => `Do the next step now: ${text}. Do no
 export const KEEP_TEXT = 'Continue with the next step of your task.'
 export const MAX_TODO_CONSECUTIVE = 6 // 'todo' continues in a row with no tool call and no changed task list between them
 export const TODO_TEXT = (title: string) => `Continue: ${title}. Do it now; do not end your turn announcing the next step.`
-export const haltTodoText = (id: string) => `${id} keeps ending its turns without doing the next item`
+export const REMIND_MAX = 2 // reminders per thread
+export const REMIND_TEXT = "Nothing is pending that wakes you: if you wait for the push, request it with lean_report ('ready to push <sha>'); if you wait for the user, ask with lean_ask; otherwise do the step now."
+export const remindCapText = (id: string) => `${id} ends its turns waiting for something nothing will deliver (reminded ${REMIND_MAX} times): it needs a message from you`
+export const haltTodoText =(id: string) => `${id} keeps ending its turns without doing the next item`
 export const haltText = (id: string) => `${id} keeps stopping after 'next:'`
 export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_PER_HOUR} times in the last hour and keeps stopping: no more automatic continues for now`
 
-export type Kind = 'next' | 'keep' | 'todo'
+export type Kind = 'next' | 'keep' | 'todo' | 'remind'
 export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
-export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean }
+export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean }
 export const logFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-log.jsonl`
-export const continuedLine = (kind: Kind, text: string): string => `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
+export const continuedLine = (kind: Kind, text: string): string => kind === 'remind' ? 'reminded by the mod: nothing is pending that wakes it' : `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
 export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-pending.json`
 export const stateFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-state.json`
 export const readPending = async (h: Host, home: string, id: string): Promise<Pending | null> => {
   const p = await readJson<Partial<Pending> | null>(h, pendingFile(home, id), null)
-  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}) } : null
+  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo' || p.kind === 'remind') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}) } : null
 }
 export const clearPending = (h: Host, home: string, id: string): Promise<void> => writeJson(h, pendingFile(home, id), {}).catch(() => undefined)
 export const readCState = async (h: Host, home: string, id: string): Promise<CState> => {
@@ -78,8 +81,12 @@ export async function keepGoingOf(h: Host, t: { id: string; keepGoing?: unknown 
 const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
 export const isQuestion = (text: string): boolean => /\?\s*[)"'*_`]*\s*$/.test(text.trim())
 // the announced next action of a turn's last text, or null (no announcement, or the text ends in a question)
+// the last paragraph of a text, flattened and lower-cased
+const lastParagraph = (text: string): string => flat(text.trim().split(/\n\s*\n/).pop() ?? '').toLowerCase()
+// the last paragraph is conditional on an external event ("once the desk reports the push, ...", "waiting for ...": nextwords.ts NEXT_CONDITIONAL)
+export const isConditional = (text: unknown): boolean => typeof text === 'string' && !!text.trim() && !isQuestion(text) && NEXT_CONDITIONAL.some(re => re.test(lastParagraph(text)))
 export function announcedNext(text: unknown): string | null {
-  if (typeof text !== 'string' || !text.trim() || isQuestion(text)) return null
+  if (typeof text !== 'string' || !text.trim() || isQuestion(text) || isConditional(text)) return null
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
   const last = lines[lines.length - 1] ?? ''
   const low = last.toLowerCase()
@@ -120,8 +127,6 @@ async function tasksOfTurn(h: Host, home: string, id: string, o: TurnEndIn): Pro
   const s = await readSnapshot(h, home, id)
   return s && s.sid === o.sid && s.at >= o.since ? tasksOf(s.tasks) : []
 }
-// a request for a remote write waits for the user's Approve: the thread went on with other steps, a turn end is not a stop
-const hasPendingRequest = async (h: Host, id: string): Promise<boolean> => (await listActions(h).catch(() => [])).some(r => r.thread === id && r.state === 'pending')
 
 // ---- thread side -------------------------------------------------------------------------------------------------------------------
 export type TurnEndIn = { sid: string; since: number; lastText?: string | null; tasks?: unknown }
@@ -134,8 +139,8 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     if (await readStop(h, home, id, o.sid)) return await drop(h, home, id) // hard-stopped at the context limit: the restart path's
     const st = turnState(await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`), id, o.since)
     if (st !== 'work') return await drop(h, home, id) // done, blocked, a question, a request the user must answer
-    const w = await readWaiting(h, home, id)
-    if (w && stillWaiting(w, (await readActivity(h, home, id))?.at)) return await drop(h, home, id)
+    // a thread that waits for an external event by RECORD (the desk's push result, an action result, an answer, a CI run: waitevent.ts) is never continued, whatever it said
+    if (await waitingOn(h, home, id)) return await drop(h, home, id)
     const cfg = await continueConfig(h, home)
     const announced = typeof o.lastText === 'string' ? announcedNext(o.lastText) : null
     const question = typeof o.lastText === 'string' && isQuestion(o.lastText)
@@ -143,12 +148,14 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     const tasks = await tasksOfTurn(h, home, id, o)
     const open = cfg.auto && !question && !(announced && announcesRestart(announced)) ? firstOpen(tasks) : null
     let kind: Kind | null = null
-    if (!question && (await hasPendingRequest(h, id))) return await drop(h, home, id) // a request waits for the user's Approve: no continue of any kind
-    if (open) kind = 'todo'
+    // a last paragraph that waits for an event ("once the desk reports the push ...") while no record will ever wake the thread: ONE reminder instead of "do it now" (it must
+    // not do the step before the event); at most REMIND_MAX per thread (the tick), then one desk notice
+    if (cfg.auto && isConditional(o.lastText)) kind = 'remind'
+    else if (open) kind = 'todo'
     else if (announced && cfg.auto) kind = 'next'
     else if (!question && (await keepGoingOf(h, t, cfg.keepGoing))) kind = 'keep'
     if (!kind) return await drop(h, home, id)
-    await writeJson(h, pendingFile(home, id), { at: await h.clock.now(), sid: o.sid, kind, text: kind === 'todo' ? open!.text : (announced ?? ''), ...(kind === 'todo' ? { sig: tasksSig(tasks) } : {}) } satisfies Pending)
+    await writeJson(h, pendingFile(home, id), { at: await h.clock.now(), sid: o.sid, kind, text: kind === 'todo' ? open!.text : kind === 'remind' ? '' : (announced ?? ''), ...(kind === 'todo' ? { sig: tasksSig(tasks) } : {}) } satisfies Pending)
     return kind
   } catch {
     return 'none'
@@ -224,7 +231,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       continue
     }
     const w = await readWaiting(h, home, id)
-    if ((w && stillWaiting(w, act?.at)) || (await readStop(h, home, id, t.sid))) {
+    if ((w && stillWaiting(w, act?.at)) || (await readStop(h, home, id, t.sid)) || (await waitingOn(h, home, id))) {
       await clearPending(h, home, id)
       continue
     }
@@ -252,6 +259,15 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
         const text = haltText(id)
         await setNotice(h, `continue-${id}`, text).catch(() => undefined)
         out.push({ id, text })
+      }
+      continue
+    }
+    // 'remind': at most REMIND_MAX per thread, then ONE desk notice
+    if (p.kind === 'remind' && (cs.remindN ?? 0) >= REMIND_MAX) {
+      await clearPending(h, home, id)
+      if (!cs.remindNoticed) {
+        await save({ ...cs, remindNoticed: true })
+        out.push({ id, text: remindCapText(id) })
       }
       continue
     }
@@ -287,14 +303,14 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id)
       continue
     }
-    const r = await deps.send(id, p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
+    const r = await deps.send(id, p.kind === 'remind' ? REMIND_TEXT : p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
     await clearPending(h, home, id)
     if (!r.ok) continue
     // the desk sees it (1.0.31): a continue by the open-TODO rule or an announcement is one line in the thread's record and one in the count of `lean_thread list`; the FIRST
     // one of a thread is also said once in the desk, the rest are only counted. (A plain keep-going continue is the standing order's own: not counted.)
     const counted = p.kind !== 'keep'
     const first = counted && !cs.noticedFirst
-    await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}), ...(counted ? { total: (cs.total ?? 0) + 1, noticedFirst: true } : {}) })
+    await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}), ...(p.kind === 'remind' ? { remindN: (cs.remindN ?? 0) + 1 } : {}), ...(counted ? { total: (cs.total ?? 0) + 1, noticedFirst: true } : {}) })
     if (counted) {
       const line = continuedLine(p.kind, p.text)
       await appendJsonl(h, logFile(home, id), { at: now, kind: p.kind, text: line }).catch(() => undefined)

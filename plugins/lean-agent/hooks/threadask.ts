@@ -12,6 +12,7 @@ import type { DeskRec } from './delivery'
 import { buildHandover } from './handover'
 import { greenReview } from './reviews'
 import { readSnapshot } from './snapshot'
+import { waitingOn } from './waitevent'
 import { kTokens, readContext } from './threadcontext'
 import type { Out, Thread } from './threads'
 
@@ -157,10 +158,11 @@ export async function reportText(h: Host, home: string, id: string, o: { section
   }
   const now = await h.clock.now()
   const age = last ? `${Math.max(0, Math.round((now - last.ts) / 60_000))} min ago` : ''
+  const waits = t.state === 'open' && !t.finished ? await waitingOn(h, home, id) : null // "waiting for push", not "idle, no report yet" (waitevent.ts)
   return {
     ok: true,
     text: [
-      `${id} (${t.title}): ${t.state}${t.finished ? ', finished' : ''}${last ? ` · last report ${last.state || 'working'} ${age}` : ' · no report yet'}`,
+      `${id} (${t.title}): ${t.state}${t.finished ? ', finished' : ''}${waits ? ` · ${waits.text}` : ''}${last ? ` · last report ${last.state || 'working'} ${age}` : waits ? '' : ' · no report yet'}`,
       `sha: ${sha ? sha.slice(0, 10) : 'unknown'}${snap?.branch ? ` on ${snap.branch}` : ''} · review: ${verdict}${snap ? ` · tree: ${snap.status.length ? `${snap.status.length} changed file(s)` : 'clean'}` : ''}`,
       `open questions: ${open.length}${open.length ? ` (latest: ${clip(flat(String(open[open.length - 1]!.text)), 120)})` : ''} · reports: ${reports.length} · questions asked: ${asks.length}${ctx ? ` · context ${kTokens(ctx.tokens)}` : ''}`,
       `full text: ${path}`,
