@@ -66,7 +66,7 @@ export async function findText(h: Host, home: string, query: string): Promise<Ou
   const all = await storeLines(h, home)
   const hit = all.filter(l => ws.every(w => (l.text + ' ' + l.file).toLowerCase().includes(w)))
   const threads = new Set(hit.map(l => l.id))
-  // a work item or PR number (9840, WI 9840, PR 5687): the threads that OWN it come first (workitems.json), then the lines
+  // a work item or PR number (4210, WI 4210, PR 4271): the threads that OWN it come first (workitems.json), then the lines
   const num = /^\s*(?:(wi|work\s?items?|pr|pull\s?requests?)\s*)?#?(\d{1,9})\s*$/i.exec(query)
   const owned: string[] = []
   if (num) {

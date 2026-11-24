@@ -196,13 +196,13 @@ test('Revoke (the pane\'s button, "stop writes", "stop writes t5") takes the def
   expect(await go(s, 'ado-pr-reply', { ...REPLY, body: 'two' })).toBeNull()
   // owning the next PR is a new default
   s.h.clock.t += 10
-  expect(await recordPushPr(s.host, 't5', 'https://dev.azure.com/acme/Shop%20App/_git/shop-api/pullrequest/5700')).toContain('t5 owns PR 5700')
+  expect(await recordPushPr(s.host, 't5', 'https://dev.azure.com/acme/Shop%20App/_git/shop-api/pullrequest/4272')).toContain('t5 owns PR 4272')
   s.h.clock.t += 10
-  expect((await go(s, 'ado-pr-reply', { ...REPLY, pr: 5700, body: 'three' }))?.sent).toBe(true)
+  expect((await go(s, 'ado-pr-reply', { ...REPLY, pr: 4272, body: 'three' }))?.sent).toBe(true)
   // the user's words
   await recordHumanPrompt(s.host, { text: 'stop writes', origin: { kind: 'composer' } })
   expect(await revokeByWords(s.host, 'stop writes')).toBeGreaterThan(0)
-  expect(await go(s, 'ado-pr-reply', { ...REPLY, pr: 5700, body: 'four' })).toBeNull()
+  expect(await go(s, 'ado-pr-reply', { ...REPLY, pr: 4272, body: 'four' })).toBeNull()
   const named = setup()
   expect(await revokeByWords(named.host, 'stop writes t6')).toBe(0) // another thread
   expect(await revokeByWords(named.host, 'revoke t5')).toBe(1)
@@ -270,10 +270,10 @@ test('through lean_thread: new with pr owns it and says how; a brief that mentio
   expect(obj.ok).toBe(false)
   // the user's words name a PR and a work item: allow-writes owns them
   const say = (text: string) => recordHumanPrompt(h.host, { text, wait: false, origin: { kind: 'composer' } })
-  await say('fix the comments on PR 5700')
-  const g = await leanThread(h.host, '/p', { action: 'allow-writes', tN: 't1', target: { pr: 5700 } })
+  await say('fix the comments on PR 4272')
+  const g = await leanThread(h.host, '/p', { action: 'allow-writes', tN: 't1', target: { pr: 4272 } })
   expect(g.ok, g.text).toBe(true)
-  expect(g.text).toContain('t1 owns PR 5700 (you allowed writes on it)')
+  expect(g.text).toContain('t1 owns PR 4272 (you allowed writes on it)')
   await say('please update work item 4321')
   const w = await leanThread(h.host, '/p', { action: 'allow-writes', tN: 't1', target: { workitem: 4321 } })
   expect(w.ok, w.text).toBe(true)

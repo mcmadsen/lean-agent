@@ -1,7 +1,7 @@
 // Work items and PRs belong to the TASK (1.0.31). A thread row (thread.json) carries `workItem: {id, org?, project?}` and `pr: {number, repo?, host?}`: set by `lean_thread new`
 // (workitem / pr, or taken by script from the brief and the user's typed prompt, unambiguous forms only), by `continues: tN` (inherited), or corrected with `set tN workitem|pr <value>`.
 // A reference is NOT ownership: the own-PR default (ownpr.ts) still needs its own signals (a `pr` with `id` and `since` in the same field is the ownership record).
-// The reference is in every handover (a "work item: 9840 (project-A), PR: 5687" line), in the memory `task` scope (one fact, source script), in `list`, and in the WI -> threads
+// The reference is in every handover (a "work item: 4210 (project-A), PR: 4271" line), in the memory `task` scope (one fact, source script), in `list`, and in the WI -> threads
 // map `~/.lean-agent/workitems.json` that `find` and the one-thread-per-work-item rule read. Scripts only; no model decides any of it.
 import { leanDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
@@ -32,7 +32,7 @@ const GH_PR = /https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d{1,9})\b/g
 const WI_WORD = /\b(?:WI|work\s?items?)\s*#?\s*(\d{1,9})\b/gi
 const PR_WORD = /\b(?:PR|pull\s?requests?)\s*#?\s*(\d{1,9})\b/gi
 
-// The references a text names, in the unambiguous forms only: the Azure DevOps / GitHub URLs, "WI 9840", "work item 9840", "workitem #9840", "PR 5687", "pull request 5687".
+// The references a text names, in the unambiguous forms only: the Azure DevOps / GitHub URLs, "WI 4210", "work item 4210", "workitem #4210", "PR 4271", "pull request 4271".
 // A bare "#123" is never taken. Two different work items (or two PRs) in one text: neither is taken, and a note says so.
 export function extractRefs(text: string): Refs & { notes: string[] } {
   const wis = new Map<number, WorkItemRef>()
@@ -63,7 +63,7 @@ export function extractRefs(text: string): Refs & { notes: string[] } {
   return { ...(wis.size === 1 ? { workItem: [...wis.values()][0]! } : {}), ...(prs.size === 1 ? { pr: [...prs.values()][0]! } : {}), notes }
 }
 
-// a value given by the desk: a number, "9840", "#9840", "WI 9840" or a URL; a string is the error text
+// a value given by the desk: a number, "4210", "#4210", "WI 4210" or a URL; a string is the error text
 export function parseWorkItem(v: unknown): WorkItemRef | string {
   if (typeof v === 'number') return N(String(v)) ? { id: v } : 'workitem must be a work item number or its URL'
   if (typeof v !== 'string') return 'workitem must be a work item number or its URL'

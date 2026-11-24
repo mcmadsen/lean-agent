@@ -13,10 +13,10 @@ const JOE = { id: 'aaaa-1111', displayName: 'Joe Example', uniqueName: 'joe@exam
 const ANN = { id: 'bbbb-2222', displayName: 'Ann Example', uniqueName: 'ann@example.test' }
 const BOB = { id: 'cccc-3333', displayName: 'Bob Example', uniqueName: 'bob@example.test' }
 const T = { org: 'acme', project: 'Shop App', repo: 'shop-api' }
-const LINK = { kind: 'ado-pr-workitem-link', params: { ...T, pr: 5687, workitem: 9840 } }
-const STATE = { kind: 'ado-workitem-update', params: { org: 'acme', project: 'Shop App', id: 9840, fields: { state: 'Reviewing' } } }
-const TITLE = { kind: 'ado-workitem-update', params: { org: 'acme', project: 'Shop App', id: 9840, fields: { title: 'A better title' } } }
-const COMMENT = { kind: 'ado-workitem-comment', params: { org: 'acme', project: 'Shop App', id: 9840, body: 'Fixed in PR 5687.' } }
+const LINK = { kind: 'ado-pr-workitem-link', params: { ...T, pr: 4271, workitem: 4210 } }
+const STATE = { kind: 'ado-workitem-update', params: { org: 'acme', project: 'Shop App', id: 4210, fields: { state: 'Reviewing' } } }
+const TITLE = { kind: 'ado-workitem-update', params: { org: 'acme', project: 'Shop App', id: 4210, fields: { title: 'A better title' } } }
+const COMMENT = { kind: 'ado-workitem-comment', params: { org: 'acme', project: 'Shop App', id: 4210, body: 'Fixed in PR 4271.' } }
 
 type Forge = { assignee: unknown; creator: unknown; fail: string[]; wiqlTitles: [number, string, string][] }
 export function world(cfg?: object, f: Partial<Forge> = {}) {
@@ -39,7 +39,7 @@ export function world(cfg?: object, f: Partial<Forge> = {}) {
     if (url.includes('/_apis/connectionData')) { reads.push('me'); return j({ authenticatedUser: ME }) }
     if (url.includes('/wit/wiql')) { reads.push('wiql'); return j({ workItems: forge.wiqlTitles.map(x => ({ id: x[0] })) }) }
     if (method === 'GET' && url.includes('/wit/workitems?ids=')) { reads.push('items'); return j({ value: forge.wiqlTitles.map(x => ({ id: x[0], fields: { 'System.Title': x[1], 'System.State': x[2] } })) }) }
-    if (method === 'GET' && url.includes('/wit/workitems/')) { reads.push('wi'); return j({ id: 9840, fields: forge.assignee === null ? {} : { 'System.AssignedTo': forge.assignee } }) }
+    if (method === 'GET' && url.includes('/wit/workitems/')) { reads.push('wi'); return j({ id: 4210, fields: forge.assignee === null ? {} : { 'System.AssignedTo': forge.assignee } }) }
     if (method === 'GET' && url.includes('/pullrequests/')) { reads.push('pr'); return j({ createdBy: forge.creator }) }
     writes.push(`${method} ${url}`)
     return j({ id: 1, url: 'https://dev.azure.com/acme/_apis/x/1' })
@@ -47,7 +47,7 @@ export function world(cfg?: object, f: Partial<Forge> = {}) {
   const ask = (a: Record<string, unknown>) => addActionRequest(h.host, 't5', { ...a, why: 'the PR needs it' })
   return { h, forge, reads, writes, ask }
 }
-const target = { workItem: { org: 'acme', project: 'Shop App', id: 9840 }, pr: { ...T, number: 5687 } }
+const target = { workItem: { org: 'acme', project: 'Shop App', id: 4210 }, pr: { ...T, number: 4271 } }
 
 test('ownTask: ok only when the work item is assigned to the user AND the PR was created by the user (id or unique name)', async () => {
   const { h, reads } = world()
@@ -61,11 +61,11 @@ test('ownTask: ok only when the work item is assigned to the user AND the PR was
 
 test('ownTask: unassigned, assigned to someone else, a PR created by someone else: one line each, nothing moves', async () => {
   const a = world(undefined, { assignee: null })
-  expect(await ownTask(a.h.host, target)).toEqual({ ok: false, why: 'WI 9840 is unassigned: not moving it' })
+  expect(await ownTask(a.h.host, target)).toEqual({ ok: false, why: 'WI 4210 is unassigned: not moving it' })
   const b = world(undefined, { assignee: ANN })
-  expect(await ownTask(b.h.host, target)).toEqual({ ok: false, why: 'WI 9840 is assigned to Ann Example, not you: not moving it' })
+  expect(await ownTask(b.h.host, target)).toEqual({ ok: false, why: 'WI 4210 is assigned to Ann Example, not you: not moving it' })
   const c = world(undefined, { creator: BOB })
-  expect(await ownTask(c.h.host, target)).toEqual({ ok: false, why: 'PR 5687 was created by Bob Example, not you: not linking it' })
+  expect(await ownTask(c.h.host, target)).toEqual({ ok: false, why: 'PR 4271 was created by Bob Example, not you: not linking it' })
   // only a work item (a state change): the PR is not read
   const d = world()
   expect((await ownTask(d.h.host, { workItem: target.workItem })).ok).toBe(true)
@@ -93,9 +93,9 @@ test('ownTask: a failed read is NEVER ok (identity, work item, PR, an answer wit
 test('request time: a link or a state change of a work item that is not yours is refused with exactly the why, no card; a title change and a comment are not moves', async () => {
   const w = world(undefined, { assignee: ANN })
   const r = await w.ask(LINK)
-  expect(r).toMatchObject({ ok: false, text: 'WI 9840 is assigned to Ann Example, not you: not moving it' })
-  expect((await w.ask(STATE)).text).toBe('WI 9840 is assigned to Ann Example, not you: not moving it')
-  expect((await w.ask({ kind: 'batch', items: [LINK, STATE] })).text).toBe('WI 9840 is assigned to Ann Example, not you: not moving it')
+  expect(r).toMatchObject({ ok: false, text: 'WI 4210 is assigned to Ann Example, not you: not moving it' })
+  expect((await w.ask(STATE)).text).toBe('WI 4210 is assigned to Ann Example, not you: not moving it')
+  expect((await w.ask({ kind: 'batch', items: [LINK, STATE] })).text).toBe('WI 4210 is assigned to Ann Example, not you: not moving it')
   expect(await listActions(w.h.host)).toHaveLength(0)
   expect((await w.ask(COMMENT)).ok).toBe(true) // a comment is not a move
   expect((await w.ask(TITLE)).ok).toBe(true) // only the State (and the PR link) is guarded
@@ -103,7 +103,7 @@ test('request time: a link or a state change of a work item that is not yours is
   expect((await own.ask(LINK)).ok).toBe(true)
   expect((await own.ask({ kind: 'batch', items: [STATE, LINK] })).ok).toBe(true) // a link and a state change of its work item are one batch
   const bob = world(undefined, { creator: BOB })
-  expect((await bob.ask(LINK)).text).toBe('PR 5687 was created by Bob Example, not you: not linking it')
+  expect((await bob.ask(LINK)).text).toBe('PR 4271 was created by Bob Example, not you: not linking it')
   const down = world(undefined, { fail: ['/wit/workitems/'] })
   expect((await down.ask(STATE)).text).toBe('could not verify the owner/assignee: not moving it')
 })
@@ -117,7 +117,7 @@ test('send time: the assignee changed after the request: the approved request is
   const told: string[] = []
   const out = await approveAction(w.h.host, made.request!.id, async (_t, text) => void told.push(text))
   expect(out.ok).toBe(false)
-  expect(out.text).toContain('not sent: WI 9840 is assigned to Ann Example, not you: not moving it')
+  expect(out.text).toContain('not sent: WI 4210 is assigned to Ann Example, not you: not moving it')
   expect(w.writes).toEqual([])
   expect(told.join('\n')).toContain('leave the work item as it is')
   // unchanged: it goes out
@@ -133,13 +133,13 @@ test('the user lifts it for ONE work item with their typed words; config workite
   expect((await w.ask({ ...STATE, force: true, params: { ...STATE.params, force: true } })).ok).toBe(false) // nothing a thread passes lifts it
   w.h.store.set('desk.human.prompts', [{ text: 'move WI 1234 anyway', ts: w.h.clock.t }])
   expect((await w.ask(STATE)).ok).toBe(false) // another work item named
-  w.h.store.set('desk.human.prompts', [{ text: 'please move WI 9840', ts: w.h.clock.t }])
+  w.h.store.set('desk.human.prompts', [{ text: 'please move WI 4210', ts: w.h.clock.t }])
   expect((await w.ask(STATE)).ok).toBe(false) // no "anyway"
-  w.h.store.set('desk.human.prompts', [{ text: 'move WI 9840 anyway', ts: w.h.clock.t }])
+  w.h.store.set('desk.human.prompts', [{ text: 'move WI 4210 anyway', ts: w.h.clock.t }])
   expect((await w.ask(STATE)).ok).toBe(true)
   // a failed read is not lifted by words
   const down = world(undefined, { fail: ['/wit/workitems/'] })
-  down.h.store.set('desk.human.prompts', [{ text: 'move WI 9840 anyway', ts: down.h.clock.t }])
+  down.h.store.set('desk.human.prompts', [{ text: 'move WI 4210 anyway', ts: down.h.clock.t }])
   expect((await down.ask(STATE)).ok).toBe(false)
   const off = world({ workitems: { onlyOwn: false } }, { assignee: ANN, creator: BOB })
   expect((await off.ask(LINK)).ok).toBe(true)

@@ -161,16 +161,16 @@ test('two refs of one thread keep their own prepared state: a prepare or a reset
 test('done: the last prepare holds more files than the forge lists -> "the range of the last prepare looks wrong; prepare again"', { timeoutMs: 20_000 }, async () => {
   const { h } = setup()
   await noteReviewed(h.host, 't1', 'app', HEAD)
-  await notePrepare(h.host, 't1', 'PR #12', { project: 'app', head: HEAD, mb: BASE, files: 1206, lines: 9000, forgeN: 7, areas: ['area-1', 'area-2'] })
+  await notePrepare(h.host, 't1', 'PR #12', { project: 'app', head: HEAD, mb: BASE, files: 1200, lines: 9000, forgeN: 7, areas: ['area-1', 'area-2'] })
   const gate = await reviewReport(h.host, 't1', 'done', 'fine')
   expect(gate.ok).toBe(false)
   expect(gate.text).toContain('the range of the last prepare looks wrong; prepare again')
-  expect(gate.text).toContain('1206 files')
+  expect(gate.text).toContain('1200 files')
   expect(gate.text).toContain('forge lists 7 files')
   expect(gate.text).not.toContain('no record')
   // a later prepare with the forge's own count lifts it
   h.clock.t += 60_000
   const again = await notePrepare(h.host, 't1', 'PR #12', { project: 'app', head: HEAD, mb: BASE, files: 7, lines: 519, forgeN: 7, areas: [] })
-  expect(again).toContain('replaces the earlier prepare of 00:16 UTC: 2 areas / 1206 files; now 1 area / 7 files')
+  expect(again).toContain('replaces the earlier prepare of 00:16 UTC: 2 areas / 1200 files; now 1 area / 7 files')
   expect((await reviewReport(h.host, 't1', 'done', 'fine')).text).toContain('no lean_review record exists')
 })

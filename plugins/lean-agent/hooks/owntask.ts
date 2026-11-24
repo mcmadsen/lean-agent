@@ -101,7 +101,7 @@ export async function onlyOwn(h: Host, home: string): Promise<boolean> {
   const v = cfg && typeof cfg === 'object' ? (cfg.workitems && typeof cfg.workitems === 'object' ? cfg.workitems.onlyOwn : undefined) ?? cfg['workitems.onlyOwn'] : undefined
   return v !== false
 }
-// the user's OWN typed words lift the rule for the one work item they name ("move WI 9840 anyway"); a thread cannot pass anything that does
+// the user's OWN typed words lift the rule for the one work item they name ("move WI 4210 anyway"); a thread cannot pass anything that does
 export async function userSaidAnyway(h: Host, wi: number): Promise<boolean> {
   const named = new RegExp(`(?:\\bWI|work\\s?items?|_workitems/edit/|#)\\s*${wi}\\b`, 'i')
   return (await recentPrompts(h).catch(() => [])).some(p => named.test(p.text) && /\banyway\b|\bregardless\b|\beven though\b/i.test(p.text))

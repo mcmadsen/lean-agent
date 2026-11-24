@@ -1,5 +1,5 @@
 // The prepared state of a review thread, per (thread, ref): ONE record of the LAST `lean_review prepare` (an id, a time, the head, the range, the file
-// and area counts, the forge's own count). A later prepare of the same ref REPLACES it (never adds to it: the 1206-file prepare of a wrong base
+// and area counts, the forge's own count). A later prepare of the same ref REPLACES it (never adds to it: the 1200-file prepare of a wrong base
 // must not keep its 6 areas after the prepare of the real 7-file range); the earlier one is kept as history, marked superseded, and its area
 // records are never required. The report gate (reviewevidence.ts) counts the areas of the last prepare only. `reset-prepare` drops it by hand.
 // The mod's store, never a file of the session. Two refs of one thread keep their own state.
