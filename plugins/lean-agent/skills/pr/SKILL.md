@@ -47,6 +47,7 @@ with the token in the header, read from an environment variable and never printe
     them, the desk never does) and queues a message to the thread. Relay the URL to the user. When the CLI is missing or fails the
     reply gives the host's create-PR link instead (Azure DevOps: .../_git/{repo}/pullrequestcreate?sourceRef=..&targetRef=..) and
     names the CLI that was needed ("az repos pr create needs az + az login"); the PR is then the user's to open.
+  - desk, after the PR is open: the thread's stored work item is linked to it and set to Reviewing by the mod itself (one Approve in the pane; config `workitems.afterPr`); the mod moves only a work item assigned to you for a PR you created, otherwise it does nothing and says one line why; never ask a thread to do it.
 - **status** (desk or thread; the desk's folder is not a repo, so it names the repo: github `--repo {owner}/{repo}`, Azure
   `--organization https://dev.azure.com/{org} --project {project} --repository {repo}`): github: `gh pr view <n> --json state,reviewDecision,statusCheckRollup,url,isDraft,mergeable`;
   find a branch's PR with `gh pr list --head <branch> --json number,url,state`. Azure: `az repos pr show --id <n>`;
