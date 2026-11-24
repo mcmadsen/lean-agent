@@ -117,6 +117,8 @@ test('prepare (light and full) lists the changed files with their ranges; record
     const p = await tool(h, { action: 'prepare', base: 'main', level })
     expect(p.text).toContain('CHANGED CODE ONLY')
     expect(p.text).toContain('src/a.ts 10-12')
+    expect(p.text).toContain('### src/a.ts\n-: x\n-: y\n10: x1\n11: y1\n12: z1') // the hunks with new-side line numbers
+    expect(p.text).toContain('every finding is file:line of a listed range')
   }
   const r = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 11), fin(2, 'src/untouched.ts', 4), fin(3, 'src/a.ts', 90), fin(4, '', 0, { category: 'tests', text: 'no test for the empty case' })]) })
   expect(r.ok).toBe(true)

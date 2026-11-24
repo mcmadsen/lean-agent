@@ -242,7 +242,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const orch = await loadOrch(h).catch(() => undefined)
   const plan = statsText(areaDiff, orch ? stepBudget('check', orch.steps, orch.stepsByJob) : STEPS_BY_JOB.check)
   if (plan) lines.push(plan)
-  lines.push(changedText(brief)) // the changed files and their changed line ranges: the reviewer reports on these only (reviewchange.ts); the area split counts changed files only
+  lines.push(changedText(brief, { diff: areaDiff, context: await contextCfg(h) })) // the changed hunks with new-side line numbers (over the budget: the ranges): the reviewer reports on these only (reviewchange.ts)
   lines.push(prepText(capPrep(brief)))
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
