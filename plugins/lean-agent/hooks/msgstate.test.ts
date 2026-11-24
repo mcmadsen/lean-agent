@@ -116,3 +116,116 @@ test('messages without tN, or for a thread with no messages, says so', { timeout
   expect((await messages(h)).text).toContain('no messages')
   after(() => 0)
 })
+
+// ---- 2. unread escalation by script ----------------------------------------------------------------------------------------------------
+const recOf = (h: any) => json(h, `${T1}/delivery.json`)
+const woken = (h: any) => h.files.set(`${T1}/thread.json`, JSON.stringify({ ...json(h, `${T1}/thread.json`), lastWake: T0 - 1_000 }))
+
+test('REGRESSION (field report): a send to a stuck thread is queued, unread after 45 s the mod restarts it WITH the text, once; a second identical send is deduped', { timeoutMs: 20_000 }, async () => {
+  const { h, deps, restarts } = setup()
+  activity(h, T0 - 15 * 60_000) // working, but no tool call for 15 min: stuck (threads.stallMinutes 10)
+  const r = await send(h, 'use sqlite, not postgres')
+  expect(r.text).toContain('m1: queued, not read yet')
+  expect(recOf(h)).toMatchObject({ sid: S1, from: 0, upTo: 1 }) // watched from the moment it was queued
+  // 30 s: too early
+  h.clock.t = T0 + 30_000
+  expect(await deliveryTick(h.host, deps)).toEqual([])
+  expect(restarts).toHaveLength(0)
+  // the desk sends the same answer again while it is unread: deduped, nothing new is queued
+  const again = await send(h, 'use sqlite, not postgres')
+  expect(again.text).toContain('already queued as m1')
+  expect(again.text).toMatch(/\(30 s\b/)
+  expect((h.files.get(`${T1}/inbox.jsonl`) ?? '').trim().split('\n')).toHaveLength(1)
+  // 46 s: unread, the session shows no activity: restarted by script, the inbox is rewound to where the batch began
+  h.clock.t = T0 + 46_000
+  const n1 = await deliveryTick(h.host, deps)
+  expect(restarts).toHaveLength(1)
+  expect(restarts[0]).toMatchObject({ id: 't1', rewind: 0 })
+  expect(restarts[0]!.why).toContain('did not react')
+  expect(n1).toHaveLength(1) // the desk is told ONCE, one line
+  expect(n1[0]!.text).toContain('restarted it with the message')
+  expect(n1[0]!.text).toContain('stuck')
+  expect(recOf(h)).toEqual({})
+  expect((await messages(h)).text).toContain('the mod woke it')
+  // later ticks: nothing again
+  h.clock.t = T0 + 120_000
+  expect(await deliveryTick(h.host, deps)).toEqual([])
+  expect(restarts).toHaveLength(1)
+  after(() => 0)
+})
+
+test('a working thread that still makes tool calls is NOT restarted: it reads the message at its next tool call', { timeoutMs: 20_000 }, async () => {
+  const { h, deps, restarts } = setup()
+  activity(h, T0 - 5_000)
+  await send(h, 'use sqlite')
+  h.clock.t = T0 + 50_000
+  activity(h, T0 + 40_000) // it reacted
+  expect(await deliveryTick(h.host, deps)).toEqual([])
+  expect(restarts).toHaveLength(0)
+  expect(recOf(h)).toEqual({}) // the watch ends: it reacted
+  after(() => 0)
+})
+
+test('a working thread with little activity (less than the stall minutes) keeps being re-checked, not restarted', { timeoutMs: 20_000 }, async () => {
+  const { h, deps, restarts } = setup()
+  activity(h, T0 - 3 * 60_000)
+  await send(h, 'use sqlite')
+  h.clock.t = T0 + 50_000
+  expect(await deliveryTick(h.host, deps)).toEqual([])
+  expect(restarts).toHaveLength(0)
+  expect(recOf(h)).toMatchObject({ upTo: 1 })
+  after(() => 0)
+})
+
+test('an IDLE thread whose queued message stays unread for 45 s is restarted with it (as the wake)', { timeoutMs: 20_000 }, async () => {
+  const { h, deps, restarts } = setup({ row: { status: 'idle', state: 'idle' } })
+  woken(h) // woken a moment ago: the send queues behind it (no second wake inside 30 s)
+  await send(h, 'use sqlite')
+  h.clock.t = T0 + 46_000
+  const n = await deliveryTick(h.host, deps)
+  expect(restarts).toHaveLength(1)
+  expect(n).toHaveLength(1)
+  after(() => 0)
+})
+
+test('the thread read it before the 45 s: no restart, the message is consumed', { timeoutMs: 20_000 }, async () => {
+  const { h, deps, restarts } = setup()
+  activity(h, T0 - 15 * 60_000)
+  await send(h, 'use sqlite')
+  h.clock.t = T0 + 20_000
+  await takeBatch(h.host, 't1')
+  activity(h, T0 + 20_000)
+  h.clock.t = T0 + 60_000
+  expect(await deliveryTick(h.host, deps)).toEqual([])
+  expect(restarts).toHaveLength(0)
+  after(() => 0)
+})
+
+test('an identical text after the thread read the first one, or past 10 minutes, is a new message; an FYI is never deduped', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  await send(h, 'use sqlite')
+  await takeBatch(h.host, 't1')
+  expect((await send(h, 'use sqlite')).text).toContain('m2: queued')
+  h.clock.t = T0 + 11 * 60_000
+  const third = await send(h, 'use sqlite') // m2 is still unread but older than 10 minutes: not "already queued"
+  expect(third.text).toContain('m3: queued')
+  expect((await send(h, 'status check: where are you?')).text).toContain('m4')
+  expect((await send(h, 'status check: where are you?')).text).toContain('m5')
+  after(() => 0)
+})
+
+test('the automatic restart failing three times marks the message failed, one notice', { timeoutMs: 20_000 }, async () => {
+  const { h, deps } = setup({ row: { status: 'idle', state: 'idle' } })
+  const bad = { ...deps, restart: async () => ({ ok: false, text: 'claude --bg refused' }) }
+  woken(h)
+  await send(h, 'use sqlite')
+  const notes: any[] = []
+  for (let k = 1; k <= 4; k++) {
+    h.clock.t = T0 + 46_000 + k * 5_000
+    notes.push(...(await deliveryTick(h.host, bad)))
+  }
+  expect(notes).toHaveLength(1)
+  expect(notes[0]!.text).toContain('failed 3 times')
+  expect((await messages(h)).text).toContain('m1 failed')
+  after(() => 0)
+})

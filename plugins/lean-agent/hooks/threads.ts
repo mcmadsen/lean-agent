@@ -25,7 +25,7 @@ import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, res
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
 import { aliveRow, answered, deliverConfig, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
-import { markHanded, messageRecs, messagesText, sendLine } from './msgstate'
+import { ageText, duplicateOf, markHanded, messageRecs, messagesText, sendLine, stateWord } from './msgstate'
 import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -1080,11 +1080,20 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
         case 'send': {
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
-          await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
+          // the same text, still unread, within 10 minutes: not queued twice (the desk sent one answer twice in the field)
+          const sentAt = await h.clock.now()
+          const dup = await duplicateOf(h, home, id, text, sentAt)
+          if (dup) return { ok: true, text: `already queued as ${dup.id} (${ageText(sentAt - dup.at)} ago, ${stateWord(dup)}); not queued again. lean_thread messages ${id} shows its state`, data: { duplicate: dup.id } }
+          const kind0 = await kindFor(h, home, t, [{ ts: sentAt, text }]) // (before the wake: a direct delivery clears the waiting state it reads)
+          await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: sentAt, text } satisfies Inbox)
           const out = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
           // the state of THIS message, said plainly (msgstate.ts): queued / delivered / consumed, and how a queued one reaches the thread
-          const mine = (await messageRecs(h, home, id)).at(-1)
+          const recs = await messageRecs(h, home, id)
+          const mine = recs.at(-1)
           if (!mine || t.state !== 'open' || !t.sid) return out // (a parked / closed thread: its own reply already says nothing reads it)
+          // still unread: WATCHED from now (deliverToThread's tick): unread for threads.answerWaitSeconds and the session idle or stuck = restarted by script with the text
+          const now2 = await load(h, home, id)
+          if (mine.state === 'queued' && now2?.state === 'open' && now2.sid && !/waits on a permission prompt/.test(out.text)) await watchDelivery(h, home, id, { sid: now2.sid, from: (recs.find(r => r.state === 'queued') ?? mine).n - 1, upTo: mine.n, kind: kind0, again: true })
           const wait = (await deliverConfig(h, home)).answerWaitSeconds
           return { ...out, text: `${sendLine(mine, { woken: (out.data as { resumed?: boolean } | undefined)?.resumed === true, answerWaitSeconds: wait })}\n${out.text}` }
         }

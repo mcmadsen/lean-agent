@@ -219,7 +219,7 @@ test('the cached refusal means no 45 s wait on a send that never went out; it en
   const { h, st, sent } = setup({ row: { status: 'busy', state: 'working' }, send: async (sid, text) => (ok ? (void 0, undefined) : { isDelivered: false, reason: NO_TOOL }) })
   await send(h, 'one')
   expect(directUnavailable()).toBe(NO_TOOL)
-  expect(h.files.get(`${T1}/delivery.json`)).toBeUndefined() // nothing went out: nothing to wait for
+  expect(JSON.parse(h.files.get(`${T1}/delivery.json`) ?? '{}')).toMatchObject({ upTo: 1 }) // (1.0.31) the message waits in the inbox and is WATCHED: unread for 45 s with a stuck / idle session = restarted by script (msgstate.test.ts)
   expect(sent).toHaveLength(0)
   ok = true
   h.clock.t = T0 + UNAVAILABLE_MS + 1_000
