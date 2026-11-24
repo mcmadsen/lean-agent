@@ -43,7 +43,7 @@ test('a request for opus is a card with Approve, Deny and Start on sonnet instea
   const r = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await has(ui, /Needs you \(1\)/)).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toMatch(/^▾ t1/) // 1.0.32: a request is a decision, so it is unfolded on its thread's card (no Needs-you section)
   expect(await has(ui, /t1 asks to run on opus\/high \(opus is not sonnet or haiku, so it needs your approval\): a cross-module change/)).toBe(true)
   for (const k of [`model-approve-${r.id}`, `model-deny-${r.id}`, `model-sonnet-${r.id}`, 'pane-t1']) expect([k, !!(await ui.find({ type: 'Button', key: k }))]).toEqual([k, true])
   await ui.press({ key: `model-approve-${r.id}` })
@@ -144,8 +144,8 @@ test('the desk\'s own request is for the desk scope; a request of a closed threa
   const d = await w.ask({ thread: 'desk', action: 'agent', origin: 'guard', reason: 'the worker-opus agent' })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await has(ui, /Needs you \(1\)/)).toBe(true) // only the desk's
-  expect(await has(ui, /the desk was refused opus/)).toBe(true)
+  expect(await has(ui, /the desk was refused opus/)).toBe(true) // the desk has no thread card: its request is in Health
+  expect(await has(ui, /t1 (asks to run|was refused)/)).toBe(false) // the closed thread's is not shown
   await ui.press({ key: `model-approve-${d.id}` })
   await ui.press({ key: `model-approve-${d.id}` })
   expect(await modelAllowed(w.store, 'desk', 'opus')).toBe(true)
@@ -160,8 +160,7 @@ test('a desk the app started on an expensive model that the mod could not switch
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
   const line = "the desk runs claude-opus-5-5; pick Sonnet in the app's model menu (lean-agent pins sonnet / high)"
-  expect(await has(ui, /Needs you \(1\)/)).toBe(true)
-  expect((await texts(ui)).filter(t => t === line)).toHaveLength(1) // once: in the row, not also at the top
+  expect((await texts(ui)).filter(t => t === line)).toHaveLength(1) // once: in the Health row, not also at the top
   const red = (await ui.findAll({ type: 'Box' })).filter((b: any) => b.props?.borderColor === 'error')
   expect(red.length).toBeGreaterThan(0)
   await ui.unmount()

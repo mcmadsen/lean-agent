@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { resetLocks } from './threads'
+import { REPORT_RULE } from './endnudge'
 
 async function threadSession($: any, on: any, hooks: () => void) {
   const h = fakeHost(on)
@@ -71,6 +72,9 @@ test('prompt.compose adds the standing orders to a thread\'s session section', {
   const mem = r.sections.find((s: any) => s.id === 'lean-agent:memory')
   expect(mem.scope).toBe('session')
   expect(mem.text).toContain('use pnpm')
+  // the report rule (endnudge.ts) is the FIRST section of a thread session, ahead of the engine's own and the mod's, with its fixed text
+  expect(r.sections[0]).toEqual({ id: 'lean-agent:report-rule', text: REPORT_RULE, scope: 'shared' })
+  expect(r.sections.filter((s: any) => s.id === 'lean-agent:report-rule')).toHaveLength(1)
 })
 
 test('session.compact writes the thread\'s notes first', { timeoutMs: 20_000 }, async ($, on) => {

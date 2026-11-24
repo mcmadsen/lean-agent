@@ -65,6 +65,8 @@ export const REGISTRY: readonly Entry[] = [
   mk('threads.autoContinue', 'boolean', true, 'threads', 'now', 'continuepending.ts', 'Continue a thread that ends its turn with "next: ..." (off: no automatic continue).'),
   mk('threads.continueSeconds', 'number', 20, 'threads', 'now', 'continuepending.ts', 'Seconds a "next: ..." turn waits before the continue message is sent.', n(1)),
   mk('threads.keepGoing', 'boolean', true, 'threads', 'now', 'continuepending.ts', 'Keep going is the standing order of every work thread (review threads excluded); a thread\'s own keep-going on / off wins.'),
+  mk('threads.endNudge', 'boolean', true, 'threads', 'now', ['endnudge.ts', 'continuepending.ts'], 'A turn that ends without lean_report (done, blocked, question) is nudged by script (once per ended turn, at most twice an hour) and, still unreported after idleAlertMinutes, raised to the desk.'),
+  mk('threads.requireReport', 'boolean', true, 'threads', 'now', ['endnudge.ts', 'continuepending.ts'], 'A thread whose brief asks for ONE action that ends its turn without lean_report is nudged at once with the whole report rule (a mod cannot refuse a Stop).'),
   mk('threads.idleAlertMinutes', 'number', 10, 'threads', 'now', ['threadstate.ts', 'stall.ts'], 'Minutes a thread may be idle without a report before the desk gets one notice (0 = off).', n(0)),
   mk('threads.softCheckpointTokens', 'number', 80000, 'threads', 'next-session', ['threadcontext.ts', 'budgetcfg.ts'], 'A work thread this big is told once to checkpoint at its next boundary (an idle one is checkpointed by script).', { min: 20000, max: 400000, int: true, flat: true }),
   mk('threads.softUsd', 'number', 8, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts'], 'Per-thread budget in USD from the ledger: one nudge at 80%, told to report and stop at 100% (0 = off; lean_thread budget tN overrides it).', { min: 0, max: 10000, flat: true }),
@@ -142,6 +144,9 @@ export const REGISTRY: readonly Entry[] = [
   mk('refusals.repeat', 'number', 3, 'other', 'now', 'refusals.ts', 'How often one refusal pattern repeats before the doctor names it.', n(2, { int: true })),
   // ---- pane ----
   mk('pane.theme', 'enum', 'off', 'pane', 'desk-restart', 'look.ts', 'Give the app lean-agent\'s own look (on) or leave it alone (off).', { values: ['on', 'off'] }),
+  mk('pane.sort', 'enum', 'active', 'pane', 'now', 'panelist.ts', 'How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), cost or name. The pane\'s sort chips set it.', { values: ['active', 'needs', 'cost', 'name'], flat: true }),
+  mk('pane.maxSessions', 'number', 30, 'pane', 'now', 'panelist.ts', 'Sessions the desk pane lists before one "show more" row (a session with an unread message or something waiting for you is always listed).', { min: 5, max: 500, int: true, flat: true }),
+  mk('pane.healthOpen', 'boolean', false, 'pane', 'now', 'panelist.ts', 'Start the pane\'s Health card (findings, fixes, standing approvals) unfolded (true); by default it starts folded and is highlighted when something needs a fix.', { flat: true }),
   // ---- feedback ----
   mk('feedback.destination', 'enum', 'local', 'feedback', 'now', 'feedbackdest.ts', 'Where the feedback export goes: local, folder, github or folder+github.', { values: ['local', 'folder', 'github', 'folder+github'], flat: true }),
   mk('feedback.folder', 'path', null, 'feedback', 'now', 'feedbackdest.ts', 'Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads.', { flat: true }),

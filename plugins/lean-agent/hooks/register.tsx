@@ -12,7 +12,7 @@ import { decide, workerJob } from './guard'
 import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { noteRun, runPrGuide } from './prchecks'
 import { holdLines, holdsTick } from './sendhold'
-import { recordHumanPrompt } from './humanprompts'
+import { isHumanPrompt, recordHumanPrompt } from './humanprompts'
 import { auditStanding, bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
 import { ownFromGrant } from './ownpr'
 import { bindConfigAnswers, configTool } from './configtool'
@@ -49,6 +49,8 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
+import { withReportRule } from './endnudge'
+import { noteSynthAtTurnEnd, noteToolResult } from './synthline'
 import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, isAuditorCall, isLeanCall, markAuditStarted, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
@@ -160,6 +162,7 @@ export const resetModState = () => {
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
+let humanTurn = false // the turn that is running (or just ended) was started or joined by the user's own typed words in this thread's pane
 let rulesSection: string | null = null // the thread's `_project.md`, a session section of prompt.compose (set at the role's setup)
 let projectOfThread: string | undefined // the thread's project (thread.json), read once per session; '' = none
 async function threadProject(host: Host): Promise<string> {
@@ -405,7 +408,11 @@ async function threadEnd(host: Host, id: string, tokensIn: unknown, sid: string,
     lastEnd = key
     const out = await threadTurnEnd(host, id, { sid, tokens, since: turnStartedAt, tasks: currentTasks() })
     if (out.stop !== undefined) stopped = out.stop ? { sid, ...out.stop } : null // at or over the limit: the hard stop applies from now on
-    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText: text ? await text() : null, tasks: currentTasks() }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
+    const lastText = text ? await text() : null
+    await noteSynthAtTurnEnd(host, await homeDir(host), id, { lastText, since: turnStartedAt }) // no assistant text, a tool result came last: a short line for the list (synthline.ts, display only)
+    const human = humanTurn
+    humanTurn = false
+    await noteTurnEnd(host, id, { sid, since: turnStartedAt, lastText, tasks: currentTasks(), human }) // an open task / "next:" at the end of a turn / keep-going: the desk's timer continues it by script
     if (after) await after() // (last: the breakdown may take a few seconds, the state and the stop must not wait for it)
   } catch {
     /* the next turn end tries again */
@@ -616,7 +623,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // a turn that ended with "next: ..." (or any turn end of a keep-going thread) is continued by script after threads.continueSeconds (continuepending.ts)
       every($, 10_000, 'desk', async host2 => {
-        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }) })
+        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text, internal: true }) }) // (a send of the mod itself: never reopens a closed thread)
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-continue-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
@@ -1628,6 +1635,7 @@ export const register: Register = on => {
     // the thread's usage counter: which MCP servers and skills it really called (names and counts, never arguments); a worker's
     // call counts for the thread. This is what a project profile is learned from.
     if (role.kind === 'thread' && r?.deny === undefined) await noteToolUse(host, role.id, String(e.tool ?? ''), e).catch(() => false)
+    if (role.kind === 'thread' && !e.agentId && r?.deny === undefined) noteToolResult(String(e.tool ?? ''), texts((r as any)?.result).join(' '), await host.clock.now()) // the last tool result, in memory (synthline.ts)
     // a thread that reported blocked with an approval and now calls a tool has carried on: its "needs your yes" card ends (approvals.ts)
     if (role.kind === 'thread' && !e.agentId) await noteCall(host, role.id, String(e.tool ?? '')).catch(() => false)
     // learned rules for a thread and its subagents: the engine loads them only beneath the session root, so the mod appends the rules
@@ -1668,15 +1676,16 @@ export const register: Register = on => {
 
   // memory: the project's saved facts as a short session section for a thread and its workers
   on('prompt.compose', async ($, e: any, next) => {
-    const r: any = await next(e)
+    const r0: any = await next(e)
+    let r: any = r0
     try {
       const text = await memorySection(hostOf($), role)
       const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(role.kind === 'thread' && rulesSection ? [{ id: 'lean-agent:rules', text: rulesSection, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
-      if (sections.length && r?.sections) return { ...r, sections: [...r.sections, ...sections] }
+      if (sections.length && r?.sections) r = { ...r, sections: [...r.sections, ...sections] }
     } catch {
       /* the prompt goes out without it */
     }
-    return r
+    return withReportRule(r, role.kind) // the report rule (endnudge.ts) is the FIRST section of every thread session, no size cap touches it
   })
 
   // handoff notes before a compaction (threads and desk), so Resume/Start can rebuild from notes.md
@@ -1703,6 +1712,8 @@ export const register: Register = on => {
       const gone = await retiredInfo(host, lastSid)
       if (gone) return next({ ...e, context: [...(e.context ?? []), retiredLine(gone)] })
     }
+    // the user's own typed words in a thread's pane: a chat turn, not a work turn: the end-nudge leaves its end alone (endnudge.ts, noteTurnEnd `human`)
+    if (role.kind === 'thread' && !e.agentId && isHumanPrompt(e, await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false))) humanTurn = true
     if (role.kind === 'desk') {
       await deskModelCheck($, '', true) // the pin holds before the turn runs (deskmodel.ts)
       promptSeen = true // a switch after this point (command / picker) is the person's own and is kept for the session

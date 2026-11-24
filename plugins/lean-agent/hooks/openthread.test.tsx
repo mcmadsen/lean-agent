@@ -170,6 +170,9 @@ test('the pane row "tN needs your yes in its own session: <action>" and its Open
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: 'Open t1' }), 'the collapsed card has Open t1 as its one button').toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`t1 needs your yes in its own session: ${ACTION}`) }), 'folded').toBeFalsy()
+  await ui.press({ key: 'card-t1' }) // 1.0.32: the row is on the card, unfolded on a tap
   expect(await ui.find({ type: 'Text', text: new RegExp(`t1 needs your yes in its own session: ${ACTION}`) }), 'row text').toBeTruthy()
   expect(await ui.find({ type: 'Button', text: 'Open t1' }), 'button').toBeTruthy()
   await ui.press({ key: 'open-t1' })
