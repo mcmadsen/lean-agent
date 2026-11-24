@@ -259,4 +259,14 @@ need remember 'ONE private store'
 need remember 'never CLAUDE.md'
 need remember 'Never:'
 [ "$(wc -l < "$here/remember/SKILL.md")" -le 30 ] || fail "the remember skill must stay one screen (30 lines)"
+# 1.0.32: the report rule (hooks/endnudge.ts REPORT_RULE) is the first line of every agent file's body and of the review brief, and the first lines of the thread guide; it lives only in the
+# mod, the agent files and the templates (never in a CLAUDE.md or rules folder of the user)
+sentence=$(grep -m1 "^export const REPORT_RULE_SENTENCE = " "$here/../hooks/endnudge.ts" | sed "s/^export const REPORT_RULE_SENTENCE = '//; s/'\$//")
+[ -n "$sentence" ] || fail "endnudge.ts has no REPORT_RULE_SENTENCE"
+for f in "$root"/agents/*.md; do
+  [ "$(awk '/^---$/{n++; next} n==2{print; exit}' "$f")" = "$sentence" ] || fail "$(basename "$f") must start its body with the report rule sentence"
+done
+[ "$(head -1 "$root/templates/review-brief.md")" = "$sentence" ] || fail "review-brief.md must start with the report rule sentence"
+[ "$(sed -n 4p "$root/templates/thread.md")" = "$sentence" ] || fail "thread.md must carry the report rule from line 4"
+grep -qF 'Silence is a failure, the desk cannot see it.' "$root/templates/thread.md" || fail "thread.md lacks the last line of the report rule"
 echo "ok skills-contract"

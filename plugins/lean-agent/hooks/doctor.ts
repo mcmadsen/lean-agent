@@ -26,6 +26,7 @@ import { feedbackRow } from './feedbackdest'
 import { configRow } from './configtool'
 import { retireMemory, staleMemoryCount } from './forgewrite'
 import { memoryRow } from './memorydoctor'
+import { doctorRow as reportRuleRow } from './endnudge'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -241,6 +242,7 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const mcp = await mcpRows(h, home).catch(() => [] as string[])
   if (mcp.length) out.push(...mcp)
   else out.push('ok   no MCP server config references an unset variable')
+  out.push(await reportRuleRow(h).catch(() => 'ok   report rule: injected (threads)')) // endnudge.ts: info only, the counters of the end-nudge
   const imp = await importNote(h, home).catch(() => null)
   if (imp) out.push(`ok   ${imp}`)
   out.push(`desk skill listing: ${skillStat()}`)

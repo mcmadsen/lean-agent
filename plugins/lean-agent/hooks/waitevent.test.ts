@@ -35,7 +35,8 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown } = {}) {
   h.files.set('/p/templates/thread.md', '# {{id}} {{title}}')
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 3_600_000, delivered: 0, ...o.thread }))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
-  h.files.set(`${L}/config.json`, JSON.stringify(o.config ?? { threads: { keepGoing: false } }))
+  const cfg0 = (o.config ?? { threads: { keepGoing: false } }) as { threads?: object }
+  h.files.set(`${L}/config.json`, JSON.stringify({ ...cfg0, threads: { ...cfg0.threads, endNudge: false } })) // (1.0.32: the end-nudge has its own specs, endnudge.test.ts)
   return h
 }
 const inbox = (h: any, ...recs: Record<string, unknown>[]) => h.files.set(`${L}/desk/inbox.jsonl`, recs.map(r => JSON.stringify(r)).join('\n') + '\n')

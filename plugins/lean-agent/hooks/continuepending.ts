@@ -12,6 +12,8 @@
 // 1.0.31: kind 'todo' (an open item in the thread's task list: structural, no phrase; "Continue: <title>. Do it now ...", 6 in a row, then one notice), kind 'remind' (a
 // last paragraph conditional on an event while waitevent.ts finds nothing that wakes the thread; at most 2 per thread), and NO continue of any kind while waitingOn() holds.
 // Keep-going is on by default (config threads.keepGoing, `keep-going off` wins; keepGoingOf). Every todo / next / remind continue is one line in continue-log.jsonl and counted.
+// 1.0.32: kind 'end' (endnudge.ts: the report rule): a turn that ends with no final report and nothing above to continue is nudged ONCE ("end with lean_report ...", at most 2 an hour a
+// thread, threads.endNudge), takes precedence over 'keep', and is recorded for the desk's alert (stall.ts).
 // Config: threads.autoContinue (default true; false = no 'next' / 'todo' / 'remind' continues), threads.continueSeconds (default 20), threads.keepGoing (default true). Every check is repeated when the tick acts:
 // only an OPEN thread whose session is the recorded one (never parked, closed, finished) is continued.
 import { appendJsonl, homeDir, readJson, readJsonl, threadsDir, writeJson, leanDir } from './state'
@@ -26,6 +28,7 @@ import { NEXT_CONDITIONAL, NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextw
 import { waitingOn } from './waitevent'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { markerOf } from './reviewkind'
+import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded } from './endnudge'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
 import type { AgentRow, Out, Thread } from './threads'
@@ -45,16 +48,16 @@ export const haltTodoText =(id: string) => `${id} keeps ending its turns without
 export const haltText = (id: string) => `${id} keeps stopping after 'next:'`
 export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_PER_HOUR} times in the last hour and keeps stopping: no more automatic continues for now`
 
-export type Kind = 'next' | 'keep' | 'todo' | 'remind'
+export type Kind = 'next' | 'keep' | 'todo' | 'remind' | 'end'
 export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
-export type CState = { consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean }
+export type CState = { endHour?: number[]; consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean }
 export const logFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-log.jsonl`
-export const continuedLine = (kind: Kind, text: string): string => kind === 'remind' ? 'reminded by the mod: nothing is pending that wakes it' : `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
+export const continuedLine = (kind: Kind, text: string): string => kind === 'end' ? 'nudged by the mod: its turn ended without a report' : kind === 'remind' ? 'reminded by the mod: nothing is pending that wakes it' : `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
 export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-pending.json`
 export const stateFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-state.json`
 export const readPending = async (h: Host, home: string, id: string): Promise<Pending | null> => {
   const p = await readJson<Partial<Pending> | null>(h, pendingFile(home, id), null)
-  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo' || p.kind === 'remind') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}) } : null
+  return p && typeof p === 'object' && Number(p.at) > 0 && typeof p.sid === 'string' && (p.kind === 'next' || p.kind === 'keep' || p.kind === 'todo' || p.kind === 'remind' || p.kind === 'end') ? { at: Number(p.at), sid: p.sid, kind: p.kind, text: typeof p.text === 'string' ? p.text : '', ...(typeof p.sig === 'string' ? { sig: p.sig } : {}) } : null
 }
 export const clearPending = (h: Host, home: string, id: string): Promise<void> => writeJson(h, pendingFile(home, id), {}).catch(() => undefined)
 export const readCState = async (h: Host, home: string, id: string): Promise<CState> => {
@@ -133,7 +136,7 @@ async function tasksOfTurn(h: Host, home: string, id: string, o: TurnEndIn): Pro
 
 // ---- thread side -------------------------------------------------------------------------------------------------------------------
 export type TurnEndIn = { sid: string; since: number; lastText?: string | null; tasks?: unknown }
-// Returns what was recorded: 'next' | 'keep' | 'none'. Never throws (the turn end is not the place for a failure).
+// Returns what was recorded: 'next' | 'keep' | 'todo' | 'remind' | 'end' (the report-rule nudge, endnudge.ts) | 'none'. Never throws (the turn end is not the place for a failure).
 export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Kind | 'none'> {
   try {
     const home = await homeDir(h)
@@ -156,16 +159,29 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     if (cfg.auto && isConditional(o.lastText)) kind = 'remind'
     else if (open) kind = 'todo'
     else if (announced && cfg.auto) kind = 'next'
-    else if (!question && (await keepGoingOf(h, t, cfg.keepGoing))) kind = 'keep'
-    if (!kind) return await drop(h, home, id)
-    await writeJson(h, pendingFile(home, id), { at: await h.clock.now(), sid: o.sid, kind, text: kind === 'todo' ? open!.text : kind === 'remind' ? '' : (announced ?? ''), ...(kind === 'todo' ? { sig: tasksSig(tasks) } : {}) } satisfies Pending)
+    // the report rule (1.0.32, endnudge.ts): none of the above and no final report in this turn = "ended without a report": the record, and ONE nudge (kind 'end', at most
+    // MAX_NUDGES_PER_HOUR an hour; over that the keep-going continue below is what it was)
+    const endOn = !kind && (await endNudgeOn(h, home))
+    const now = await h.clock.now()
+    if (endOn) {
+      const hint = hasUnverifiedClaim(o.lastText)
+      await noteEnded(h, home, id, { sid: o.sid, now, hint, recs: await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`) })
+      if (((await readCState(h, home, id)).endHour ?? []).filter(x => now - x < 3_600_000).length < MAX_NUDGES_PER_HOUR) {
+        await writeJson(h, pendingFile(home, id), { at: now, sid: o.sid, kind: 'end', text: hint ? HINT_KEY : '' } satisfies Pending)
+        return 'end'
+      }
+    } else await clearEnded(h, home, id) // continued by an open task / announcement / reminder, or the nudge is off: not an unreported end
+    if (!kind && !question && (await keepGoingOf(h, t, cfg.keepGoing))) kind = 'keep'
+    if (!kind) return await drop(h, home, id, endOn)
+    await writeJson(h, pendingFile(home, id), { at: now, sid: o.sid, kind, text: kind === 'todo' ? open!.text : kind === 'remind' ? '' : (announced ?? ''), ...(kind === 'todo' ? { sig: tasksSig(tasks) } : {}) } satisfies Pending)
     return kind
   } catch {
     return 'none'
   }
 }
-async function drop(h: Host, home: string, id: string): Promise<'none'> {
+async function drop(h: Host, home: string, id: string, keepEnd = false): Promise<'none'> {
   await clearPending(h, home, id)
+  if (!keepEnd) await clearEnded(h, home, id) // a final report, a question, a wait, a stop, a closed thread: nothing ended unreported
   return 'none'
 }
 
@@ -219,7 +235,12 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       continue
     }
     if (now - p.at < cfg.seconds * 1000) continue
-    if (p.kind !== 'keep' && !cfg.auto) {
+    // the report-rule nudge (kind 'end'): threads.endNudge decides, not autoContinue; at most MAX_NUDGES_PER_HOUR a thread an hour (then only the desk alert, stall.ts)
+    if (p.kind === 'end' && (!(await endNudgeOn(h, home)) || (cs.endHour ?? []).filter(x => now - x < 3_600_000).length >= MAX_NUDGES_PER_HOUR)) {
+      await clearPending(h, home, id)
+      continue
+    }
+    if (p.kind !== 'keep' && p.kind !== 'end' && !cfg.auto) {
       await clearPending(h, home, id)
       continue
     }
@@ -306,9 +327,15 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id)
       continue
     }
-    const r = await deps.send(id, p.kind === 'remind' ? REMIND_TEXT : p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
+    const r = await deps.send(id, p.kind === 'end' ? NUDGE_TEXT(p.text === HINT_KEY) : p.kind === 'remind' ? REMIND_TEXT : p.kind === 'todo' ? TODO_TEXT(p.text) : p.kind === 'next' ? NEXT_TEXT(p.text || 'the step you announced') : KEEP_TEXT)
     await clearPending(h, home, id)
     if (!r.ok) continue
+    if (p.kind === 'end') {
+      // one nudge per ended turn, counted per hour (the cap above); one line in the thread's record, never announced to the desk (the alert of stall.ts is the desk's word)
+      await save({ ...cs, sentAt: now, endHour: [...(cs.endHour ?? []).filter(x => now - x < 3_600_000), now] })
+      await appendJsonl(h, logFile(home, id), { at: now, kind: 'end', text: continuedLine('end', '') }).catch(() => undefined)
+      continue
+    }
     // the desk sees it (1.0.31): a continue by the open-TODO rule or an announcement is one line in the thread's record and one in the count of `lean_thread list`; the FIRST
     // one of a thread is also said once in the desk, the rest are only counted. (A plain keep-going continue is the standing order's own: not counted.)
     const counted = p.kind !== 'keep'

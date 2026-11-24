@@ -37,6 +37,7 @@ import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
 import { continueConfig, keepGoingOf } from './continuepending'
 import { waitingOn } from './waitevent'
+import { endDue, endedNote } from './endnudge'
 import { dismissAction } from './dismiss'
 import { loadView } from './view'
 import { loadOrch, threadToolsArgv } from './orchestrate'
@@ -846,7 +847,8 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const answerQ = t.state === 'open' && t.sid ? answerText((await answerInfo(h, home, t.id)).open, now0) : '' // an answer to its question that it has not read yet
     // idle for threads.idleAlertMinutes with nothing reported (the desk's timer raises the notice once: stall.ts); a flag here so a listing shows it too
     const idleNo = truth ? idleNoReport({ word: truth.word, keepGoing: t.keepGoing === true, lastAt: truth.lastAt, now: now0, minutes: stall.idleAlertMinutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec }) : null
-    const idleNote = idleNo ? `idle ${Math.max(1, Math.round(idleNo.ms / 60_000))} min, no report` : ''
+    const endNo = truth ? await endDue(h, home, t, { word: truth.word, now: now0, minutes: stall.idleAlertMinutes, recs }) : null // the report rule (endnudge.ts): the turn ended with no final report
+    const idleNote = endNo ? endedNote(endNo.ms) : idleNo ? `idle ${Math.max(1, Math.round(idleNo.ms / 60_000))} min, no report` : ''
     const unvRec = t.state === 'open' ? await readUnverified(h, home, t.id) : null // the old session's findings, until the new one reports (msgstate.ts)
     const unverified = unvRec ? unverifiedText(unvRec) : ''
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)

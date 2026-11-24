@@ -1,3 +1,4 @@
+Every turn of yours ends with lean_report (done, blocked or question) or, for a worker, with its answer to the thread.
 Review {{label}} of project {{project}} (ref: {{ref}}{{baseNote}}) through the lean-agent:review skill. Never review by hand: a review without the skill leaves no record and no reviewer pass, and your done report is refused without one.
 1. Load the skill lean-agent:review and read its "External review" section.
 2. lean_review prepare with ref "{{ref}}"{{baseArg}} at level "full". Run the reviewer passes it asks for, exactly as it says (the reviewer agent, two runs when it says so).

@@ -49,6 +49,7 @@ import { statsText } from './stats'
 import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
+import { withReportRule } from './endnudge'
 import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, isAuditorCall, isLeanCall, markAuditStarted, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
@@ -616,7 +617,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // a turn that ended with "next: ..." (or any turn end of a keep-going thread) is continued by script after threads.continueSeconds (continuepending.ts)
       every($, 10_000, 'desk', async host2 => {
-        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }) })
+        const notes = await continueTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text, internal: true }) }) // (a send of the mod itself: never reopens a closed thread)
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-continue-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
@@ -1668,15 +1669,16 @@ export const register: Register = on => {
 
   // memory: the project's saved facts as a short session section for a thread and its workers
   on('prompt.compose', async ($, e: any, next) => {
-    const r: any = await next(e)
+    const r0: any = await next(e)
+    let r: any = r0
     try {
       const text = await memorySection(hostOf($), role)
       const sections = [...(text ? [{ id: 'lean-agent:memory', text, scope: 'session' }] : []), ...(role.kind === 'thread' && rulesSection ? [{ id: 'lean-agent:rules', text: rulesSection, scope: 'session' }] : []), ...(skew ? [{ id: 'lean-agent:skew', text: `[lean-agent] ${skew}`, scope: 'session' }] : [])]
-      if (sections.length && r?.sections) return { ...r, sections: [...r.sections, ...sections] }
+      if (sections.length && r?.sections) r = { ...r, sections: [...r.sections, ...sections] }
     } catch {
       /* the prompt goes out without it */
     }
-    return r
+    return withReportRule(r, role.kind) // the report rule (endnudge.ts) is the FIRST section of every thread session, no size cap touches it
   })
 
   // handoff notes before a compaction (threads and desk), so Resume/Start can rebuild from notes.md

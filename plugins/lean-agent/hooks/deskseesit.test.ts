@@ -26,7 +26,7 @@ function setup() {
   h.files.set('/p/templates/thread.md', '# {{id}} {{title}}')
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 3_600_000, delivered: 0 }))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: false } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: false, endNudge: false } }))
   return h
 }
 async function cycle(h: any, i: number, tasks: unknown, text = 'Going on in the next step.') {
@@ -59,7 +59,7 @@ test('a continue by an announcement ("next:") is written and counted the same wa
   expect(log(h)).toEqual([expect.objectContaining({ kind: 'next', text: 'continued by the mod: announced "wire the timer"' })])
   expect(a.notes).toHaveLength(1)
   const k = setup()
-  k.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: true } }))
+  k.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: true, endNudge: false } }))
   const b = await cycle(k, 0, [], 'Finished the module.')
   expect(b.sent).toHaveLength(1)
   expect(log(k)).toEqual([])

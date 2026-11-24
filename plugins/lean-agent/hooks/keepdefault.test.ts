@@ -22,7 +22,7 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown } = {}) {
   const h = fakeHost(null)
   h.clock.t = T0
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 3_600_000, delivered: 0, ...o.thread }))
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  h.files.set(`${L}/config.json`, JSON.stringify({ ...(o.config as object | undefined), threads: { ...(o.config as { threads?: object } | undefined)?.threads, endNudge: false } })) // (1.0.32: the end-nudge has its own specs, endnudge.test.ts)
   return h
 }
 const end = (h: any, lastText: string | null) => noteTurnEnd(h.host, 't1', { sid: S1, since: T0 - 60_000, lastText, tasks: [] })
@@ -84,7 +84,7 @@ test('a pending request for the user stops the plain keep-going continue too', {
 test('switched off after the record was written: the timer drops it; a default thread that keeps ending its turns is silenced after 6 in a row without a tool call', async () => {
   const h = setup()
   await end(h, 'ok')
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: false } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { keepGoing: false, endNudge: false } }))
   h.clock.t = T0 + 25_000
   const s1: string[] = []
   await tick(h, s1)

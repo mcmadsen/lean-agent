@@ -28,7 +28,8 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown } = {}) {
   const h = fakeHost(null)
   h.clock.t = T0
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 3_600_000, delivered: 0, ...o.thread }))
-  h.files.set(`${L}/config.json`, JSON.stringify(o.config ?? { threads: { keepGoing: false } })) // (the keep-going default is its own spec)
+  const cfg0 = (o.config ?? { threads: { keepGoing: false } }) as { threads?: object }
+  h.files.set(`${L}/config.json`, JSON.stringify({ ...cfg0, threads: { ...cfg0.threads, endNudge: false } })) // (the keep-going default is its own spec; so is the end-nudge, endnudge.test.ts)
   return h
 }
 const end = (h: any, lastText: string | null, tasks: unknown = TASKS, since = T0 - 60_000) => noteTurnEnd(h.host, 't1', { sid: S1, since, lastText, ...(tasks === null ? {} : { tasks }) }) // tasks null: none passed (the snapshot is read)
