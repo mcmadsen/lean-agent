@@ -23,7 +23,8 @@ import { slugOk } from './rules'
 import { lessonsTool, repoOf } from './reviewlessons'
 import { fetchPrs } from './prhost'
 import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
-import { addPrepNote, expectedReviewCost, expectedText, reviewCostLine } from './reviewcost'
+import { addPrepNote, expectedReviewCost, expectedText, fanOutText, reviewCostLine } from './reviewcost'
+import { spendStop } from './reviewspend'
 // "\nreview cost for <sha>: $0.84 over 2 passes, 41 requests" (the line every prepare and record reply ends with), or '' when no pass ran for the sha
 const costNote = async (h: Host, project: string, thread: string, sha: string): Promise<string> => {
   const l = await reviewCostLine(h, project, thread, sha).catch(() => '')
@@ -186,7 +187,11 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const areasAll = partition(whole)
   if (!scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))) {
     await noteAreas(h, project, range.head, areasAll.map(a => a.name))
-    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head })}\n${bigText(whole, ctx.prep, areasAll)}` }
+    const bigExp = await expectedReviewCost(h, project, 1, level) // one pass per area
+    const bigFan = fanOutText(bigExp, areasAll.length)
+    const bigStop = await spendStop(h, project, bigExp.usd * areasAll.length, bigFan, i.confirm === true)
+    if (bigStop) return { ok: false, text: bigStop }
+    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head, expectedUsd: Math.round(bigExp.usd * areasAll.length * 100) / 100 })}\n${bigText(whole, ctx.prep, areasAll)}\n${bigFan}.` }
   }
   const area = scopeArg ? areaOf(areasAll, scopeArg) : undefined
   if (scopeArg && !area) return { ok: false, text: `prepare: scope ${JSON.stringify(scopeArg.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'the diff has no changed files'}); run prepare without scope to see the areas` }
@@ -218,6 +223,10 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
       held = `a review on ${want.model} (${want.why}) needs the user's approval for this thread (a request is in the pane's "Needs you", Approve there); sonnet runs meanwhile.`
     }
   }
+  const exp = await expectedReviewCost(h, project, nRuns, level)
+  const fan = fanOutText(exp, 1)
+  const costStop = await spendStop(h, project, exp.usd, fan, i.confirm === true) // above review.askAboveUsd / maxUsd: the user decides first (reviewspend.ts)
+  if (costStop) return { ok: false, text: costStop }
   const brief0 = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
   const brief = area ? scopedPrep(brief0, keep, areaDiff) : brief0
   const second = !light && !rereview && wantSecondOpinion(prepFor)
@@ -250,14 +259,13 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
-  const exp = await expectedReviewCost(h, project, nRuns, level)
   const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
     : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.\n${fan}.${spent}${held ? `\n${held}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {

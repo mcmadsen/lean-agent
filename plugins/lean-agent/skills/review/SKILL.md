@@ -45,7 +45,9 @@ behaviour and reuse: use it at an intermediate checkpoint ("is this on the right
 review (`level: "full"`: every pass, two runs for a high-risk diff, the record that unlocks `git push`) runs only when the work is done,
 right before you `lean_report` "ready to push". `prepare` prints the expected cost (`expected review cost ~$1.20 (2 passes, sonnet)`,
 the median of this project's earlier reviewer passes in the ledger, else a stated default): say it to the user before you start the
-reviewer agents, and never run a full review at every checkpoint. The push gate still needs the full review's record for the pushed sha.
+reviewer agents, and never run a full review at every checkpoint. Above config `review.askAboveUsd` (default 5) `prepare` does not start: ask the user
+with `lean_ask` and run `prepare` again with `confirm: true` only after the user's yes (above `review.maxUsd`, default 25, the same, and prefer a light review or one scope at a time). If
+it says "prepared N files, the forge lists M: wrong range", no reviewer is started: fix the base or head. The push gate still needs the full review's record for the pushed sha.
 
 The review is strict on purpose: the reviewer works in ordered passes (completeness, correctness traced end to end, behaviour
 before -> after, reuse and duplication, scope and platform, tests, defaults and state, style last), a script (not a model) computes
