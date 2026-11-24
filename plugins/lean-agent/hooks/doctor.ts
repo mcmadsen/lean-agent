@@ -22,6 +22,7 @@ import { reportFailures } from './delivery'
 import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
 import { topRefusalsRow } from './refusals'
+import { feedbackRow } from './feedbackdest'
 import { retireMemory, staleMemoryCount } from './forgewrite'
 
 export const OLD_LABEL = 'com.lean-agent.up'
@@ -157,6 +158,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
     if (compareVersions(s.run, s.installed) < 0) row(false, `thread ${s.id} ${runsText(s.run, s.installed)}: its session loaded the older plugin; do not ask it for what ${s.installed} added. ${SKEW_CAUSE}`) // (cause and advice in the row itself: \`fix\` prints FIX rows only, so a separate note row never reached the user)
     else out.push(`note thread ${s.id} ${runsText(s.run, s.installed)}: a newer copy than the installed plugin (a dev copy?)`)
   }
+  const fb = await feedbackRow(h).catch(() => null) // config.json feedback.destination / folder (feedbackdest.ts): shown once set or wrong
+  if (fb) row(fb.ok, fb.text)
   row(await h.fs.exists(deskDir(home)), 'desk folder ~/lean-agent-desk')
   const real = await realPath(h, deskDir(home))
   let doc: Record<string, any> = {}

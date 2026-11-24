@@ -59,8 +59,8 @@ const human = (s: S, v: Parameters<typeof questionOf>[0], label: string) => {
 }
 
 // ---- the table -----------------------------------------------------------------------------------------------------------------
-test('the table has exactly seventeen kinds (the plain five, a thread status, a GitHub thread resolve, a GitHub review comment, a work item create, a PR-work item link and unlink, a vote, a PR update, a reviewer, a policy queue, a label, a batch) and renders exactly what is sent', () => {
-  expect(Object.keys(ACTION_KINDS).sort()).toEqual(['ado-pr-comment', 'ado-pr-label', 'ado-pr-policy-queue', 'ado-pr-reply', 'ado-pr-reviewer', 'ado-pr-thread-status', 'ado-pr-update', 'ado-pr-vote', 'ado-pr-workitem-link', 'ado-pr-workitem-unlink', 'ado-workitem-comment', 'ado-workitem-create', 'ado-workitem-update', 'batch', 'gh-pr-comment', 'gh-pr-review-comment', 'gh-pr-thread-resolve'])
+test('the table has exactly eighteen kinds (the plain five, the public feedback issue of the desk, a thread status, a GitHub thread resolve, a GitHub review comment, a work item create, a PR-work item link and unlink, a vote, a PR update, a reviewer, a policy queue, a label, a batch) and renders exactly what is sent', () => {
+  expect(Object.keys(ACTION_KINDS).sort()).toEqual(['ado-pr-comment', 'ado-pr-label', 'ado-pr-policy-queue', 'ado-pr-reply', 'ado-pr-reviewer', 'ado-pr-thread-status', 'ado-pr-update', 'ado-pr-vote', 'ado-pr-workitem-link', 'ado-pr-workitem-unlink', 'ado-workitem-comment', 'ado-workitem-create', 'ado-workitem-update', 'batch', 'gh-issue-create', 'gh-pr-comment', 'gh-pr-review-comment', 'gh-pr-thread-resolve'])
   const want: Record<string, [string, string, string]> = {
     'ado-pr-reply': ['POST', 'https://dev.azure.com/acme/Shop%20App/_apis/git/repositories/shop-api/pullRequests/42/threads/7/comments?api-version=7.1', 'application/json'],
     'ado-pr-comment': ['POST', 'https://dev.azure.com/acme/Shop%20App/_apis/git/repositories/shop-api/pullRequests/42/threads?api-version=7.1', 'application/json'],
@@ -92,7 +92,7 @@ test('the table has exactly seventeen kinds (the plain five, a thread status, a 
 })
 
 test('anything outside the table is refused with the list: other kinds, other params, other fields, odd values', () => {
-  const kinds = Object.keys(ACTION_KINDS)
+  const kinds = Object.keys(ACTION_KINDS).filter(k => k !== 'gh-issue-create') // (the desk's own kind is not listed for a thread)
   for (const kind of ['push', 'git-push', 'merge', 'delete', 'gh-pr-merge', 'az-run', 'bash', 'settings', 'toString', '__proto__', 'constructor', '']) {
     const c = checkAction({ kind, params: PARAMS['gh-pr-comment'] })
     expect([kind, c.ok]).toEqual([kind, false])
@@ -172,7 +172,7 @@ test('lean_report with an action stores a signed request, shows it in the inbox 
   expect(wrongState.text).toContain('Report state working with the action')
   expect((s.h.files.get(`${L}/desk/inbox.jsonl`) ?? '').length).toBe(before) // neither reported anything
   expect(await listActions(s.h.host)).toHaveLength(1)
-  expect(THREAD_TOOLS.find(t => t.name === 'lean_report')!.inputSchema).toMatchObject({ properties: { action: { properties: { kind: { enum: Object.keys(ACTION_KINDS) } } } } })
+  expect(THREAD_TOOLS.find(t => t.name === 'lean_report')!.inputSchema).toMatchObject({ properties: { action: { properties: { kind: { enum: Object.keys(ACTION_KINDS).filter(k => k !== 'gh-issue-create') } } } } })
 })
 
 test('a report with an action (working: it does not block) carries the hint; a thread cannot ask for more than five open requests', async () => {

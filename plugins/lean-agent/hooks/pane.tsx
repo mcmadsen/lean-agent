@@ -16,6 +16,7 @@ import { scriptTool } from './scripts'
 import { hostOf } from './host'
 import { skillStat } from './skilltrim'
 import { exportFeedback } from './feedbackexport'
+import { destText, feedbackConfig } from './feedbackdest'
 import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
@@ -670,6 +671,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const unreadLabel = v?.unread ? `${v.unread} unread` : 'all read'
     // ---- Needs you: one card per thing that waits for the user, its button on the same card ----
     const needs = v?.needs ?? []
+    // the footer action names where the export goes (config.json feedback.destination); the default (local) keeps the plain label
+    const fbCfg = await feedbackConfig(host, homeP).catch(() => null)
+    const feedbackLabel = fbCfg && fbCfg.dest !== 'local' ? `Feedback export (${destText(fbCfg)})` : 'Feedback export'
     const restartLabel = confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'
     // "N dismissed" and its "show" toggle: the dismissed items are not counted above; show brings them back into this view (dim, no buttons)
     const dismissedRows = v?.dismissed ?? []
@@ -1071,7 +1075,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         {setupRows}
         <Box flexWrap="wrap" columnGap={1}>
           <Button key="new-thread" label="New thread" onPress={newThreadPress} />
-          <Button key="feedback" label="Feedback export" onPress={feedbackPress} />
+          <Button key="feedback" label={feedbackLabel} onPress={feedbackPress} />
           <Button key="repair" label="Setup / repair" onPress={runSetup} />
           {/* always here (the header's button shows only near the limit): the same two-press confirm, the same handover */}
           <Button key="restart-desk-footer" label={restartLabel} onPress={restartDeskPress} />

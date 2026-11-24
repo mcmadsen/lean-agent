@@ -47,7 +47,7 @@ test('1.0.24: the detector names forge writes by script (curl / wget / az / gh) 
 test('1.0.24: the refusal text names the kinds FROM THE TABLE, stays under 60 words and has its own rule id', () => {
   const t = forgeRefusal()
   expect(t.split(/\s+/).length).toBeLessThan(60)
-  for (const k of Object.keys(ACTION_KINDS)) expect(t).toContain(k)
+  for (const k of Object.keys(ACTION_KINDS).filter(k => k !== 'gh-issue-create')) expect(t).toContain(k) // (the desk's own kind is not in a thread's guide)
   expect(kindsLine()).toContain('ado-pr-reply (optional status)')
   expect(t).toContain('lean_report with action {kind:')
   expect(t).toContain('Reads: lean_run ci, or a reader.')

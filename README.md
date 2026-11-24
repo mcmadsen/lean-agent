@@ -184,7 +184,7 @@ Top to bottom (the desk's pane; any other session sees only the way to the desk 
    last 5 read ones ("show all" for the rest). A read row older than 7 days is archived: hidden here, still in
    `~/.lean-agent/desk/inbox.jsonl`. **ack all** marks everything read.
 5. **Goals** (only when there are some), **Closed (N)** and **More** (projects, scripts) are folded sections.
-6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`; nothing is posted),
+6. **Footer actions.** **New thread**, **Feedback export** (the anonymised export file of `/lean-agent-feedback`, sent where `config.json` `feedback.destination` says: the button names it, e.g. "exports to ~/Downloads"; a GitHub post only after your Approve),
    **Setup / repair** and **Restart desk**, always here (the header's button shows only near the limit; both press twice and do the same).
 
 In the minimized widget form (Claude desktop), the pane draws a glance and no button, because clicks may not reach it: threads
@@ -547,7 +547,7 @@ in `~/.lean-agent/config.json`. When on, the look (a calm palette, cool grays an
 | `todo` | the user's to-do list in `~/.lean-agent/todo.json` |
 | `stats`, `budget` | what sessions and workers cost, which rules load, caps |
 | `find` | search lean-agent's own state (threads, notes, memory, handovers, saved output, reviews) |
-| `feedback` | draft a bug report (posting needs the user's OK), or `/lean-agent-feedback`: one anonymised export file written by the mod |
+| `feedback` | draft a bug report (posting needs the user's OK), or `/lean-agent-feedback`: one anonymised export file written by the mod, copied to `feedback.folder` or offered as a public GitHub issue per `feedback.destination` (never without the Approve card) |
 | `lean-mode` | work frugally on long unattended runs |
 | `doctor` | check and repair the install, migrate from 0.45 |
 

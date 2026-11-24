@@ -7,6 +7,7 @@ import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl
 import type { Host } from './state'
 import { check } from './doctor'
 import { allScripts } from './scripts'
+import { copyToFolder, feedbackConfig, offerPost, wantsFolder, wantsGithub } from './feedbackdest'
 
 export const EXPORT_CAP = 40 * 1024
 const exportDir = (home: string) => `${leanDir(home)}/feedback-export`
@@ -471,7 +472,7 @@ export function fit(c: Collected, at: number, cap = EXPORT_CAP): string {
 
 // ---- the export ---------------------------------------------------------------------------------------------------------------
 // `deps.wrap` lets a spec hand in a faulty anonymiser (a rule that regressed) to prove the final check refuses
-export async function exportFeedback(h: Host, root: string, o: { notes?: string; version: string }, deps: { wrap?: (a: Anonymiser) => Anonymiser } = {}): Promise<{ ok: boolean; text: string; path?: string }> {
+export async function exportFeedback(h: Host, root: string, o: { notes?: string; version: string }, deps: { wrap?: (a: Anonymiser) => Anonymiser } = {}): Promise<{ ok: boolean; text: string; path?: string; copy?: string }> {
   try {
     const home = await homeDir(h)
     const dir = exportDir(home)
@@ -490,7 +491,26 @@ export async function exportFeedback(h: Host, root: string, o: { notes?: string;
     await mkdirp(h, dir)
     await atomicWrite(h, path, body)
     await writeJson(h, `${dir}/state.json`, { at: startedAt, drafts: [...st.drafts, ...c.drafts.map(d => d.raw)], core: [...st.core, ...c.core.map(x => x.name)] } satisfies State)
-    return { ok: true, path, text: `Feedback export written: ${path} (${Math.ceil(bytes(body) / 1024)} KB, anonymised). Nothing was posted. Paste it to the maintainers, or ask the desk to post it.` }
+    const written = `Feedback export written: ${path} (${Math.ceil(bytes(body) / 1024)} KB, anonymised).`
+    const cfg = await feedbackConfig(h, home)
+    if (cfg.dest === 'local' && !cfg.problems.length) return { ok: true, path, text: `${written} Nothing was posted. Paste it to the maintainers, or ask the desk to post it.` }
+    // config.json feedback.destination (feedbackdest.ts): only the text written above (already anonymised and checked) is copied or offered for posting
+    const parts: string[] = [written]
+    let copy: string | undefined
+    if (wantsFolder(cfg.dest)) {
+      const r = await copyToFolder(h, home, cfg.folder, path, `lean-agent-feedback-${stamp}.md`)
+      if ('path' in r) {
+        copy = r.path
+        parts.push(`Copied to ${r.path}.`)
+      } else parts.push(`${r.why}: written to ${path}.`)
+    }
+    for (const p of cfg.problems) parts.push(`(${p})`)
+    parts.push('Nothing was posted.')
+    if (wantsGithub(cfg.dest)) {
+      const o2 = await offerPost(h, { title: c.drafts[0]?.title ?? '', body, fallbackTitle: `Feedback ${o.version} ${stamp}` })
+      parts.push(o2.ok ? `To post it as a public issue on mcmadsen/lean-agent: request ${o2.id} waits for the user's Approve (nothing is posted until then): in the pane press Approve on its card; at the desk call lean_thread action-list, ask the user its question word for word, then approve-action ${o2.id}.` : `Not offered for posting: ${o2.why}. The export stays where it was written.`)
+    }
+    return { ok: true, path, ...(copy ? { copy } : {}), text: parts.join(' ') }
   } catch (e) {
     return { ok: false, text: `Feedback export failed: ${String((e as Error)?.message ?? e).slice(0, 200)}. Nothing was posted.` }
   }
