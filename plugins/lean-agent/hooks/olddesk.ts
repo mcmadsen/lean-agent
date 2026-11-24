@@ -138,6 +138,13 @@ async function closeOld(h: Host, rec: OldDesk, row: Row, mySid: string, mode: Cl
     }
     if (isWorking(row) || row.waitingFor) return await miss('the old desk is working, not stopped')
     if (row.pid > 0) {
+      // look again right before the stop: a desk that went busy since the listing is never stopped
+      const l = await listRows(h)
+      const fresh = l ? rowOf(l, rec.sid) : undefined
+      if (!l) return await miss('cannot list sessions (claude agents failed), so nothing is stopped')
+      if (!isActive(fresh) || !(await closable(h, rec, fresh))) return 'no'
+      if (isWorking(fresh) || fresh.waitingFor) return await miss('the old desk is working, not stopped')
+      row = fresh
       const st = await h.process.run(['claude', 'stop', rec.sid], { timeoutMs: 15_000 }).catch(() => null)
       if (!st || st.exitCode !== 0) return await miss(`claude stop ${shortId(rec.sid)} failed (${failed(st, 'claude stop')})`)
       let cur: Row | undefined = row
@@ -186,7 +193,7 @@ export async function oldDeskStep(h: Host, sid: string, phase: 'start' | 'turn')
     if (skip) skipTurn = false
     const rec = await readOldDesk(h)
     if (!rec || rec.done || rec.dismissed || !sid || sid === rec.sid) return null
-    if (phase === 'turn' && rec.quiet) {
+    if (rec.quiet) {
       // stopped but still listed: its one quiet line was shown, the first desk turn after it ends it
       await settle(h, rec, 'stopped by desk.closeOld; the user was told once')
       return null

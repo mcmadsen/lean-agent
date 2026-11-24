@@ -303,6 +303,29 @@ test('a working old desk is never stopped: it is tried again on the next desk tu
   expect(p.stops()).toEqual([])
 })
 
+test('the listing is read again right before the stop: a desk that went busy in between is not stopped (one try used)', { timeoutMs: 20_000 }, async () => {
+  const w = world([bg()])
+  await w.restart()
+  const inner = w.h.claude.handler as (a: string[]) => any
+  let lists = 0
+  w.h.claude.handler = (a: string[]) => {
+    if (a[0] === 'agents' && ++lists === 2) w.state.rows = [bg({ state: 'working', status: 'busy' })] // the 2nd listing (the one before the stop)
+    return inner(a)
+  }
+  const said = await oldDeskStep(w.h.host, NEW, 'start')
+  expect(w.stops()).toEqual([])
+  expect(said).toContain('still open in the Claude app')
+  expect((await readOldDesk(w.h.host))?.tries).toBe(1)
+  // a listing that fails at that moment stops nothing either
+  const f = world([bg()])
+  await f.restart()
+  const innerF = f.h.claude.handler as (a: string[]) => any
+  let n = 0
+  f.h.claude.handler = (a: string[]) => (a[0] === 'agents' && ++n === 2 ? { exitCode: 1, stdout: '', stderr: 'no service' } : innerF(a))
+  await oldDeskStep(f.h.host, NEW, 'start')
+  expect(f.stops()).toEqual([])
+})
+
 test('only the recorded old desk id is ever stopped or removed: not another row, a partial id, another folder, a desktop row, the new desk', { timeoutMs: 20_000 }, async () => {
   const cases: [string, Record<string, unknown>][] = [
     ['desktop kind', { kind: 'desktop', pid: 4242 }],
