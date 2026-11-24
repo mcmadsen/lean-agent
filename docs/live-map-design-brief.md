@@ -18,7 +18,7 @@ tokens. The pieces:
 | Piece | What it is | How the user sees it |
 |---|---|---|
 | **Front desk** | The one chat the user talks to. It routes work, never does project work itself. | A Claude chat (desktop or phone) |
-| **Threads** | Long-lived agent sessions, one per topic (`t192 E2E checks`). They talk to the front desk. | Listed and reported by the front desk |
+| **Threads** | Long-lived agent sessions, one per topic (`t5 E2E checks`). They talk to the front desk. | Listed and reported by the front desk |
 | **Workers** | Short, cheap, scoped runs a thread (or the front desk) starts for one task (`run 8545 · sonnet`). | Mostly invisible; results come back as reports |
 | **Service socket** | A local background service that carries every message between them. | Invisible |
 | **Hooks** | Small scripts Claude Code calls on every tool call (Edit, Bash, Read ...). | Invisible |
@@ -66,7 +66,7 @@ Everything below is available live. Example values are made up.
 |---|---|---|
 | Front desk | `Front desk · talking` | state (active / idle), idle time |
 | Service socket | `service.sock · 0.6 ms · 20 threads · up 2 h` | round trip ms, CPU %, thread count, uptime |
-| Thread | `t192 E2E checks · mid-turn` | id, title, project, state (active, mid-turn, parked, idle, undelivered), idle time |
+| Thread | `t5 E2E checks · mid-turn` | id, title, project, state (active, mid-turn, parked, idle, undelivered), idle time |
 | Worker | `run 8545 · sonnet · 12 min · alive` | model, state (alive, done, orphaned, dead), age, last progress, turns / max turns (7/80), tokens, cost ($0.52), git branch, context size |
 | Hooks | `tool calls · 14 a min` | rate |
 
@@ -81,8 +81,8 @@ Each thread, worker and the front desk also carries **activity**:
 
 | Kind | Meaning | Today drawn as |
 |---|---|---|
-| message | front desk / service → agent (`send · t192`, `deliver`) | teal arrow |
-| report | agent → back (`report · t196`, `result`) | amber arrow |
+| message | front desk / service → agent (`send · t5`, `deliver`) | teal arrow |
+| report | agent → back (`report · t6`, `result`) | amber arrow |
 | request | socket request (`pending? 1 ms`) | blue arrow |
 | idle | link exists, nothing moving | dashed grey |
 | undelivered / stuck | a message did not arrive | red |
@@ -98,7 +98,7 @@ Edges fade 30 s after their last message. Live events animate a dot along the ed
 
 ### Alerts
 
-`t192 mid-turn with no tool activity for 12 min` (warn) · `5-hour limit 96% - resets 14:10` (bad) · stuck worker,
+`t5 mid-turn with no tool activity for 12 min` (warn) · `5-hour limit 96% - resets 14:10` (bad) · stuck worker,
 undelivered message, error burst, daily budget, slow service. Each has a level (warn / bad), a node (optional), an age
 and a stable id (so "new" vs "seen" is possible).
 
