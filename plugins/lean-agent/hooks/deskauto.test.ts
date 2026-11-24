@@ -21,6 +21,7 @@ function world() {
   resetOldDesk()
   const h = fakeHost(null)
   h.clock.t = 50_000_000
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 60k since 1.0.31; these cases are written against 100k)
   h.files.set(`${DESK}/CLAUDE.md`, 'desk')
   h.files.set(`${L}/desk.json`, JSON.stringify({ sid: 'desk-a' }))
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'parser work', project: 'demo', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))

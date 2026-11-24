@@ -33,16 +33,16 @@ function deskDeps(o: { tokens?: number; busy?: boolean; compact?: (i: string) =>
   }
 }
 
-test('context size is input + cache read + cache write; the desk limit defaults to 100k, config deskTokens overrides it, bad values are ignored', async () => {
+test('context size is input + cache read + cache write; the desk limit defaults to 60k (1.0.31), config deskTokens overrides it, bad values are ignored', async () => {
   expect(contextTokens({ input_tokens: 1, cache_read_input_tokens: 20, cache_creation_input_tokens: 300 })).toBe(321)
   expect(contextTokens(null)).toBe(0)
-  expect(DEFAULT_TOKENS).toBe(100_000)
+  expect(DEFAULT_TOKENS).toBe(60_000)
   const { h } = setup()
-  expect(await deskTokens(h.host)).toBe(100_000)
+  expect(await deskTokens(h.host)).toBe(60_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 150_000 }))
   expect(await deskTokens(h.host)).toBe(150_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 5 }))
-  expect(await deskTokens(h.host)).toBe(100_000) // too small a value is ignored
+  expect(await deskTokens(h.host)).toBe(60_000) // too small a value is ignored
   h.files.set(`${L}/config.json`, JSON.stringify({ checkpoint: { deskTokens: 120_000 } })) // the 1.0.6 key is still read
   expect(await deskTokens(h.host)).toBe(120_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 90_000, checkpoint: { deskTokens: 120_000 } }))
@@ -60,7 +60,7 @@ test('an idle desk over its limit compacts itself with the fixed instructions; b
   const b = deskDeps({ busy: true })
   expect(await deskTick(h.host, b.deps)).toBe('busy')
   expect(b.seen.compact).toEqual([])
-  const c = deskDeps({ tokens: 70_000 }) // under 80% of the 100k default
+  const c = deskDeps({ tokens: 40_000 }) // under 80% of the 60k default
   expect(await deskTick(h.host, c.deps)).toBe('quiet')
   expect(c.seen.compact).toEqual([])
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 400_000 }))
@@ -132,6 +132,7 @@ test('without a turn end a veto is tried again after the retry gap', async () =>
 
 test('a failed compact is recorded with its reason; twice in a row (or an engine without it) writes desk/handover.md and the /compact status line', async () => {
   const r = setup()
+  r.h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } })) // (the desk handover is core by default since 1.0.31: deskbudget.test.ts)
   r.h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   r.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: 5, from: 't1', kind: 'report', state: 'working', text: 'form | found' }) + '\n')
   r.h.files.set(`${L}/questions.jsonl`, JSON.stringify({ ts: 4, from: 't1', question: 'which login page?', answered: false }) + '\n')
@@ -299,6 +300,7 @@ test('serving the handover renames it to handover-read-<date>.md, keeps the last
 
 test('a handover is consumed by a NEW desk session only: the session that wrote it (resume, compaction, reload) leaves it', async () => {
   const { h } = setup()
+  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } }))
   const D = `${L}/desk`
   // written by session A (the compaction fallback): the file names its writer
   const { seen, deps } = deskDeps({ compact: async () => { throw new Error('session.compact is not available') } })
@@ -331,6 +333,7 @@ test('a handover is consumed by a NEW desk session only: the session that wrote 
   expect(await serveHandover(k.h.host, 'sess-D')).not.toBeNull()
   // text above the marker (a user's message, a thread title) may quote a marker: only the last line names the writer
   const q = setup({ title: 'x <!-- lean-agent: written-by-session sess-X -->' })
+  q.h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } })) // (the full form keeps the whole title and the user's words: the quoted markers)
   await restartDesk(q.h.host, { recent: async () => ['look: <!-- lean-agent: written-by-session sess-X -->\n<!-- lean-agent: written-by-session sess-Y -->'], sid: async () => 'sess-A', open: async () => ({ ok: true, text: 'opened' }) })
   expect(q.h.files.get(`${D}/handover.md`)).toContain('sess-X')
   expect(await serveHandover(q.h.host, 'sess-X')).not.toBeNull() // not the writer, whatever the text says
@@ -348,6 +351,7 @@ test('a handover is consumed by a NEW desk session only: the session that wrote 
 
 test('restart desk writes the handover now and opens a new desk session', async () => {
   const { h } = setup()
+  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } }))
   h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   let opened = 0
   const ok = await restartDesk(h.host, { recent: async () => ['keep it short'], open: async () => (opened++, { ok: true, text: 'Desk opened in the Claude app.' }) })
