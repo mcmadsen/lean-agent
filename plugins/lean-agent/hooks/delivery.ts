@@ -9,6 +9,7 @@ import { MAX_EXPLORERS, checkRules, checkStale, recordRule, rulesStats, slugOk, 
 import { syncWithScripts } from './rulelines'
 import { readConfig } from './budget'
 import { markWaiting, readWaiting } from './threadstate'
+import { markMsgRead } from './msgstate'
 import { PROSE_REPLY, proseRequest } from './proserequest'
 import { REVIEW_EXTRA_PROPS, reviewTool } from './reviewtool'
 import { lessonLines } from './reviewlessons'
@@ -50,8 +51,10 @@ async function consumedN(h: Host, home: string, id: string): Promise<number> {
 }
 
 export async function markConsumed(h: Host, home: string, id: string, n: number): Promise<void> {
-  if (n > (await consumedN(h, home, id))) {
+  const was = await consumedN(h, home, id)
+  if (n > was) {
     await writeJson(h, `${tdir(home, id)}/consumed.json`, { n } satisfies Consumed)
+    await markMsgRead(h, home, id, was, n) // msgstate.ts: the messages became "consumed" at this time
     await writeJson(h, `${tdir(home, id)}/delivered-at.json`, { at: await h.clock.now() }).catch(() => undefined) // when the desk last delivered anything (sendhold.ts)
   }
 }

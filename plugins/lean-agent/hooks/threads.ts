@@ -24,7 +24,8 @@ import { RESTARTING_TEXT, hardStopped, isRestarting } from './contextstop'
 import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, resumeLead, taskOf } from './handover'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
-import { aliveRow, answered, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
+import { aliveRow, answered, deliverConfig, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
+import { markHanded, messageRecs, messagesText, sendLine } from './msgstate'
 import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -648,6 +649,7 @@ async function directOut(h: Host, home: string, t: Thread, row: AgentRow | undef
   if (d.delivered) {
     t.delivered = u.upTo
     await save(h, home, t)
+    await markHanded(h, home, t.id, u.upTo - u.msgs.length, u.upTo)
     return { ok: true, text: d.text, data: { resumed: false, direct: true } }
   }
   if (d.text) {
@@ -900,6 +902,7 @@ const USES: Record<string, string[]> = {
   find: TEXTY,
   ask: TEXTY,
   report: ['section', 'full'],
+  messages: [],
   dismiss: ['kind', 'notice'],
 }
 const FIELDS = new Set([...Object.values(USES).flat(), 'action', 'tN'])
@@ -925,10 +928,11 @@ export function unusedField(e: Record<string, unknown>): string | null {
 // window.holdAbove (windows.ts). Everything else is leanThreadCore.
 export async function leanThread(h: Host, root: string, i: Input): Promise<Out> {
   try {
-    if (i.action === 'find' || i.action === 'ask' || i.action === 'report') {
+    if (i.action === 'find' || i.action === 'ask' || i.action === 'report' || i.action === 'messages') {
       const home = await homeDir(h)
       if (i.action === 'find') return await findText(h, home, i.text ?? '')
       if (!ID.test(i.tN ?? '')) return err(`${i.action} needs tN (like t3)`)
+      if (i.action === 'messages') return (await load(h, home, i.tN!)) ? { ok: true, text: await messagesText(h, home, i.tN!, await h.clock.now()) } : err(`no thread ${i.tN}`)
       return i.action === 'ask' ? await askText(h, home, i.tN!, i.text ?? '') : await reportText(h, home, i.tN!, { section: typeof i.section === 'string' ? i.section : undefined, full: i.full === true })
     }
     if (i.message !== undefined && i.text === undefined) i = { ...i, text: i.message } // `message` is an alias of `text`
@@ -1077,7 +1081,12 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           const text = (i.text ?? '').trim()
           if (!text) return err('send needs text')
           await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: await h.clock.now(), text } satisfies Inbox)
-          return await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          const out = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          // the state of THIS message, said plainly (msgstate.ts): queued / delivered / consumed, and how a queued one reaches the thread
+          const mine = (await messageRecs(h, home, id)).at(-1)
+          if (!mine || t.state !== 'open' || !t.sid) return out // (a parked / closed thread: its own reply already says nothing reads it)
+          const wait = (await deliverConfig(h, home)).answerWaitSeconds
+          return { ...out, text: `${sendLine(mine, { woken: (out.data as { resumed?: boolean } | undefined)?.resumed === true, answerWaitSeconds: wait })}\n${out.text}` }
         }
         case 'wake':
           return await wake(h, home, t, { root, current: installed, explicit: true })
