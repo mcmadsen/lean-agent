@@ -6,7 +6,7 @@ import { readConfig } from './budget'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
-import { noteReviewed } from './reviewkind'
+import { noteReviewed, reviewedBy } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
 import { changeScope, changedText, contextOf, droppedText } from './reviewchange'
@@ -226,7 +226,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const cut = area ? ` -- ${pathspecs(area).join(' ')}${specs ? ` ${specs}` : ''}` : specs ? ` -- . ${specs}` : ''
   const co = range.path
   const lines: string[] = []
-  if (area) lines.push(`AREA REVIEW ${area.name} of ${areasAll.length} (${area.files} files, ${area.lines} lines: ${area.keys.map(keyLabel).join(', ')}). The PR is too large for one review: review ONLY the changed files under these paths (the other areas are separate passes); every git diff below is limited to them. Record with lean_review record and scope "${area.name}" (an area record is never green); keep your answer short.`)
+  if (area) lines.push(`AREA REVIEW ${area.name} of ${areasAll.length} (${area.files} changed files, ${area.lines} changed lines: ${area.keys.map(keyLabel).join(', ')}). The PR is too large for one review: review ONLY the changed files and lines listed below under these paths (a folder is only a way to group them: its unchanged files are not part of the review) (the other areas are separate passes); every git diff below is limited to them. Record with lean_review record and scope "${area.name}" (an area record is never green); keep your answer short.`)
   if (ext) lines.push(`EXTERNAL REVIEW of ${ext.label} (someone else's work, read read-only from a scratch repository; the user's tree is never touched). Record it with mode: "external" and the head sha below: it is recorded NOT green and never counts for the push gate. Do not edit anything and do not push.`)
   lines.push(ext ? `Scratch repository (every git command is git -C this path, never cd): ${co}` : `Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
   lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${co} diff ${range.mb}...${range.head}${cut} (code before the change: git -C ${co} show ${range.mb}:<path>)`)
@@ -302,8 +302,12 @@ const contextCfg = async (h: Host): Promise<number> => contextOf(((await readCon
 // The changed files and line ranges of the range a merge or record is about (best effort: null when the range cannot be read)
 async function changePrep(h: Host, project: string, i: any, thread: string): Promise<Context['prep'] | null> {
   try {
-    const sha = str(i.sha)
-    const external = str(i.mode) === 'external'
+    let sha = str(i.sha)
+    let external = str(i.mode) === 'external'
+    if (!sha && !external) { // a review thread's merge names no sha: the sha it last prepared with a ref (the mod's store) is the one to read
+      const seen = await reviewedBy(h, thread)
+      if (seen && seen.project === project && (await externalOf(h, project, seen.sha))) { sha = seen.sha; external = true }
+    }
     const ext = external && sha ? await externalOf(h, project, sha) : null
     if (external && !ext) return null
     const checkout = ext ? ext.path : await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
@@ -322,12 +326,10 @@ async function doMerge(h: Host, project: string, i: any, thread = ''): Promise<O
   const { result, info } = mergeRuns(normalize(two.a), normalize(two.b))
   // only changed code counts: a finding outside the change is dropped and counted (reviewchange.ts); no range to read = nothing dropped here, record does it
   const prep = await changePrep(h, project, i, thread)
-  let droppedNote = ''
-  if (prep) {
-    const cs = changeScope(result.findings, prep, await contextCfg(h))
-    result.findings = cs.kept
-    droppedNote = droppedText(cs.dropped)
-  }
+  if (!prep) return { ok: false, text: 'merge: could not read the PR diff: review not recorded (the changed lines of the range are needed to drop findings outside the change; pass sha, and mode "external" for someone else\'s ref, or run lean_review prepare first). Nothing was merged.' }
+  const cs = changeScope(result.findings, prep, await contextCfg(h))
+  result.findings = cs.kept
+  const droppedNote = droppedText(cs.dropped)
   const block = roundTrip(result)
   const digest = digestOf(block)
   await rememberMerged(h, project, digest)
@@ -375,25 +377,22 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   // the same checkout prepare read (the thread's own worktree): generated-file marks and the lists must be the same on both sides
   const askedWt = str(i.worktree)
   const ext = external ? await externalOf(h, project, sha) : null
-  if (external && !ext) {
-    const file = await writeReview(h, rec)
-    return { ok: true, text: `recorded not green: an external record needs lean_review prepare with ref for this sha first (the scratch repository it read is remembered by the mod); recorded NOT green in ${file}${extNote}` }
-  }
+  // 1.0.31: a review whose changed lines cannot be read is never recorded (it would be unfiltered): refused, nothing written
+  const noDiff = (why: string): Out => ({ ok: false, text: `could not read the PR diff: review not recorded (${why}). Nothing was written; fix that and record again.` })
+  if (external && !ext) return noDiff('an external record needs lean_review prepare with ref for this sha first: the mod remembers the scratch repository it read')
   const checkout = ext ? ext.path : await checkoutOf(h, project, thread, branch, askedWt)
   const range = ext ? await resolveRange(h, project, ext.base, sha, ext.path) : askedWt && !checkout ? `worktree ${JSON.stringify(askedWt.slice(0, 200))} is not a live registered worktree of ${project}` : await resolveRange(h, project, base || undefined, sha, checkout)
-  if (typeof range === 'string') {
-    const file = await writeReview(h, rec)
-    return { ok: !wantGreen, text: `${wantGreen ? 'green refused' : 'recorded not green'}: ${range} (base is needed to compute the new symbols and edited tests); recorded NOT green in ${file}` }
-  }
+  if (typeof range === 'string') return noDiff(`${range}; base is needed to compute the range`)
   const res = normalize(raw)
   const second = Array.isArray(i.second) ? i.second.filter((x: any) => x && typeof x.symbol === 'string').map((x: any) => ({ symbol: String(x.symbol), candidate: typeof x.candidate === 'string' ? x.candidate : '' })) : undefined
   // a light pass never records green: said by the call (level: "light") or by the last prepare of this sha (the mod's store)
   const light = str(i.level).toLowerCase() === 'light' || (await preparedLevel(h, project, sha)) === 'light'
   const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
   // only changed code counts (reviewchange.ts): a finding about a file the change does not touch, or a line outside every changed hunk (+-3), is dropped and counted
-  const cs = failed ? null : changeScope(res.findings, ctx.prep, await contextCfg(h))
-  if (cs) res.findings = cs.kept
-  const droppedNote = cs ? droppedText(cs.dropped) : ''
+  if (failed) return noDiff('git could not produce the diff of the range (an error or a timeout)') // never recorded unfiltered
+  const cs = changeScope(res.findings, ctx.prep, await contextCfg(h))
+  res.findings = cs.kept
+  const droppedNote = droppedText(cs.dropped)
   // an area record: the checks (new symbols, edited tests) cover this area's files only
   let area: ReturnType<typeof areaOf>
   let areasAll: ReturnType<typeof partition> = []

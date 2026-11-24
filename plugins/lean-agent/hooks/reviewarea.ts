@@ -114,8 +114,8 @@ export function bigText(stats: Stat[], prep: Pick<Prep, 'symbols' | 'exports'>, 
     `By top-level area: ${top.slice(0, 12).map(([k, c]) => `${k} ${c.files} files/${c.lines} lines`).join('; ')}${top.length > 12 ? `; and ${top.length - 12} more` : ''}.`,
     `The 10 riskiest files (size, new symbols, export changes, risky names): ${riskiest(stats, prep).map(s => `${s.path} +${s.add}/-${s.del}`).join('; ')}.`,
     'this PR is too large for one review: review it by area. One area per pass: lean_review prepare with `scope: "area-N"` (same ref and level), the reviewer pass over that area only, lean_review record with the same `scope` (an area record is never green and is an external-style record). Do the areas one after the other, keep each result short, and list every area\'s verdict in your final report.',
-    `Areas (script-built from the folders, balanced by changed lines, at most ${MAX_AREAS}):`,
-    ...areas.map(a => `- ${a.name}: ${a.files} files, ${a.lines} lines: ${a.keys.map(keyLabel).join(', ')}`),
+    `Areas (script-built from the ${stats.length} changed files only, ${total} changed lines, balanced by changed lines, at most ${MAX_AREAS}; a folder's files the PR does not change are in no area and are not reviewed):`,
+    ...areas.map(a => `- ${a.name}: ${a.files} changed files, ${a.lines} changed lines: ${a.keys.map(keyLabel).join(', ')}`),
   ].join('\n')
 }
 

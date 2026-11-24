@@ -130,3 +130,37 @@ test('prepare (light and full) lists the changed files with their ranges; record
   expect(m.text).toMatch(/2 findings dropped: outside the change \(files: src\/untouched\.ts, src\/elsewhere\.ts\)/)
   expect(m.text).toContain('top 1 of 1')
 })
+
+// ---- 1.0.31: never unfiltered; areas only from changed files ----------------------------------------------------------------
+test('merge and record refuse, and write nothing, when the PR diff cannot be read', async () => {
+  const h = setup()
+  const good = h.git.handler
+  h.git.handler = (a: string[]) => (a.join(' ').includes(' diff ') ? { exitCode: 1, stdout: '' } : good(a, {} as any))
+  const r = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 11)]) })
+  expect(r.ok).toBe(false)
+  expect(r.text).toContain('could not read the PR diff: review not recorded')
+  expect([...h.files.keys()].some(k => k.includes('/reviews/'))).toBe(false)
+  const m = await tool(h, { action: 'merge', reviews: [block([fin(1, 'src/a.ts', 11)]), block([fin(1, 'src/a.ts', 12, { text: 'another problem' })])] })
+  expect(m.ok).toBe(false)
+  expect(m.text).toContain('could not read the PR diff: review not recorded')
+  // an external record without its prepare (no scratch repository to read) is refused the same way
+  const e = await tool(h, { sha: H2, mode: 'external', review: block([fin(1, 'src/a.ts', 11)]) })
+  expect(e.ok).toBe(false)
+  expect(e.text).toContain('could not read the PR diff: review not recorded')
+}, { timeoutMs: 20_000 })
+
+test('the areas of a large PR are built from the changed files only, and say how many files and lines they hold', async () => {
+  const { partition: part } = await import('./reviewarea')
+  const { perFileStats } = await import('./reviewprep')
+  const { bigText } = await import('./reviewarea')
+  const prep = await analyzeDiff(DIFF, async () => '')
+  const stats = perFileStats(DIFF)
+  const areas = part(stats)
+  const named = areas.flatMap(a => a.keys.map(k => k.key))
+  expect(named.every(k => k === '.' || stats.some(s => s.path.startsWith(`${k}/`)))).toBe(true)
+  expect(areas.reduce((n, a) => n + a.files, 0)).toBe(6)
+  const t = bigText(stats, prep, areas)
+  expect(t).toContain('6 changed files only')
+  expect(t).toContain('changed files,')
+  expect(t).toContain('are in no area and are not reviewed')
+})
