@@ -145,7 +145,7 @@ export async function overBudget(h: Host, role: string, agent: { type?: string; 
   const cap = cfg.dailyCapUsd?.[role as 'desk']
   if (cap !== undefined) {
     const s = await spentToday(h, role)
-    if (s >= cap) return `lean-agent: the daily $${cap.toFixed(2)} budget for ${role} sessions is used ($${s.toFixed(2)}); raise dailyCapUsd in config.json to continue`
+    if (s >= cap) return `lean-agent: the daily $${cap.toFixed(2)} budget for ${role} sessions is used ($${s.toFixed(2)}); raise it with lean_config set dailyCapUsd.${role} <usd> to continue`
   }
   return null
 }

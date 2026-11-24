@@ -23,6 +23,7 @@ import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
 import { topRefusalsRow } from './refusals'
 import { feedbackRow } from './feedbackdest'
+import { configRow } from './configtool'
 import { retireMemory, staleMemoryCount } from './forgewrite'
 
 export const OLD_LABEL = 'com.lean-agent.up'
@@ -160,6 +161,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   }
   const fb = await feedbackRow(h).catch(() => null) // config.json feedback.destination / folder (feedbackdest.ts): shown once set or wrong
   if (fb) row(fb.ok, fb.text)
+  const cf = await configRow(h).catch(() => null) // the settings differing from the defaults, and the invalid ones (configtool.ts, the registry in configkeys.ts)
+  if (cf) row(cf.ok, cf.fix ? `${cf.text}; fix: ${cf.fix}` : cf.text)
   row(await h.fs.exists(deskDir(home)), 'desk folder ~/lean-agent-desk')
   const real = await realPath(h, deskDir(home))
   let doc: Record<string, any> = {}

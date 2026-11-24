@@ -231,4 +231,15 @@ for f in "$root/agents/reviewer.md" "$root/templates/review-brief.md" "$here/rev
 # 1.0.29: a thread near its cap restarts itself with the checkpoint call (never asks the desk or the user); the desk never restarts a thread for its context
 grep -qF 'call `lean_run {checkpoint: {next: "<the next step>"}}` and end your turn: the mod restarts you at once and you continue with it; never end your turn asking the desk or the user for a restart' "$root/templates/thread.md" || fail "thread.md lacks the checkpoint line"
 grep -qF 'Context restarts are the mod'"'"'s (the thread'"'"'s `lean_run checkpoint`, the limit, a stall): never restart a thread for its context; `restart` by hand only when the user asks' "$root/templates/front-desk.md" || fail "front-desk.md lacks the context-restart line"
+# 1.0.31: settings change only through lean_config (the config skill and command); a sensitive key needs the user's own words or an Approve
+[ -f "$here/config/SKILL.md" ] && [ -f "$root/commands/config.md" ] || fail "the config skill and commands/config.md must exist"
+grep -qF 'the desk changes config.json only through `lean_config` (the config skill), never by editing the file' "$root/templates/front-desk.md" || fail "front-desk.md must say settings change only through lean_config / the config skill, never by editing config.json"
+for f in "$here/config/SKILL.md" "$root/commands/config.md"; do
+  grep -qF 'lean_config' "$f" || fail "$f must name lean_config"
+  grep -qF 'Never put the command in a code block' "$f" || fail "$f must say never to put the command in a code block"
+  grep -qF 'this setting loosens a safety rule: type `/lean-agent:config <key> <value>` in the chat box, or I ask you with a question' "$f" || fail "$f must give the sensitive-key refusal line"
+done
+grep -qF 'exactly the options Approve, Not now' "$here/config/SKILL.md" || fail "the config skill must name the Approve / Not now question"
+# the settings registry: every config key the hooks read is in hooks/configkeys.ts, every entry has a description, the README table matches (scripts/config-table.mjs)
+if [ -f "$root/../../scripts/config-table.mjs" ]; then node "$root/../../scripts/config-table.mjs" --check || fail "settings registry or README table (see above; regenerate with: node scripts/config-table.mjs --write)"; fi
 echo "ok skills-contract"

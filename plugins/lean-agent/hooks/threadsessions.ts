@@ -44,7 +44,7 @@ export async function threadSessionRows(h: Host): Promise<string[]> {
   if (stale.length) {
     const by = new Map<string, number>()
     for (const s of stale) by.set(s.id, (by.get(s.id) ?? 0) + 1)
-    out.push(`${keep ? 'note' : 'FIX '} stale thread sessions: ${stale.length} stopped session(s) of threads that have a newer session stay in the app's list (${[...by].map(([id, n]) => `${id}: ${n}`).join(', ')})${keep ? '; config.json threads.removeOld is false, so they are kept' : '; doctor fix removes them with claude rm (their conversations are kept, nothing is forced; a refusal is left as it is)'}`)
+    out.push(`${keep ? 'note' : 'FIX '} stale thread sessions: ${stale.length} stopped session(s) of threads that have a newer session stay in the app's list (${[...by].map(([id, n]) => `${id}: ${n}`).join(', ')})${keep ? '; threads.removeOld is false, so they are kept (lean_config unset threads.removeOld removes them next time)' : '; doctor fix removes them with claude rm (their conversations are kept, nothing is forced; a refusal is left as it is)'}`)
   } else out.push('ok   no stale thread sessions')
   // the app lists a session under the name it was started with; a resume cannot give it another (no command renames a background session)
   const odd = threads.filter(t => t.state === 'open' && t.sid).flatMap(t => {
