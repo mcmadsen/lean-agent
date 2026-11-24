@@ -19,6 +19,7 @@ test('oneStepBrief: one thing under 600 characters; two items, a "then" chain or
   expect(oneStepBrief(MANY)).toBe(false)
   expect(oneStepBrief('- fix the typo\n- fix the other typo')).toBe(false)
   expect(oneStepBrief('fix the typo, then run the tests')).toBe(false)
+  for (const b of ['Fix the typo. Next, add a test.', 'fix it and also rename it', '1. fix it\n- rename it', 'fix it, finally commit']) expect([b, oneStepBrief(b)]).toEqual([b, false]) // the shared sequencing words and the combined item count
   expect(oneStepBrief('x'.repeat(599))).toBe(true)
   expect(oneStepBrief('x'.repeat(600))).toBe(false)
   expect(oneStepBrief('   ')).toBe(false)

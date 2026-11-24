@@ -839,7 +839,7 @@ and what the transcript names of MCP (servers, tool names, instructions). This r
 | auditor | 0 | 855 | 0 | 0 | 855 |
 
 **First request of a thread, part by part (1.0.32).** `node scripts/first-request.mjs [--tools-from <claude plugin test output>] [--from tN]` prints it (chars / 4; the engine's own rows come from a recorded `context-parts.json`, else "unknown"). On the leanest defaults a thread's fixed base is about 12k tokens: engine system prompt and built-ins 2.9k, lean-agent tools 3.1k, guide 3.0k, skills 1.0k, agents 0.9k, memory index up to 0.4k, rules 0.7k.
-**Lite setup (`threads.liteSetup`, default true).** A thread started as haiku / low with a one-step brief (under 600 characters, no review, PR, work item or push in it) gets a guide without the review, PR, work item, forge and memory lines ("ask the desk") and `lean_review`, `lean_script`, `lean_goal`, `lean_remember` behind ToolSearch: -3.0k tokens (guide -1.2k, tools -1.9k); the report rule and `lean_report` stay.
+**Lite setup (`threads.liteSetup`, default true).** A thread started as haiku / low with a one-step brief (under 600 characters, at most one numbered or bulleted item, no sequencing word such as then, next, finally, "and also", no review, PR, work item or push in it; the same detection decides the immediate report nudge) gets a guide without the review, PR, work item, forge and memory lines ("ask the desk") and `lean_review`, `lean_script`, `lean_goal`, `lean_remember` behind ToolSearch: -3.0k tokens (guide -1.2k, tools -1.9k); the report rule and `lean_report` stay.
 The skills (1.0k) and agent listings (0.9k) are each under the 1k worth cutting and stay for every thread.
 
 After the rule text diet (1.0.15), the guides, in tokens:
