@@ -70,7 +70,9 @@ export const REGISTRY: readonly Entry[] = [
   mk('threads.requireReport', 'boolean', true, 'threads', 'now', ['endnudge.ts', 'continuepending.ts'], 'A thread whose brief asks for ONE action that ends its turn without lean_report is nudged at once with the whole report rule (a mod cannot refuse a Stop).'),
   mk('threads.idleAlertMinutes', 'number', 10, 'threads', 'now', ['threadstate.ts', 'stall.ts'], 'Minutes a thread may be idle without a report before the desk gets one notice (0 = off).', n(0)),
   mk('threads.softCheckpointTokens', 'number', 80000, 'threads', 'next-session', ['threadcontext.ts', 'budgetcfg.ts'], 'A work thread this big is told once to checkpoint at its next boundary (an idle one is checkpointed by script).', { min: 20000, max: 400000, int: true, flat: true }),
-  mk('threads.softUsd', 'number', 8, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts'], 'Per-thread budget in USD from the ledger: one nudge at 80%, told to report and stop at 100% (0 = off; lean_thread budget tN overrides it).', { min: 0, max: 10000, flat: true }),
+  mk('threads.softUsd', 'number', 8, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts'], 'Per-thread budget in USD from the ledger: one nudge at 80%, a desk notice at 100% (raise / park / continue); the thread goes on (0 = off; lean_thread budget tN overrides it).', { min: 0, max: 10000, flat: true }),
+  mk('tasks.splitHintTokens', 'number', 60000, 'threads', 'now', ['briefsize.ts', 'budgetcfg.ts'], 'The "split this task" hint for a big brief appears only when the files it names add up to at least this many tokens (bytes / 4); no hint when it names no files (0 = no floor).', { min: 0, max: 10000000, int: true, flat: true }),
+  mk('threads.hardUsd', 'number', null, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts', 'budgettick.ts', 'guard.ts'], 'Per-thread hard cap in USD from the ledger: the thread is told to report and stop, and its new Agent calls are refused (none by default; 0 = none).', { min: 0, max: 10000, flat: true }),
   mk('workitems.afterPr', 'enum', 'ask', 'threads', 'now', 'workitemflow.ts', 'After a PR is opened the mod asks for one Approve to link it to the thread\'s work item and set it to Reviewing (off: never).', { values: ['ask', 'off'], flat: true }),
   mk('workitems.reviewState', 'string', 'Reviewing', 'threads', 'now', 'workitemflow.ts', 'The work item state that request sets after a PR is opened.', { flat: true }),
   mk('workitems.onlyOwn', 'boolean', true, 'safety', 'now', ['owntask.ts', 'workitemflow.ts'], 'Link and move only a work item assigned to you for a PR you created (off: any work item the thread has).', { flat: true, ...S }),
@@ -240,6 +242,8 @@ export function checkValue(e: Entry, v: unknown): Checked {
     case 'boolean':
       return typeof v === 'boolean' ? { ok: true, value: v } : bad('must be true or false')
     case 'number': {
+      // the alert limits are read by budget.ts limitOf: "off" / "none" / false / a negative is none, a numeric string is the number (the 1.0.30 README documents "off")
+      if ((e.key === 'budget.daily' || e.key === 'budget.threadDaily') && (v === false || (typeof v === 'string' && (/^\s*(off|none|false|no)\s*$/i.test(v) || (v.trim() !== '' && Number.isFinite(Number(v))))) || (typeof v === 'number' && v < 0))) return { ok: true, value: v }
       if (typeof v !== 'number' || !Number.isFinite(v)) return bad('must be a number')
       if (e.int && !Number.isInteger(v)) return bad('must be a whole number')
       if (e.zero && v === 0) return { ok: true, value: v }

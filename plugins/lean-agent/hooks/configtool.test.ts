@@ -208,8 +208,7 @@ test('doctor row: nothing for a default install, the differing keys and the inva
   expect(ok).toMatchObject({ ok: true, text: 'config: 2 settings differ from the defaults (desk.model, threadTokens), 0 invalid' })
   const bad = (await configRow(setup({ desk: { model: 'gpt' }, nope: 1 }).host))!
   expect(bad.ok).toBe(false)
-  expect(bad.text).toBe('config: 0 settings differ from the defaults, 2 invalid')
-  expect(bad.fix).toBe('lean_config validate')
+  expect(bad.text).toBe('config: 0 settings differ from the defaults, 2 invalid: desk.model, nope (lean_config validate)') // the invalid keys are named
   expect((await configRow(setup(undefined, '{ nope').host))!.ok).toBe(false)
 })
 
@@ -224,7 +223,7 @@ test('lean_doctor check: the config row, a FIX naming lean_config validate only 
   const ok = (await doc({ desk: { model: 'opus' }, threads: { autoRestart: false } })).find(r => r.includes('config:'))!
   expect(ok).toMatch(/^ok\s+config: 2 settings differ from the defaults \(desk\.model, threads\.autoRestart\), 0 invalid$/)
   const bad = (await doc({ desk: { model: 'gpt' } })).find(r => r.includes('config:'))!
-  expect(bad).toMatch(/^FIX\s+config: 0 settings differ from the defaults, 1 invalid; fix: lean_config validate$/)
+  expect(bad).toMatch(/^FIX\s+config: 0 settings differ from the defaults, 1 invalid: desk\.model \(lean_config validate\)$/)
 })
 
 // ---- the tool through the engine: desk only ----

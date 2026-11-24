@@ -14,7 +14,9 @@ export const KEYS = {
   'window.blockAbove': { type: 'number', dflt: 92, min: 1, max: 100, what: 'percent of the 5-hour window above which no new thread or reviewer fan-out starts (priority urgent excepted)' },
   'window.capFiveHourPct': { type: 'number', dflt: null, min: 1, max: 100, what: 'your own cap in percent of the 5-hour window: at it all new work is held until the window resets (default none)' },
   'threads.softCheckpointTokens': { type: 'number', dflt: 80000, min: 20000, max: 400000, what: 'a work thread this big is told once to checkpoint at its next boundary (a stalled one is checkpointed by script)' },
-  'threads.softUsd': { type: 'number', dflt: 8, min: 0, max: 10000, what: 'per-thread soft budget in USD from the ledger: 80% one nudge, 100% told to report and stop (0 = off)' },
+  'threads.softUsd': { type: 'number', dflt: 8, min: 0, max: 10000, what: 'per-thread soft budget in USD from the ledger: 80% one nudge, 100% a desk notice (raise / park / continue); the thread goes on (0 = off)' },
+  'tasks.splitHintTokens': { type: 'number', dflt: 60000, min: 0, max: 10000000, what: 'the split hint for a big brief needs the named files to add up to at least this many tokens (bytes / 4); none when it names no files (0 = no floor)' },
+  'threads.hardUsd': { type: 'number', dflt: null, min: 0, max: 10000, what: 'per-thread hard cap in USD from the ledger: at it the thread is told to report and stop and its new Agent calls are refused (default none; 0 = none)' },
   'desk.contextLimit': { type: 'number', dflt: 60000, min: 20000, max: 400000, what: 'the desk restarts (automatic restart) at this many context tokens' },
 } as const
 export type Key = keyof typeof KEYS

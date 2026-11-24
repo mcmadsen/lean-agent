@@ -5,7 +5,7 @@ import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
 import { resetBase } from './base'
-import { BRIEF_SOFT, DEFAULT_BASE, briefHint, briefHintText, briefLint, fanWords, freeOf, freeText, lintLine, lintRoots, pathWords, sourceBytes } from './briefsize'
+import { BRIEF_SOFT, DEFAULT_BASE, briefHint, briefHintText, briefLint, fanWords, freeOf, freeText, globFiles, lintLine, lintRoots, pathWords, sourceBytes } from './briefsize'
 
 const L = '/h/.lean-agent'
 const APP = '/w/app'
@@ -31,7 +31,8 @@ test('the paths a brief names: files and folders, relative or absolute, never a 
   expect(pathWords(text)).toEqual(['docs/living.md', './docs/history.md', 'reports/', '/w/app/src/a.ts', 'nothere/ghost.md'])
   const h = project()
   const s = await sourceBytes(h.host, pathWords(text), [APP], '/h')
-  expect(s).toEqual({ bytes: 40_000 + 240_000 + 60_000 + 400, files: 6, found: 4 }) // the folder counts its 3 files, not the one beneath it
+  expect(s).toMatchObject({ bytes: 40_000 + 240_000 + 60_000 + 400, files: 6, found: 4, skipped: 0 }) // the folder counts its 3 files, not the one beneath it
+  expect(s.largest[0]).toEqual({ name: 'history.md', bytes: 240_000 })
   expect(fanWords('all of it, every report, the full doc, each of them, overall')).toEqual(['all', 'every', 'full', 'each of'])
 })
 
@@ -40,16 +41,71 @@ test('free context = the limit minus the FIXED base (unknown: 40k); the lint fir
   expect(freeOf(LIM, 28_200)).toBe(91_800)
   expect(freeOf(LIM, null)).toBe(120_000 - DEFAULT_BASE)
   const big = await briefLint(h.host, 'read docs/history.md and write a plan', [APP], { limit: LIM, fixed: 28_200 }) // 60k tokens > 45.9k
-  expect(big?.line).toBe('this task reads about 60k tokens of sources into a thread with 92k free: split it: a READING thread that writes a summary file (one section per source) and a WRITING thread that reads only that file')
-  expect(big?.line).toBe(lintLine(60_000, 91_800))
+  expect(big?.line).toBe('this task reads about 60k tokens of sources into a thread with 92k free: split it: a READING thread that writes a summary file (one section per source) and a WRITING thread that reads only that file (counted 1 file from 1 named source, 240 KB, bytes / 4 = 60k tokens; largest: history.md 240 KB)')
+  expect(big?.line.startsWith(lintLine(60_000, 91_800))).toBe(true)
   expect(await briefLint(h.host, 'read docs/living.md and fix the typo', [APP], { limit: LIM, fixed: 28_200 })).toBeNull() // 10k of 92k free
   expect(await briefLint(h.host, 'read docs/living.md and reports/', [APP], { limit: LIM, fixed: 28_200 })).toBeNull() // 25k < 45.9k
-  // against a fixed base of 90k (free 30k) the same 25k is over half
-  expect(await briefLint(h.host, 'read docs/living.md and reports/', [APP], { limit: LIM, fixed: 90_000 })).not.toBeNull()
+  // against a fixed base of 90k (free 30k) the same 25k is over half of the free context, but under the floor (tasks.splitHintTokens, 60000): no hint
+  expect(await briefLint(h.host, 'read docs/living.md and reports/', [APP], { limit: LIM, fixed: 90_000 })).toBeNull()
+  h.files.set(`${L}/config.json`, JSON.stringify({ tasks: { splitHintTokens: 20_000 } })) // a lower floor: the hint comes back
+  expect((await briefLint(h.host, 'read docs/living.md and reports/', [APP], { limit: LIM, fixed: 90_000 }))?.line).toContain('reads about 25k tokens')
 })
 
-test('the count rule: five sources named, or two fan-out words with two sources, fire it even when they are small', async () => {
+test('no hint when the brief names no source that exists, or the estimate is under tasks.splitHintTokens (default 60000; 0 = no floor); the unit is bytes / 4 of the sizes the host reports', async () => {
   const h = project()
+  const at = (t: string, fixed = 28_200) => briefLint(h.host, t, [APP], { limit: LIM, fixed })
+  expect(await at('audit the extension build and fix every failing check, all of them, in full')).toBeNull() // names nothing
+  expect(await at('compare nothere/a.md nothere/b.md nothere/c.md nothere/d.md nothere/e.md')).toBeNull() // five names, none exists
+  expect(await at('compare a/1.md a/2.md a/3.md a/4.md a/5.md')).toBeNull() // five small sources (1k tokens): under the floor
+  expect(await at('read all of src/a.ts and every note in reports/')).toBeNull() // fan-out words, 15k tokens: under the floor
+  h.files.set(`${L}/config.json`, JSON.stringify({ tasks: { splitHintTokens: 0 } }))
+  expect((await at('compare a/1.md a/2.md a/3.md a/4.md a/5.md'))?.line).toContain('(5 sources named) (counted 5 files from 5 named sources, 1 KB, bytes / 4 = 1k tokens')
+  expect(await at('audit the extension build')).toBeNull() // still nothing named
+  // the unit: 240000 bytes of history.md are 60000 tokens (bytes / 4), shown as "60k", never as 240k or 60000k
+  h.files.set(`${L}/config.json`, JSON.stringify({ tasks: { splitHintTokens: 60_001 } }))
+  expect(await at('read docs/history.md')).toBeNull() // 60000 < 60001
+  h.files.set(`${L}/config.json`, JSON.stringify({ tasks: { splitHintTokens: 60_000 } }))
+  expect((await at('read docs/history.md'))?.tokens).toBe(60_000)
+})
+
+test('a glob counts the files it matches (not node_modules, not binaries), once each; a glob that matches nothing names nothing', async () => {
+  const h = project()
+  h.files.set(`${APP}/ext/src/a.ts`, 'a'.repeat(40_000))
+  h.files.set(`${APP}/ext/src/deep/b.ts`, 'b'.repeat(40_000))
+  h.files.set(`${APP}/ext/src/deep/b.png`, 'p'.repeat(9_000_000))
+  h.files.set(`${APP}/ext/src/c.md`, 'c'.repeat(40_000))
+  h.files.set(`${APP}/ext/node_modules/x/index.ts`, 'n'.repeat(9_000_000))
+  expect(await globFiles(h.host, `${APP}/ext/src/*.ts`)).toEqual([`${APP}/ext/src/a.ts`])
+  expect((await globFiles(h.host, `${APP}/ext/**/*.ts`)).sort()).toEqual([`${APP}/ext/src/a.ts`, `${APP}/ext/src/deep/b.ts`])
+  expect(pathWords('read ext/**/*.ts and ext/src/*.md')).toEqual(['ext/**/*.ts', 'ext/src/*.md'])
+  const s = await sourceBytes(h.host, pathWords('read ext/**/*.ts, ext/src/*.md and ext/src/a.ts and ext/**/*.rs'), [APP], '/h')
+  expect(s).toMatchObject({ bytes: 120_000, files: 3, found: 3, skipped: 0 }) // a.ts once; the .rs glob matches nothing
+  expect((await briefLint(h.host, 'read ext/**/*.ts and ext/src/*.md', [APP], { limit: LIM, fixed: 28_200 }))).toBeNull() // 30k tokens: under the floor
+})
+
+test('a build folder: binaries, source maps, packages and lock files are not read as text (not counted, and the line says so); a file named twice counts once', async () => {
+  const h = project()
+  h.files.set(`${APP}/dist/main.js`, 'j'.repeat(8_000)) // 2k tokens: the only text
+  h.files.set(`${APP}/dist/main.js.map`, 'm'.repeat(8_000_000)) // 2M tokens if read as text
+  h.files.set(`${APP}/dist/ext.crx`, 'p'.repeat(4_000_000))
+  h.files.set(`${APP}/dist/logo.png`, 'i'.repeat(2_000_000))
+  h.files.set(`${APP}/dist/pnpm-lock.yaml`, 'l'.repeat(3_000_000))
+  h.files.set(`${APP}/dist/vendor.min.js`, 'v'.repeat(900_000))
+  const s = await sourceBytes(h.host, pathWords('audit dist/ and dist/main.js'), [APP], '/h')
+  expect(s).toMatchObject({ bytes: 8_000, files: 1, found: 2, skipped: 5 }) // main.js once, although it is named and also in the folder
+  expect(await briefLint(h.host, 'audit dist/ and dist/main.js', [APP], { limit: LIM, fixed: 28_200 })).toBeNull() // small: no split advice for a 2k token task
+  // a really big text file is counted whole and named, so the thread can split on it
+  h.files.set(`${APP}/data/dump.json`, 'd'.repeat(8_800_000))
+  const big = await briefLint(h.host, 'audit data/dump.json', [APP], { limit: LIM, fixed: 28_200 })
+  expect(big?.line).toContain('reads about 2200k tokens')
+  expect(big?.line).toContain('(counted 1 file from 1 named source, 8.8 MB, bytes / 4 = 2200k tokens; largest: dump.json 8.8 MB)')
+  const both = await briefLint(h.host, 'audit data/dump.json and dist/', [APP], { limit: LIM, fixed: 28_200 })
+  expect(both?.line).toContain('5 binary or generated files not counted')
+})
+
+test('the count rule: five sources named, or two fan-out words with two sources, fire it (with the floor off: they are small)', async () => {
+  const h = project()
+  h.files.set(`${L}/config.json`, JSON.stringify({ tasks: { splitHintTokens: 0 } }))
   const five = await briefLint(h.host, 'compare a/1.md a/2.md a/3.md a/4.md a/5.md', [APP], { limit: LIM, fixed: 28_200 })
   expect(five?.line).toContain('(5 sources named)')
   expect(five?.line).toContain('reads about 1k tokens of sources into a thread with 92k free: split it')

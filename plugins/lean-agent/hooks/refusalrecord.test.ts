@@ -76,7 +76,28 @@ test('a worker over its step budget and an MCP call without a grant are recorded
   expect(t).toContain('worker-step-budget:')
 })
 
-test('the desk routing refusal is recorded', { timeoutMs: 20_000 }, async ($, on) => {
+test('a step-budget refusal records the job, the run\'s calls, its budget and the brief size; the export counts RUNS per job, not refused calls', { timeoutMs: 20_000 }, async ($, on) => {
+  const answer = (e: any) => (e.tool === 'Agent' ? { result: 'Async agent launched successfully.\nagentId: agent-1 (use SendMessage)' } : { result: 'ok' }) // a background worker: its grant binds to its id
+  const h = await session($, on, `${L}/threads/t1`, answer)
+  const prompt = `job: edit\nchange thing${'x'.repeat(980)}` // 1000+ characters, within the brief cap
+  await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt } as any)
+  for (let i = 0; i < 18; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any) // an edit job: 16 calls, then 2 refused ones
+  const got = (await rows(h)).filter(r => r.rule === 'worker-step-budget')
+  expect(got).toHaveLength(2)
+  expect(got[0]).toMatchObject({ role: 'worker', job: 'edit', calls: 17, budget: 16, chars: prompt.length, run: 'agent1' })
+  expect(got[1]).toMatchObject({ calls: 18, budget: 16 })
+  const t = await exported(h)
+  expect(t).toContain(`step budget used by 1 edit run(s) (2 refused calls; budget 16 tool calls; median 17 calls made; brief characters: median ${prompt.length}, largest ${prompt.length})`)
+})
+
+test('answer-too-long rows of 1.0.31 are not listed as refusals (a counter now)', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = await session($, on, `${L}/threads/t1`)
+  h.files.set(`${L}/refusals.jsonl`, JSON.stringify({ ts: 1_000_000, src: 'guard', kind: 'refusal', role: 'worker', rule: 'answer-too-long', text: 'answer-too-long: a second answer of 3000 characters, let through', agent: 'reader-sonnet', version: '1.0.31' }) + '\n')
+  expect(await exported(h)).not.toContain('answer-too-long')
+  expect(await refusalsText(h.host, 7)).not.toContain('answer-too-long')
+})
+
+test('the desk routing refusal is recorded',{ timeoutMs: 20_000 }, async ($, on) => {
   const h = await session($, on, '/h/lean-agent-desk')
   const r: any = await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt: brief(9) } as any)
   expect(r.deny).toContain('the desk routes')

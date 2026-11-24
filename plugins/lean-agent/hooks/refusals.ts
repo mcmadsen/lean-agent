@@ -95,7 +95,7 @@ const RULES: [string, RegExp][] = [
   ['job-missing', /^the first line of the brief names the job/],
   ['worker-slots', /^at most \d+ workers at once/],
   ['worker-spawn', /^a worker never spawns workers/],
-  ['worker-step-budget', /^step budget of a|^return what you have; the thread splits/],
+  ['worker-step-budget', /^step budget of a|^the reviewer's budget|^return what you have; the thread splits/],
   ['forge-write', /^forge writes go through the desk/],
   ['forge-read', /^read it with lean_run get \(forge reads/],
   ['thread-orchestrate', /^one step for a small worker|^run tests and builds with lean_run/],
@@ -119,7 +119,7 @@ export async function groupRefusals(h: Host, days = DAYS_DEFAULT): Promise<{ gro
   let total = 0
   // the guard's own rows only (a worker's own report of a refusal is counted in the export separately, never twice here)
   for (const r of await readJsonl<Row>(h, `${leanDir(home)}/refusals.jsonl`)) {
-    if (!r || r.src === 'worker' || r.kind === 'missing-tool' || r.command !== undefined || typeof r.text !== 'string' || (typeof r.ts === 'number' && r.ts < since)) continue
+    if (!r || r.src === 'worker' || r.kind === 'missing-tool' || r.rule === 'answer-too-long' || r.command !== undefined || typeof r.text !== 'string' || (typeof r.ts === 'number' && r.ts < since)) continue
     total++
     const agent = (r.agent ?? 'session').replace(/^lean-agent:/, '')
     const p = patternOf(r.text, agent, typeof r.what === 'string' ? r.what : undefined)

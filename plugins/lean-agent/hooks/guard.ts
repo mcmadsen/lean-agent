@@ -25,7 +25,7 @@ import { budgetFile, budgetRefusal } from './budgetthread'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
-export type Grants = { edit?: string[]; cmds?: string[]; mcp?: string[]; mcpWrite?: string[]; job?: string }
+export type Grants = { edit?: string[]; cmds?: string[]; mcp?: string[]; mcpWrite?: string[]; job?: string; chars?: number }
 type GrantRec = Grants & { call: string; type?: string; at?: number; sid?: string }
 type GrantDoc = { pending: GrantRec[]; agents: Record<string, GrantRec>; ended?: Record<string, GrantRec> } // ended: a subagent that stopped; a resumed one (same id) takes its grant back
 export const GRANT_TTL_MIN = 120
@@ -410,7 +410,7 @@ export const sweepGrants = ($: Host, role: Role, o: GrantOpts = {}): Promise<voi
 
 export function recordGrant($: Host, role: Role, call: string, type: string | undefined, g: Grants, o: GrantOpts = {}): Promise<void> {
   return mutate($, role, o, (d, now) => {
-    d.pending.push({ call, type, at: now, ...(o.sid ? { sid: o.sid } : {}), edit: [], cmds: [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}) })
+    d.pending.push({ call, type, at: now, ...(o.sid ? { sid: o.sid } : {}), edit: [], cmds: [], mcp: g.mcp ?? [], mcpWrite: g.mcpWrite ?? [], ...(g.job ? { job: g.job } : {}), ...(g.chars ? { chars: g.chars } : {}) })
   })
 }
 
@@ -437,6 +437,11 @@ export const releaseAgent = ($: Host, role: Role, agentId: string, o: GrantOpts 
 
 // the job type of the brief a worker was started with (the refusal and missing-tool records name it)
 export const workerJob = async ($: Host, ctx: Ctx): Promise<string | undefined> => (await grantFor($, ctx).catch(() => ({}) as Grants)).job
+// the job type and the size (characters) of the brief: the step-budget refusal record carries both, so an export can tell a job that is too big for its budget from a brief that is too big
+export const workerBrief = async ($: Host, ctx: Ctx): Promise<{ job?: string; chars?: number }> => {
+  const g = await grantFor($, ctx).catch(() => ({}) as Grants)
+  return { ...(g.job ? { job: g.job } : {}), ...(g.chars ? { chars: g.chars } : {}) }
+}
 async function grantFor($: Host, ctx: Ctx): Promise<Grants> {
   if (!ctx.agentId) return {}
   return locked(async () => {
@@ -1102,9 +1107,9 @@ async function expensiveDenial($: Host, ctx: Ctx, e: Call): Promise<string | nul
 // a new Agent call while the 5h window is hot (throttle.ts): the model it would run on is the call's override, else its type's own, else the session's (unknown: not haiku)
 async function windowDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if ((e.tool !== 'Agent' && e.tool !== 'Task') || (ctx.role.kind !== 'thread' && ctx.role.kind !== 'desk')) return null
-  if (ctx.role.kind === 'thread') { // the thread's own soft budget is used up (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut
-    const b = await readJson<{ budget?: number; over?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
-    if (b?.over && typeof b.budget === 'number' && b.budget > 0) return budgetRefusal(b.budget)
+  if (ctx.role.kind === 'thread') { // the thread's HARD cap (config threads.hardUsd, none by default) is reached (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut; the soft budget never refuses anything
+    const b = await readJson<{ hard?: number; hardUsd?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
+    if (b?.hard && typeof b.hardUsd === 'number' && b.hardUsd > 0) return budgetRefusal(b.hardUsd)
   }
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type.trim() : ''
   const over = typeof e.model === 'string' ? e.model.trim() : ''

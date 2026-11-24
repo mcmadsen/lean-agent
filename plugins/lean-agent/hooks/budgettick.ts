@@ -9,7 +9,7 @@ import type { Host } from './state'
 import { windowState } from './throttle'
 import { deskState } from './delivery'
 import { readContext, threadLimitsFor } from './threadcontext'
-import { budgetFile, budgetLevel, budgetOf, budgetText, nearNudge, overNudge, threadTotals } from './budgetthread'
+import { budgetFile, budgetLevel, budgetOf, budgetText, hardNudge, hardOf, nearNudge, overNote, threadTotals } from './budgetthread'
 import type { BudgetRec } from './budgetthread'
 import { MIN_GAP_MS, turnState } from './autorestart'
 import { isWorking } from './threads'
@@ -48,8 +48,9 @@ export async function windowParkTick(h: Host, deps: TickDeps): Promise<string[]>
   }
 }
 
-// The soft budget (budgetthread.ts): at 80% of a thread's own spend ONE nudge to the thread and ONE desk notice; at 100% the thread is told to report and stop, and budget.json
-// says "over" so the guard refuses its new Agent calls. The levels are recorded per budget value (<thread>/budget.json): raising the budget announces them again.
+// The soft budget (budgetthread.ts): at 80% of a thread's own spend ONE nudge to the thread and ONE desk notice; at 100% ONE desk notice (raise / park / continue) and the thread goes on.
+// Only the hard cap (config threads.hardUsd, none by default) stops a thread: it is told to report and stop, and budget.json says "hard" so the guard refuses its new Agent calls.
+// The levels are recorded per budget value (<thread>/budget.json): raising the budget announces them again.
 export async function softBudgetTick(h: Host, deps: TickDeps): Promise<string[]> {
   const out: string[] = []
   try {
@@ -59,29 +60,44 @@ export async function softBudgetTick(h: Host, deps: TickDeps): Promise<string[]>
       const t = await threadOf(h, home, id)
       if (!t || t.state === 'closed' || t.state === 'closing') continue
       const budget = await budgetOf(h, t)
-      if (budget === null) {
-        if ((await readJson<{ over?: number } | null>(h, budgetFile(home, id), null))?.over) await writeJson(h, budgetFile(home, id), {}) // switched off: the refusal ends
+      const hard = await hardOf(h)
+      const have = await readJson<BudgetRec | null>(h, budgetFile(home, id), null)
+      if (budget === null && hard === null) {
+        if (have?.hard || have?.over) await writeJson(h, budgetFile(home, id), {}) // both switched off: the refusal ends
         continue
       }
       totals ??= await threadTotals(h)
       const spent = totals[id] ?? 0
-      const level = budgetLevel(spent, budget)
-      const have = await readJson<BudgetRec | null>(h, budgetFile(home, id), null)
-      const rec: BudgetRec = have && have.budget === budget ? have : { budget }
       const now = await h.clock.now()
       const send = async (text: string) => deps.thread({ action: 'send', tN: id, text }).catch(() => null)
-      if (level === 'over' && !rec.over) {
+      const rec: BudgetRec = have && have.budget === (budget ?? 0) ? { ...have } : { budget: budget ?? 0 }
+      if (rec.hardUsd !== undefined && rec.hardUsd !== hard) { delete rec.hard; delete rec.hardUsd } // the cap was changed or removed: the refusal ends, a new cap is announced again
+      let changed = have?.budget !== rec.budget || have?.hardUsd !== rec.hardUsd
+      // the hard cap (threads.hardUsd, none by default): the only level that stops a thread: told to report and stop, new Agent calls refused (guard.ts reads budget.json)
+      if (hard !== null && spent >= hard && !rec.hard) {
+        rec.hard = now
+        rec.hardUsd = hard
+        await writeJson(h, budgetFile(home, id), rec)
+        await send(hardNudge(spent, hard))
+        out.push(`${id}: hard cap ${budgetText(spent, hard)} reached: told to report and stop; its new Agent calls are refused (raise threads.hardUsd, or remove it, to let it go on)`)
+        changed = false
+      }
+      const level = budget === null ? 'ok' : budgetLevel(spent, budget)
+      if (budget !== null && level === 'over' && !rec.over) {
+        // the soft budget never stops a thread: ONE notice to the desk (raise / park / continue); the thread is not messaged and goes on
         rec.over = now
         rec.near ??= now
         await writeJson(h, budgetFile(home, id), rec)
-        await send(overNudge(spent, budget))
-        out.push(`${id}: budget ${budgetText(spent, budget)} used: told to report and stop; its new Agent calls are refused (raise it with: budget ${id} <usd>)`)
-      } else if (level === 'near' && !rec.near) {
+        out.push(overNote(id, spent, budget))
+        changed = false
+      } else if (budget !== null && level === 'near' && !rec.near) {
         rec.near = now
         await writeJson(h, budgetFile(home, id), rec)
         await send(nearNudge(spent, budget))
-        out.push(`${id}: 80% of its budget used (${budgetText(spent, budget)}): told to finish the step, checkpoint and report`)
-      } else if (have?.budget !== budget) await writeJson(h, budgetFile(home, id), rec) // a changed budget forgets the old levels
+        out.push(`${id}: 80% of its soft budget used (${budgetText(spent, budget)}): nudged to take the cheapest path and report at the next natural point; it goes on`)
+        changed = false
+      }
+      if (changed) await writeJson(h, budgetFile(home, id), rec) // a changed budget or cap forgets the old levels
     }
   } catch {
     /* a timer never throws */
