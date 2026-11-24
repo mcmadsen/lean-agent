@@ -12,6 +12,7 @@ import { DEFAULT_PUSH_DENY, PROTECTED, guardedBy } from './guard'
 import type { Inbox, Out, Thread } from './threads'
 import { registerWorktree, takeoverCandidate, unregisteredAt, worktreeState } from './worktreereg'
 import { recordPushPr } from './ownpr'
+import { createChecks } from './prchecks'
 
 export type PrInput = { title?: unknown; body?: unknown; base?: unknown; draft?: unknown }
 
@@ -186,7 +187,7 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (t.state === 'closed' || t.state === 'closing') return err(`${id} is ${t.state}: reopen ${id} first, then push`)
   if (!FULL.test(sha)) return err('push needs the full commit sha the user approved (git rev-parse <ref>)')
   // the PR, validated up front: a bad title must not cost the approval
-  let pr: { title: string; body: string; base: string; draft: boolean } | null = null
+  let pr: { title: string; body: string; base: string; draft: boolean; draftSet: boolean } | null = null
   if (i.pr !== undefined && i.pr !== null) {
     const p = i.pr
     if (typeof p !== 'object') return err('pr must be an object: { title, body?, base?, draft? }')
@@ -196,7 +197,7 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const base = p.base === undefined ? '' : typeof p.base === 'string' ? p.base.trim() : '?'
     if (base && !nameOk(base)) return err(`pr.base ${JSON.stringify(p.base)} is not a plain branch name`)
     if (p.draft !== undefined && typeof p.draft !== 'boolean') return err('pr.draft must be true or false')
-    pr = { title, body: typeof p.body === 'string' ? p.body : '', base, draft: p.draft === true }
+    pr = { title, body: typeof p.body === 'string' ? p.body : '', base, draft: p.draft === true, draftSet: p.draft !== undefined }
   }
   // 1. the thread's project, never a private one
   if (!t.project) return err(`${id} has no project, so there is nothing to push`)
@@ -295,6 +296,14 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (!(await greenReview(h, t.project, sha))) return err(`not pushed: no green review record for ${short} (project ${t.project}): have ${id} run the review skill on this commit`)
   // 5. the user's approval for (project, sha, thread): valid, unused; consumed here, once, just before the push
   if (!(await hasApproval(h, t.project, sha, id))) return err(`not pushed: no valid approval for ${short} from ${id} (none, used, expired or for another thread). The user's yes goes through approve-push first (single use, 2 h)`)
+  // 1.0.31: the PR text follows the repo's guidelines, the diff holds no secret, and a PR without a green test run is proposed as a draft (prchecks.ts; config pr.checks): refused before anything changes
+  let prNotes: string[] = []
+  if (pr) {
+    const chk = await createChecks(h, { dir, project: t.project, thread: id, sha, remote, base: pr.base || deflt, title: pr.title, body: pr.body, draft: pr.draftSet ? pr.draft : undefined })
+    if (!chk.ok) return err(`not pushed: ${chk.text}`)
+    pr.draft = chk.draft
+    prNotes = chk.notes
+  }
   if (adopt) {
     const r = await registerWorktree(h, { project: t.project, path: adopt.path, repo: pj.path, branch: adopt.branch, thread: id, adopted: true })
     if (!r.ok) return err(`not pushed: ${r.text}; the approval is kept`)
@@ -350,7 +359,7 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   const ado = adoOf(pushTo.out)
   const adoBase = pr?.base || deflt
   const compare = ado ? adoCreateLink(ado, branch, adoBase) : compareUrl(`${pushed.stderr}\n${pushed.stdout}`)
-  const done = `pushed ${sha} to ${where}`
+  const done = `pushed ${sha} to ${where}${prNotes.length ? ` (${prNotes.join('; ')})` : ''}`
   const data = { pushed: true, sha, remote, branch, ...(compare ? { compare } : {}) }
   if (!pr) {
     return await finish({ ok: true, text: `${done}${compare ? `; compare URL ${compare}` : ''}`, data }, 'push', { compare }, `the desk pushed ${sha} to ${where}; no PR${compare ? `, compare URL ${compare}` : ''}`)
@@ -358,7 +367,13 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
   if (ado) {
     const r = await adoPullRequest(h, dir, ado, pr, branch, adoBase)
     const need = 'az repos pr create needs az + az login (extension azure-devops)'
-    if (r.kind === 'created') return await finish({ ok: true, text: `${done}; PR ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}`)
+    if (r.kind === 'created') {
+      // 1.0.31: the PR's last steps, from the work items the thread stored: link the PR to them and move them to Reviewing (each one asked)
+      const tj = await readJson<{ workItems?: unknown; briefItems?: unknown }>(h, `${threadsDir(home)}/${id}/thread.json`, {}).catch(() => ({}) as { workItems?: unknown; briefItems?: unknown })
+      const ids = [...new Set([...(Array.isArray(tj.workItems) ? tj.workItems : []), ...(Array.isArray(tj.briefItems) ? tj.briefItems : [])].filter((n): n is number => Number.isInteger(n)))].slice(0, 3)
+      const next = ids.length ? `; next, one asked request each: ado-pr-workitem-link and ado-workitem-update to Reviewing for work item ${ids.join(', ')}` : ''
+      return await finish({ ok: true, text: `${done}; PR ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}${next}`)
+    }
     if (r.kind === 'open') return await finish({ ok: true, text: `${done}; PR already open: ${r.url}`, data: { ...data, pr: r.url } }, 'push', { compare, pr: r.url }, `the desk pushed ${sha} to ${where}; PR ${r.url}`)
     if (r.kind === 'missing') {
       const text = `${done}; az was not found (PATH, ${AZ_PLACES.join(', ')}), so no PR was created: ${need}; open it from ${compare}`

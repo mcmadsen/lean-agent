@@ -105,7 +105,7 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-workitem-unlink': ['org', 'project', 'repo', 'pr', 'workitem', 'workItem'],
   'ado-pr-label': ['org', 'project', 'repo', 'pr', 'op', 'label'],
   'gh-pr-review': ['repo', 'pr', 'event', 'body'],
-  'batch':['items', 'continueOnError'],
+  'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
 export const kindsText = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => `${k} {${p}}`).join('; ')

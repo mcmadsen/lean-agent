@@ -32,6 +32,8 @@ need review-learn 'az account get-access-token --resource 499b84ac-1321-427f-aa1
 need review-learn 'never a PAT'
 need review-learn 'az repos pr list --status completed --top'
 need pr 'lean_review` `prs'
+need pr 'pr-guide: true'
+need pr 'draft: false'
 need worktree '\*\*reuse\*\*'
 need worktree 'not a path to guess'
 need worktree 'frozen-lockfile'

@@ -39,12 +39,17 @@ with the token in the header, read from an environment variable and never printe
   because the user's yes was said to the desk):
   - thread: after a green `review`, `lean_report` "ready to push <full sha> (branch, PR title)" with the PR body text (what changed
     and why, plus how it was tested; add the attribution lines only if `~/.lean-agent/config.json` `attribution` is true, your thread
-    CLAUDE.md states the value; default off) and stop.
+    CLAUDE.md states the value; default off) and stop. Build the title and the description FROM the repo's own guidelines: `lean_run`
+    `{pr-guide: true}` shows the template's sections, the title pattern, owners and work item rule (read by script, cached), and
+    `{pr-guide: {title, body}}` lints your text; fill every section and put the test evidence line of your last `lean_run` in it.
   - desk: ask the user, naming that sha and branch; only after an explicit yes call `lean_thread` `approve-push` (tN, sha) and then
     `push` (tN, sha, `pr: { title, body, base?, draft? }`). The mod checks the review, the approval and the thread's worktree, runs
     the push and the PR itself (the host is read from the push remote's URL: gh pr create for GitHub, az repos pr create with
     --org, --project, --repository, --source-branch and --target-branch for Azure DevOps, using the user's own az login; the mod runs
-    them, the desk never does) and queues a message to the thread. Relay the URL to the user. When the CLI is missing or fails the
+    them, the desk never does) and queues a message to the thread. Before it pushes, the mod refuses a PR text that breaks the repo's
+    guidelines or a diff with a secret (it names the parts; the approval is kept: the thread fixes and reports again), notes a large PR
+    (over 400 lines or 15 files) and opens a PR with no recorded green `lean_run` for that commit as a DRAFT: say `draft: false` when the
+    user wants it ready. Switch off: config `pr.checks`. Relay the URL to the user. When the CLI is missing or fails the
     reply gives the host's create-PR link instead (Azure DevOps: .../_git/{repo}/pullrequestcreate?sourceRef=..&targetRef=..) and
     names the CLI that was needed ("az repos pr create needs az + az login"); the PR is then the user's to open.
 - **status** (desk or thread; the desk's folder is not a repo, so it names the repo: github `--repo {owner}/{repo}`, Azure
