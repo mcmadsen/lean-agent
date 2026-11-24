@@ -68,6 +68,8 @@ import { runGet } from './forgeget'
 import { contextReport, sessionBreakdown } from './contextstat'
 import { briefHint } from './briefsize'
 import { pullText } from './pull'
+import { MEMORY_SPEC, memoryTool } from './memorytool'
+import { memoryOnPrompt } from './memoryprompt'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
@@ -190,8 +192,9 @@ const DOCTOR = 'lean_doctor'
 const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
-const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight'], description: 'INSTEAD of command: read a part of your restart store (the pull list of your first prompt); no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight a word' }, checkpoint: { type: 'object', description: 'INSTEAD of command: restart yourself at once (context near the cap): after writing scratch/notes.md, {next: "<the next step, 1-3 sentences>"}; end your turn after the answer, a fresh session continues with it', properties: { next: { type: 'string' } }, required: ['next'] }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] }, 'pr-changes': { type: 'object', description: 'INSTEAD of command: a PR\'s changed files with added / removed line ranges, no checkout. {forge: "ado"|"github", org, project, repo, pr, iteration?}', properties: { forge: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, iteration: { type: 'number' } }, required: ['forge', 'pr'] } }, required: [] } }
+const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight', 'memory'], description: 'INSTEAD of command: read a part of your restart store; no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight / memory words' }, checkpoint: { type: 'object', description: 'INSTEAD of command: restart yourself at once (context near the cap): after writing scratch/notes.md, {next: "<the next step, 1-3 sentences>"}; end your turn after the answer, a fresh session continues with it', properties: { next: { type: 'string' } }, required: ['next'] }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] }, 'pr-changes': { type: 'object', description: 'INSTEAD of command: a PR\'s changed files with added / removed line ranges, no checkout. {forge: "ado"|"github", org, project, repo, pr, iteration?}', properties: { forge: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, iteration: { type: 'number' } }, required: ['forge', 'pr'] } }, required: [] } }
 const TOOL = 'lean_thread'
+const MEMORY = 'lean_memory' // the desk's memory tool (memorytool.ts); a thread has lean_remember
 const SCHEMA = {
   type: 'object',
   properties: {
@@ -579,6 +582,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         isDeferred: false,
       } as any)
       await registerOnce($, { ...SCRIPT_SPEC, isDeferred: false })
+      await registerOnce($, { ...MEMORY_SPEC, isDeferred: false } as any)
     })
     await step('desk timers', async () => {
       setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text })) // desk -> thread, direct (deliver-to-thread.ts)
@@ -1227,6 +1231,15 @@ export const register: Register = on => {
     return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
   })
 
+  // the user's memory (memory.ts): the desk's tool; scripts decide the scope, refuse secrets and long texts, merge duplicates, cap each scope
+  on('tool.call', { tool: `mcp__lean-agent__${MEMORY}` as const }, async ($, e: any) => {
+    if (role.kind !== 'desk') await redetect($, undefined, true)
+    if (role.kind !== 'desk') return { result: await roleReport(hostOf($), { tool: MEMORY, need: 'desk', role, startDir, sid: lastSid }), isError: true } as any
+    const host = hostOf($)
+    const out = await memoryTool(host, await homeDir(host), e).catch(err => ({ ok: false, text: `lean_memory failed: ${String((err as Error)?.message ?? err)}` }))
+    return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
+  })
+
   // scripts over models: thread and desk (propose is a thread's, decide the desk's; scripts.ts checks per action)
   on('tool.call', { tool: `mcp__lean-agent__${SCRIPT_TOOL}` as const }, async ($, e: any) => {
     const halted = await stopCheck($, e)
@@ -1637,6 +1650,11 @@ export const register: Register = on => {
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
       const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
       if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
+    }
+    // the user's own typed words that are a standing order (memorycapture.ts): remembered by script, one notice line; a candidate is shown once
+    if ((role.kind === 'desk' || role.kind === 'thread') && !e.agentId) {
+      const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false)
+      pending.push(...(await memoryOnPrompt(host, e, role, inApp).catch(() => [] as string[])))
     }
     let extra: string | null = pending.length ? pending.splice(0).join('\n') : null
     try {

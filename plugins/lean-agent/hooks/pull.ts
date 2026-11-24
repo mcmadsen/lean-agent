@@ -11,9 +11,10 @@ import { readSnapshot, snapshotFile } from './snapshot'
 import type { Snapshot } from './snapshot'
 import { NOTES_FILE } from './scratchnotes'
 import { preflightOf } from './handover'
+import { memoryPull } from './memorytool'
 import type { Thread } from './threads'
 
-export const PULL_KINDS = ['brief', 'reports', 'notes', 'snapshot', 'preflight'] as const
+export const PULL_KINDS = ['brief', 'reports', 'notes', 'snapshot', 'preflight', 'memory'] as const
 export const PULL_MAX = 4_000
 export const LIST_MAX = 30
 const cut = (s: string, n: number, where: string) => (s.length <= n ? s : `${s.slice(0, n)}\n…(cut at ${n} characters: ${where})`)
@@ -101,6 +102,7 @@ export async function pullText(h: Host, home: string, id: string, kind: string, 
       const r = await h.fs.read(p).catch(() => '')
       return typeof r === 'string' ? r : ''
     }
+    if (kind === 'memory') return await memoryPull(h, home, id, section) // the standing orders and the rest the thread may see (memory.ts)
     if (kind === 'reports') return await reportsPull(h, home, id, section)
     if (kind === 'snapshot') return await snapshotPull(h, home, id, section)
     if (kind === 'brief') return docPull(`${dir}/brief.md`, 'brief', await text(`${dir}/brief.md`), section)

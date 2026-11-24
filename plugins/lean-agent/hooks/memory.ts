@@ -166,7 +166,7 @@ export const ageText = (now: number, ts: number): string => {
 }
 
 // ---- add -------------------------------------------------------------------------------------------------------------------------
-export type AddReq = { text: string; scope?: string; kind?: string; trigger?: string; output?: string; source: Source; status?: 'active' | 'candidate'; viaCommand?: boolean }
+export type AddReq = { text: string; scope?: string; kind?: string; trigger?: string; output?: string; source: Source; status?: 'active' | 'candidate'; viaCommand?: boolean /* the user typed the remember command */; auto?: boolean /* captured by script from a typed prompt: a loosening text is only ever a candidate */ }
 export async function addItem(h: Host, home: string, req: AddReq, ctx: Ctx): Promise<Out> {
   const text = flat(req.text ?? '')
   const bad = refuseText(text)
@@ -189,8 +189,8 @@ export async function addItem(h: Host, home: string, req: AddReq, ctx: Ctx): Pro
   let status: 'active' | 'candidate' = req.status ?? 'active'
   if (loosensSafety(text)) {
     if (req.source === 'thread') return { ok: false, text: 'not remembered: it would loosen a safety rule (permissions, approvals, pushes, sends); a thread cannot add that: ask the user to say it with /lean-agent:remember' }
-    if (!req.viaCommand && !(await userCommanded(h, text))) {
-      if (req.source !== 'script') return { ok: false, text: 'not remembered: it would loosen a safety rule (permissions, approvals, pushes, sends). Only the user\'s own /lean-agent:remember <text> (typed in the chat box) keeps it' }
+    if (!req.viaCommand && (req.auto || !(await userCommanded(h, text)))) {
+      if (req.source !== 'script' && !req.auto) return { ok: false, text: 'not remembered: it would loosen a safety rule (permissions, approvals, pushes, sends). Only the user\'s own /lean-agent:remember <text> (typed in the chat box) keeps it' }
       status = 'candidate'
     }
   }

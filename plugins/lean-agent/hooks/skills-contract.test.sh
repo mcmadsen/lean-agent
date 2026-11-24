@@ -227,4 +227,11 @@ for f in "$root/agents/reviewer.md" "$root/templates/review-brief.md" "$here/rev
 # 1.0.29: a thread near its cap restarts itself with the checkpoint call (never asks the desk or the user); the desk never restarts a thread for its context
 grep -qF 'call `lean_run {checkpoint: {next: "<the next step>"}}` and end your turn: the mod restarts you at once and you continue with it; never end your turn asking the desk or the user for a restart' "$root/templates/thread.md" || fail "thread.md lacks the checkpoint line"
 grep -qF 'Context restarts are the mod'"'"'s (the thread'"'"'s `lean_run checkpoint`, the limit, a stall): never restart a thread for its context; `restart` by hand only when the user asks' "$root/templates/front-desk.md" || fail "front-desk.md lacks the context-restart line"
+# 1.0.31: memory is ONE store: both guides say WHEN to remember and what never goes in (the skill carries the same), and the skill is short
+grep -qF 'only a standing rule or preference, a correction the user repeats, a decision with its reason, or a fact the user had to repeat (200 characters at most; no secrets, nothing the repo shows)' "$root/templates/front-desk.md" || fail "front-desk.md lacks the memory line (when to remember, what never)"
+grep -qF 'only a standing preference, a correction the user repeats, a decision with its reason or a fact the user had to repeat (200 characters at most; no secrets, nothing the repo shows)' "$root/templates/thread.md" || fail "thread.md lacks the memory line (when to remember, what never)"
+need remember 'ONE private store'
+need remember 'never CLAUDE.md'
+need remember 'Never:'
+[ "$(wc -l < "$here/remember/SKILL.md")" -le 30 ] || fail "the remember skill must stay one screen (30 lines)"
 echo "ok skills-contract"
