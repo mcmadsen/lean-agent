@@ -74,6 +74,14 @@ export type Scoped = { files: number; lines: number; dropped: number; droppedFil
 export function scopedOf(prep: Pick<Prep, 'changed' | 'lines'>, d: Dropped, version = ''): Scoped {
   return { files: prep.changed.length, lines: prep.lines, dropped: d.n, droppedFiles: d.files.slice(0, 40), notInPr: (d.notInPr ?? []).slice(0, 40), ...(version ? { version } : {}) }
 }
+// an area record joins the earlier ones of its sha: the per-area entries stay, the totals are their sums
+export function withArea(prev: Scoped | undefined, name: string, one: Scoped): Scoped {
+  const { byArea: _skip, ...mine } = one
+  const by = { ...(prev?.byArea ?? {}), [name]: mine }
+  const all = Object.values(by)
+  const uniq = (xs: string[]) => [...new Set(xs)].slice(0, 40)
+  return { files: all.reduce((n, a) => n + a.files, 0), lines: all.reduce((n, a) => n + a.lines, 0), dropped: all.reduce((n, a) => n + a.dropped, 0), droppedFiles: uniq(all.flatMap(a => a.droppedFiles)), notInPr: uniq(all.flatMap(a => a.notInPr)), ...(one.version ? { version: one.version } : {}), byArea: by }
+}
 export function scopeLine(s: Scoped, max = 8): string {
   const head = `reviewed ${s.files} changed file${s.files === 1 ? '' : 's'} (${s.lines} lines); ${s.dropped} finding${s.dropped === 1 ? '' : 's'} dropped${s.dropped ? `: outside the change (files: ${s.droppedFiles.slice(0, max).join(', ')}${s.droppedFiles.length > max ? `, and ${s.droppedFiles.length - max} more` : ''})` : ''}`
   const out = s.notInPr.length ? `\nthe reviewer reported on files that are not in the PR: ${s.notInPr.slice(0, max).join(', ')}${s.notInPr.length > max ? `, and ${s.notInPr.length - max} more` : ''} (dropped)` : ''

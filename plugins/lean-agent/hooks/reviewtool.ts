@@ -1,7 +1,7 @@
 // `lean_review` actions beyond the plain record: prepare (the script-computed brief, model and second-opinion advice), record (the
 // reviewer's JSON checked by reviewgate.ts before a green is signed) and decline. The HMAC signing stays in reviews.ts.
 import type { Host } from './state'
-import { atomicWrite, homeDir, leanDir, threadsDir } from './state'
+import { atomicWrite, homeDir, leanDir, readJson, threadsDir } from './state'
 import { readConfig } from './budget'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
@@ -9,7 +9,8 @@ import { logRefusal } from './feedback'
 import { noteReviewed, reviewedBy } from './reviewkind'
 import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
-import { changeScope, changedText, contextOf, droppedText } from './reviewchange'
+import { MIN_FILTER_VERSION, changeScope, changedText, contextOf, droppedText, scopeLine, scopedOf, withArea } from './reviewchange'
+import { compareVersions, running, runningOf } from './skew'
 import { areaOf, areasOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
 import { STEPS_BY_JOB, stepBudget } from './jobs'
 import { loadOrch } from './orchestrate'
@@ -296,6 +297,15 @@ async function blockOf(h: Host, thread: string, v: unknown): Promise<unknown> {
   return typeof t === 'string' ? t : v
 }
 
+// A thread whose plugin is older than the changed-code filter (1.0.29) reviews unfiltered: say so first, by the version the mod knows (skew.ts running)
+// and the one thread.json records for this session (role.ts recordRunning); the lowest known counts. '' = nothing known or new enough.
+async function oldFilterNote(h: Host, thread: string): Promise<string> {
+  const t = /^t\d+$/.test(thread) ? await readJson<{ sid?: string; running?: unknown } | null>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, null).catch(() => null) : null
+  const known = [running.version, runningOf(t)].filter(v => /^\d+\.\d+\.\d+/.test(v)).sort(compareVersions)
+  const low = known[0]
+  return low && compareVersions(low, MIN_FILTER_VERSION) < 0 ? `this thread runs lean-agent ${low}: the changed-code filter needs ${MIN_FILTER_VERSION} or newer: restart it` : ''
+}
+
 // config review.contextLines (default 0): lines of context around each changed hunk that still count as "in the change"
 const contextCfg = async (h: Host): Promise<number> => contextOf(((await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { contextLines?: unknown } })?.review?.contextLines)
 
@@ -392,7 +402,6 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (failed) return noDiff('git could not produce the diff of the range (an error or a timeout)') // never recorded unfiltered
   const cs = changeScope(res.findings, ctx.prep, await contextCfg(h))
   res.findings = cs.kept
-  const droppedNote = droppedText(cs.dropped)
   // an area record: the checks (new symbols, edited tests) cover this area's files only
   let area: ReturnType<typeof areaOf>
   let areasAll: ReturnType<typeof partition> = []
@@ -407,6 +416,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
     ctx.prep = scopedPrep(ctx.prep, keep, keepSections(diff, keep))
     if (ctx.delta) ctx.delta = scopedPrep(ctx.delta, keep, keepSections(deltaDiff ?? '', keep))
   }
+  const scoped = scopedOf(ctx.prep, cs.dropped, running.version) // (the area's own files and lines for an area record)
   const v = enforce(res, ctx)
   // a high-risk diff needs TWO independent runs: the two blocks (`reviews`), or the one block the merge action returned, unchanged
   // (its digest was remembered in the mod's store; a block that merely says `runs: 2` is one pass)
@@ -439,13 +449,15 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   rec.base = ext ? ext.base : base || range.base
   if (branch) rec.branch = branch
   rec.findings = v.open.map(findingLine)
+  rec.scoped = scoped
   if (area) {
     // an area record joins the earlier ones of this sha (one record per sha): the area's verdict, its findings tagged with the area, summed counts
     const prev = await readReview(h, project, sha)
     const areas = { ...(prev?.areas ?? {}), [area.name]: { verdict: res.verdict || 'none', open: v.open.length, counts: { ...rec.counts } } }
     const mine = (s: string) => s.startsWith(`[${area!.name}] `)
     rec.areas = areas
-    rec.findings = [...(prev?.findings ?? []).filter(s => !mine(s)), ...v.open.map(f => `[${area!.name}] ${findingLine(f)}`)]
+    rec.scoped = withArea(prev?.scoped, area.name, scoped)
+    rec.findings =[...(prev?.findings ?? []).filter(s => !mine(s)), ...v.open.map(f => `[${area!.name}] ${findingLine(f)}`)]
     rec.verdicts = Object.entries(areas).map(([n, a]) => `${n}: ${a.verdict}`)
     rec.counts = {}
     for (const a of Object.values(areas)) for (const [k, n] of Object.entries(a.counts ?? {})) rec.counts[k] = (rec.counts[k] ?? 0) + n
@@ -454,7 +466,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
-  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', droppedNote].filter(Boolean).join('\n')
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', scopeLine(rec.scoped ?? scoped)].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
   const areaLine = area ? `\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
@@ -487,7 +499,11 @@ async function reviewToolRun(h: Host, project: string, i: any, thread = ''): Pro
   const action = str(i.action) || 'record'
   const les = await lessonsTool(h, project, i) // the learned lessons (reviewlessons.ts): lessons, learn, lessons-list/-rm/-undo/-verify
   if (les) return les
-  if (action === 'prepare') return doPrepare(h, project, i, thread)
+  if (action === 'prepare') {
+    const out = await doPrepare(h, project, i, thread)
+    const old = await oldFilterNote(h, thread)
+    return old ? { ...out, text: `${old}\n${out.text}` } : out
+  }
   if (action === 'merge') return doMerge(h, project, i, thread)
   if (action === 'prs') {
     // the PR comments of a project's recent PRs (or one), from the host in its origin URL: prhost.ts, the one fetch the pr and review-learn skills share

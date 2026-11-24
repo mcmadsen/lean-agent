@@ -63,7 +63,7 @@ tool's refusal: do what it says.
    (renamed, flipped, deleted, skipped), new parameters with defaults, new module-level state, changed or removed exported symbols,
    the user's declines for this branch, and on a later pass the open findings and the delta since the last reviewed sha. The first
    line is `LEAN-REVIEW-PREP {...}` (the model, the number of runs and why, whether a second opinion comes first, whether this is a
-   re-review; `summary`: level, passes and expected cost). If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
+   re-review; `summary`: level, passes and expected cost). A line before it saying `this thread runs lean-agent <v>: the changed-code filter needs 1.0.29 or newer: restart it`, or a prepare text without `CHANGED CODE ONLY`, means this thread would review unfiltered: stop and tell the user to restart it. If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
    worktree path (git -C <worktree> ...). Print the reviewer line (`reviewer: sonnet x2
    (risk: ...)`, or `reviewer: sonnet (...)`) and the expected cost line so the user sees who reviews, why and what it costs. The reviewer is **always sonnet**; never pass
    `model` to prepare yourself: it is only for a model the brief explicitly names.

@@ -125,6 +125,8 @@ test('prepare (light and full) lists the changed files with their ranges; record
   expect(r.text).toContain('3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
   expect(r.text).toContain('src/a.ts:11')
   expect(r.text).not.toContain('src/untouched.ts:4')
+  expect(r.text).toContain('reviewed 1 changed file (5 lines); 3 findings dropped: outside the change (files: src/untouched.ts, src/a.ts, (no file))')
+  expect(r.text).toContain('the reviewer reported on files that are not in the PR: src/untouched.ts')
   const a = block([fin(1, 'src/a.ts', 11), fin(2, 'src/untouched.ts', 4)])
   const b = block([fin(1, 'src/a.ts', 12, { text: 'problem 1 in the code, again' }), fin(2, 'src/elsewhere.ts', 8)])
   const m = await tool(h, { action: 'merge', reviews: [a, b] })
@@ -132,6 +134,39 @@ test('prepare (light and full) lists the changed files with their ranges; record
   expect(m.text).toMatch(/2 findings dropped: outside the change \(files: src\/untouched\.ts, src\/elsewhere\.ts\)/)
   expect(m.text).toContain('top 1 of 1')
 })
+
+test('the summary line says what was reviewed and dropped; a thread older than the filter is told first; review.contextLines widens the range', async () => {
+  const { scopeLine, scopedOf, withArea } = await import('./reviewchange')
+  const prep = await analyzeDiff(DIFF, async () => '')
+  const cs = changeScope([f('src/mod.ts', 11), f('src/other.ts', 3), f('lib/x.ts', 4)], prep)
+  const s = scopedOf(prep, cs.dropped, '1.0.31')
+  expect(scopeLine(s)).toBe('reviewed 6 changed files (21 lines); 2 findings dropped: outside the change (files: src/other.ts, lib/x.ts)\nthe reviewer reported on files that are not in the PR: src/other.ts, lib/x.ts (dropped)\nthis thread ran lean-agent 1.0.31')
+  expect(scopeLine(scopedOf(prep, { n: 0, files: [] }))).toBe('reviewed 6 changed files (21 lines); 0 findings dropped')
+  const two = withArea(withArea(undefined, 'area-1', s), 'area-2', scopedOf(prep, { n: 1, files: ['a.ts'], notInPr: ['a.ts'] }))
+  expect(two.files).toBe(12)
+  expect(two.dropped).toBe(3)
+  expect(two.notInPr).toEqual(['src/other.ts', 'lib/x.ts', 'a.ts'])
+  const { running, setRunning } = await import('./skew')
+  const before = running.version
+  const h = setup()
+  try {
+    setRunning('1.0.28')
+    const old = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+    expect(old.text.split('\n')[0]).toBe('this thread runs lean-agent 1.0.28: the changed-code filter needs 1.0.29 or newer: restart it')
+    setRunning('1.0.31')
+    expect((await tool(h, { action: 'prepare', base: 'main', level: 'full' })).text).not.toContain('this thread runs lean-agent')
+  } finally {
+    setRunning(before)
+  }
+  // review.contextLines 3 keeps what context 0 drops
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { contextLines: 3 } }))
+  const w = await tool(h, { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14), fin(2, 'src/a.ts', 16)]) })
+  expect(w.text).toContain('1 finding dropped')
+  expect(w.text).toContain('src/a.ts:14')
+  const z = await tool(setup(), { sha: H2, base: 'main', level: 'full', review: block([fin(1, 'src/a.ts', 14)]) })
+  expect(z.text).toContain('1 finding dropped')
+  expect(z.text).not.toContain('src/a.ts:14')
+}, { timeoutMs: 20_000 })
 
 // ---- 1.0.31: never unfiltered; areas only from changed files ----------------------------------------------------------------
 test('merge and record refuse, and write nothing, when the PR diff cannot be read', async () => {
