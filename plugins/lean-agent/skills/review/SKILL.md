@@ -139,5 +139,5 @@ the head sha. Run the reviewer passes exactly as in step 5 (and 3, 4); fix nothi
 `lean_review` `record` with `mode: "external"`, `sha` = the head sha prepare printed, `base` = the base you gave (or omit it), `passes`,
 `review` / `reviews`. An external record is NEVER green and never counts for the push gate; the answer says so. The mod remembers the head sha
 you prepared: a review thread's `lean_report` done is refused until a full-level record exists for it, and the mod appends the evidence
-(record sha, level, passes, per-pass verdicts, findings by severity) to your report from its store. Report: the verdict, the findings by severity
+(record sha, level, passes, per-pass verdicts, findings by severity) to your report from its store. A second prepare replaces the first; `reset-prepare` clears stale areas: never review files outside the PR to satisfy the record check. Report: the verdict, the findings by severity
 with `file:line`, in the user's words, never an approval of a merge. Posting comments on the PR only when the user asked (the `pr` skill).
