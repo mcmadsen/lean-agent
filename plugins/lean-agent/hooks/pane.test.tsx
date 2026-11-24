@@ -184,7 +184,8 @@ test('sections are toggle buttons with counts; the state survives a remount; def
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', text: /▾ Goals \(2\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(2 unread\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '2 unread' })).toBeTruthy() // 1.0.31: the total; the inbox itself is on the cards (t1, t2), so no global section
+  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /▸ More \(0 projects, 0 scripts\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /▾ Threads \(2\)/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /▸ Closed \(1\)/ })).toBeTruthy()
@@ -201,28 +202,89 @@ test('sections are toggle buttons with counts; the state survives a remount; def
   await ui.unmount()
 })
 
-test('inbox: grouped by thread, unread first (all of them), a row expands to its full text, ack moves a row to the read ones', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press unfolds the rows, one press folds again, ack of one row acks only it and never moves the desk marker', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   const long = 'x'.repeat(260) + ' THE-END' // longer than a card's last-report line (200) and an inbox row's (70)
   const rows = Array.from({ length: 12 }, (_, n) => ({ ts: h.clock.t - (12 - n) * 1000, from: n % 2 ? 't1' : 't2', kind: 'report', text: n === 11 ? long : `report ${n}`, state: 'working' }))
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rows.map(rec).join(''))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(12 unread\)/ })).toBeTruthy()
   const rowsDrawn = async () => (await ui.findAll({ type: 'Button', text: /^[▸▾] (● )?(\? )?(report|x)/ })).length
-  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(6 unread\)/ })).toBeTruthy() // a group per thread, open while it has unread rows
-  expect(await ui.find({ type: 'Button', text: /▾ t2 two \(6 unread\)/ })).toBeTruthy()
-  expect(await rowsDrawn()).toBe(12) // every unread row
+  expect(await ui.find({ type: 'Text', text: '12 unread' })).toBeTruthy() // the one total
+  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy() // every sender has a card: no global section
+  expect(await ui.find({ type: 'Text', text: 'Nothing from the threads yet.' })).toBeFalsy()
+  expect(await ui.findAll({ type: 'Text', text: '6 new' })).toHaveLength(2) // a chip on each card, nothing hidden silently
+  expect(await rowsDrawn()).toBe(0) // folded by default, even with unread rows
+  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Show messages')
+  await ui.press({ key: 'inbox-toggle-t1' })
+  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Hide messages')
+  expect(await rowsDrawn()).toBe(6) // t1's unread rows only
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeFalsy() // cut at one line
   await ui.press({ key: 'row-11' })
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeTruthy() // the full report text
   await ui.press({ key: 'row-11' })
-  expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeFalsy() // and collapses again
-  await ui.press({ key: 'ack-11' })
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(11 unread\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(5 unread, 1 read\)/ })).toBeTruthy()
+  await ui.press({ key: 'ack-11' }) // one row: only it
+  expect(await ui.find({ type: 'Text', text: '11 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '5 new' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '6 new' })).toBeTruthy() // t2's chip is untouched
   expect(await ui.find({ type: 'Button', key: 'ack-11' })).toBeFalsy() // read: no ack button, dimmed, after the unread rows
   expect(await ui.find({ type: 'Button', key: 'row-11' })).toBeTruthy()
+  expect(h.files.has('/h/.lean-agent/desk/inbox-read.json')).toBe(false) // the pane ack never moves the desk marker
+  await ui.press({ key: 'inbox-toggle-t1' }) // fold again: nothing acked by folding
+  expect(await rowsDrawn()).toBe(0)
+  expect(await ui.find({ type: 'Text', text: '5 new' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('1.0.31 inbox on the card: a thread with nothing unread has no chip; its read rows are behind the toggle; a cardless sender stays in the global Inbox section, folded, and the section is hidden when none is left', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', [{ ts: h.clock.t - 3000, from: 't1', kind: 'report', text: 'already seen', state: 'working' }, { ts: h.clock.t - 2000, from: 'desk', kind: 'report', text: 'system notice a', state: 'working' }, { ts: h.clock.t - 1000, from: 't3', kind: 'report', text: 'from a closed thread', state: 'working' }].map(rec).join(''))
+  h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 1, ns: [] })) // the first row (t1's) is read
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.findAll({ type: 'Text', text: /\d+ new/ })).toHaveLength(0) // t1: read only, t2: nothing: no chip
+  expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t1' }))?.text).toBe('Show messages')
+  expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy() // nothing at all: no toggle
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(2 unread\)/ })).toBeTruthy() // only desk and closed t3 (no card)
+  expect(await ui.find({ type: 'Button', text: /▸ desk .*\(1 unread\)/ })).toBeTruthy() // groups folded by default
+  expect(await ui.find({ type: 'Button', text: /▸ t3 .*\(1 unread\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /system notice a/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', text: /already seen/ })).toBeFalsy() // t1 is on its card, not in the global section
+  await ui.press({ key: 'grp-btn-desk' })
+  expect(await ui.find({ type: 'Button', text: /system notice a/ })).toBeTruthy()
+  await ui.press({ key: 'ack-all' })
+  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(all read\)/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('1.0.31 inbox on the card: when every row belongs to a card the global Inbox section is hidden (no empty-state line)', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 't2', kind: 'report', text: 'only on a card', state: 'working' }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /Nothing from the threads yet|Nothing unread/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: '1 new' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('1.0.31 inbox on the card: Needs you stays on top, unfolded, and a card with a need wears its chip in amber', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/questions.jsonl', rec({ ts: 1, from: 't2', question: 'which cache?' }))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  // t2's open question is in Needs you, as before (a card with its own text, never folded)
+  expect((await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ }))?.text).toBeTruthy()
+  // t2's unread inbox row: its card chip says "1 new" (t1's too); the row itself is behind the toggle
+  expect(await ui.findAll({ type: 'Text', text: '1 new' })).toHaveLength(2)
+  expect(await ui.find({ type: 'Button', text: /which db\?/ })).toBeFalsy()
+  await ui.press({ key: 'inbox-toggle-t2' })
+  expect(await ui.find({ type: 'Button', text: /\? which db\?/ })).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ }))?.text).toBeTruthy() // still there
+  const chips = (await ui.findAll({ type: 'Text', text: '1 new' })).map((c: any) => JSON.stringify(c)) // cards in order: t2, t1
+  expect(chips[0]).toContain('"warning"') // t2 waits for an answer: amber chip
+  expect(chips[1]).not.toContain('"warning"') // t1 does not
   await ui.unmount()
 })
 
@@ -240,13 +302,13 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 11, ns: [] })) // the first 11 rows are read, "fresh" is not
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(1 unread\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▾ t1 one \(1 unread\)/ })).toBeTruthy() // the 2 old read rows are archived: not even counted
-  expect(await ui.find({ type: 'Text', text: /2 read message\(s\) older than 7 days are archived/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '1 new' })).toBeTruthy() // t1's chip: the 2 old read rows are archived, not even counted
+  await ui.press({ key: 'inbox-toggle-t1' })
   expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: /fresh/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▸ t2 two \(9 read\)/ })).toBeTruthy() // nothing unread: folded
-  await ui.press({ key: 'grp-btn-t2' })
+  expect(await ui.find({ type: 'Button', text: /recent/ })).toBeFalsy() // t2 is folded
+  await ui.press({ key: 'inbox-toggle-t2' }) // nothing unread: no chip, the toggle still opens its read rows
   const drawn = async () => (await ui.findAll({ type: 'Button', text: /recent/ })).length
   expect(await drawn()).toBe(5) // the last 5 read rows
   expect(await ui.find({ type: 'Button', text: /recent 8/ })).toBeTruthy()
@@ -257,7 +319,8 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   expect(await drawn()).toBe(5)
   // ack all: the unread row is read; the read rows stay in the file
   await ui.press({ key: 'ack-all' })
-  expect(await ui.find({ type: 'Button', text: /▾ Inbox \(all read\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /\d+ new/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /unread/ })).toBeFalsy()
   expect(h.files.get('/h/.lean-agent/desk/inbox.jsonl')!.split('\n').filter(Boolean)).toHaveLength(12)
   await ui.unmount()
 })
