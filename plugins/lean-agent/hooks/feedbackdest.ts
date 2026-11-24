@@ -6,6 +6,7 @@
 import { homeDir, realPath, readJson, leanDir } from './state'
 import type { Host } from './state'
 import { destination, eperm, freeName } from './deliver'
+import { DESK_THREAD, FEEDBACK_REPO, addActionRequest } from './deskactions'
 
 export const FEEDBACK_DESTS = ['local', 'folder', 'github', 'folder+github'] as const
 export type FeedbackDest = (typeof FEEDBACK_DESTS)[number]
@@ -51,6 +52,28 @@ export async function feedbackRow(h: Host): Promise<{ ok: boolean; text: string 
   const c = await feedbackConfig(h, await homeDir(h))
   if (!c.set && !c.problems.length) return null
   return c.problems.length ? { ok: false, text: `feedback export: ${c.problems.join('; ')}` } : { ok: true, text: `feedback export ${destText(c)}` }
+}
+
+// gh installed and logged in? null = ready, else the reason. (`gh auth status` reads; it never writes anything)
+export async function ghProblem(h: Host): Promise<string | null> {
+  const r = await h.process.run(['gh', 'auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000 }).catch(() => null)
+  if (!r || r.exitCode === 127) return 'gh is not installed (https://cli.github.com)'
+  return r.exitCode === 0 ? null : 'gh is not logged in to github.com (run: gh auth login)'
+}
+
+// ONE typed desk request (gh-issue-create) with the exact title and the anonymised body: posting is a remote write to a PUBLIC repo, so it never
+// goes out here; the user's Approve (the pane's card, or the desk's question) is bound to the request id and the mod runs `gh issue create`.
+export async function offerPost(h: Host, o: { title: string; body: string; fallbackTitle: string }): Promise<{ ok: true; id: string } | { ok: false; why: string }> {
+  const why = await ghProblem(h)
+  if (why) return { ok: false, why }
+  const clean = (t: string) => t.replace(/\s+/g, ' ').replace(/^[^A-Za-z0-9]+/, '').trim().slice(0, 120)
+  for (const title of [clean(o.title), o.fallbackTitle]) {
+    if (!title) continue
+    const r = await addActionRequest(h, DESK_THREAD, { kind: 'gh-issue-create', params: { repo: FEEDBACK_REPO, title, body: o.body }, why: 'feedback export' })
+    if (r.ok && r.request) return { ok: true, id: r.request.id }
+    if (title === o.fallbackTitle) return { ok: false, why: r.text.slice(0, 200) }
+  }
+  return { ok: false, why: 'no title' }
 }
 
 // copy the anonymised export (already written at `src`) into the configured folder, under `name`, never over an existing file (name-2, name-3 ...)

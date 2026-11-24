@@ -10,6 +10,7 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
   const calls: Call[] = []
   const writes: string[] = []
   const git = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 1, stdout: '' }) }
+  const gh = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 127, stdout: '', stderr: 'gh: command not found' }) }
   const os = { name: 'Darwin' } // what `uname` answers
   const app = { running: true, pgrep: null as null | ((a: string[]) => any) } // is the Claude app running (pgrep)
   const opener = { handler: (_a: string[], _c: Call): { exitCode: number; stdout: string; stderr?: string } => ({ exitCode: 0, stdout: '' }) } // the system opener (open, xdg-open, rundll32): opens a URL
@@ -87,6 +88,7 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
       if (c === 'tee') { const p = a[a.length - 1]; files.set(p, (files.get(p) ?? '') + (call.stdin ?? '')); return ok(call.stdin) }
       if (c === 'open' || c === 'xdg-open' || c === 'rundll32') { const r = opener.handler([...argv], call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (c === 'claude') { const r = claude.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
+      if (c === 'gh' && !exec.handler) { const r = gh.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } } // default: not installed (127)
       if (c === 'git') { const r = git.handler(a, call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       if (exec.handler) { const r = exec.handler([...argv], call); return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr ?? '' } }
       return { exitCode: 127, stdout: '', stderr: 'unknown ' + c }
@@ -113,7 +115,7 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, noWrite, made, claude, opener, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, noWrite, made, gh, claude, opener, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
 // An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the

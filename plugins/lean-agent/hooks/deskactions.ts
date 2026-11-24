@@ -38,9 +38,13 @@ export const ACTIONS_MAX = 40 // requests kept in the store
 export const PENDING_MAX = 5 // open requests one thread may have at a time
 export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
+export const FEEDBACK_REPO = 'mcmadsen/lean-agent' // the ONLY repo a feedback issue goes to (feedbackexport.ts REPO_URL names the same repo)
+export const ISSUE_BODY_MAX = 45_000 // the export is capped at 40 KB
+export const DESK_THREAD = 't0' // the desk's own requests (the feedback export): no thread, so nobody is "told" and no history folder is made
+export const DESK_ONLY_KINDS: string[] = ['gh-issue-create'] // never asked for by a thread (lean_report); the mod makes them
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'gh-issue-create' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
@@ -79,6 +83,7 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-policy-queue': 'org, project, repo, pr, evaluationId (the GUID of the policy evaluation to queue again)',
   'ado-pr-workitem-unlink': 'org, project, repo, pr, workitem (id): removes the link of the PR from that work item',
   'ado-pr-label': 'org, project, repo, pr, op (add | remove), label (text of at most 40 characters)',
+  'gh-issue-create': `${FEEDBACK_REPO} only: title, body (the anonymised feedback export). Made by the mod for the desk's feedback export (config.json feedback.destination github), never by a thread`,
   batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
@@ -98,10 +103,12 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-policy-queue': ['org', 'project', 'repo', 'pr', 'evaluationId'],
   'ado-pr-workitem-unlink': ['org', 'project', 'repo', 'pr', 'workitem', 'workItem'],
   'ado-pr-label': ['org', 'project', 'repo', 'pr', 'op', 'label'],
+  'gh-issue-create': ['repo', 'title', 'body'],
   'batch': ['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
-export const kindsText = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => `${k} {${p}}`).join('; ')
+export const THREAD_KINDS = (): string[] => Object.keys(ACTION_KINDS).filter(k => !DESK_ONLY_KINDS.includes(k)) // what a thread may ask for
+export const kindsText = (): string => Object.entries(ACTION_KINDS).filter(([k]) => !DESK_ONLY_KINDS.includes(k)).map(([k, p]) => `${k} {${p}}`).join('; ')
 export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assignedTo: 'System.AssignedTo', tags: 'System.Tags', title: 'System.Title' }
 
 // what is sent: tool 'azure' = curl with a bearer token, 'github' = gh api
@@ -111,7 +118,7 @@ export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assi
 // `items`: a batch of PR comments, numbered, for the card and the question; `cont`: a failing item is reported and the rest still run
 export type ReviewItem = { n: number; file: string; where: string; text: string }
 // `me`: the write names the identity the token belongs to (PH_ME in the URL): read by a GET of connectionData right before it is sent
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number; unlink?: number /* the work item the PR's link is REMOVED from */ }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
+export type Plan = { tool: 'azure' | 'github'; issue?: { repo: string; title: string; body: string } /* gh-issue-create: `gh issue create` by argv, not the REST call */; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number; unlink?: number /* the work item the PR's link is REMOVED from */ }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
@@ -305,6 +312,19 @@ export function checkAction(a: unknown): Checked {
     }
     return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: `https://api.github.com/repos/${repo}/issues/${pr}/comments`, contentType: 'application/json', body: json({ body }), headline: `comment on GitHub PR ${repo}#${pr}`, text: body } }
   }
+  if (k === 'gh-issue-create') {
+    // a PUBLIC issue on the lean-agent repo and no other (exactly FEEDBACK_REPO: the repo REPO_URL of feedbackexport.ts lets through the anonymiser; a spec pins both)
+    const repo = typeof p.repo === 'string' ? p.repo.trim() : ''
+    const title = typeof p.title === 'string' ? p.title.replace(/\s+/g, ' ').trim() : ''
+    const text = typeof p.body === 'string' ? p.body.replace(/\r\n?/g, '\n') : ''
+    if (repo !== FEEDBACK_REPO) return refuse(`action ${k}: a feedback issue goes to ${FEEDBACK_REPO} only (got ${JSON.stringify(repo.slice(0, 60))}): refused, nothing is posted anywhere else`)
+    if (!title || title.length > 120 || !/^[A-Za-z0-9]/.test(title) || CONTROL.test(title)) return refuse(`action ${k}: title is 1 to 120 characters, starting with a letter or digit, no control characters`)
+    if (!text.trim() || text.length > ISSUE_BODY_MAX || CONTROL.test(text.replace(/[\n\t]/g, ''))) return refuse(`action ${k}: body is non-empty text of at most ${ISSUE_BODY_MAX} characters`)
+    params.repo = repo
+    params.title = title
+    params.body = text
+    return { ok: true, kind: k, params, plan: { tool: 'github', issue: { repo, title, body: text }, method: 'POST', url: `https://github.com/${repo}/issues`, contentType: 'text/markdown', body: JSON.stringify({ title, body: text }), headline: `post a public issue on ${repo}: ${JSON.stringify(title)}`, text: `Title: ${title}\n\n${text}` } }
+  }
   if (k === 'gh-pr-thread-resolve') {
     const repo = typeof p.repo === 'string' ? p.repo.trim() : ''
     const pr = num('pr')
@@ -469,7 +489,7 @@ export function checkAction(a: unknown): Checked {
 
 // a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
 export const targetOf = (kind: ActionKind, p: Params): string =>
-  kind === 'ado-workitem-create' ? `Azure DevOps work item ${p.org}/${p.project}#new` : kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
+  kind === 'gh-issue-create' ? `a public issue on ${p.repo}` : kind === 'ado-workitem-create' ? `Azure DevOps work item ${p.org}/${p.project}#new` : kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
 function checkBatch(x: Record<string, unknown>): Checked {
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
   if (p) for (const key of Object.keys(p)) if (!PARAM_KEYS.batch.includes(key)) return refuse(`action batch: unknown param "${key.slice(0, 30)}" (the batch takes items and continueOnError)`)
@@ -486,6 +506,7 @@ function checkBatch(x: Record<string, unknown>): Checked {
   for (const [i, it] of items.entries()) {
     const kind = it && typeof it === 'object' ? (it as { kind?: unknown }).kind : undefined
     if (kind === 'batch') return refuse(`batch item ${i + 1}: a batch cannot hold a batch`)
+    if (typeof kind === 'string' && DESK_ONLY_KINDS.includes(kind.trim())) return refuse(`batch item ${i + 1}: ${kind.trim()} is its own request, never part of a batch`)
     const c = checkAction(it)
     if (!c.ok) return refuse(`batch item ${i + 1}: ${c.text}`)
     checked.push(c)
@@ -640,17 +661,18 @@ export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 't
   const shown = v.items ? `${reviewListing(v.items, QUESTION_TEXT_MAX)}${v.items.some(i => i.text.replace(/\s+/g, ' ').trim().length > QUESTION_TEXT_MAX) ? `\n(texts are cut at ${QUESTION_TEXT_MAX} characters here: the full text of each is on the card in the pane)` : ''}${v.anchors ? `\n(${ANCHOR_NOTE})` : ''}` : v.text
   const standing = v.standing ? [{ label: standingLabelOf(v.kind ?? ''), description: `the desk sends exactly this text, once; and ${v.thread}'s later writes of this kind on this ${(v.kind ?? '').startsWith('ado-workitem') ? 'work item' : 'PR'} (statuses only fixed, closed, active) are sent without asking, for 24 h, at most 40, or until it closes (Revoke in the pane)` }] : []
   return {
-    question: `${v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${shown}\n---\nTarget: ${v.target}\nSend exactly this?`,
+    question: `${v.thread === DESK_THREAD ? 'the desk' : v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${shown}\n---\nTarget: ${v.target}\nSend exactly this?`,
     options: [
       { label: 'Approve', description: v.writes && v.writes > 1 ? `the desk sends exactly these ${v.writes} writes, in this order, once; ${v.cont ? 'a failing one is reported and the rest still run' : 'it stops at the first failure'}` : 'the desk sends exactly this text, once' },
-      { label: 'Deny', description: `${v.thread} is told it was denied and goes on without it` },
-      { label: 'Edit first', description: `nothing is sent; tell ${v.thread} what to change, it sends a NEW request` },
+      v.thread === DESK_THREAD ? { label: 'Deny', description: 'nothing is posted; the export stays where it was written' } : { label: 'Deny', description: `${v.thread} is told it was denied and goes on without it` },
+      v.thread === DESK_THREAD ? { label: 'Edit first', description: 'nothing is posted; say what to change, then export again' } : { label: 'Edit first', description: `nothing is sent; tell ${v.thread} what to change, it sends a NEW request` },
       ...standing,
     ],
   }
 }
 
 export const logHistory = async (h: Host, thread: string, rec: Record<string, unknown>): Promise<void> => {
+  if (thread === DESK_THREAD) return // the desk's own requests have no thread folder
   const home = await homeDir(h)
   await appendJsonl(h, `${threadsDir(home)}/${thread}/history.jsonl`, { ts: await h.clock.now(), ...rec }).catch(() => undefined)
 }
@@ -659,6 +681,8 @@ export type Tell = (thread: string, text: string) => Promise<void>
 // ---- a thread asks ---------------------------------------------------------------------------------------------------------------------------
 export async function addActionRequest(h: Host, thread: string, a: { kind?: unknown; params?: unknown; items?: unknown; why?: unknown }): Promise<{ ok: boolean; text: string; request?: ActionView }> {
   if (!threadOk(thread)) return { ok: false, text: 'an action request comes from a thread (tN)' }
+  // the desk's own kinds (a public issue) are made by the mod for the desk only; a thread asking for one, or the desk asking for a thread's kind, is refused
+  if (DESK_ONLY_KINDS.includes(typeof a.kind === 'string' ? a.kind.trim() : '') !== (thread === DESK_THREAD)) return { ok: false, text: thread === DESK_THREAD ? 'the desk makes only its own request kinds this way' : `${typeof a.kind === 'string' ? a.kind.trim().slice(0, 40) : 'that kind'} is not one a thread may ask for` }
   const c = checkAction(a)
   if (!c.ok) return { ok: false, text: c.text }
   // an inline comment is shown to the user only after its line was read against the PR's diff now (checked again right before it is sent)
@@ -960,6 +984,22 @@ const idIn = (out: string): string | undefined => {
 }
 
 async function send(h: Host, plan: Plan): Promise<Sent> {
+  if (plan.issue) {
+    // gh-issue-create: `gh issue create` by argv (no shell), the repo fixed by the check, the body read from a file the mod writes and removes
+    const { repo, title, body } = plan.issue
+    if (repo !== FEEDBACK_REPO) return { ok: false, text: `a feedback issue goes to ${FEEDBACK_REPO} only: nothing was posted` }
+    const home = await homeDir(h)
+    const file = `${leanDir(home)}/feedback-export/.issue-body-${await h.clock.now()}.md`
+    try {
+      await atomicWrite(h, file, body)
+      const r = await h.process.run(['gh', 'issue', 'create', '--repo', repo, '--title', title, '--body-file', file], { timeoutMs: 60_000 }).then(x => x, (e: unknown) => ({ exitCode: -1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
+      if (r.exitCode === -1) return { ok: false, unknown: true, text: `gh did not answer (${oneLine(r.stderr, 160)}): the issue may or may not exist` }
+      if (r.exitCode !== 0) return { ok: false, text: `gh issue create failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login). The export is still on disk` }
+      return { ok: true, text: r.stdout.split('\n').map(l => l.trim()).filter(l => /^https:\/\/github\.com\//.test(l)).pop() ?? oneLine(r.stdout, 200) }
+    } finally {
+      await h.process.run(['rm', '-f', file], { timeoutMs: 10_000 }).catch(() => undefined)
+    }
+  }
   if (plan.tool === 'github') {
     const r = await h.process.run(['gh', 'api', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', plan.url.replace('https://api.github.com/', ''), '--input', '-'], { stdin: plan.body, timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
     if (r.exitCode !== 0) return { ok: false, text: `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
@@ -1262,6 +1302,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but NOT sent, nothing was written: ${sent.text}. Make a NEW request with an anchor on a line the PR changes.`).catch(() => undefined)
     return { ok: false, text: `not sent: ${sent.text}. Nothing was written; the request is closed because the anchor does not stand, ${r.thread} was told to send a new one` }
   }
+  if (sent.ok && r.thread === DESK_THREAD) return { ok: true, text: `posted: ${sent.text}` }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
   return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused for its 2 h: try again, or tell ${r.thread}` }
 }
