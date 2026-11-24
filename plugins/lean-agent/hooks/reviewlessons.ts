@@ -133,10 +133,13 @@ const nextId = (all: Lesson[]) => all.reduce((m, l) => Math.max(m, l.id), 0) + 1
 
 type Meta = { lastImport?: number; imported?: number; from?: string[] }
 type Op = { kind: 'add' | 'update' | 'rm'; id: number; old?: Lesson }
-export async function lessonCap(h: Host): Promise<{ tokens: number; max: number }> {
+export const FALLBACK_PER_TOPIC = 2 // config.json review.lessonsFallback (0 = off): the always-on general slice, per topic
+export const FALLBACK_TOTAL = 6
+export async function lessonCap(h: Host): Promise<{ tokens: number; max: number; fallback: number }> {
   const r = asObj(asObj(await readConfig(h, await homeDir(h)).catch(() => ({}))).review)
   const n = (v: unknown, d: number) => (Number.isInteger(v) && (v as number) > 0 ? (v as number) : d)
-  return { tokens: n(r.lessonTokens, DEFAULT_TOKENS), max: n(r.lessonMax, MAX_LESSONS) }
+  const fb = r.lessonsFallback
+  return { tokens: n(r.lessonTokens, DEFAULT_TOKENS), max: n(r.lessonMax, MAX_LESSONS), fallback: Number.isInteger(fb) && (fb as number) >= 0 ? Math.min(fb as number, FALLBACK_TOTAL) : FALLBACK_PER_TOPIC }
 }
 
 async function logBatch(h: Host, home: string, project: string, ops: Op[], ts: number) {
@@ -351,9 +354,9 @@ function newCode(diff: string): string {
   return (keep.length ? keep.map(l => (l[0] === '+' ? l.slice(1) : l)).join('\n') : d)
 }
 
-const section = (title: string, rows: Lesson[]) => (rows.length ? [`### ${title}`, ...rows.map(l => `- ${l.text}`)] : [])
+const section = (title: string, rows: Lesson[], general = new Set<number>()) => (rows.length ? [`### ${title}`, ...rows.map(l => `- ${l.text}${general.has(l.id) ? ' (general)' : ''}`)] : [])
 
-export async function reviewLessons(h: Host, project: string, changedPaths: string[], diffText: string, opts: number | { budget?: number; goal?: string; log?: boolean } = {}): Promise<LessonsOut> {
+export async function reviewLessons(h: Host, project: string, changedPaths: string[], diffText: string, opts: number | { budget?: number; goal?: string; log?: boolean; fallback?: number } = {}): Promise<LessonsOut> {
   const o = typeof opts === 'number' ? { budget: opts } : opts
   const cfg = await lessonCap(h)
   const budget = Math.max(100, Math.floor(o.budget ?? cfg.tokens))
@@ -383,7 +386,7 @@ export async function reviewLessons(h: Host, project: string, changedPaths: stri
     if (why.length) cands.push({ l, score, why, near: isNear })
   }
   cands.sort((a, b) => b.score - a.score || a.l.id - b.l.id)
-  const picked: { l: Lesson; why: string; score: number }[] = []
+  const picked: { l: Lesson; why: string; score: number; general?: boolean }[] = []
   const perTopic = new Map<string, number>()
   let used = tok(REUSE_RULE) + 40 // the rule and the header are always in
   let nearN = 0
@@ -397,15 +400,32 @@ export async function reviewLessons(h: Host, project: string, changedPaths: stri
     perTopic.set(key, (perTopic.get(key) ?? 0) + cost)
     used += cost
   }
+  // The general slice (config review.lessonsFallback, default 2 per topic, at most 6 in all): a checklist line with no path or keyword hit is
+  // not lost; the newest ones of each topic join the offered set, inside the same budget and topic caps, marked "(general)".
+  const perFallback = o.fallback ?? cfg.fallback
+  if (perFallback > 0) {
+    const have = new Set(picked.map(p => p.l.id))
+    const pool = TOPIC_NAMES.flatMap(t => all.filter(l => l.family === 'review-checklist' && l.topic === t && !have.has(l.id)).sort((a, b) => b.id - a.id).slice(0, perFallback))
+    let n = 0
+    for (const l of pool.sort((a, b) => b.id - a.id)) {
+      const cost = tok(l.text + ' (general)') + 1
+      if (n >= FALLBACK_TOTAL || used + cost > budget || (perTopic.get(l.topic) ?? 0) + cost > Math.min(TOPIC_TOKENS, budget)) continue
+      picked.push({ l, why: 'general', score: 0, general: true })
+      perTopic.set(l.topic, (perTopic.get(l.topic) ?? 0) + cost)
+      used += cost
+      n++
+    }
+  }
+  const generalIds = new Set(picked.filter(p => p.general).map(p => p.l.id))
   const head = `Learned review checklist for ${project} (what human reviewers caught before; leads, not facts: check each line that applies to this change against the code and say so in the review):`
   const build = () => {
     const helpers = picked.filter(p => p.l.family === 'shared-helpers').map(p => p.l)
     const topics = TOPIC_NAMES.map(t => ({ t, rows: picked.filter(p => p.l.family === 'review-checklist' && p.l.topic === t).map(p => p.l) })).filter(x => x.rows.length)
-    return [head, `General: ${REUSE_RULE}`, ...section('shared helpers: reuse these before adding new code with the same job', helpers), ...topics.flatMap(x => section(x.t, x.rows))].join('\n')
+    return [head, `General: ${REUSE_RULE}`, ...section('shared helpers: reuse these before adding new code with the same job', helpers), ...topics.flatMap(x => section(x.t, x.rows, generalIds))].join('\n')
   }
   let text = build()
   while (tok(text) > budget && picked.length) { picked.pop(); text = build() } // (headers and section titles are counted here: the lowest-scored line goes first)
-  const out: LessonsOut = { text, picked: picked.map(p => ({ id: p.l.id, family: p.l.family, topic: p.l.topic, why: p.why, score: p.score })), tokens: tok(text), total: all.length }
+  const out: LessonsOut = { text, picked: picked.map(p => ({ id: p.l.id, family: p.l.family, topic: p.l.topic, why: p.why, score: p.score, ...(p.general ? { general: true } : {}) })), tokens: tok(text), total: all.length }
   if (o.log !== false) {
     const home = await homeDir(h)
     await appendJsonl(h, logFile(home), { ts: Math.floor((await h.clock.now()) / 1000), project, changed: changed.length, total: all.length, offered: out.picked.map(p => ({ id: p.id, why: p.why })), tokens: out.tokens, budget }).catch(() => undefined)

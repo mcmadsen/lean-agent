@@ -73,7 +73,7 @@ test('selection: a small budget caps the block, a topic never takes more than it
   expect(g.picked.every(p => p.why.length > 0)).toBe(true)
   // nothing relevant: only the general rule (and header)
   const none = await reviewLessons(h.host, 'proj', ['zzz/unrelated.bin'], 'binary', { log: false })
-  expect(none.picked).toEqual([])
+  expect(none.picked.filter(p => !p.general)).toEqual([]) // (the general slice is the next spec)
   expect(none.text).toContain(REUSE_RULE)
   // no store at all: the rule alone, no failure
   const empty = fakeHost(null)
@@ -92,7 +92,40 @@ test('selection: globs in a lesson match changed paths; a dropped line is never 
   h.files.set(STORE, [a, b].map(x => JSON.stringify(x)).join('\n') + '\n')
   const r = await reviewLessons(h.host, 'proj', ['src/exporter/deep/csv.ts'], '', { log: false })
   expect(r.picked.map(p => p.id)).toEqual([1])
-  expect((await reviewLessons(h.host, 'proj', ['src/other/csv.ts'], '', { log: false })).picked).toEqual([])
+  expect((await reviewLessons(h.host, 'proj', ['src/other/csv.ts'], '', { log: false, fallback: 0 })).picked).toEqual([])
+})
+
+test('selection: a path hit and a keyword hit lead; lines with neither join as a "(general)" slice, per topic, at most 6, newest first, inside the caps', async () => {
+  const h = fakeHost(null)
+  const rows = [
+    makeLesson(1, 'review-checklist', 'When changing the exporter schema, bump the schema version', { source: 't', added: '2026-01-01' }),
+    makeLesson(2, 'review-checklist', 'Check that normalizePhone is used for every phone field', { source: 't', added: '2026-01-01' }),
+  ]
+  rows[0]!.paths = ['src/exporter/**']
+  // eight lines that match neither the path nor a word of the diff: two topics' worth of old and new ones
+  for (let n = 0; n < 8; n++) rows.push(makeLesson(10 + n, 'review-checklist', n % 2 ? `Never log the credential field of flow${n}` : `Add a test with a fixture for case${n}`, { source: 't', added: '2026-01-01' }))
+  h.files.set(STORE, rows.map(x => JSON.stringify(x)).join('\n') + '\n')
+  const diff = ['diff --git a/src/exporter/csv.ts b/src/exporter/csv.ts', '@@ -1,1 +1,2 @@', '+const p = normalizePhone(row.phone)'].join('\n')
+  const r = await reviewLessons(h.host, 'proj', ['src/exporter/csv.ts'], diff, { log: false })
+  const lead = r.picked.filter(p => !p.general).map(p => p.id)
+  expect(lead).toEqual(expect.arrayContaining([1, 2])) // path hit (#1) and strong keyword hit (#2)
+  const gen = r.picked.filter(p => p.general)
+  expect(gen.length).toBeGreaterThan(0)
+  expect(gen.length).toBeLessThanOrEqual(4) // 2 per topic, two topics hold the filler
+  for (const t of ['security', 'tests']) expect(gen.filter(p => p.topic === t).length).toBeLessThanOrEqual(2)
+  expect(gen.map(p => p.id)).toContain(17) // the newest of its topic
+  expect(gen.map(p => p.id)).not.toContain(11) // the older lines of a topic beyond the 2 stay out
+  expect(r.text).toContain('(general)')
+  expect(r.text).not.toMatch(/bump the schema version.*\(general\)/)
+  expect(r.tokens).toBeLessThanOrEqual(DEFAULT_TOKENS)
+  // config review.lessonsFallback: 0 = off, 1 = one per topic, 99 is held at 6 in all
+  expect((await reviewLessons(h.host, 'proj', ['src/exporter/csv.ts'], diff, { log: false, fallback: 0 })).picked.some(p => p.general)).toBe(false)
+  expect((await reviewLessons(h.host, 'proj', ['src/exporter/csv.ts'], diff, { log: false, fallback: 1 })).picked.filter(p => p.general).length).toBeLessThanOrEqual(2)
+  h.files.set(`${L}/config.json`, JSON.stringify({ review: { lessonsFallback: 99 } }))
+  expect((await reviewLessons(h.host, 'proj', ['src/exporter/csv.ts'], diff, { log: false })).picked.filter(p => p.general).length).toBeLessThanOrEqual(6)
+  // a tiny budget: the general slice goes first, the leads stay
+  const tiny = await reviewLessons(h.host, 'proj', ['src/exporter/csv.ts'], diff, { log: false, budget: 150 })
+  expect(tiny.tokens).toBeLessThanOrEqual(150)
 })
 
 test('learn: near-duplicates are skipped, a helper of a known name updates its line, replace corrects one, undo restores, the cap holds', async () => {
