@@ -25,7 +25,7 @@ import { INSTR_LEAD, buildHandover, instrBlock, olderVersion, pluginVersion, res
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, liveOf, nameProblem, readWaiting, removeSession, requestsOf, sessionName, staleWorking, stallConfig, stallFor, stillWaiting, threadsConfig, truthOf } from './threadstate'
 import type { Truth } from './threadstate'
 import { aliveRow, answered, deliverConfig, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
-import { ageText, duplicateOf, markHanded, messageRecs, messagesText, sendLine, stateWord } from './msgstate'
+import { ageText, answerInfo, answerText, duplicateOf, markAnswer, markHanded, messageRecs, messagesText, sendLine, stateWord } from './msgstate'
 import type { MsgKind } from './deliver-to-thread'
 import { priceOf } from './budget'
 import { installedVersion, runningOf, threadSkew } from './skew'
@@ -780,8 +780,10 @@ async function wake(h: Host, home: string, t: Thread, opts: { force?: boolean; e
 // is `verbose: true`. The desk's conversation keeps every reply, so the default stays small (a spec pins the size).
 export const LIST_LINE_MAX = 200
 const LAST_CHARS = 80
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean }): string {
-  const word = `${o.state === 'open' ? (o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean; answerQ?: string }): string {
+  // an answer on its way replaces "waiting for your answer" (1.0.31: "answer queued, not read yet (4 min)"); a stuck session stays named
+  const stuckWord = o.live === 'stuck' || o.live === 'stalled' ? `, ${o.live}` : ''
+  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.live === 'waiting' ? 'waiting for your answer' : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"` : `(no report) ${(o.title ?? '').slice(0, 40)}`
   return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.ctx, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
@@ -811,6 +813,7 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const truth: Truth | null = listed && t.state === 'open' && t.sid ? truthOf({ threadState: t.state, finished: !!t.finished, row: t.sid ? row : undefined, queued, now: now0, stuckMinutes, stallMinutes: stallFor(stall.minutes, t), activityAt: t.sid && t.state === 'open' ? await lastActivity(h, home, t.id, t.lastWake) : null, waitingSince: (await readWaiting(h, home, t.id))?.since ?? null }) : null
     const mine = recs.filter(r => r && r.from === t.id && (r.kind === 'report' || r.kind === 'ask'))
     const lastRec = mine[mine.length - 1]
+    const answerQ = t.state === 'open' && t.sid ? answerText((await answerInfo(h, home, t.id)).open, now0) : '' // an answer to its question that it has not read yet
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
     const finishing = !!truth && truth.word === 'running' && lastRec?.kind === 'report' && lastRec.state === 'done' && row?.status === 'idle' // reported done, only a background worker's notification is pending
     const ended = !!truth && !!t.sid && t.lastWake > 0 && endedAtOnce({ word: truth.word, req0: t.req0, req: typeof t.req0 === 'number' ? await requestsOf(h, t.id, now0) : null, reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
@@ -824,7 +827,7 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const cv0 = t.state !== 'closed' && t.sid ? await ctxOf(h, home, t, ctxLimits).catch(() => null) : null // "ctx 108k/120k" | "ctx unknown" (threadcontext.ts)
     const restarting = await isRestarting(h, home, t).catch(() => false) // hard-stopped, the mod restarts it: amber, nothing for the user to do
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
-    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : truth.text } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
@@ -1086,12 +1089,14 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           if (dup) return { ok: true, text: `already queued as ${dup.id} (${ageText(sentAt - dup.at)} ago, ${stateWord(dup)}); not queued again. lean_thread messages ${id} shows its state`, data: { duplicate: dup.id } }
           const kind0 = await kindFor(h, home, t, [{ ts: sentAt, text }]) // (before the wake: a direct delivery clears the waiting state it reads)
           await appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts: sentAt, text } satisfies Inbox)
+          if (kind0 === 'answer') await markAnswer(h, home, id, [(await messageRecs(h, home, id)).length]) // the answer to its open question: msgstate.ts answerInfo
           const out = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
           // the state of THIS message, said plainly (msgstate.ts): queued / delivered / consumed, and how a queued one reaches the thread
           const recs = await messageRecs(h, home, id)
           const mine = recs.at(-1)
           if (!mine || t.state !== 'open' || !t.sid) return out // (a parked / closed thread: its own reply already says nothing reads it)
           // still unread: WATCHED from now (deliverToThread's tick): unread for threads.answerWaitSeconds and the session idle or stuck = restarted by script with the text
+          if (kind0 === 'answer') await answered(h, home, id) // queued, not read: it no longer "waits for your answer" (the list says "answer queued, not read yet")
           const now2 = await load(h, home, id)
           if (mine.state === 'queued' && now2?.state === 'open' && now2.sid && !/waits on a permission prompt/.test(out.text)) await watchDelivery(h, home, id, { sid: now2.sid, from: (recs.find(r => r.state === 'queued') ?? mine).n - 1, upTo: mine.n, kind: kind0, again: true })
           const wait = (await deliverConfig(h, home)).answerWaitSeconds

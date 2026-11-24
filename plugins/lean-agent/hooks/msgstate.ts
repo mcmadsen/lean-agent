@@ -72,6 +72,17 @@ export async function messageRecs(h: Host, home: string, id: string): Promise<Ms
 }
 export const unread = (r: MsgRec): boolean => r.state === 'queued' || r.state === 'delivered'
 
+// ---- answers (1.0.31): a message sent while the thread waited for its answer ----------------------------------------------------
+// `lastAt`: when the newest answer was sent (0 = none): a question or blocked report OLDER than that is answered. `open`: the newest answer the thread has not read yet.
+export type AnswerInfo = { lastAt: number; last: MsgRec | null; open: MsgRec | null }
+export async function answerInfo(h: Host, home: string, id: string): Promise<AnswerInfo> {
+  const as = (await messageRecs(h, home, id)).filter(r => r.answer)
+  const last = as[as.length - 1] ?? null
+  return { lastAt: last?.at ?? 0, last, open: [...as].reverse().find(unread) ?? null }
+}
+// the row text while an answer is on its way: "answer queued, not read yet (4 min)"
+export const answerText = (r: MsgRec | null, now: number): string => (r ? `answer ${r.state === 'delivered' ? 'delivered, not read back yet' : 'queued, not read yet'} (${ageText(now - r.at)})` : '')
+
 export const ageText = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000))
   return s < 90 ? `${s} s` : `${Math.round(s / 60)} min`

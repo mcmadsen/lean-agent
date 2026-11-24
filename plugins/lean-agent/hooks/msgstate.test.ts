@@ -7,7 +7,8 @@ import { leanThread, resetLocks } from './threads'
 import { resetFinish } from './finish'
 import { resetThreadCache } from './threaddetail'
 import { resetActivity } from './threadstate'
-import { takeBatch } from './delivery'
+import { renderReports, takeBatch, unreadReports, worthRelay } from './delivery'
+import { loadView } from './view'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const NEW = '99999999-8888-7777-6666-555555555555'
@@ -211,6 +212,71 @@ test('an identical text after the thread read the first one, or past 10 minutes,
   expect(third.text).toContain('m3: queued')
   expect((await send(h, 'status check: where are you?')).text).toContain('m4')
   expect((await send(h, 'status check: where are you?')).text).toContain('m5')
+  after(() => 0)
+})
+
+// ---- 3. an answer clears "waiting for your answer" --------------------------------------------------------------------------------------
+const waits = (h: any, since: number) => h.files.set(`${T1}/waiting.json`, JSON.stringify({ since, text: 'sqlite or postgres?' }))
+const deskInbox = (h: any, ...recs: object[]) => h.files.set(`${L}/desk/inbox.jsonl`, recs.map(r => JSON.stringify(r)).join('\n') + '\n')
+const listText = async (h: any) => (await leanThread(h.host, ROOT, { action: 'list' })).text
+
+test('queuing an answer to a waiting thread clears its waiting state: the list says "answer queued, not read yet (age)" until the thread reads it', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 60_000)
+  waits(h, T0 - 60_000)
+  expect(await listText(h)).toContain('waiting for your answer')
+  const r = await send(h, 'postgres')
+  expect(r.text).toContain('m1: queued, not read yet')
+  expect(json(h, `${T1}/waiting.json`)).toEqual({}) // no longer waiting
+  expect(await listText(h)).toContain('answer queued, not read yet (0 s)')
+  expect(await listText(h)).not.toContain('waiting for your answer')
+  h.clock.t = T0 + 4 * 60_000
+  expect(await listText(h)).toContain('answer queued, not read yet (4 min)')
+  expect((await messages(h)).text).toContain('answer to its question')
+  await takeBatch(h.host, 't1') // consumed: answered, nothing left to show
+  expect(await listText(h)).not.toContain('answer queued')
+  after(() => 0)
+})
+
+test('a plain instruction to a thread that waits for nothing is not an answer: no "answer queued" text', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  await send(h, 'also run the linter')
+  expect(await listText(h)).not.toContain('answer queued')
+  after(() => 0)
+})
+
+test('the pane row: the question card is answered (not asking) once an answer is queued, and the row text says so until it is read', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 60_000)
+  waits(h, T0 - 60_000)
+  deskInbox(h, { ts: T0 - 60_000, from: 't1', kind: 'ask', text: 'sqlite or postgres?' })
+  const before = (await loadView(h.host)).threads.find(x => x.id === 't1')!
+  expect(before.asking).toBe(true)
+  await send(h, 'postgres')
+  h.clock.t = T0 + 3 * 60_000
+  const queued = (await loadView(h.host)).threads.find(x => x.id === 't1')!
+  expect(queued.asking).toBe(false)
+  expect(queued.liveNote).toContain('answer queued, not read yet (3 min)')
+  await takeBatch(h.host, 't1')
+  const read = (await loadView(h.host)).threads.find(x => x.id === 't1')!
+  expect(read.asking).toBe(false)
+  expect(read.liveNote ?? '').not.toContain('answer queued')
+  after(() => 0)
+})
+
+test('a desk inbox row whose question was already answered is marked answered and is not relayed again', { timeoutMs: 20_000 }, async () => {
+  const { h } = setup()
+  activity(h, T0 - 60_000)
+  waits(h, T0 - 60_000)
+  deskInbox(h, { ts: T0 - 60_000, from: 't1', kind: 'ask', text: 'sqlite or postgres?' }, { ts: T0 - 50_000, from: 't2', kind: 'ask', text: 'other thread question' })
+  await send(h, 'postgres')
+  const u = await unreadReports(h.host)
+  expect(u.recs).toHaveLength(2)
+  const text = renderReports(u.recs)
+  expect(text).toMatch(/from t1.*\[answered by the desk at \d\d:\d\d \(m1\)/)
+  expect(text).not.toMatch(/from t2.*\[answered/)
+  expect(worthRelay(u.recs.filter(r => r.from === 't1'))).toBe(false) // nothing left to ask the user for t1
+  expect(worthRelay(u.recs)).toBe(true) // t2's question still needs them
   after(() => 0)
 })
 
