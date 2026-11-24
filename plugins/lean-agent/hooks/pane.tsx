@@ -851,7 +851,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                   key={`ack-card-${id}`}
                   label={`ack ${grp.unread.length}`}
                   onPress={act('ack', async () => {
-                    for (const a of grp.unread) await ackRows(host, a.n)
+                    for (const a of grp.unread.slice(0, GROUP_ROWS)) await ackRows(host, a.n) // (only the rows the card shows: an unread row that was never drawn is not read)
                   })}
                 />
               ) : null,
@@ -874,8 +874,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const DECIDE: string[] = ['action', 'model', 'denial']
     const threadRow = (t: ThreadRow) => {
       const sc = stateOf(t)
-      const quiet = ['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) && !t.liveNote && !t.pending
       const myNeeds = needs.filter(n => n.thread === t.id)
+      // a done or idle thread with something waiting for the user (a report ready to push, a question) is a card, not a quiet row
+      const quiet = ['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) && !t.liveNote && !t.pending && myNeeds.length === 0
       const held = holdsOf(t.id)
       const open = expanded(t.id) || myNeeds.some(n => DECIDE.includes(n.kind)) || held.length > 0
       const blockedWord = ['blocked', 'stuck', 'stalled'].includes(sc.word)
@@ -903,7 +904,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const msg = messagePieces(t.id)
       // ONE primary button, only when it matters: a thread that needs you: Open (the session for an approval); blocked: Restart; a quiet row: Open
       const approvalOpen = !!t.approval && !t.working
-      const primary = quiet ? openBtn : blockedWord ? restartBtn : chipWord === 'needs you' || sc.word === 'waiting for answer' ? (approvalOpen ? <Button key={`open-${t.id}`} label={`Open ${t.id}`} onPress={openOne(t.id)} /> : openBtn) : null
+      const primary = quiet ? openBtn : blockedWord ? restartBtn : chipWord === 'needs you' || sc.word === 'waiting for answer' || myNeeds.length > 0 ? (approvalOpen ? <Button key={`open-${t.id}`} label={`Open ${t.id}`} onPress={openOne(t.id)} /> : openBtn) : null
       const title = (
         <Button key={`card-${t.id}`} plain label={`${open ? '▾' : '▸'} ${t.id} ${t.title}`} onPress={toggleCard(t.id)} />
       )
@@ -1001,7 +1002,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const allItems = sortItems(itemsOf(v?.threads ?? [], v?.closed ?? [], needs), cfgPane.sort)
     const unreadIds = new Set(inbox.filter(g => g.unread.length > 0).map(g => g.from))
     const showAllRows = ui.rows.sessionsAll === true
-    const capped = showAllRows ? { shown: allItems, hidden: 0 } : capItems(allItems, cfgPane.maxSessions, (i: Item) => i.needs || unreadIds.has(i.id))
+    const capped = showAllRows ? { shown: allItems, hidden: 0 } : capItems(allItems, cfgPane.maxSessions, (i: Item) => i.needs || unreadIds.has(i.id) || holdsOf(i.id).length > 0)
     const sessionRow = (i: Item) => (i.t ? threadRow(i.t) : closedRow(i.c!))
 
     // ---- header: ONE compact block: the model chip, the budget, the plan window, the desk's context with the Health chip, the version ----
@@ -1044,7 +1045,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const revokeOwnPress = (nt: NoticeRow) => async () => {
       resetViewCache()
       const n = await revokeOwn(host, { thread: nt.thread ?? '' }, 'user, pane').catch(() => 0)
-      if (n > 0) await setNotice(host, nt.key, null)
+      if (n > 0) for (const o of (v?.notices ?? []).filter(x => x.info && x.thread === nt.thread && /^ownpr/.test(x.key))) await setNotice(host, o.key, null) // (every own-PR line of that thread: the default is gone)
       resetViewCache()
       sayModel(n > 0 ? `${nt.thread} no longer sends its own PR replies without a question` : `nothing to revoke for ${nt.thread}: it owns no PR now`, n === 0)
       tell()
@@ -1091,7 +1092,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       selfEditBlock,
       ...infoNotices.map(nt => {
         const hid = isHid(nt)
-        return row(`own-${nt.key}`, '', undefined, `${short(nt.text, 160)}${hid ? ' (dismissed)' : ''}`, hid ? [] : [<Button key={`own-revoke-${nt.key}`} label="Revoke" onPress={revokeOwnPress(nt)} />, <Button key={`notice-dismiss-${nt.key}`} label="Dismiss" onPress={dismissLine([nt.dk])} />], hid)
+        return row(`own-${nt.key}`, '', undefined, `${short(nt.text, 160)}${hid ? ' (dismissed)' : ''}`, hid ? [] : [/^ownpr/.test(nt.key) ? <Button key={`own-revoke-${nt.key}`} label="Revoke" onPress={revokeOwnPress(nt)} /> : null, <Button key={`notice-dismiss-${nt.key}`} label="Dismiss" onPress={dismissLine([nt.dk])} />], hid)
       }),
     ].filter(Boolean)
     const infoItems: any[] = []
@@ -1103,12 +1104,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     for (const nt of otherNotices.filter(isHid)) infoItems.push(row(`nt-${nt.key}`, '', undefined, `${short(nt.text, 160)} (dismissed)`, [], true))
     for (const g of cardless.filter(x => x.unread.length === 0)) infoItems.push(inboxGroup(g))
     if (v?.archived && cardless.length > 0) infoItems.push(row('h-archived', '', undefined, `${v.archived} read message(s) older than 7 days are archived (still in the inbox file)`, [], true))
-    for (const n of showHidden ? dismissedRows : []) infoItems.push(needCard(n, true))
-    if (dismissLine_) infoItems.push(dismissLine_)
-    for (const [i, l] of lastSetup.entries()) infoItems.push(row(`su-${i}`, '', undefined, l, [], true))
+    // below the groups, not counted: the dismissed list with its show / hide, and the lines of the last setup run
+    const trailing: any[] = [...(showHidden ? dismissedRows : []).map(n => needCard(n, true)), dismissLine_, ...lastSetup.map((l, i) => row(`su-${i}`, '', undefined, l, [], true))].filter(Boolean)
     const blocker = missing.length > 0 || errors.length > 0 || otherNotices.some(n => !isHid(n) && !n.budget && !n.warn) || looseNeeds.some(n => n.kind === 'deskmodel')
     const hs = healthSummary({ fix: fixItems.length, standing: standN, info: infoItems.length, blocker })
-    const healthDflt = cfgPane.healthOpen || missing.length > 0 // (a missing setup is never hidden)
+    const healthDflt = cfgPane.healthOpen || missing.length > 0 || errors.length > 0 // (a missing setup and a failed load are never hidden: the pane is never blank)
     const healthUnfolded = isOpen(ui, 'health', healthDflt)
     const openHealth = async () => {
       await patchUi($, u => ({ ...u, open: { ...u.open, health: true } }))
@@ -1135,7 +1135,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {group('g-fix', 'Needs a fix', fixItems, fixes.length > 0 ? [<Button key="doctor-fix" label="Run fix" onPress={runSetup} />] : [])}
             {group('g-standing', 'Standing approvals', standItems)}
             {group('g-info', 'Info', infoItems)}
-            {fixItems.length + standItems.length + infoItems.length === 0 && <Text dimColor>Nothing to fix.</Text>}
+            {trailing}
+            {fixItems.length + standItems.length + infoItems.length + trailing.length === 0 && <Text dimColor>Nothing to fix.</Text>}
           </Box>
         )}
       </Box>

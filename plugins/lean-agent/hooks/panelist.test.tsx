@@ -5,6 +5,7 @@ import { fakeHost } from './fake'
 import { ownRevoked } from './deskwrites'
 import { ownLine } from './ownpr'
 import { paneConfig } from './panelist'
+import { writeReview } from './reviews'
 import { resetViewCache } from './view'
 import { resetLocks } from './threads'
 
@@ -215,7 +216,73 @@ test('Health: folded on startup; quiet and grey ("Health: all good", no chip) wh
   await ui.unmount()
 })
 
-test('pane.healthOpen starts Health unfolded; the pane remembers a fold after that', { timeoutMs: 20_000 }, async ($, on) => {
+test('a failed load is never hidden: Health is unfolded by itself and the red error line is on screen (the pane is never blank)', { timeoutMs: 20_000 }, async ($, on) => {
+  const { h, thr } = world(on)
+  thr('t1')
+  await inDesk($)
+  h.claude.handler = () => ({ exitCode: 3, stdout: '' })
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  expect((await ui.find({ type: 'Button', key: 'sec-health' }))?.text).toMatch(/^▾ Health: \d+ findings?/)
+  expect((await ui.find({ type: 'Text', text: /^error: agents/ }))?.text).toContain('exited 3')
+  await ui.unmount()
+})
+
+test('a done thread with a report ready to push is a card with an amber border and its Open button, not a quiet row; its need is on the unfolded card', { timeoutMs: 20_000 }, async ($, on) => {
+  const { h, thr, kv } = world(on)
+  const sha = 'abcdef1' + '0'.repeat(33)
+  const KEY = 'k'.repeat(64)
+  kv.set('review.key', KEY) // the pane's engine instance signs and verifies with this key
+  thr('t1', { lastWake: h.clock.t - HOUR })
+  h.files.set(`${L}/desk/inbox.jsonl`, line({ ts: h.clock.t - 60_000, from: 't1', kind: 'report', text: `Done. Branch: feat/x, commit ${sha.slice(0, 7)}, not pushed.`, state: 'done' }))
+  await h.host.store.set('review.key', KEY)
+  await writeReview(h.host, { green: true, sha, project: 'p', branch: 'feat/x' })
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy()
+  expect((await ui.findAll({ type: 'Box' })).filter((b: any) => b.props?.borderColor === 'warning').length).toBeGreaterThan(0)
+  expect(await ui.find({ type: 'Text', text: /is ready to push/ })).toBeFalsy()
+  await ui.press({ key: 'card-t1' })
+  expect(await ui.find({ type: 'Text', text: /is ready to push/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('"ack N" on a card reads only the rows the card shows (20 at most): an unread row that was never drawn stays unread', { timeoutMs: 20_000 }, async ($, on) => {
+  const { h, thr } = world(on)
+  thr('t1')
+  h.files.set(`${L}/desk/inbox.jsonl`, Array.from({ length: 25 }, (_, n) => line({ ts: h.clock.t - (30 - n) * 1000, from: 't1', kind: 'report', text: `report ${n}`, state: 'working' })).join(''))
+  await inDesk($)
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  await ui.press({ key: 'card-t1' })
+  await ui.press({ key: 'ack-card-t1' })
+  expect(await ui.find({ type: 'Text', text: '5 unread' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a PR-link notice (wipr) is information with Dismiss only; Revoke is for an own-PR line, and it clears every own-PR line of that thread', { timeoutMs: 20_000 }, async ($, on) => {
+  const { h, thr } = world(on)
+  thr('t5', { pr: { host: 'azure', org: 'acme', project: 'Shop', repo: 'shop-api', id: 4321, number: 4321, url: '', since: 1, how: 'you passed pr' } })
+  await inDesk($)
+  h.files.set(`${L}/notices/ownpr_t5_4321.txt`, ownLine('t5', { id: 4321, how: 'you passed pr' }) + '\n')
+  h.files.set(`${L}/notices/ownpr_t5_wi9.txt`, 't5 owns work item 9 (it created the work item): moving it to Reviewing goes out without a question\n')
+  h.files.set(`${L}/notices/wipr_t5_4321.txt`, 't5 linked PR 4321 to work item 9\n')
+  const ui = await $.ui.mount(PANE as any)
+  await setUp(ui)
+  await openHealth(ui)
+  expect(await ui.find({ type: 'Button', key: 'own-revoke-wipr_t5_4321' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'notice-dismiss-wipr_t5_4321' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /t5 linked PR 4321/ })).toBeTruthy()
+  await ui.press({ key: 'own-revoke-ownpr_t5_4321' })
+  expect(h.files.has(`${L}/notices/ownpr_t5_4321.txt`)).toBe(false)
+  expect(h.files.has(`${L}/notices/ownpr_t5_wi9.txt`)).toBe(false)
+  expect(h.files.has(`${L}/notices/wipr_t5_4321.txt`)).toBe(true) // what already went out stays as information
+  await ui.unmount()
+})
+
+test('pane.healthOpen starts Health unfolded; the pane remembers a fold after that',{ timeoutMs: 20_000 }, async ($, on) => {
   const { h, thr } = world(on)
   thr('t1')
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { healthOpen: true } }))
