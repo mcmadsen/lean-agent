@@ -48,6 +48,7 @@ export const REGISTRY: readonly Entry[] = [
   mk('desk.reportChars', 'number', 400, 'desk', 'now', 'reportdigest.ts', 'Characters of a thread report the desk gets (0 = the whole report).', n(0, { int: true })),
   mk('desk.contextLimit', 'number', 60000, 'desk', 'now', 'deskcompact.ts', 'The desk restarts itself (handover first) when its context passes this many tokens (the older deskTokens still counts when this is unset).', n(10000, { int: true, flat: true, aliases: ['deskTokens', 'checkpoint.deskTokens'] })),
   mk('desk.autoRestartPerDay', 'number', 12, 'desk', 'now', 'deskauto.ts', 'Automatic desk restarts allowed per 24 hours (and at most one every 30 minutes); past it only the Restart desk button.', { min: 1, max: 100, int: true, flat: true }),
+  mk('desk.closeOld', 'enum', 'stop', 'desk', 'now', 'olddesk.ts', 'After a desk restart, stop the old desk session (stop) or also remove it from the list (remove), when it is a claude --bg one; off leaves it. A desktop desk is archived by you.', { values: ['stop', 'remove', 'off'], flat: true }),
   mk('deskToolResultChars', 'number', 6000, 'desk', 'now', 'orchestrate.ts', 'Largest tool result the desk keeps whole, in characters (longer ones are cut).', n(1, { int: true, flat: true })),
   mk('notify.toast', 'boolean', true, 'desk', 'now', 'notify.ts', 'Show a toast for desk notices.'),
   mk('notify.sound', 'boolean', false, 'desk', 'now', 'notify.ts', 'Play a sound with a toast (accepted; no sound clip is bundled yet).'),
