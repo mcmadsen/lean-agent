@@ -17,6 +17,7 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
   const res = (p: string): string => { for (const [k, v] of links) if (p === k || p.startsWith(k + '/')) return v + p.slice(k.length); return p } // a symlink anywhere in the path, as the OS follows it
   const perms = new Map<string, { uid: number; mode: number }>() // owner and mode per file (default: uid 501 = what `id -u` answers, mode 600); chmod changes it
   const exec = { handler: null as null | ((argv: string[], c: Call) => { exitCode: number; stdout: string; stderr?: string }) } // any other command (a user's mcp-env command)
+  const noWrite = new Set<string>() // folders a `cp` may not write into (read-only)
   const made = new Set<string>() // folders a `mkdir` made (a folder alone has no file in `files`)
   const dirs = () => {
     const d = new Set<string>(['/', ...made])
@@ -54,6 +55,15 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
       const a = c === 'mv' ? rest.filter(y => !y.startsWith('-')) : rest
       if (c === 'mv') { const s = files.get(a[0]); if (s === undefined) { const ks = [...files.keys()].filter(k => k.startsWith(a[0] + '/')); if (!ks.length) return { exitCode: 1, stdout: '', stderr: 'no such file' }; for (const k of ks) { files.set(a[1] + k.slice(a[0].length), files.get(k)!); files.delete(k) } return ok() } files.set(a[1], s); files.delete(a[0]); return ok() }
       if (c === 'rm') { for (const x of a.filter(y => !y.startsWith('-'))) for (const k of [...files.keys()]) if (k === x || k.startsWith(x + '/')) files.delete(k); return ok() }
+      if (c === 'cp' && !exec.handler) { // (a spec with its own exec handler answers cp itself) cp -n SRC DEST: never overwrites (silently skips); a folder in noWrite answers EACCES like a read-only one
+        const x = a.filter(y => !y.startsWith('-'))
+        const s = files.get(x[0])
+        const dir = x[1].slice(0, x[1].lastIndexOf('/'))
+        if (s === undefined) return { exitCode: 1, stdout: '', stderr: 'no such file' }
+        if (noWrite.has(dir)) return { exitCode: 1, stdout: '', stderr: `cp: cannot create regular file '${x[1]}': Permission denied` }
+        if (!files.has(x[1])) files.set(x[1], s)
+        return ok()
+      }
       if (c === 'mkdir') { for (const x of a.filter(y => !y.startsWith('-'))) made.add(x); return ok() }
       if (c === 'sleep') return ok()
       if (c === 'chmod') { const m = parseInt(a[0], 8); for (const x of a.slice(1)) perms.set(x, { uid: perms.get(x)?.uid ?? 501, mode: Number.isNaN(m) ? 0o600 : m }); return ok() }
@@ -103,7 +113,7 @@ export function fakeHost(on: any, opts: { home?: string; orchestrate?: boolean }
     on('process.run', (_: any, e: any) => ({ value: impl.run(e.argv, e.init) }))
   }
   if (on) on('clock.now', () => ({ value: clock.t }))
-  return { host, store, files, links, calls, writes, claude, opener, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
+  return { host, store, files, links, calls, writes, noWrite, made, claude, opener, git, app, os, clock, home, perms, exec, strict, claudeCalls: () => calls.filter(c => c.argv[0] === 'claude').map(c => c.argv.slice(1)) }
 }
 
 // An auditor's LEAN-AUDIT line carries the sha256 of the text it was given. The specs' lines are written without it: this adds the

@@ -37,7 +37,7 @@ const hex = (s: string): string => {
 }
 
 // the destination folder: a standard word or an absolute folder under home; { folder: the path, label: what the user sees } or a refusal
-async function destination(h: Host, home: string, to: string): Promise<{ folder: string; label: string } | { text: string }> {
+export async function destination(h: Host, home: string, to: string): Promise<{ folder: string; label: string } | { text: string }> {
   const t = to.trim()
   const word = FOLDERS.find(f => f.toLowerCase() === t.replace(/^~\//, '').replace(/\/+$/, '').toLowerCase())
   if (word) return { folder: `${home}/${word}`, label: word }
@@ -52,7 +52,7 @@ const safeName = (n: string): string | null => {
   const s = n.replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return s && s.length <= 120 && !/[/\\]/.test(s) && !s.startsWith('.') && s !== '..' ? s : null
 }
-async function freeName(h: Host, folder: string, name: string): Promise<string | null> {
+export async function freeName(h: Host, folder: string, name: string): Promise<string | null> {
   const dot = name.lastIndexOf('.')
   const stem = dot > 0 ? name.slice(0, dot) : name
   const ext = dot > 0 ? name.slice(dot) : ''
