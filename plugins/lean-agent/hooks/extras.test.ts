@@ -7,15 +7,18 @@ const L = '/h/.lean-agent'
 const j = (h: any, p: string, o: unknown) => h.files.set(`${L}/${p}`, typeof o === 'string' ? o : JSON.stringify(o))
 const jl = (h: any, rows: unknown[]) => rows.map(r => JSON.stringify(r)).join('\n') + '\n'
 
-test('memory section: the project\'s notes for a thread, nothing for desk or plain', async () => {
+test('memory section: the standing orders a thread may see (its own, its project\'s, the user\'s), nothing for plain', async () => {
   const h = fakeHost(null)
   j(h, 'threads/t1/thread.json', { id: 't1', project: 'app' })
-  j(h, 'memory/notes.jsonl', jl(h, [{ project: 'app', text: 'tests need docker' }, { project: 'other', text: 'not mine' }, { project: '', text: 'global fact' }]))
+  const it = (id: string, scope: string, text: string) => ({ id, scope, kind: 'rule', text, created: 1, source: 'desk', uses: 0, lastUsed: 0, status: 'active' })
+  j(h, 'memory/items.json', { next: 5, items: [it('m1', 'project:app', 'tests need docker'), it('m2', 'project:other', 'not mine'), it('m3', 'global', 'global habit'), it('m4', 'thread:t9', 'another thread')] })
   const s = (await memorySection(h.host, { kind: 'thread', id: 't1' }))!
   expect(s).toContain('tests need docker')
-  expect(s).toContain('global fact')
+  expect(s).toContain('global habit')
   expect(s).not.toContain('not mine')
-  expect(await memorySection(h.host, { kind: 'desk' })).toBeNull()
+  expect(s).not.toContain('another thread')
+  expect(await memorySection(h.host, { kind: 'desk' })).toContain('global habit') // the desk gets its own and the user's habits
+  expect(await memorySection(h.host, { kind: 'desk' })).not.toContain('tests need docker')
   expect(await memorySection(h.host, { kind: 'plain' })).toBeNull()
 })
 

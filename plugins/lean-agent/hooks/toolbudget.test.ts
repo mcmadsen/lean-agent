@@ -41,6 +41,12 @@ test('a thread session registers at most 4.5k tokens of lean-agent tool schemas'
   for (const n of ['lean_report', 'lean_ask', 'lean_review', 'lean_run', 'lean_script']) expect(names).toContain(n)
   for (const n of ['lean_thread', 'lean_doctor']) expect(names).not.toContain(n) // the desk's
   for (const n of ['lean_rules', 'lean_compare', 'lean_worktree', 'lean_profile']) expect([n, specs.find(s => s.name === n)?.isDeferred]).toEqual([n, true]) // one kind of run each: behind ToolSearch
+  // 1.0.31 memory: the thread's lean_remember carries scope / kind / trigger / output (short), lean_memory is the desk's, the pull has a memory kind
+  const rem: any = specs.find(s => s.name === 'lean_remember')
+  for (const p of ['text', 'scope', 'kind', 'trigger', 'output']) expect(Object.keys(rem.inputSchema.properties)).toContain(p)
+  expect(names).not.toContain('lean_memory')
+  expect(JSON.stringify(specs.find(s => s.name === 'lean_run')!.inputSchema)).toContain('"memory"')
+  expect(size(rem) / 4).toBeLessThanOrEqual(130) // the memory parameters cost at most ~70 tokens over the 51 of 1.0.30
   const tokens = report('thread', specs)
   expect(tokens).toBeLessThanOrEqual(BUDGET.thread)
   expect(tokens).toBeLessThanOrEqual(WAS_THREAD * 0.6) // at least 40% less than 1.0.25
@@ -49,7 +55,9 @@ test('a thread session registers at most 4.5k tokens of lean-agent tool schemas'
 test('the desk registers at most 6k tokens of lean-agent tool schemas', { timeoutMs: 20_000 }, async ($, on) => {
   const specs = await register($, on, '/h/lean-agent-desk')
   const names = specs.map(s => s.name)
-  for (const n of ['lean_thread', 'lean_doctor', 'lean_script']) expect(names).toContain(n)
-  for (const n of ['lean_report', 'lean_review', 'lean_run']) expect(names).not.toContain(n) // a thread's
+  for (const n of ['lean_thread', 'lean_doctor', 'lean_script', 'lean_memory']) expect(names).toContain(n)
+  for (const n of ['lean_report', 'lean_review', 'lean_run', 'lean_remember']) expect(names).not.toContain(n) // a thread's
+  expect(JSON.stringify(specs.find(s => s.name === 'lean_thread')!.inputSchema)).toContain('"rule"') // 1.0.31: a standing rule of one thread
+  expect(JSON.stringify(specs.find(s => s.name === 'lean_doctor')!.inputSchema)).toContain('"memory"')
   expect(report('desk', specs)).toBeLessThanOrEqual(BUDGET.desk)
 })

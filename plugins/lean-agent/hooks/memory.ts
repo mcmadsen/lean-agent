@@ -135,8 +135,10 @@ export function guessKind(text: string): Kind {
   if (/\b(no,? i said|i told you|that'?s wrong|that is wrong|not what i (asked|said|meant))\b/.test(t)) return 'correction'
   if (/\b(prefer|rather|i like|i want|i'd like|my style)\b/.test(t) && !/\b(always|never)\b/.test(t)) return 'preference'
   if (/\b(decided|we chose|we picked|chose to|because|the reason|instead of)\b/.test(t)) return 'decision'
-  if (/\b(always|never|from now on|going forward|don'?t|do not|must|whenever|every time|after (a|an|every|each|the)|before (a|an|every|each|the)|when (a|an|the) )\b/.test(t)) return 'rule'
-  return 'fact'
+  // a declarative sentence about how things are ("the staging database resets at night") is a fact; everything else the user says to remember is an order
+  const declarative = /^(the|a|an|our|my|this|that|these|those)\b/.test(t) && /\b(is|are|was|were|uses|runs|lives|resets|needs|has|have|means|called|named|stored|located)\b/.test(t)
+  if (declarative && !/\b(always|never|must|should|from now on|going forward|whenever|every time|don'?t|do not|keep|stay)\b/.test(t)) return 'fact'
+  return 'rule'
 }
 const HABIT = /\b(always|never|from now on|going forward|whenever|every time|don'?t|do not|after (a|an|every|each|the) |before (a|an|every|each|the) |when (a|an|the) )\b/i
 

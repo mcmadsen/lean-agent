@@ -70,6 +70,8 @@ import { briefHint } from './briefsize'
 import { pullText } from './pull'
 import { MEMORY_SPEC, memoryTool } from './memorytool'
 import { memoryOnPrompt } from './memoryprompt'
+import { relevantOnPrompt, triggerOnTool } from './memoryindex'
+import { memoryDoctor } from './memorydoctor'
 import { deferOutside, noteToolUse, readLoaded } from './profile'
 import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
@@ -189,7 +191,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover', 'memory'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // execution model (orchestrate.ts): a test / build run whose output goes to a file; the thread gets exit code, failing tests, last 40 lines
 const RUN = 'lean_run'
 const RUN_SPEC = { name: RUN, description: 'Run a test or build command in the project: the output goes to a file, you get the exit code, the totals and the failures (a clean run is one line). Use it instead of Bash for tests and builds.', inputSchema: { type: 'object', properties: { command: { type: 'string', description: 'the test / build command' }, context: { type: 'boolean', description: 'INSTEAD of command: what fills your context (sources by size, biggest results, one fix)' }, pull: { type: 'string', enum: ['brief', 'reports', 'notes', 'snapshot', 'preflight', 'memory'], description: 'INSTEAD of command: read a part of your restart store; no section = a list or headings' }, section: { type: 'string', description: 'pull: reports "<n>" or a word; notes / brief a heading; snapshot "status,tasks"; preflight / memory words' }, checkpoint: { type: 'object', description: 'INSTEAD of command: restart yourself at once (context near the cap): after writing scratch/notes.md, {next: "<the next step, 1-3 sentences>"}; end your turn after the answer, a fresh session continues with it', properties: { next: { type: 'string' } }, required: ['next'] }, cwd: { type: 'string', description: 'absolute folder (default: the thread\'s folder)' }, ci: { type: 'object', description: 'INSTEAD of command: a read-only CI check that waits inside the tool, no model turn per check. {host: "ado", org, project, id | ids | branch, waitMinutes} or {host: "github", repo, id | ids | pr | branch, waitMinutes}; waitMinutes 0-30 (default 10)', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, id: { type: 'number' }, ids: { type: 'array', items: { type: 'number' } }, branch: { type: 'string' }, pr: { type: 'number' }, waitMinutes: { type: 'number' } }, required: ['host'] }, get: { type: 'object', description: 'INSTEAD of command: a forge READ by the mod (GET only). {host: "ado", org, project, path | repo, pr, threads: true (one line per PR thread)} or {host: "github", path}; select = dotted field paths to keep', properties: { host: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, threads: { type: 'boolean' }, path: { type: 'string' }, query: { type: 'object' }, select: { type: 'array', items: { type: 'string' } } }, required: ['host'] }, 'pr-changes': { type: 'object', description: 'INSTEAD of command: a PR\'s changed files with added / removed line ranges, no checkout. {forge: "ado"|"github", org, project, repo, pr, iteration?}', properties: { forge: { type: 'string', enum: ['ado', 'github'] }, org: { type: 'string' }, project: { type: 'string' }, repo: { type: 'string' }, pr: { type: 'number' }, iteration: { type: 'number' } }, required: ['forge', 'pr'] } }, required: [] } }
@@ -198,7 +200,7 @@ const MEMORY = 'lean_memory' // the desk's memory tool (memorytool.ts); a thread
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'find', 'ask', 'report', 'dismiss', 'rule'] },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -223,6 +225,10 @@ const SCHEMA = {
     on: { type: 'boolean', description: 'project-private, keep, keep-going: true or false; profile: false removes the profile' },
     keep: { type: 'boolean', description: 'new/start: keep mode (follow-ups resume the session until its context passes the limit)' },
     keepGoing: { type: 'boolean', description: 'new/start: the standing order "keep going, no asks"' },
+    rules: { type: 'array', items: { type: 'string' }, description: 'new: standing rules of THIS thread (200 characters each): in its first prompt and every restart; see action rule' },
+    inherit: { type: ['string', 'boolean'], description: 'new: "tN" (or true with tN): carry that thread\'s rules over, ONLY when the user said so in their own words' },
+    trigger: { type: 'string', description: 'rule: after-commit | after-step | before-push | on-pr-open' },
+    output: { type: 'string', description: 'rule: the path the thread updates at the trigger (~/...)' },
     allowEdit: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     allowCmd: { type: 'array', items: { type: 'string' }, description: 'ignored' },
     needs: { type: 'array', items: { type: 'string' }, description: 'new/start/reopen: MCP servers or plugins this thread needs beyond its project profile' },
@@ -571,13 +577,13 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       await registerOnce($, {
         name: TOOL,
         description:
-          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
+          'Manage lean-agent threads (the thread skill has the flow): new, send, wake, close, park, reopen, list, resume, start, restart (only on the user\'s request), keep, keep-going (tN on|off: when the user says "keep going / no asks"); action-cancel (id: a reply held 30 s before sending); projects (list), project-add, project-remove, project-private, profile; goal-set, goal-clear; approve-push (tN + full sha, only after the user said yes to that sha and branch) then push (the desk pushes, optional pr {title}; a thread never pushes); action-list then approve-action (id, after the user\'s Approve): the desk sends a thread\'s remote write; allow-writes / revoke-writes (approval in advance, only on the user\'s own recorded words) and allow-ask (tN, target: returns the question to ask with AskUserQuestion: their Allow answer is the written yes); allow-self-edit / revoke-self-edit (tN: a thread whose worker call the classifier denied may edit its own worktree, only on the user\'s recorded words naming it); deliver (tN, file, to Downloads | Desktop | Documents | a folder, name?: a file for the user\'s folder); rule (tN, text, on? false = off, trigger?, output?: a standing rule of ONE thread, kept across restarts; `new` takes `rules`); find, ask, report, dismiss. A send to a running thread is only queued; an idle one is woken once.',
         inputSchema: SCHEMA,
         isDeferred: false,
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor (the doctor skill): check (read-only), fix, migrate, stats (computed here, never read the ledger yourself), compare, export (one anonymised feedback file; never posts), mcp-env (a NON-secret variable of an MCP server), dismiss-old-desk, refusals, context, overhead, handover.',
+        description: 'lean-agent doctor (the doctor skill): check (read-only), fix, migrate, stats (computed here, never read the ledger yourself), compare, export (one anonymised feedback file; never posts), mcp-env (a NON-secret variable of an MCP server), dismiss-old-desk, refusals, context, overhead, handover, memory (per scope: items, tokens, what the last sessions got, over budget).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -1323,6 +1329,7 @@ export const register: Register = on => {
         if (!/^t\d+$/.test(id)) return { result: 'handover needs name: a thread id like t3', isError: true } as any
         return { result: await handoverReport(host, await homeDir(host), id) } as any
       }
+      if (e.action === 'memory') return { result: await memoryDoctor(host, await homeDir(host)) } as any // per scope: items, tokens, what the last sessions got, over budget (memorydoctor.ts)
       if (e.action === 'compare') {
         const out = await compare(host, $.plugin.root, { project: typeof e.project === 'string' ? e.project : undefined, mode: typeof e.mode === 'string' ? e.mode : undefined }, 'desk')
         return { result: out.text, ...(out.ok ? {} : { isError: true as const }) } as any
@@ -1600,6 +1607,9 @@ export const register: Register = on => {
       if (slices) lines.push(slices)
       const warn = await warnNote($, host, texts(r?.result).join('').length) // the context is at the warn level: ONE line per session, "write what you have learned to scratch/notes.md" (scratchnotes.ts)
       if (warn) lines.push(warn)
+      // a rule with a trigger (a commit, a finished step, a push, a PR opened): one line with its output path, at most one per turn (memoryindex.ts)
+      const trig = (r as any)?.isError === true ? null : await triggerOnTool(host, role, String(e.tool ?? ''), e).catch(() => null)
+      if (trig) lines.push(trig)
     } catch {
       /* delivery is retried at the next call */
     }
@@ -1673,6 +1683,11 @@ export const register: Register = on => {
         if (tip) more = more ? `${more}\n${tip}` : tip
       }
       if (more) extra = extra ? `${extra}\n${more}` : more
+      // memory by script (memoryindex.ts): a keyword trigger, and at most 3 items that match this prompt or brief and are not in the standing orders
+      if ((role.kind === 'desk' || role.kind === 'thread') && !e.agentId) {
+        const rel = await relevantOnPrompt(host, role, `${e.text ?? ''}\n${more ?? ''}`).catch(() => null)
+        if (rel) extra = extra ? `${extra}\n${rel}` : rel
+      }
       const nudge = role.kind === 'thread' ? await takeNudges(host) : null
       if (nudge) extra = extra ? `${extra}\n${nudge}` : nudge
     } catch {

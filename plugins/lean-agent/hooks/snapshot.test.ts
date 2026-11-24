@@ -114,10 +114,8 @@ test('handover: the size budget cuts the least needed first and every cut line n
   const h = setup({ config: { handoverTokens: 700 } })
   expect(await handoverTokens(h.host, '/h')).toBe(700)
   h.files.set(`${T1}/notes.md`, Array.from({ length: 200 }, (_, i) => `note line ${i} with some words in it`).join('\n'))
-  h.files.set(`${L}/memory/notes.jsonl`, Array.from({ length: 20 }, (_, i) => rec({ from: 't1', text: `remember item ${i} `.repeat(8) })).join(''))
   const ho = await buildHandover(h.host, '/h', THREAD as any, 'Because.', [])
   expect(ho.prompt).toContain(`full text in ${T1}/notes.md`)
-  expect(ho.prompt).toContain(`full text in ${L}/memory/notes.jsonl`)
   expect(ho.prompt).toContain('Resume the work now') // the task line is never cut
   expect(ho.prompt.length).toBeLessThan(9_000) // (budget 2800 chars; the fixed lines are never cut)
   expect(ho.parts!.find(p => p.name === 'notes')!.cut).toBe(true)

@@ -10,6 +10,7 @@ import type { Host } from './state'
 import { deskState, reportFile } from './delivery'
 import type { DeskRec } from './delivery'
 import { buildHandover } from './handover'
+import { readItems } from './memory'
 import { greenReview } from './reviews'
 import { readSnapshot } from './snapshot'
 import { kTokens, readContext } from './threadcontext'
@@ -28,7 +29,7 @@ export async function storeLines(h: Host, home: string, only?: string): Promise<
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const wts = await readJson<Record<string, Record<string, unknown>>>(h, `${leanDir(home)}/worktrees.json`, {})
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
-  const mem = await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)
+  const mem = (await readItems(h, home).catch(() => [])).filter(i => i.status !== 'retired' && i.scope.startsWith('thread:')).map(i => ({ from: i.scope.slice(7), text: i.text })) // the one memory store (memory.ts): what a thread remembered
   const text = async (p: string) => {
     const r = await h.fs.read(p).catch(() => '')
     return typeof r === 'string' ? r : ''
@@ -49,7 +50,7 @@ export async function storeLines(h: Host, home: string, only?: string): Promise<
       if (r.from !== id || (r as { mod?: boolean }).mod) continue
       for (const l of String(r.text ?? '').split('\n')) if (l.trim()) out.push({ id, file: `desk/reports/${r.ts}-${id}-${r.kind}.md`, text: `${r.kind === 'ask' ? '[question] ' : ''}${flat(l)}` })
     }
-    for (const m of mem) if (m.from === id && typeof m.text === 'string') out.push({ id, file: 'memory/notes.jsonl', text: `remembered: ${flat(m.text)}` })
+    for (const m of mem) if (m.from === id && typeof m.text === 'string') out.push({ id, file: 'memory/items.json', text: `remembered: ${flat(m.text)}` })
   }
   return out
 }

@@ -1,7 +1,7 @@
 // The one memory store (memory.ts): add, merge, cap, refusals, scope guess, list / retire / edit / confirm / prune, the old notes imported once.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { addItem, confirmItem, editItem, findItems, getItem, guessScope, listItems, loosensSafety, mutate, pruneSuggestions, readItems, refuseText, resetMemory, retireItem } from './memory'
+import { addItem, confirmItem, editItem, findItems, getItem, guessKind, guessScope, listItems, loosensSafety, mutate, pruneSuggestions, readItems, refuseText, resetMemory, retireItem } from './memory'
 import type { Ctx } from './memory'
 
 const L = '/h/.lean-agent'
@@ -25,6 +25,14 @@ test('add stores an item with id, scope, kind, source and counters in the privat
   expect([...h.files.keys()].some(k => k.endsWith('/memory/items.json'))).toBe(true)
   expect([...h.files.keys()].some(k => /CLAUDE\.md|\.claude\/rules/.test(k))).toBe(false) // never a repo or rule file
   expect((await add(h, 'the staging branch is called next', { scope: 'project:form-finder' })).id).toBe('m2')
+})
+
+test('the kind is guessed: an order is a rule (so it reaches the index), a declarative sentence a fact', () => {
+  for (const t of ['answer in short sentences', 'use tabs in the form code', 'the changelog stays short', 'always run the linter', 'keep the plan doc current']) expect([t, guessKind(t)]).toEqual([t, 'rule'])
+  for (const t of ['the staging database resets at night', 'the work item is a bug fix', 'our build runs on the large agents']) expect([t, guessKind(t)]).toEqual([t, 'fact'])
+  expect(guessKind('we decided to use tabs because the formatter does')).toBe('decision')
+  expect(guessKind('I prefer short answers')).toBe('preference')
+  expect(guessKind("no, I said use the staging branch")).toBe('correction')
 })
 
 test('a near-duplicate is merged: "already remembered as m1: updated"', async () => {

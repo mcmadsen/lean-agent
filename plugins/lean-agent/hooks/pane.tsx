@@ -880,6 +880,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             {ctxNode}
             {t.pending ? <Text color="warning">{t.pending}</Text> : null}
             {t.keepGoing ? <Text color="cyan">keep-going</Text> : null}
+            {t.rules ? <Text dimColor>{`${t.rules} rule${t.rules > 1 ? 's' : ''}`}</Text> : null}
             {t.agents ? <Text dimColor>{t.agents}</Text> : null}
             {t.branch ? <Text dimColor>{t.branch}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{review.text}</Text>

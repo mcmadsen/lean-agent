@@ -38,7 +38,7 @@ test('find: matching lines with the thread id and the source file; AND over the 
   expect(branch.text).toContain('t1  worktrees.json: path: /w/app · branch: fix-login-redirect · thread: t1')
   const project = (await leanThread(h.host, ROOT, { action: 'find', text: 'site' })).text
   expect(project).toContain('t2  threads/t2/thread.json: title: docs sweep · project: site · state: parked')
-  expect(project).toContain('t1  memory/notes.jsonl: remembered: the staging site needs the VPN')
+  expect(project).toContain('t1  memory/items.json: remembered: the staging site needs the VPN') // (the old note is imported into the one memory store)
   const goal = (await leanThread(h.host, ROOT, { action: 'find', text: 'mobile' })).text
   expect(goal).toContain('t1  goals.json: goal: login redirect works on mobile')
   expect((await leanThread(h.host, ROOT, { action: 'find', text: 'cookie' })).text).toContain('t1  threads/t1/notes.md: decided to keep the cookie name')

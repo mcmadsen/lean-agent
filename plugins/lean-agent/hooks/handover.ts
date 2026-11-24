@@ -6,7 +6,7 @@ import { deskState, reportBody, reportFile, unconsumed } from './delivery'
 import type { DeskRec } from './delivery'
 import { leadOf, openItemOf, restartWaiting } from './waitrestart'
 import { GIT_LINE, readSnapshot, snapshotFile, snapshotText } from './snapshot'
-import { retireText } from './forgewrite'
+import { indexText } from './memoryindex'
 import { HANDOVER_RULE, NOTES_FILE, scratchList, scratchNotes } from './scratchnotes'
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
@@ -19,7 +19,6 @@ const QUEUED_EACH = 1_000 // a desk message in the corrections, cut to this
 export const PROMPT_MAX = 80_000 // hard cap on the whole handover prompt (the parts above add up to about 60k at most)
 const BRIEF_MAX = 6_000
 const NOTES_MAX = 3_000
-const REMEMBER_MAX = 20
 const flat = (s: string) => s.replace(/\r/g, '').trim()
 const cut = (s: string, n: number, tail = false) => (s.length <= n ? s : tail ? '…' + s.slice(s.length - n) : s.slice(0, n) + '…')
 
@@ -152,7 +151,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const none = await ensureReportFiles(h, home, reportHistory(recs).cutRecs)
   const capped = (s: string, n: number, file: string) => (s.length > n ? `${s.slice(0, n)}\n…(cut to ${n} characters: full text in ${file})` : s)
   const hist = reportHistory(recs, r => (none.has(r) ? `${deskState(home)}/inbox.jsonl (the row with ts ${r.ts})` : reportFile(home, r)))
-  const mem = (await readJsonl<{ from?: string; text?: string }>(h, `${leanDir(home)}/memory/notes.jsonl`)).filter(m => m.from === t.id && typeof m.text === 'string').slice(-REMEMBER_MAX).map(m => ({ ...m, text: retireText(m.text!) })) // (a forge write by script is retired, not passed on)
+  const memText = await indexText(h, home, t.id).catch(() => '') // the standing orders (memoryindex.ts: a token budget of its own, ranked, "+N more")
   const where = [t.project && `project: ${t.project}`, wt?.path && `worktree: ${wt.path}`, wt?.branch && `branch: ${wt.branch}`, t.model && `model: ${t.model}/${t.effort ?? ''}`].filter(Boolean).join(' · ')
   const now = await h.clock.now()
   const pre = await preflightOf(h, home, t) // (first: it refreshes the snapshot's git fields when they are older than 60 s; the snapshot is read after)
@@ -185,6 +184,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     const core: Part[] = [
       { name: 'lead', body: `${wait ?? resumeLead(taskLine(goal, brief, t.title))}${instr.length ? ` ${INSTR_LEAD}` : ''}`, mode: 'fixed' },
       { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; this prompt holds only what changes your behaviour.`, mode: 'fixed' },
+      { name: 'memory', head: '## Standing orders', body: memText, mode: 'fixed' },
       { name: 'brief', head: `## Brief (first ${CORE_BRIEF} characters)`, body: cut(flagForeignPaths(brief, t.id), CORE_BRIEF), file: `${dir}/brief.md`, mode: 'head' },
       { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
       { name: 'open', head: '## Open', body: open, mode: 'fixed' },
@@ -214,7 +214,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'scratchrule', body: scratchNotesText || scratchFiles.length || nl.content.length || nl.listed.length ? `Your earlier reading is kept: ${HANDOVER_RULE}.` : '', mode: 'fixed' },
     { name: 'scratchnotes', head: '## Your scratch notes (end of scratch/notes.md)', body: scratchNotesText, file: `${dir}/scratch/${NOTES_FILE}`, mode: 'tail' },
     { name: 'scratchlist', head: `## Other notes and scratch files: ${READ_FIRST} (newest first; path, size, first line)`, body: nl.listed.length ? `${nl.listed.map(noteLine).join('\n')}${nl.left.length ? `\n(+${nl.left.length} older, not listed: ${nl.left.map(f => f.path).join(', ')})` : ''}` : '', file: dir, mode: 'lines' },
-    { name: 'remembered', head: '## What you asked to remember', body: mem.map(m => `- ${cut(flat(m.text!), 300)}`).join('\n'), file: `${leanDir(home)}/memory/notes.jsonl`, mode: 'lines' },
+    { name: 'memory', head: '## Standing orders', body: memText, mode: 'fixed' },
   ]
   const noNotes = !notes && !progressText && !scratchNotesText && !nl.listed.length && !nl.left.length
   const missing = [!goalText && 'no goal (goal-set tN "<line>")', noNotes && `no notes (looked in ${dir}/notes.md, ${dir}/notes/*.md, ${dir}/scratch/*.md)`, !snap && `no snapshot (${snapshotFile(home, t.id)}: written at the end of the thread's next turn)`, !hist.lines.length && 'no report of this thread in the desk inbox'].filter((x): x is string => !!x)
@@ -234,7 +234,7 @@ export async function handoverTokens(h: Host, home: string): Promise<number> {
 
 export type Part = { name: string; head?: string; body: string; file?: string; mode: 'fixed' | 'head' | 'tail' | 'lines'; cut?: boolean }
 export const partText = (p: Part): string => (p.body ? (p.head ? `${p.head}\n${p.body}` : p.body) : '')
-const CUT_ORDER = ['remembered', 'scratchlist', 'notes', 'progress', 'reports', 'scratchnotes', 'corrections', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
+const CUT_ORDER = ['scratchlist', 'notes', 'progress', 'reports', 'scratchnotes', 'corrections', 'brief', 'preflight', 'snapshot'] // the first to lose text is the least needed
 const FLOOR = 300 // a section is never cut below this many characters
 const noteOf = (p: Part) => `\n…(cut to fit the handover budget: full text in ${p.file ?? 'its source'})`
 const total = (parts: Part[]) => parts.reduce((n, p) => n + (p.body ? partText(p).length + 2 : 0), 0)

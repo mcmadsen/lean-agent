@@ -18,7 +18,7 @@ test('a worker reply with LEAN-FEEDBACK files its missing context and memory', {
   const h = await threadSession($, on, () => on('tool.call', () => ({ result: 'did it\nLEAN-FEEDBACK {"status":"done","missing":"build flags for src/a/b.ts","remember":["use pnpm"]}' })))
   await $.tool.call({ tool: 'Agent', prompt: 'x' } as any)
   expect(h.files.get('/h/.lean-agent/proj/gaps.jsonl')).toContain('src/a/b.ts')
-  expect(h.files.get('/h/.lean-agent/memory/notes.jsonl')).toContain('use pnpm')
+  expect(h.files.get('/h/.lean-agent/memory/items.json')).toContain('use pnpm') // the one memory store (memory.ts)
 })
 
 test('turn.step writes a ledger row and refuses past the daily cap', { timeoutMs: 20_000 }, async ($, on) => {
@@ -64,9 +64,9 @@ test('a thread cannot ask the user directly', { timeoutMs: 20_000 }, async ($, o
   expect(r.deny).toContain('lean_ask')
 })
 
-test('prompt.compose adds the project memory to a thread\'s session section', { timeoutMs: 20_000 }, async ($, on) => {
+test('prompt.compose adds the standing orders to a thread\'s session section', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () => on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'hi', scope: 'shared' }] }) as any))
-  h.files.set('/h/.lean-agent/memory/notes.jsonl', JSON.stringify({ project: 'proj', text: 'use pnpm' }) + '\n')
+  h.files.set('/h/.lean-agent/memory/items.json', JSON.stringify({ next: 2, items: [{ id: 'm1', scope: 'project:proj', kind: 'rule', text: 'use pnpm', created: 1, source: 'user-typed', uses: 0, lastUsed: 0, status: 'active' }] }))
   const r: any = await $.prompt.compose({ model: 'haiku', promptModel: 'haiku', surfaces: [], tools: [], outputStyle: null, traits: [] } as any)
   const mem = r.sections.find((s: any) => s.id === 'lean-agent:memory')
   expect(mem.scope).toBe('session')

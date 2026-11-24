@@ -5,8 +5,10 @@ import type { Host } from './state'
 import type { Role } from './role'
 import { candidateLines, captureTyped } from './memorycapture'
 import { deskCtx, threadCtx } from './memorytool'
+import { resetTurn } from './memoryindex'
 
 export async function memoryOnPrompt(h: Host, e: { text?: string }, role: Role, inApp: boolean): Promise<string[]> {
+  resetTurn() // a new prompt: a trigger may remind again (one line per turn)
   if (role.kind !== 'desk' && role.kind !== 'thread') return []
   const home = await homeDir(h)
   const ctx = role.kind === 'thread' ? await threadCtx(h, home, role.id) : await deskCtx(h, home)

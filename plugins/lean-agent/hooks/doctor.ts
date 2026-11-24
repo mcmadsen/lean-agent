@@ -23,6 +23,7 @@ import { overCapGlobs } from './rules'
 import { importLegacyLessons, lessonLines } from './reviewlessons'
 import { topRefusalsRow } from './refusals'
 import { retireMemory, staleMemoryCount } from './forgewrite'
+import { memoryRow } from './memorydoctor'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -208,6 +209,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   out.push((await topRefusalsRow(h).catch(() => null)) ?? 'ok   no guard refusal pattern repeats') // refusals.ts: the same refusal again and again is a missing grant or command
   const staleMem = await staleMemoryCount(h).catch(() => 0) // forgewrite.ts: remembered items that describe a forge write by script (a thread gets "(retired ...)" instead)
   row(staleMem === 0, `${staleMem} remembered items describe forge writes by script${staleMem ? ' (threads get a retired note instead; run fix to retire them in the store, a backup is kept)' : ''}`)
+  const mem = await memoryRow(h, home).catch(() => null) // memorydoctor.ts: only when something is remembered
+  if (mem) row(mem.ok, mem.text)
   const sh = await text(h, `${leanDir(home)}/bin/open-desk.sh`)
   row(sh !== null && sh === (await text(h, `${root}/opener/open-desk.sh`)), 'opener script current')
   const mac = (await run(h, ['uname', '-s'])).out === 'Darwin'

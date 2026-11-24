@@ -1,11 +1,12 @@
 // LEAN-FEEDBACK: the last line of a worker's reply. `missing` goes to the project's gaps.jsonl (paths it names mark
-// areas stale after three), `remember` to memory/notes.jsonl, the status to feedback.jsonl for `stats`. An explorer or
+// areas stale after three), `remember` to the one memory store (memory/items.json, memory.ts), the status to feedback.jsonl for `stats`. An explorer or
 // reader also reports `refused` (commands the guard refused, with its text: they go to refusals.jsonl with the running
 // version; the guard's own refusals are written there too, appendRefusal), `unverified` (claims it did not check) and `unreached` (folders it did not cover): counts and the first few
 // entries are kept in the feedback row.
 import { addGap, pathsIn, slugOk } from './rules'
 import { appendJsonl, homeDir, leanDir } from './state'
 import { running } from './skew'
+import { TEXT_MAX, addItem } from './memory'
 import type { Host } from './state'
 
 export type Refusal = { command: string; text: string }
@@ -89,6 +90,9 @@ export async function applyFeedback(h: Host, ctx: FbCtx, fb0: Feedback): Promise
       gaps++
     }
   }
-  for (const r of fb.remember) await appendJsonl(h, `${leanDir(home)}/memory/notes.jsonl`, { ts, from: ctx.thread ?? 'worker', project: ctx.project ?? '', type: r.type, text: r.text })
-  return { gaps, remembered: fb.remember.length }
+  // what a worker says to remember goes to the one memory store (memory.ts), as a fact of its thread (else its project): the scripts there refuse a secret, cap the scope, merge a duplicate
+  const scope = /^t\d+$/.test(ctx.thread ?? '') ? `thread:${ctx.thread}` : slugOk(ctx.project) ? `project:${ctx.project}` : ''
+  let remembered = 0
+  if (scope) for (const r of fb.remember) if ((await addItem(h, home, { text: String(r.text ?? '').replace(/\s+/g, ' ').trim().slice(0, TEXT_MAX), scope, kind: 'fact', source: 'script' }, { role: 'desk' }).catch(() => ({ ok: false }))).ok) remembered++
+  return { gaps, remembered }
 }

@@ -23,6 +23,7 @@ test('no line, broken JSON or a non-object parse to null; an unknown status beco
 
 test('missing paths go to gaps.jsonl, three for one area mark it stale; remember goes to memory', async () => {
   const h = fakeHost(null)
+  h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', project: 'proj', state: 'open' }))
   await recordLearn(h.host, 'proj', 'billing', { globs: ['services/billing/**'], sha: 'abc', lines: 9 })
   const ctx = { thread: 't1', project: 'proj', agent: 'worker-haiku' }
   for (let n = 0; n < 3; n++) {
@@ -33,7 +34,7 @@ test('missing paths go to gaps.jsonl, three for one area mark it stale; remember
   expect(gaps.length).toBe(3)
   expect(gaps[0].area).toBe('billing')
   expect(JSON.parse(h.files.get('/h/.lean-agent/proj/learn.json')!).areas.billing.stale).toContain('3 gaps')
-  expect(h.files.get('/h/.lean-agent/memory/notes.jsonl')).toContain('money is cents')
+  expect(h.files.get('/h/.lean-agent/memory/items.json')).toContain('money is cents') // a worker's remember: a fact of its thread, in the one memory store
   expect(h.files.get('/h/.lean-agent/feedback.jsonl')).toContain('worker-haiku')
 })
 
