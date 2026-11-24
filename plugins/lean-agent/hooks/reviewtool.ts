@@ -3,7 +3,8 @@
 import type { Host } from './state'
 import { atomicWrite, homeDir, leanDir, threadsDir } from './state'
 import { readConfig } from './budget'
-import { voteAdvice, voteLine } from './prvote'
+import { checkOn, voteAdvice, voteLine } from './prvote'
+import { sizeNote } from './prchecks'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
@@ -235,6 +236,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   lines.push(`allow-cmd: ${grants.join(', ')}`)
   const ex = excludedText(brief.excluded)
   if (ex) lines.push(ex)
+  const big = checkOn(cfg, 'review', 'size') ? sizeNote(whole.length, whole.reduce((n, s) => n + s.add + s.del, 0)) : null // 1.0.31: a warning, never a refusal (config review.prChecks)
+  if (big) lines.push(big)
   if (light) lines.push('LIGHT REVIEW (an intermediate checkpoint; one pass; it never records green). Do ONLY pass 1 (correctness, traced end to end), pass 2 (behaviour before -> after) and pass 3 (reuse and duplication). Skip completeness, scope and platform, tests, defaults and style. Report only findings you are sure of, blockers and majors first; keep the answer short. Still answer with the one fenced json block (every key; `[]` for what you skipped).')
   if (rereview) {
     lines.push(`RE-REVIEW. The last reviewed sha is ${earlier!.sha}. Review ONLY: (1) whether each open finding below is fixed, (2) the diff since: git -C ${co} diff ${earlier!.sha}...${range.head}${cut}, (3) ${light ? 'the reuse pass (3)' : 'the reuse, scope and platform passes (3 and 4)'} on the files changed since: ${brief.changed.slice(0, 30).join(', ') || 'none'}. Report new findings only about changed lines.`)

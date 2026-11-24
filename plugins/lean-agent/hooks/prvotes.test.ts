@@ -227,6 +227,24 @@ test('severity: the word of the finding starts the comment text (added when miss
   expect(v.text.startsWith('major:')).toBe(false)
 })
 
+// ---- 4f the thread's own PR is never approved --------------------------------------------------------------------------------------------------
+test('an approval of the PR the thread opened is refused at the request (Azure DevOps and GitHub, alone or last in a batch); a reject, a wait-for-author and another PR are not', async () => {
+  const s = setup(undefined, true) // the thread owns Azure DevOps PR 4321
+  s.h.files.set(`${L}/threads/t6/thread.json`, JSON.stringify({ id: 't6', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, pr: { host: 'github', org: 'acme', project: 'acme', repo: 'shop', id: 7, url: 'https://github.com/acme/shop/pull/7', since: 500_000 } }))
+  const never = 'opened this PR for the user: the mod never approves it'
+  for (const a of [adoV('approve'), adoV('approve-with-suggestions'), batch([adoC(1), adoV('approve')])]) {
+    const r = await addActionRequest(s.h.host, 't5', { ...a, why: 'the review' })
+    expect([r.ok, r.text]).toEqual([false, expect.stringContaining(never)])
+  }
+  for (const a of [ghV('approve', null), batch([ghC(1), ghV('approve', null)])]) {
+    const r = await addActionRequest(s.h.host, 't6', { ...a, why: 'the review' })
+    expect([r.ok, r.text]).toEqual([false, expect.stringContaining(never)])
+  }
+  for (const a of [adoV('wait-for-author'), adoV('reject'), { ...adoV('approve'), params: { ...BASE, pr: 9, vote: 'approve' } }]) expect((await addActionRequest(s.h.host, 't5', { ...a, why: 'the review' })).ok).toBe(true)
+  expect((await addActionRequest(s.h.host, 't6', { ...ghV('request-changes'), why: 'the review' })).ok).toBe(true)
+  expect((await addActionRequest(s.h.host, 't6', { ...{ kind: 'gh-pr-review', params: { repo: 'acme/shop', pr: 8, event: 'approve' } }, why: 'the review' })).ok).toBe(true) // another PR of the same repo
+})
+
 // ---- the script that decides the vote ----------------------------------------------------------------------------------------------------------
 test('voteAdvice: a posted blocking / major / minor comment, or a gate that is not green, means waiting for author; green with no ask proposes approve (asked) or nothing for the author', () => {
   expect(voteAdvice(['blocker', 'minor', 'nit'], true, false)).toMatchObject({ vote: 'wait-for-author', summary: '3 comments: 1 blocking' })

@@ -77,12 +77,30 @@ test('external prepare reads a PR into a scratch repo (never the project tree) a
   const r = await tool(h, { sha: HEAD, mode: 'external', green: true, base: 'main', passes: 2, review: approve })
   expect(r.ok).toBe(true)
   expect(r.text).toContain('never counts for the push gate')
+  expect(r.text).toContain('PR vote:') // 1.0.31: the record says what the comment request ends with
   expect(await greenReview(h.host, 'app', HEAD)).toBe(false)
   const rec = JSON.parse(h.files.get(`${L}/app/reviews/${HEAD}.json`)!)
   expect(rec).toMatchObject({ green: false, mode: 'external', level: 'full', verdicts: ['approve'], passes: 2 })
   // no prepare for this sha: nothing to read
   const lost = await tool(h, { sha: 'f'.repeat(40), mode: 'external', review: approve })
   expect(lost.text).toContain('needs lean_review prepare with ref')
+})
+
+test('prepare warns about a large PR (over 400 changed lines or 15 files), refuses nothing, and the switch review.prChecks turns it off', async () => {
+  const big = `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,451 @@\n-x\n${'+y\n'.repeat(450)}`
+  const h = setup()
+  const old = h.git.handler
+  h.git.handler = (a: string[], c: any) => (a.join(' ').includes(' diff ') && !a.join(' ').includes('--name-status') ? ok(big) : old(a, c))
+  const p = await tool(h, { action: 'prepare', ref: '12', base: 'main', level: 'full' })
+  expect(p.ok).toBe(true)
+  expect(p.text).toContain('large PR: consider splitting; 1 files / 451 lines')
+  const small = await tool(setup(), { action: 'prepare', ref: '12', base: 'main', level: 'full' })
+  expect(small.text).not.toContain('large PR')
+  const off = setup()
+  off.files.set(`${L}/config.json`, JSON.stringify({ review: { prChecks: { size: false } } }))
+  const o2 = off.git.handler
+  off.git.handler = (a: string[], c: any) => (a.join(' ').includes(' diff ') && !a.join(' ').includes('--name-status') ? ok(big) : o2(a, c))
+  expect((await tool(off, { action: 'prepare', ref: '12', base: 'main', level: 'full' })).text).not.toContain('large PR')
 })
 
 test('external: an unreadable ref or a URL of another repo is refused before anything is computed', async () => {

@@ -693,12 +693,31 @@ export const logHistory = async (h: Host, thread: string, rec: Record<string, un
 }
 export type Tell = (thread: string, text: string) => Promise<void>
 
+// an approval (ado-pr-vote approve | approve-with-suggestions, gh-pr-review approve) of the PR the thread itself opened: the refusal text, or null
+async function ownApproval(h: Host, thread: string, kind: ActionKind, params: Params): Promise<string | null> {
+  const raw = kind === 'batch' ? (Array.isArray(params.items) ? (params.items as { kind?: unknown; params?: Params }[]) : []) : [{ kind, params }]
+  const approving = raw.filter(it => (it.kind === 'ado-pr-vote' && String(it.params?.vote).startsWith('approve')) || (it.kind === 'gh-pr-review' && it.params?.event === 'approve'))
+  if (!approving.length) return null
+  const t = await readJson<{ pr?: { host?: string; org?: string; project?: string; repo?: string; id?: number; url?: string } }>(h, `${threadsDir(await homeDir(h))}/${thread}/thread.json`, {}).catch(() => ({}) as { pr?: undefined })
+  const pr = t?.pr
+  if (!pr || typeof pr.id !== 'number') return null
+  const lc = (s: unknown) => String(s ?? '').toLowerCase()
+  const own = approving.some(it => {
+    const p = it.params ?? {}
+    return it.kind === 'ado-pr-vote' ? pr.host === 'azure' && lc(pr.org) === lc(p.org) && lc(pr.project) === lc(p.project) && lc(pr.repo) === lc(p.repo) && pr.id === p.pr : lc(pr.url).includes(`${lc(p.repo)}/pull/${String(p.pr)}`)
+  })
+  return own ? `${thread} opened this PR for the user: the mod never approves it (no approve vote on your own PR); report the review result to the user instead` : null
+}
+
 // ---- a thread asks ---------------------------------------------------------------------------------------------------------------------------
 export async function addActionRequest(h: Host, thread: string, a: { kind?: unknown; params?: unknown; items?: unknown; why?: unknown }): Promise<{ ok: boolean; text: string; request?: ActionView }> {
   if (!threadOk(thread)) return { ok: false, text: 'an action request comes from a thread (tN)' }
   const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
   const c = checkAction(a, { severity: checkOn(cfg, 'review', 'severity') })
   if (!c.ok) return { ok: false, text: c.text }
+  // 1.0.31: the PR this thread opened is the user's work: the mod never approves it (nor completes it: that kind does not exist)
+  const mine = await ownApproval(h, thread, c.kind, c.params)
+  if (mine) return { ok: false, text: mine }
   // an inline comment is shown to the user only after its line was read against the PR's diff now (checked again right before it is sent)
   const anchored = anchorsOf(c.plan)
   if (anchored.length) {

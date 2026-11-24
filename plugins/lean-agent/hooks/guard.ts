@@ -17,6 +17,7 @@ import { isOwn, serverOf } from './profile'
 import type { Host } from './state'
 import type { Role } from './role'
 import { modSending } from './modsend'
+import { forcedPrDenial, isForce } from './forcepr'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
@@ -247,6 +248,13 @@ async function pushDenial($: Host, c: string, cwd: string, role?: Role): Promise
   if (a.pushes.some(x => !x.known)) return UNREADABLE
   const prot = await protectedDenial($, a, dir)
   if (prot) return prot
+  // 1.0.31: a forced push to a branch whose open PR has comments orphans the review (forcepr.ts: asked read-only, a failed lookup lets the push go on)
+  for (const { args } of a.pushes) {
+    if (!isForce(args)) continue
+    const dests = await pushDestinations($, args, dir)
+    const fp = dests?.length ? await forcedPrDenial($, dests.filter(b => b !== 'HEAD'), dir) : null
+    if (fp) return fp
+  }
   const gd = await guardedDenial($, a, dir)
   if (gd) return gd
   const p = await projectOf($, dir)
