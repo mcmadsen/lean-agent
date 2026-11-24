@@ -141,3 +141,4 @@ the head sha. Run the reviewer passes exactly as in step 5 (and 3, 4); fix nothi
 you prepared: a review thread's `lean_report` done is refused until a full-level record exists for it, and the mod appends the evidence
 (record sha, level, passes, per-pass verdicts, findings by severity) to your report from its store. Report: the verdict, the findings by severity
 with `file:line`, in the user's words, never an approval of a merge. Posting comments on the PR only when the user asked (the `pr` skill).
+Review vote: give each comment its `severity` and end the SAME batch with ONE vote item as the record's `PR vote:` line says (`ado-pr-vote` wait-for-author, `gh-pr-review` request-changes with body "N comments: M blocking"); never approve yourself; after the author pushed and every thread is fixed or closed, ONE request: reset the vote or approve (asked).

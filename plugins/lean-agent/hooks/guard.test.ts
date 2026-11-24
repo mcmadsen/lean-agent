@@ -191,6 +191,38 @@ test('protected branches are never force-pushed or deleted, in any repo', async 
   expect(await run(h, plain, { tool: 'Bash', command: 'git push --force' }, '/elsewhere')).toBeNull()
 })
 
+test('1.0.31: a force-push to a branch whose open PR has comments is refused (GitHub and Azure DevOps); no PR, no comments, an unreadable forge or the switch let it go', async () => {
+  const forge = (url: string, gh: unknown, az: { prs: unknown; threads: unknown } | null = null) => {
+    const h = setup()
+    h.git.handler = a => (a.includes('--abbrev-ref') ? { exitCode: 0, stdout: 'feature\n' } : a.includes('get-url') ? { exitCode: 0, stdout: `${url}\n` } : { exitCode: 0, stdout: SHA + '\n' })
+    h.exec.handler = argv => {
+      if (argv[0] === 'gh') return gh === null ? { exitCode: 1, stdout: '', stderr: 'not logged in' } : { exitCode: 0, stdout: JSON.stringify(gh) }
+      if (argv[0] === 'az' && argv.includes('invoke')) return az ? { exitCode: 0, stdout: JSON.stringify(az.threads) } : { exitCode: 1, stdout: '' }
+      if (argv[0] === 'az') return az ? { exitCode: 0, stdout: JSON.stringify(az.prs) } : { exitCode: 1, stdout: '' }
+      return { exitCode: 127, stdout: '' }
+    }
+    return h
+  }
+  const push = { tool: 'Bash', command: 'git push --force-with-lease origin feature' }
+  const gh = forge('https://github.com/acme/shop.git', [{ number: 7, comments: [{}], reviews: [{}, {}] }])
+  const denied = (await run(gh, plain, push, '/elsewhere')) as string
+  expect(denied).toContain('feature has an open PR (#7) with 3 comments')
+  expect(denied).toContain('the review is anchored to commits: push new commits instead')
+  expect(gh.calls.find(c => c.argv[0] === 'gh')!.argv).toEqual(['gh', 'pr', 'list', '--repo', 'acme/shop', '--head', 'feature', '--state', 'open', '--json', 'number,comments,reviews', '--limit', '1'])
+  expect(await run(gh, plain, { tool: 'Bash', command: 'git push origin feature' }, '/elsewhere')).toBeNull() // not forced
+  expect(await run(forge('https://github.com/acme/shop.git', [{ number: 7, comments: [], reviews: [] }]), plain, push, '/elsewhere')).toBeNull() // no comments
+  expect(await run(forge('https://github.com/acme/shop.git', []), plain, push, '/elsewhere')).toBeNull() // no open PR
+  expect(await run(forge('https://github.com/acme/shop.git', null), plain, push, '/elsewhere')).toBeNull() // gh cannot be asked: the push goes on as before
+  const off = forge('https://github.com/acme/shop.git', [{ number: 7, comments: [{}], reviews: [] }])
+  off.files.set('/h/.lean-agent/config.json', JSON.stringify({ pr: { checks: { force: false } } }))
+  expect(await run(off, plain, push, '/elsewhere')).toBeNull()
+  const az = forge('https://dev.azure.com/acme/Shop%20App/_git/shop-api', null, { prs: [{ pullRequestId: 42 }], threads: { value: [{ comments: [{ commentType: 'system' }] }, { comments: [{ commentType: 'text' }, { commentType: 'text', isDeleted: true }] }] } })
+  expect(await run(az, plain, push, '/elsewhere')).toContain('feature has an open PR (#42) with 1 comment:')
+  expect(az.calls.find(c => c.argv[0] === 'az')!.argv).toEqual(['az', 'repos', 'pr', 'list', '--organization', 'https://dev.azure.com/acme', '--project', 'Shop App', '--repository', 'shop-api', '--source-branch', 'feature', '--status', 'active', '--output', 'json'])
+  const quiet = forge('https://dev.azure.com/acme/Shop%20App/_git/shop-api', null, { prs: [{ pullRequestId: 42 }], threads: { value: [{ comments: [{ commentType: 'system' }] }] } })
+  expect(await run(quiet, plain, push, '/elsewhere')).toBeNull() // only system threads (votes, policy): no review to orphan
+})
+
 test('an unlexable git push fails closed, in any repo', async () => {
   const h = setup()
   h.git.handler = a => (a.includes('--abbrev-ref') ? { exitCode: 0, stdout: 'feature\n' } : { exitCode: 0, stdout: SHA + '\n' })

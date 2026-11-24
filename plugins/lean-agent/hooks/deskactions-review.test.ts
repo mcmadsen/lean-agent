@@ -95,7 +95,7 @@ test('ado-pr-vote: every vote is the REST value of az repos pr set-vote, rendere
 })
 
 test('ado-pr-vote: only an approved request is sent; "me" is read by a GET of connectionData at send time; the token is on stdin only', { timeoutMs: 20_000 }, async () => {
-  const s = setup()
+  const s = setup({ owns: false }) // (1.0.31: a thread never approves the PR it opened)
   const v = await ask(s, 'ado-pr-vote', { ...BASE, vote: 'approve-with-suggestions' })
   expect(v.text).toContain('vote "approve-with-suggestions" (5)')
   const refused = await approveAction(s.host, v.id, s.tell)
@@ -132,9 +132,14 @@ test('ado-pr-vote: when the identity cannot be read, nothing is written and the 
 
 test('ado-pr-vote: the own-PR default covers ONLY a reset on the owned PR; approve, approve-with-suggestions, reject and wait-for-author are asked, and so is a reset on another PR', { timeoutMs: 20_000 }, async () => {
   const s = setup()
-  for (const vote of ['approve', 'approve-with-suggestions', 'reject', 'wait-for-author']) {
+  for (const vote of ['reject', 'wait-for-author']) {
     const r = await own(s, 'ado-pr-vote', { ...BASE, vote })
     expect([vote, r]).toEqual([vote, null])
+  }
+  for (const vote of ['approve', 'approve-with-suggestions']) {
+    // 1.0.31: an approval of the PR the thread opened is not even asked
+    const r = await addActionRequest(s.host, 't5', { kind: 'ado-pr-vote', params: { ...BASE, vote }, why: 'the review round' })
+    expect([vote, r.ok, r.text]).toEqual([vote, false, 't5 opened this PR for the user: the mod never approves it (no approve vote on your own PR); report the review result to the user instead'])
   }
   expect(await own(s, 'ado-pr-vote', { ...BASE, pr: 9999, vote: 'reset' })).toBeNull() // not the owned PR
   expect(s.sends()).toHaveLength(0)
@@ -396,7 +401,7 @@ test('the six review writes: all asked (approval bound to the request id), batch
   for (const kind of ['ado-pr-vote', 'ado-pr-update', 'ado-pr-reviewer', 'ado-pr-policy-queue', 'ado-pr-workitem-unlink', 'ado-pr-label']) expect(Object.keys(ACTION_KINDS)).toContain(kind)
   const items = [
     { kind: 'ado-pr-label', params: { ...BASE, op: 'add', label: 'ready' } },
-    { kind: 'ado-pr-vote', params: { ...BASE, vote: 'approve' } },
+    { kind: 'ado-pr-vote', params: { ...BASE, vote: 'reject' } }, // (an approve of the thread's own PR is refused at the request, 1.0.31)
   ]
   const b = checkAction({ kind: 'batch', items })
   expect(b.ok).toBe(true)

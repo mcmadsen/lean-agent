@@ -3,6 +3,8 @@
 import type { Host } from './state'
 import { atomicWrite, homeDir, leanDir, readJson, threadsDir } from './state'
 import { readConfig } from './budget'
+import { checkOn, voteAdvice, voteLine } from './prvote'
+import { sizeNote } from './prchecks'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import type { External } from './reviewext'
@@ -264,6 +266,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   lines.push(`allow-cmd: ${grants.join(', ')}`)
   const ex = excludedText(brief.excluded)
   if (ex) lines.push(ex)
+  const big = checkOn(cfg, 'review', 'size') ? sizeNote(whole.length, whole.reduce((n, s) => n + s.add + s.del, 0)) : null // 1.0.31: a warning, never a refusal (config review.prChecks)
+  if (big) lines.push(big)
   if (light) lines.push('LIGHT REVIEW (an intermediate checkpoint; one pass; it never records green). Do ONLY pass 1 (correctness, traced end to end), pass 2 (behaviour before -> after) and pass 3 (reuse and duplication). Skip completeness, scope and platform, tests, defaults and style. Report only findings you are sure of, blockers and majors first; keep the answer short. Still answer with the one fenced json block (every key; `[]` for what you skipped).')
   if (rereview) {
     lines.push(`RE-REVIEW. The last reviewed sha is ${earlier!.sha}. Review ONLY: (1) whether each open finding below is fixed, (2) the diff since: git -C ${co} diff ${earlier!.sha}...${range.head}${cut}, (3) ${light ? 'the reuse pass (3)' : 'the reuse, scope and platform passes (3 and 4)'} on the files changed since: ${brief.changed.slice(0, 30).join(', ') || 'none'}. Report new findings only about changed lines.`)
@@ -502,7 +506,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
-  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped)].filter(Boolean).join('\n')
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped), ext ? voteLine(voteAdvice(v.open.map(f => f.severity), v.green, false)) : ''].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
   const areaLine = area ? `${replaced ? `\n${replaced}` : ''}\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''

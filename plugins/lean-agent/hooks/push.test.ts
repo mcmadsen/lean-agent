@@ -32,6 +32,7 @@ async function setup(o: Opts = {}) {
       return { exitCode: 0, stdout: 'git@example.com:o/r.git\n' }
     }
     if (a.includes('push')) return { exitCode: 0, stderr: PUSH_OUT, stdout: '', ...(o.pushResult ?? {}) }
+    if (a.includes('diff')) return { exitCode: 0, stdout: '' } // 1.0.31: the size and secrets checks read the PR diff (an empty one here)
     return { exitCode: 1, stdout: '' }
   }
   const ghCalls: { argv: string[]; cwd?: string; body: string; env?: Record<string, string>; timeoutMs?: number }[] = []
@@ -55,7 +56,9 @@ async function setup(o: Opts = {}) {
   if (o.approve !== false) await writeApproval(h.host, { project: 'app', sha: SHA, thread: 't1' })
   const pushes = () => log.filter(a => a.includes('push'))
   const pushCall = () => h.calls.find(c => c.argv.includes('push'))
-  const push = (extra: Record<string, unknown> = {}) => leanThread(h.host, '/p', { action: 'push', tN: 't1', sha: SHA, ...extra } as any)
+  // (1.0.31: a PR without a recorded green test run opens as a draft unless draft is said: these specs say draft: false, prchecks.test.ts covers the proposal)
+  const ready = (x: Record<string, unknown>): Record<string, unknown> => (x.pr && typeof x.pr === 'object' && !('draft' in (x.pr as object)) ? { ...x, pr: { ...(x.pr as object), draft: false } } : x)
+  const push = (extra: Record<string, unknown> = {}) => leanThread(h.host, '/p', { action: 'push', tN: 't1', sha: SHA, ...ready(extra) } as any)
   const history = () => String(h.files.get('/h/.lean-agent/threads/t1/history.jsonl') ?? '')
   const inbox = () => String(h.files.get('/h/.lean-agent/threads/t1/inbox.jsonl') ?? '')
   return { h, push, pushes, pushCall, log, ghCalls, history, inbox }
@@ -587,4 +590,51 @@ test('a GitHub remote still uses gh, whatever the host is called', async () => {
   const t = await setup({ urls: { origin: 'https://example.com/dev.azure.com/org1/proj1/_git/repo1' } })
   await t.push({ pr: { title: 'T' } })
   expect(t.ghCalls[0]!.argv[0]).toBe('gh')
+})
+
+// ---- 1.0.31: the PR text follows the repo's guidelines, no secret in the diff, a draft without a green run ----------------------------------------
+test('a PR text that breaks the repo template, or a diff with a secret, is refused BEFORE the push and the approval is kept; a clean one goes', async () => {
+  const s = await setup()
+  s.h.files.set(`${WT}/.github/pull_request_template.md`, '## Summary\n\n## Test plan\n')
+  const bad = await s.push({ pr: { title: 'T', body: '## Summary\nx\n' } })
+  expect(bad.ok).toBe(false)
+  expect(bad.text).toContain('the description section "Test plan" is missing or empty')
+  expect(bad.text).toContain('the approval is kept')
+  expect(s.pushes()).toEqual([]) // nothing was pushed
+  const old = s.h.git.handler
+  s.h.git.handler = (a: string[], c: any) => (a.includes('diff') && a.includes('-U0') ? { exitCode: 0, stdout: '+++ b/src/k.ts\n@@ -1 +3 @@\n+const k = "AKIAIOSFODNN7EXAMPLQ"\n' } : old(a, c))
+  const sec = await s.push({ pr: { title: 'T', body: '## Summary\nx\n\n## Test plan\nTested.\n' } })
+  expect(sec.text).toContain('src/k.ts:3 (an AWS access key id)')
+  expect(s.pushes()).toEqual([])
+  s.h.git.handler = old
+  const good = await s.push({ pr: { title: 'T', body: '## Summary\nx\n\n## Test plan\nTested.\n' } })
+  expect(good.ok, good.text).toBe(true)
+  expect(s.pushes()).toHaveLength(1)
+})
+
+test('an Azure DevOps PR the desk opened tells the thread its last steps from the stored work items: link the PR, move the item to Reviewing (each asked)', async () => {
+  const s = await setup({ urls: { origin: ADO_ORIGIN } })
+  s.h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, workItems: [1234], briefItems: [1234, 99] }))
+  const r = await s.push({ pr: { title: 'T' } })
+  expect(r.ok, r.text).toBe(true)
+  expect(JSON.parse(s.inbox().trim()).text).toContain('next, one asked request each: ado-pr-workitem-link and ado-workitem-update to Reviewing for work item 1234, 99')
+  const t = await setup({ urls: { origin: ADO_ORIGIN } })
+  await t.push({ pr: { title: 'T' } })
+  expect(JSON.parse(t.inbox().trim()).text).not.toContain('next, one asked request')
+})
+
+test('without a recorded green run the PR opens as a DRAFT with the reason; draft false opens it ready; a push without a PR is not checked', async () => {
+  const s = await setup()
+  const raw = (extra: Record<string, unknown>) => leanThread(s.h.host, '/p', { action: 'push', tN: 't1', sha: SHA, ...extra } as any)
+  const r = await raw({ pr: { title: 'T' } })
+  expect(r.ok, r.text).toBe(true)
+  expect(r.text).toContain('opened as a DRAFT: no green test run is recorded')
+  expect(s.ghCalls[0]!.argv).toContain('--draft')
+  const t = await setup()
+  const ready = await leanThread(t.h.host, '/p', { action: 'push', tN: 't1', sha: SHA, pr: { title: 'T', draft: false } } as any)
+  expect(ready.text).not.toContain('DRAFT')
+  expect(t.ghCalls[0]!.argv).not.toContain('--draft')
+  const n = await setup()
+  n.h.files.set(`${WT}/.github/pull_request_template.md`, '## Summary\n')
+  expect((await n.push()).ok).toBe(true) // no PR: no PR text to lint
 })

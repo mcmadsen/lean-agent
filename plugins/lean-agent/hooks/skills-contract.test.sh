@@ -32,6 +32,8 @@ need review-learn 'az account get-access-token --resource 499b84ac-1321-427f-aa1
 need review-learn 'never a PAT'
 need review-learn 'az repos pr list --status completed --top'
 need pr 'lean_review` `prs'
+need pr 'pr-guide: true'
+need pr 'draft: false'
 need worktree '\*\*reuse\*\*'
 need worktree 'not a path to guess'
 need worktree 'frozen-lockfile'
@@ -160,6 +162,9 @@ grep -qF "$writes_line" "$here/thread/SKILL.md" || fail "the thread skill must c
 for k in ado-pr-vote ado-pr-update ado-pr-reviewer ado-pr-policy-queue ado-pr-workitem-unlink ado-pr-label; do
   grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
 done
+# 1.0.31: a review's comments end with ONE vote item (waiting for author), with the severity of each comment: ONE line in the review skill
+grep -qF 'Review vote: give each comment its `severity` and end the SAME batch with ONE vote item' "$here/review/SKILL.md" || fail "the review skill must carry the review-vote line (severity per comment, ONE vote item last)"
+grep -qF "'gh-pr-review'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind gh-pr-review"
 grep -qF 'ask the user with AskUserQuestion' "$root/templates/front-desk.md" || grep -qF 'Ask the user with AskUserQuestion' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk asks the user with AskUserQuestion for an action request"
 grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-desk.md" || fail "front-desk.md must name the three options"
 grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
@@ -190,7 +195,7 @@ users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --inc
 [ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
-[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "18" ] || fail "the action table (PARAM_KEYS) must hold exactly eighteen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label + the desk's own gh-issue-create)"
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "19" ] || fail "the action table (PARAM_KEYS) must hold exactly nineteen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label + the desk's own gh-issue-create + gh-pr-review of 1.0.31)"
 # the feedback export's public issue (1.0.31): desk-only, one request, never covered by a standing approval; the guides name the destination config and the Approve card
 grep -qF 'never post to GitHub without the user'"'"'s Approve' "$root/templates/front-desk.md" || fail "front-desk.md must say the feedback destination is the user's config and a GitHub post needs the Approve card"
 grep -qF 'never post without the user'"'"'s Approve' "$root/skills/feedback/SKILL.md" || fail "the feedback skill must say the destination is the user's config and a post needs the Approve card"
