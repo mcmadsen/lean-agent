@@ -160,6 +160,9 @@ grep -qF "$writes_line" "$here/thread/SKILL.md" || fail "the thread skill must c
 for k in ado-pr-vote ado-pr-update ado-pr-reviewer ado-pr-policy-queue ado-pr-workitem-unlink ado-pr-label; do
   grep -qF "'$k'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind $k"
 done
+# 1.0.31: a review's comments end with ONE vote item (waiting for author), with the severity of each comment: ONE line in the review skill
+grep -qF 'Review vote: give each comment its `severity` and end the SAME batch with ONE vote item' "$here/review/SKILL.md" || fail "the review skill must carry the review-vote line (severity per comment, ONE vote item last)"
+grep -qF "'gh-pr-review'" "$root/hooks/deskactions.ts" || fail "deskactions.ts lacks the action kind gh-pr-review"
 grep -qF 'ask the user with AskUserQuestion' "$root/templates/front-desk.md" || grep -qF 'Ask the user with AskUserQuestion' "$root/templates/front-desk.md" || fail "front-desk.md must say the desk asks the user with AskUserQuestion for an action request"
 grep -qF 'exactly the options Approve, Deny, Edit first' "$root/templates/front-desk.md" || fail "front-desk.md must name the three options"
 grep -qF 'approve-action' "$root/templates/front-desk.md" || fail "front-desk.md must name approve-action"
@@ -190,7 +193,7 @@ users=$(grep -rlE "writeGrant|action\.grants" "$root/hooks" --include=*.ts --inc
 [ "$users" = "deskactions.ts " ] || fail "only deskactions.ts may write or name the standing grant store (found: $users)"
 callers=$(grep -rlE "answerAction\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')
 [ "$callers" = "deskactions.ts pane.tsx " ] || fail "answerAction may be called only by the pane and by deskactions.ts (found: $callers)"
-[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "17" ] || fail "the action table (PARAM_KEYS) must hold exactly seventeen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label)"
+[ "$(grep -c "^  '[a-z-]*': \[" "$root/hooks/deskactions.ts")" = "18" ] || fail "the action table (PARAM_KEYS) must hold exactly eighteen kinds (eleven + the six review writes: ado-pr-vote, ado-pr-update, ado-pr-reviewer, ado-pr-policy-queue, ado-pr-workitem-unlink, ado-pr-label, + gh-pr-review of 1.0.31)"
 # the user's dialog answer as the written yes (1.0.28): a grant offer is signed and stored only in deskwrites.ts, and only the desk's AskUserQuestion hook reads the
 # answer (bindOfferAnswers); a skill the desk invokes is never the user's accept; no slash command in a bash code fence (its Run button runs it in a shell)
 callers=$(grep -rlE "bindOfferAnswers\(" "$root/hooks" --include=*.ts --include=*.tsx | grep -v '\.test\.' | sed 's|.*/||' | sort | tr '\n' ' ')

@@ -32,6 +32,7 @@ import { setNotice } from './notices'
 import { holdCovered } from './sendhold'
 import { CANNOT_VERIFY, changesTable, lintReviewText, prKey, verifyAnchors } from './anchor'
 import type { Anchor, AnchorInfo, Reader } from './anchor'
+import { checkOn, severityWord, withSeverity } from './prvote'
 
 export const ACTION_TTL_MS = 2 * 60 * 60 * 1000
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -40,10 +41,12 @@ export const BODY_MAX = 10_000
 export const FIELD_MAX = 200
 
 // ---- the table: the ONLY kinds, with the params each takes ---------------------------------------------------------------------------
-export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'batch'
+export type ActionKind = 'ado-pr-reply' | 'ado-pr-thread-status' | 'ado-pr-comment' | 'ado-workitem-comment' | 'ado-workitem-update' | 'ado-workitem-create' | 'ado-pr-workitem-link' | 'gh-pr-comment' | 'gh-pr-review-comment' | 'gh-pr-thread-resolve' | 'ado-pr-vote' | 'ado-pr-update' | 'ado-pr-reviewer' | 'ado-pr-policy-queue' | 'ado-pr-workitem-unlink' | 'ado-pr-label' | 'gh-pr-review' | 'batch'
 export const BATCH_MAX = 10
 export const COMMENT_BATCH_MAX = 60 // a batch of ONLY PR comments (inline or general) for ONE PR: a review is one request
 export const COMMENT_KINDS: string[] = ['ado-pr-comment', 'gh-pr-comment', 'gh-pr-review-comment']
+export const VOTE_KINDS: string[] = ['ado-pr-vote', 'gh-pr-review'] // 1.0.31: a batch of PR comments may end with exactly ONE of these for the same PR (comments first, then the vote)
+export const GH_EVENTS: Record<string, string> = { comment: 'COMMENT', 'request-changes': 'REQUEST_CHANGES', approve: 'APPROVE' }
 export const PH_HEAD = '<PR head commit>' // the commit an inline GitHub comment names: read by a GET right before it is sent (the user sees the placeholder)
 export const PH_ITER = '<latest iteration>' // an inline Azure DevOps comment follows ONE iteration: the latest one, read right before it is sent, unless `iteration` is given
 export const PH_CHANGE = '<change id>' // the file's changeTrackingId in that iteration, read then too, unless `changeTrackingId` is given
@@ -54,7 +57,9 @@ export const QUESTION_TEXT_MAX = 300 // a comment's text in the desk's question 
 export const WI_TYPES = ['Bug', 'Task', 'User Story', 'Issue']
 // the review writes of 1.0.30 (vote, update, reviewer, policy queue, work item unlink, label): the REST value of each vote of `az repos pr set-vote`
 export const VOTES: Record<string, number> = { approve: 10, 'approve-with-suggestions': 5, reject: -10, reset: 0, 'wait-for-author': -5 }
-export const PH_INDEX = '<link index>' // the position of the PR's link in the work item's relations: read by a GET of the work item right before an unlink is sent
+// the line a vote item adds to the card and the question of a comment batch ("then: ...")
+export const VOTE_THEN: Record<string, string> = { 'wait-for-author': 'set the PR to Waiting for author', approve: 'approve the PR', 'approve-with-suggestions': 'approve the PR with suggestions', reject: 'reject the PR', reset: 'reset your vote on the PR', comment: 'submit your comments as a review (no state)', 'request-changes': 'request changes on the PR (GitHub review)' }
+export const PH_INDEX ='<link index>' // the position of the PR's link in the work item's relations: read by a GET of the work item right before an unlink is sent
 export const PH_ME ='<your reviewer id>' // the identity the token belongs to: read by a GET of connectionData right before it is sent (the user sees the placeholder)
 export const PH_PROJECT = '<project id>' // placeholders in a PR link's body: the mod reads the two ids by a GET right before it sends (the user sees the placeholders)
 export const PH_REPO = '<repository id>'
@@ -65,13 +70,13 @@ export const STATUS_NAMES = Object.values(THREAD_STATUS).join(', ')
 export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-reply': `org, project, repo, pr, thread, body, optional status (${STATUS_NAMES}: the desk then sets the thread's status, after the reply)`,
   'ado-pr-thread-status': `org, project, repo, pr, thread, status (${STATUS_NAMES})`,
-  'ado-pr-comment': `org, project, repo, pr, body, optional file + line (+ endLine or lineEnd, offset, offsetEnd, side right|left, iteration, changeTrackingId): an inline comment on that line of the PR; optional status (${STATUS_NAMES}), commentType text|codeChange, parentCommentId`,
+  'ado-pr-comment': `org, project, repo, pr, body, optional file + line (+ endLine or lineEnd, offset, offsetEnd, side right|left, iteration, changeTrackingId): an inline comment on that line of the PR; optional status (${STATUS_NAMES}), commentType text|codeChange, parentCommentId, severity (blocker|major|minor|nit|question: the text starts with that word)`,
   'ado-workitem-comment': 'org, project, id, body',
   'ado-workitem-update': 'org, project, id, fields (state, assignedTo, tags, title; strings)',
   'ado-workitem-create': `org, project, type (${WI_TYPES.join(' | ')}), title, description?, area?, iteration?, assignedTo?, parent? (id), links? [{pr}] with repo`,
   'ado-pr-workitem-link': 'org, project, repo, pr, workitem (id)',
   'gh-pr-comment': 'repo (owner/name), pr, body',
-  'gh-pr-review-comment': 'repo (owner/name), pr, file, line, body, optional endLine, side right|left: an inline comment on that line of the PR',
+  'gh-pr-review-comment': 'repo (owner/name), pr, file, line, body, optional endLine, side right|left, severity (blocker|major|minor|nit|question: the text starts with that word): an inline comment on that line of the PR',
   'gh-pr-thread-resolve': 'repo (owner/name), pr, thread (the review thread node id, like PRRT_...)',
   'ado-pr-vote': `org, project, repo, pr, vote (${Object.keys(VOTES).join(' | ')}): the vote of the identity the token belongs to`,
   'ado-pr-update': 'org, project, repo, pr, title?, description?, draft? (true | false), status? (active | abandoned); never completing, auto-complete, merge options, bypass: the user does that by hand',
@@ -79,7 +84,8 @@ export const ACTION_KINDS: Record<ActionKind, string> = {
   'ado-pr-policy-queue': 'org, project, repo, pr, evaluationId (the GUID of the policy evaluation to queue again)',
   'ado-pr-workitem-unlink': 'org, project, repo, pr, workitem (id): removes the link of the PR from that work item',
   'ado-pr-label': 'org, project, repo, pr, op (add | remove), label (text of at most 40 characters)',
-  batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR; one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
+  'gh-pr-review': `repo (owner/name), pr, event (${Object.keys(GH_EVENTS).join(' | ')}), optional body: the review state of the PR; sent after the comments of the same request`,
+  batch: `items: up to ${BATCH_MAX} {kind, params} of the kinds above (not batch) for ONE PR or ONE work item (same org, project, repo, pr, or the same work item), up to ${COMMENT_BATCH_MAX} when ALL are PR comments of one PR (plus ONE last vote item: ado-pr-vote or gh-pr-review); one approval covers the list, run in order, stopped at the first failure (continueOnError: a failing item is reported and the rest run; the default for PR comments)`,
 }
 const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-reply': ['org', 'project', 'repo', 'pr', 'thread', 'body', 'status'],
@@ -98,7 +104,8 @@ const PARAM_KEYS: Record<ActionKind, string[]> = {
   'ado-pr-policy-queue': ['org', 'project', 'repo', 'pr', 'evaluationId'],
   'ado-pr-workitem-unlink': ['org', 'project', 'repo', 'pr', 'workitem', 'workItem'],
   'ado-pr-label': ['org', 'project', 'repo', 'pr', 'op', 'label'],
-  'batch': ['items', 'continueOnError'],
+  'gh-pr-review': ['repo', 'pr', 'event', 'body'],
+  'batch':['items', 'continueOnError'],
 }
 export const isKind = (k: unknown): k is ActionKind => typeof k === 'string' && Object.prototype.hasOwnProperty.call(ACTION_KINDS, k)
 export const kindsText = (): string => Object.entries(ACTION_KINDS).map(([k, p]) => `${k} {${p}}`).join('; ')
@@ -111,7 +118,7 @@ export const FIELD_NAMES: Record<string, string> = { state: 'System.State', assi
 // `items`: a batch of PR comments, numbered, for the card and the question; `cont`: a failing item is reported and the rest still run
 export type ReviewItem = { n: number; file: string; where: string; text: string }
 // `me`: the write names the identity the token belongs to (PH_ME in the URL): read by a GET of connectionData right before it is sent
-export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number; unlink?: number /* the work item the PR's link is REMOVED from */ }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean }
+export type Plan = { tool: 'azure' | 'github'; method: 'POST' | 'PATCH' | 'PUT' | 'DELETE'; url: string; contentType: string; body: string; headline: string; text: string; tag?: string; steps?: Plan[]; link?: { org: string; project: string; repo: string; pr: number; unlink?: number /* the work item the PR's link is REMOVED from */ }; me?: { org: string }; anchor?: Anchor; items?: ReviewItem[]; cont?: boolean; vote?: boolean /* the vote / review item that ends a comment batch: sent only when a comment went out */; ghReview?: { repo: string; pr: number; event: string } /* a GitHub review: the head commit is read right before it is sent, an APPROVE of the user's own PR is refused */; then?: string /* the card / question line for that last item */ }
 export type Params = Record<string, unknown>
 type Checked = { ok: true; kind: ActionKind; params: Params; plan: Plan } | { ok: false; text: string }
 
@@ -163,7 +170,7 @@ function checkReview(k: ActionKind, p: Params, az: { org: string; project: strin
     const word = typeof p.vote === 'string' ? p.vote.trim().toLowerCase().replace(/[\s_]+/g, '-') : ''
     if (!Object.prototype.hasOwnProperty.call(VOTES, word)) return bad(`vote must be one of ${Object.keys(VOTES).join(', ')}`)
     params.vote = word
-    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url: `${prs}/reviewers/${enc(PH_ME)}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ vote: VOTES[word] }), headline: `vote "${word}" on PR ${pr} (${where})`, text: `vote "${word}" (${VOTES[word]}) on PR ${pr} of ${repo}, as the identity the desk's Azure DevOps login belongs to`, me: { org: az.org } } }
+    return { ok: true, kind: k, params, plan: { tool: 'azure', method: 'PUT', url: `${prs}/reviewers/${enc(PH_ME)}?api-version=7.1`, contentType: 'application/json', body: JSON.stringify({ vote: VOTES[word] }), headline: `vote "${word}" on PR ${pr} (${where})`, text: `vote "${word}" (${VOTES[word]}) on PR ${pr} of ${repo}, as the identity the desk's Azure DevOps login belongs to`, me: { org: az.org }, vote: true, then: VOTE_THEN[word] ?? `vote "${word}"` } }
   }
   if (k === 'ado-pr-update') {
     const str = (key: string, max: number): string | null | undefined => {
@@ -229,14 +236,25 @@ function checkReview(k: ActionKind, p: Params, az: { org: string; project: strin
 }
 
 // the table's one door: a kind, exactly its params (no others), every value checked; the plan is what the mod will send
-export function checkAction(a: unknown): Checked {
+export type CheckOpts = { severity?: boolean } // severity: false = config review.prChecks off: a comment's severity param is dropped, the text is not prefixed
+// 1.0.31: a review comment may name its severity (blocker | major | minor | nit | question): the text then starts with that word, added here by script when it is missing
+const severed = (k: string, p: Params, on: boolean): Params | string => {
+  if (!COMMENT_KINDS.includes(k) || p.severity === undefined) return p
+  const { severity, ...rest } = p
+  if (severityWord(severity) === null) return `action ${k}: severity must be one of blocker, major, minor, nit, question`
+  return on && typeof rest.body === 'string' ? { ...rest, body: withSeverity(rest.body, severity) } : rest
+}
+export function checkAction(a: unknown, opts: CheckOpts = {}): Checked {
   const x = a && typeof a === 'object' && !Array.isArray(a) ? (a as Record<string, unknown>) : null
   const kind = typeof x?.kind === 'string' ? x.kind.trim() : ''
   if (!x || !isKind(kind)) return refuse(`action kind ${kind ? `"${kind.slice(0, 40)}" ` : ''}is not one the desk can send for a thread. The kinds: ${kindsText()}. Anything else (a push, a merge, a delete, a settings change, any command) is not asked for this way`)
   const k = kind
-  if (k === 'batch') return checkBatch(x)
-  const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
-  if (!p) return refuse(`action ${k} needs params {${ACTION_KINDS[k]}}`)
+  if (k === 'batch') return checkBatch(x, opts)
+  const p0 = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
+  if (!p0) return refuse(`action ${k} needs params {${ACTION_KINDS[k]}}`)
+  const sv = severed(k, p0, opts.severity !== false)
+  if (typeof sv === 'string') return refuse(sv)
+  const p = sv
   if (k === 'ado-pr-update') {
     const key = Object.keys(p).find(x => BY_HAND.test(x.toLowerCase()))
     if (key) return byHand(`"${key.slice(0, 30)}"`)
@@ -304,6 +322,19 @@ export function checkAction(a: unknown): Checked {
       return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: `https://api.github.com/repos/${repo}/pulls/${pr}/comments`, contentType: 'application/json', body: json({ body, commit_id: PH_HEAD, path: place.file, ...rest }), headline: `comment on ${where} of GitHub PR ${repo}#${pr}`, text: `comment on ${where} of PR ${pr}: ${body}`, anchor } }
     }
     return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: `https://api.github.com/repos/${repo}/issues/${pr}/comments`, contentType: 'application/json', body: json({ body }), headline: `comment on GitHub PR ${repo}#${pr}`, text: body } }
+  }
+  if (k === 'gh-pr-review') {
+    const repo = typeof p.repo === 'string' ? p.repo.trim() : ''
+    const pr = num('pr')
+    const word = typeof p.event === 'string' ? p.event.trim().toLowerCase().replace(/[\s_]+/g, '-') : ''
+    const body = p.body === undefined ? undefined : bodyOf()
+    if (!GH_REPO.test(repo) || pr === null || !Object.prototype.hasOwnProperty.call(GH_EVENTS, word) || body === null) return bad(`repo must be owner/name, pr a number, event one of ${Object.keys(GH_EVENTS).join(', ')} and body text`)
+    if (!body && word !== 'approve') return bad(`event ${word} needs a body (one line: what the review found)`)
+    Object.assign(params, { repo, pr, event: word })
+    if (body) params.body = body
+    const event = GH_EVENTS[word]!
+    const reply = JSON.stringify({ event, commit_id: PH_HEAD, ...(body ? { body } : {}) })
+    return { ok: true, kind: k, params, plan: { tool: 'github', method: 'POST', url: `https://api.github.com/repos/${repo}/pulls/${pr}/reviews`, contentType: 'application/json', body: reply, headline: `submit a ${word} review on GitHub PR ${repo}#${pr}`, text: `review ${event} on PR ${pr} of ${repo}${body ? `: ${body}` : ''}`, ghReview: { repo, pr, event }, vote: true, then: VOTE_THEN[word]! } }
   }
   if (k === 'gh-pr-thread-resolve') {
     const repo = typeof p.repo === 'string' ? p.repo.trim() : ''
@@ -470,15 +501,19 @@ export function checkAction(a: unknown): Checked {
 // a batch: up to BATCH_MAX checked items for ONE target; the plan holds every write flat and in order, numbered by item
 export const targetOf = (kind: ActionKind, p: Params): string =>
   kind === 'ado-workitem-create' ? `Azure DevOps work item ${p.org}/${p.project}#new` : kind.startsWith('ado-workitem') ? `Azure DevOps work item ${p.org}/${p.project}#${p.id}` : kind.startsWith('ado-pr') ? `Azure DevOps PR ${p.org}/${p.project}/${p.repo}#${p.pr}` : `GitHub PR ${p.repo}#${p.pr}`
-function checkBatch(x: Record<string, unknown>): Checked {
+function checkBatch(x: Record<string, unknown>, opts: CheckOpts = {}): Checked {
   const p = x.params && typeof x.params === 'object' && !Array.isArray(x.params) ? (x.params as Params) : null
   if (p) for (const key of Object.keys(p)) if (!PARAM_KEYS.batch.includes(key)) return refuse(`action batch: unknown param "${key.slice(0, 30)}" (the batch takes items and continueOnError)`)
   const items = Array.isArray(x.items) ? x.items : p && Array.isArray(p.items) ? p.items : null
   if (!items || !items.length) return refuse(`action batch needs items: [{kind, params}, ...] (1 to ${BATCH_MAX}, of the other kinds: ${kindsText()})`)
   // a batch of ONLY PR comments (one PR, checked below) is a review: up to COMMENT_BATCH_MAX; every other mix stays at BATCH_MAX
-  const commentsOnly = items.every(it => !!it && typeof it === 'object' && typeof (it as { kind?: unknown }).kind === 'string' && COMMENT_KINDS.includes(((it as { kind: string }).kind).trim()))
-  const limit = commentsOnly ? COMMENT_BATCH_MAX : BATCH_MAX
-  if (items.length > limit) return refuse(`action batch holds at most ${limit} items (got ${items.length}${commentsOnly ? '' : `; only a batch of PR comments for one PR may hold up to ${COMMENT_BATCH_MAX}`}): split it in two requests`)
+  const kindOf = (it: unknown): string => (it && typeof it === 'object' && typeof (it as { kind?: unknown }).kind === 'string' ? ((it as { kind: string }).kind).trim() : '')
+  const isComment = (it: unknown): boolean => COMMENT_KINDS.includes(kindOf(it))
+  // 1.0.31: PR comments may end with exactly ONE vote / review item for the same PR (comments first, then the vote): up to COMMENT_BATCH_MAX + 1 items
+  const withVote = items.length > 1 && VOTE_KINDS.includes(kindOf(items[items.length - 1])) && items.slice(0, -1).every(isComment)
+  const commentsOnly = withVote || items.every(isComment)
+  const limit = withVote ? COMMENT_BATCH_MAX + 1 : commentsOnly ? COMMENT_BATCH_MAX : BATCH_MAX
+  if (items.length > limit) return refuse(`action batch holds at most ${limit} items (got ${items.length}${commentsOnly ? '' : `; only a batch of PR comments for one PR may hold up to ${COMMENT_BATCH_MAX}`})${!commentsOnly && items.some(it => VOTE_KINDS.includes(kindOf(it))) ? ` (such a batch may end with ONE vote item, ${VOTE_KINDS.join(' or ')}, as the LAST item)` : ''}: split it in two requests`)
   const co = x.continueOnError ?? p?.continueOnError
   if (co !== undefined && typeof co !== 'boolean') return refuse('action batch: continueOnError must be true or false')
   const cont = co ?? commentsOnly
@@ -486,7 +521,7 @@ function checkBatch(x: Record<string, unknown>): Checked {
   for (const [i, it] of items.entries()) {
     const kind = it && typeof it === 'object' ? (it as { kind?: unknown }).kind : undefined
     if (kind === 'batch') return refuse(`batch item ${i + 1}: a batch cannot hold a batch`)
-    const c = checkAction(it)
+    const c = checkAction(it, opts)
     if (!c.ok) return refuse(`batch item ${i + 1}: ${c.text}`)
     checked.push(c)
   }
@@ -495,17 +530,19 @@ function checkBatch(x: Record<string, unknown>): Checked {
     const t = targetOf(c.kind, c.params)
     if (t !== target) return refuse(`batch item ${i + 1} is for another target (${t}; item 1 is ${target}): one batch is for ONE PR or ONE work item, make a second request`)
   }
-  const steps: Plan[] = checked.flatMap((c, i) => (c.plan.steps ?? [c.plan]).map(s => ({ ...s, tag: c.plan.steps ? `${i + 1} ${s.tag}` : `${i + 1}` })))
+  const steps: Plan[] = checked.flatMap((c, i) => (c.plan.steps ?? [c.plan]).map(s => ({ ...s, tag: c.plan.steps ? `${i + 1} ${s.tag}` : `${i + 1}`, vote: withVote && i === checked.length - 1 ? true : undefined })))
   const n = checked.length
   // a review (some inline comment, or more than BATCH_MAX): numbered, grouped by file, each with its anchor and text; every other batch keeps the write-by-write text
-  const review = commentsOnly && (n > BATCH_MAX || checked.some(c => c.plan.anchor))
-  const list: ReviewItem[] = review ? checked.map((c, i) => ({ n: i + 1, file: c.plan.anchor?.file ?? '', where: c.plan.anchor ? whereOf(c.plan.anchor) : 'PR comment', text: String(c.params.body) })) : []
-  const text = review ? reviewListing(list) : checked.map((c, i) => `${i + 1}/${n} ${c.plan.headline}\n${c.plan.text}\n→ ${(c.plan.steps ?? [c.plan]).map(s => `${s.method} ${s.url}`).join(' ; ')}`).join('\n\n')
+  const review = commentsOnly && (withVote || n > BATCH_MAX || checked.some(c => c.plan.anchor))
+  const then = withVote ? checked[n - 1]!.plan.then : undefined // the vote item is listed last: "then: set the PR to Waiting for author"
+  const nc = withVote ? n - 1 : n
+  const list: ReviewItem[] = review ? checked.slice(0, nc).map((c, i) => ({ n: i + 1, file: c.plan.anchor?.file ?? '', where: c.plan.anchor ? whereOf(c.plan.anchor) : 'PR comment', text: String(c.params.body) })) : []
+  const text = review ? `${reviewListing(list)}${then ? `\nthen: ${then}` : ''}` : checked.map((c, i) => `${i + 1}/${n} ${c.plan.headline}\n${c.plan.text}\n→ ${(c.plan.steps ?? [c.plan]).map(s => `${s.method} ${s.url}`).join(' ; ')}`).join('\n\n')
   return {
     ok: true,
     kind: 'batch',
     params: { items: checked.map(c => ({ kind: c.kind, params: c.params })), ...(co !== undefined || commentsOnly ? { continueOnError: cont } : {}) },
-    plan: { ...steps[0]!, url: review ? [...new Set(steps.map(s => s.url))].join(' ; ') : steps.map(s => s.url).join(' ; '), headline: `${review ? `post ${n} review comment${n === 1 ? '' : 's'}` : `do ${n} write${n === 1 ? '' : 's'}`} on ${target}, in this order`, text, tag: undefined, steps, cont, ...(review ? { items: list } : {}), anchor: undefined },
+    plan: { ...steps[0]!, url: review ? [...new Set(steps.map(s => s.url))].join(' ; ') : steps.map(s => s.url).join(' ; '), headline: `${review ? `post ${nc} review comment${nc === 1 ? '' : 's'}${then ? `, then ${then}` : ''}` : `do ${n} write${n === 1 ? '' : 's'}`} on ${target}, in this order`, text, tag: undefined, steps, cont, ...(review ? { items: list } : {}), ...(then ? { then } : {}), anchor: undefined },
   }
 }
 // the numbered list of a review batch, grouped by file (first appearance), `cutAt` shortens each text for the question (the card shows all of it)
@@ -521,7 +558,7 @@ export type ActionRequest = { id: string; thread: string; kind: ActionKind; para
 type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string }
 export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired'
 // a request as the desk and the pane see it (never carries a signature)
-export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */ }
+export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */ }
 
 // ---- standing approval: ONLY a status change carries it (never text) ------------------------------------------------------------------------
 // The kinds and statuses that can be covered: a thread status to fixed / closed / active, a GitHub review thread resolved. Never a reply, a comment, a
@@ -619,7 +656,7 @@ export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<Ac
   if (!plan) return null
   // an inline comment's line was read against the PR's diff before this request existed (addActionRequest): the card and the question say so
   const anchors = (plan.steps ?? [plan]).filter(s => s.anchor).length
-  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.cont ? { cont: true } : {}) }
+  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.then ? { then: plan.then } : {}), ...(plan.cont ? { cont: true } : {}) }
 }
 // the requests that are not finished (the desk's list and the pane): pending, approved but not sent yet, and expired ones until they are told
 export async function listActions(h: Host, all = false): Promise<ActionView[]> {
@@ -635,9 +672,9 @@ export async function listActions(h: Host, all = false): Promise<ActionView[]> {
 // ---- what the user is asked, word for word -----------------------------------------------------------------------------------------------
 export const OPTION_LABELS = ['Approve', 'Deny', 'Edit first'] as const
 export const checkCode = (hash: string): string => hash.slice(0, 12)
-export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean; kind?: string; anchors?: number; items?: ReviewItem[]; cont?: boolean }):{ question: string; options: { label: string; description: string }[] } {
+export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean; kind?: string; anchors?: number; items?: ReviewItem[]; cont?: boolean; then?: string }):{ question: string; options: { label: string; description: string }[] } {
   // a review batch: numbered, grouped by file, each text cut at QUESTION_TEXT_MAX here (the card shows all of it)
-  const shown = v.items ? `${reviewListing(v.items, QUESTION_TEXT_MAX)}${v.items.some(i => i.text.replace(/\s+/g, ' ').trim().length > QUESTION_TEXT_MAX) ? `\n(texts are cut at ${QUESTION_TEXT_MAX} characters here: the full text of each is on the card in the pane)` : ''}${v.anchors ? `\n(${ANCHOR_NOTE})` : ''}` : v.text
+  const shown = v.items ? `${reviewListing(v.items, QUESTION_TEXT_MAX)}${v.items.some(i => i.text.replace(/\s+/g, ' ').trim().length > QUESTION_TEXT_MAX) ? `\n(texts are cut at ${QUESTION_TEXT_MAX} characters here: the full text of each is on the card in the pane)` : ''}${v.then ? `\nthen: ${v.then}` : ''}${v.anchors ? `\n(${ANCHOR_NOTE})` : ''}` : v.text
   const standing = v.standing ? [{ label: standingLabelOf(v.kind ?? ''), description: `the desk sends exactly this text, once; and ${v.thread}'s later writes of this kind on this ${(v.kind ?? '').startsWith('ado-workitem') ? 'work item' : 'PR'} (statuses only fixed, closed, active) are sent without asking, for 24 h, at most 40, or until it closes (Revoke in the pane)` }] : []
   return {
     question: `${v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${shown}\n---\nTarget: ${v.target}\nSend exactly this?`,
@@ -659,7 +696,8 @@ export type Tell = (thread: string, text: string) => Promise<void>
 // ---- a thread asks ---------------------------------------------------------------------------------------------------------------------------
 export async function addActionRequest(h: Host, thread: string, a: { kind?: unknown; params?: unknown; items?: unknown; why?: unknown }): Promise<{ ok: boolean; text: string; request?: ActionView }> {
   if (!threadOk(thread)) return { ok: false, text: 'an action request comes from a thread (tN)' }
-  const c = checkAction(a)
+  const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
+  const c = checkAction(a, { severity: checkOn(cfg, 'review', 'severity') })
   if (!c.ok) return { ok: false, text: c.text }
   // an inline comment is shown to the user only after its line was read against the PR's diff now (checked again right before it is sent)
   const anchored = anchorsOf(c.plan)
@@ -959,9 +997,31 @@ const idIn = (out: string): string | undefined => {
   }
 }
 
+// a GitHub review (1.0.31): the head commit is read now (commit_id), and an APPROVE is refused on a PR the user wrote (or when that cannot be told): the mod never approves the user's own work.
+// Nothing is written when a read fails. Returns the body to send, or the refusal.
+async function reviewBody(h: Host, plan: Plan): Promise<{ body: string } | { text: string; refused?: boolean }> {
+  const { repo, pr, event } = plan.ghReview!
+  const rd = readerOf(h)
+  const info = (await rd.gh(`repos/${repo}/pulls/${pr}`)) as { head?: { sha?: unknown }; user?: { login?: unknown } } | null
+  const head = info?.head?.sha
+  if (typeof head !== 'string' || !/^[0-9a-f]{7,64}$/i.test(head)) return { text: `could not read the head commit of PR ${pr} (no login, no network, or no such PR): nothing was written` }
+  if (event === 'APPROVE') {
+    const me = ((await rd.gh('user')) as { login?: unknown } | null)?.login
+    const author = info?.user?.login
+    if (typeof me !== 'string' || !me || typeof author !== 'string' || !author) return { text: `could not tell who wrote PR ${pr} and who the gh login is: an approval is not sent without knowing it is not your own PR` }
+    if (me.toLowerCase() === author.toLowerCase()) return { text: `PR ${pr} is yours (${author}): the mod never approves your own PR; nothing was written`, refused: true }
+  }
+  return { body: JSON.stringify({ ...(JSON.parse(plan.body) as Record<string, unknown>), commit_id: head }) }
+}
 async function send(h: Host, plan: Plan): Promise<Sent> {
   if (plan.tool === 'github') {
-    const r = await h.process.run(['gh', 'api', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', plan.url.replace('https://api.github.com/', ''), '--input', '-'], { stdin: plan.body, timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
+    let stdin = plan.body
+    if (plan.ghReview) {
+      const rb = await reviewBody(h, plan)
+      if ('text' in rb) return { ok: false, text: rb.text, ...(rb.refused ? { refused: true } : {}) }
+      stdin = rb.body
+    }
+    const r = await h.process.run(['gh', 'api', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', plan.url.replace('https://api.github.com/', ''), '--input', '-'], { stdin, timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
     if (r.exitCode !== 0) return { ok: false, text: `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
     if (plan.url.endsWith('/graphql')) return /"isResolved"\s*:\s*true/.test(r.stdout) ? { ok: true, text: 'thread resolved' } : { ok: false, text: `GitHub answered but the thread is not reported resolved: ${oneLine(r.stdout, 200)}` }
     return { ok: true, text: resultOf(r.stdout, 'html_url') }
@@ -1149,6 +1209,13 @@ async function runSteps(h: Host, thread: string, plan: Plan): Promise<Ran> {
     const tag = s0.tag ?? '?'
     if (stopped) {
       parts.push(`${tag}: not run`)
+      continue
+    }
+    if (s0.vote && !progress) {
+      // 1.0.31: the vote ends a comment batch: when every comment failed, the PR is not set to anything (the author was told nothing)
+      failed++
+      if (refusals === failed - 1) refusals++
+      parts.push(`${tag}: not run (no comment of this request was posted, so the vote was not sent)`)
       continue
     }
     const ai = anchored.indexOf(s0)

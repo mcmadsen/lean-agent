@@ -3,6 +3,7 @@
 import type { Host } from './state'
 import { atomicWrite, homeDir, leanDir, threadsDir } from './state'
 import { readConfig } from './budget'
+import { voteAdvice, voteLine } from './prvote'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
 import { logRefusal } from './feedback'
@@ -452,7 +453,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
-  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', droppedNote].filter(Boolean).join('\n')
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', droppedNote, ext ? voteLine(voteAdvice(v.open.map(f => f.severity), v.green, false)) : ''].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await areasOf(h, project, sha)).filter(n => !(rec.areas ?? {})[n]) : []
   const areaLine = area ? `\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''

@@ -205,7 +205,8 @@ const DISCLAIMER: RegExp[] = [
 const SHORT_DISCLAIMER = /\bnot (fully |completely |been )?(reviewed|verified|checked|tested)\b/
 const APPROVAL = /^(lgtm|looks good( to me)?|ship it|approved?|\+1)$/
 export function lintReviewText(body: string): string | null {
-  const plain = body.toLowerCase().replace(/[*_`>#~]/g, ' ').replace(/\s+/g, ' ').trim()
+  // the severity word the mod puts in front ("minor: ...") is not part of what the comment says
+  const plain = body.toLowerCase().replace(/^\W{0,4}(blocking|blocker|major|minor|nit|question)\s*:/, '').replace(/[*_`>#~]/g, ' ').replace(/\s+/g, ' ').trim()
   const parts = plain.split(/(?<=[.!?;])\s+|\n+/).map(s => s.replace(/^[-\s]+|[\s.!]+$/g, '')).filter(Boolean)
   if (!parts.length) return null
   if (parts.every(s => APPROVAL.test(s) || DISCLAIMER.some(re => re.test(s)) || (s.split(' ').length <= 6 && SHORT_DISCLAIMER.test(s)))) {
