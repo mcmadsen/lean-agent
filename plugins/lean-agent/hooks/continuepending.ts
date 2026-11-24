@@ -9,7 +9,10 @@
 // next step of your task." (kind 'keep'). Limits (continue-state.json, the desk's file): 'next' at most 3 in a row without a tool call between them, then ONE desk notice
 // "t5 keeps stopping after 'next:'" and the stall state (stall.ts reads `halted`); 'keep' at most 30 per hour, then ONE notice per hour.
 // A 'next' text that says the thread wants a fresh session / a restart / that its context is near the cap is not continued: it is a checkpoint restart (checkpoint.ts, 1.0.29).
-// Config: threads.autoContinue (default true; false = no 'next' continues), threads.continueSeconds (default 20). Every check is repeated when the tick acts:
+// 1.0.31: kind 'todo' (an open item in the thread's task list: structural, no phrase; "Continue: <title>. Do it now ...", 6 in a row, then one notice), kind 'remind' (a
+// last paragraph conditional on an event while waitevent.ts finds nothing that wakes the thread; at most 2 per thread), and NO continue of any kind while waitingOn() holds.
+// Keep-going is on by default (config threads.keepGoing, `keep-going off` wins; keepGoingOf). Every todo / next / remind continue is one line in continue-log.jsonl and counted.
+// Config: threads.autoContinue (default true; false = no 'next' / 'todo' / 'remind' continues), threads.continueSeconds (default 20), threads.keepGoing (default true). Every check is repeated when the tick acts:
 // only an OPEN thread whose session is the recorded one (never parked, closed, finished) is continued.
 import { appendJsonl, homeDir, readJson, readJsonl, threadsDir, writeJson, leanDir } from './state'
 import type { Host } from './state'
