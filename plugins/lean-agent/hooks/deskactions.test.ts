@@ -2,6 +2,8 @@
 // the executors with canned az / curl / gh output, and every way a model could try to get a write sent without the human. Synthetic names only.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { relaxOwnTaskForSpecs } from './owntask'
+relaxOwnTaskForSpecs() // these specs test the writes, not whose task it is (owntask.test.ts does)
 import { ACTION_KINDS, ACTION_TTL_MS, actionListText, addActionRequest, answerAction, approveAction, bindAnswers, checkAction, checkCode, dropActions, hashOf, listActions, questionOf, renderingOf, resetActions } from './deskactions'
 import { THREAD_TOOLS, actionHint, threadTool } from './delivery'
 import { leanThread, resetLocks } from './threads'

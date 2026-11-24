@@ -23,11 +23,14 @@ import { setNotice } from './notices'
 import type { ActionKind, Params } from './deskactions'
 import { ownActive, ownRevoked, parseForgeUrl, recordOwnSent, remoteOf, resolveRef } from './deskwrites'
 import type { ForgeRef } from './deskwrites'
+import { afterPrOpened, setOwnRunner } from './workitemflow'
+import { afterRefs, prNumber } from './workitems'
+import type { RefHolder } from './workitems'
 
 export const OWN_MAX_DAY = 20
 export const OWN_STATES = ['Reviewing', 'Active', 'In Progress', 'Resolved']
 export const TEXT_MAX = 2000
-export type OwnPr = { host: 'azure' | 'github'; org: string; project: string; repo: string; id: number; url: string; since: number; how?: string }
+export type OwnPr = { host: 'azure' | 'github'; org: string; project: string; repo: string; id: number; number?: number; url: string; since: number; how?: string }
 // `workItems`: owned by creation or by the user's grant; `briefItems`: the work items the brief names (AB#N / work item N), owned only with the branch token
 type TJ = Record<string, unknown> & { state?: unknown; pr?: OwnPr; workItems?: number[]; briefItems?: number[] }
 const lc = (s: unknown) => String(s ?? '').toLowerCase()
@@ -75,8 +78,9 @@ async function takePr(h: Host, thread: string, ref: Omit<OwnPr, 'since' | 'url' 
   const t = await readT(h, thread)
   if (!t || t.state === 'closed') return null
   if (t.pr && sameRef(t.pr, ref)) return null
-  const pr: OwnPr = { ...ref, url: url.slice(0, 300), since: await h.clock.now(), how }
+  const pr: OwnPr = { ...ref, number: ref.id, url: url.slice(0, 300), since: await h.clock.now(), how } // (`number`: the task's PR reference of workitems.ts, same field)
   await writeJson(h, await tfile(h, thread), { ...t, pr })
+  await afterRefs(h, await homeDir(h), { ...(t as RefHolder), id: thread, pr: pr as unknown as Record<string, unknown> }, { wi: (t as RefHolder).workItem?.id, pr: prNumber(t as RefHolder) }).catch(() => undefined) // the WI -> threads map follows the PR
   const cfg = await ownConfig(h)
   if (!cfg.on) return null
   const line = ownLine(thread, pr)
@@ -90,7 +94,10 @@ const asOwn = (r: ForgeRef): Ref => ({ host: r.host, org: r.org, project: r.proj
 export async function recordPushPr(h: Host, thread: string, url: string): Promise<string | null> {
   const ref = parseForgeUrl(url)
   if (!ref || ref.type !== 'pr' || !threadOk(thread)) return null
-  return (await takePr(h, thread, asOwn(ref), url, 'it opened the PR').catch(() => null))?.line ?? null
+  const line = (await takePr(h, thread, asOwn(ref), url, 'it opened the PR').catch(() => null))?.line ?? null
+  // the PR was opened by the desk: when the thread has a stored work item and it is the user's own task, the mod builds ONE request to link it and move it to Reviewing (workitemflow.ts)
+  if (ref.host === 'azure') await afterPrOpened(h, thread, { org: ref.org, project: ref.project, repo: ref.repo, number: ref.n }).catch(() => null)
+  return line
 }
 
 // the PR the user passed: `new` with `pr` (a number, read against the thread's project remote, or a URL checked against it), or a review thread's `review.pr`
@@ -262,3 +269,5 @@ export async function runOwnPr(h: Host, id: string): Promise<{ sent: boolean; li
   await logHistory(h, r.thread, { kind: 'own-pr-default', id, action: r.kind, pr: pr.id, count: taken, result: what.slice(0, 300) })
   return { sent: true, line }
 }
+
+setOwnRunner(runOwnPr) // the after-PR request (workitemflow.ts) may be covered by the own-PR default

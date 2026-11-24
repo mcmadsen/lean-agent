@@ -16,6 +16,7 @@ import { readSnapshot } from './snapshot'
 import { waitingOn } from './waitevent'
 import { kTokens, readContext } from './threadcontext'
 import type { Out, Thread } from './threads'
+import { ownersOf, ownersText, refsShort } from './workitems'
 
 export type Line = { id: string; file: string; text: string }
 const MAX_LINES = 25
@@ -38,7 +39,7 @@ export async function storeLines(h: Host, home: string, only?: string): Promise<
   for (const id of names) {
     const dir = `threads/${id}`
     const t = await readJson<Partial<Thread> | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
-    if (t) out.push({ id, file: `${dir}/thread.json`, text: `title: ${t.title ?? ''} · project: ${t.project ?? ''} · state: ${t.state ?? ''}${t.finished ? ' (finished)' : ''}` })
+    if (t) out.push({ id, file: `${dir}/thread.json`, text: `title: ${t.title ?? ''} · project: ${t.project ?? ''} · state: ${t.state ?? ''}${t.finished ? ' (finished)' : ''}${refsShort(t) ? ` · ${refsShort(t)}` : ''}` })
     const g = goals?.[id]?.text ?? t?.lastGoal
     if (g) out.push({ id, file: 'goals.json', text: `goal: ${flat(String(g))}` })
     for (const w of Object.values(wts && typeof wts === 'object' ? wts : {})) {
@@ -65,11 +66,22 @@ export async function findText(h: Host, home: string, query: string): Promise<Ou
   const all = await storeLines(h, home)
   const hit = all.filter(l => ws.every(w => (l.text + ' ' + l.file).toLowerCase().includes(w)))
   const threads = new Set(hit.map(l => l.id))
-  if (!hit.length) return { ok: true, text: `find "${query}": nothing matches (searched titles, goals, branches, reports, notes, remembered items and snapshots of ${new Set(all.map(l => l.id)).size} thread(s))` }
+  // a work item or PR number (9840, WI 9840, PR 5687): the threads that OWN it come first (workitems.json), then the lines
+  const num = /^\s*(?:(wi|work\s?items?|pr|pull\s?requests?)\s*)?#?(\d{1,9})\s*$/i.exec(query)
+  const owned: string[] = []
+  if (num) {
+    for (const kind of ['wi', 'pr'] as const) {
+      if (num[1] && /^(wi|work)/i.test(num[1]) !== (kind === 'wi')) continue
+      const o = await ownersOf(h, home, kind, Number(num[2]))
+      if (o.length) owned.push(`owned by ${ownersText(kind, Number(num[2]), o)}`)
+    }
+  }
+  const own = owned.length ? `${owned.join('\n')}\n` : ''
+  if (!hit.length) return { ok: true, text: `${own}find "${query}": nothing matches (searched titles, goals, branches, reports, notes, remembered items and snapshots of ${new Set(all.map(l => l.id)).size} thread(s))` }
   // a line is shown once (the same text twice, e.g. a report and its note)
   const seen = new Set<string>()
   const rows = hit.filter(l => (seen.has(l.id + l.text) ? false : (seen.add(l.id + l.text), true)))
-  return { ok: true, text: [`find "${query}": ${rows.length} line(s) in ${threads.size} thread(s)${rows.length > MAX_LINES ? `, first ${MAX_LINES}` : ''}`, ...rows.slice(0, MAX_LINES).map(show)].join('\n'), data: { threads: [...threads] } }
+  return { ok: true, text: [`${own}find "${query}": ${rows.length} line(s) in ${threads.size} thread(s)${rows.length > MAX_LINES ? `, first ${MAX_LINES}` : ''}`, ...rows.slice(0, MAX_LINES).map(show)].join('\n'), data: { threads: [...threads] } }
 }
 
 // ---- ask -------------------------------------------------------------------------------------------------------------------------

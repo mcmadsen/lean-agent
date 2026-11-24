@@ -476,7 +476,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       notice = short(text, 300)
       if (bad) lastError = notice
     }
-    const tellThread = (r: ModelRequest, text: string) => (r.thread === 'desk' ? Promise.resolve() : leanThread(host, $.plugin.root, { action: 'send', tN: r.thread, text }).then(() => undefined, () => undefined))
+    const tellThread = (r: ModelRequest, text: string) => (r.thread === 'desk' ? Promise.resolve() : leanThread(host, $.plugin.root, { action: 'send', tN: r.thread, text, internal: true }).then(() => undefined, () => undefined))
     // the action that goes on after an approval or on sonnet: what a tool call asked for (a new thread is started now), nothing for a guard refusal
     const retryOf = (r: ModelRequest, model?: string) => ({ action: r.action === 'new' ? 'start' : r.action, tN: r.thread, ...(model ? { model } : r.asked ? { model: r.model, ...(r.effort ? { effort: r.effort } : {}) } : {}) })
     const approveModel = (r: ModelRequest) =>
@@ -522,7 +522,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     }
     // ---- a thread's request for a remote write (deskactions.ts): the same decision as the desk's question, pressed twice. Approve sends it
     // at once (the mod, once, exactly the text on the card); Deny tells the thread. Nothing here is a model's call. ----
-    const tellAction = (thread: string, text: string) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)
+    const tellAction = (thread: string, text: string) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)
     const approveWrite = (a: ActionView) =>
       twoStep(`action:approve:${a.id}`, async () => {
         resetViewCache()
@@ -571,14 +571,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const selfEditPress = (id: string) => async () => {
       resetViewCache()
       const out = await grantByHuman(host, id, 'pane')
-      if (out.ok) await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user let you edit your worktree yourself (their choice in the pane). Do the step yourself with your own Edit / Write / Read / Grep / Glob inside your worktree, then continue and report.` }).catch(() => undefined)
+      if (out.ok) await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user let you edit your worktree yourself (their choice in the pane). Do the step yourself with your own Edit / Write / Read / Grep / Glob inside your worktree, then continue and report.`, internal: true }).catch(() => undefined)
       resetViewCache()
       sayModel(out.text, !out.ok)
       tell()
     }
     const retryPress = (id: string) => async () => {
       resetViewCache()
-      const out = await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user chose: retry the worker with a narrower brief. ${NARROW_BRIEF}.` }).catch(() => ({ ok: false, text: `retry ${id} failed` }))
+      const out = await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user chose: retry the worker with a narrower brief. ${NARROW_BRIEF}.`, internal: true }).catch(() => ({ ok: false, text: `retry ${id} failed` }))
       resetViewCache()
       sayModel(out.ok ? `${id} was told to retry with a narrower brief` : out.text, !out.ok)
       tell()
