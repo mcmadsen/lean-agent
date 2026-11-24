@@ -239,6 +239,21 @@ Claude Code's auto-mode classifier can deny a thread's worker call ("Permission 
 
 A thread never writes to Downloads, Desktop or Documents itself (a worker gets EPERM on macOS, and a hook refuses it). It writes the file you asked for to its `scratch/` folder and the desk calls `deliver` (tN, file, to, name?): the mod copies it (never overwriting: `name-2`, `name-3`) when your recorded words of the last 24 h name the folder or say "save" / "put it in"; otherwise the desk asks you with a question that names the file and the folder. If macOS blocks the Claude app from the folder, the reply says exactly where to allow it: System Settings > Privacy & Security > Files and Folders (or Full Disk Access).
 
+### Where the feedback export goes
+
+`/lean-agent-feedback`, the pane's **Feedback export** and the desk's `lean_doctor export` always write ONE anonymised, size-capped file to `~/.lean-agent/feedback-export/<YYYY-MM-DD-HHMM>.md`. What happens next is your choice (`lean_config set feedback.destination folder`, or `config.json`):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `feedback.destination` | `"local"` (default), `"folder"`, `"github"`, `"folder+github"` | `local`: the file stays in the export folder. `folder`: the mod also copies it into `feedback.folder`. `github`: the mod also offers it as a public GitHub issue. `folder+github`: both |
+| `feedback.folder` | a path, `~` expanded, e.g. `"~/Downloads"` | used by `folder` and `folder+github`; a real folder under your home (not hidden, not lean-agent's own state) |
+
+A wrong value falls back to `local` and shows as a `FIX feedback export` row in `lean_doctor check`. The pane's footer button names the destination.
+
+**Folder.** After the private-string check passed, the mod copies the file by script (no model, no desk turn) as `lean-agent-feedback-<stamp>.md`, never over an existing file (`-2`, `-3` ...). A folder that does not exist or is not writable falls back to the local copy and says so.
+
+**GitHub.** Posting is a remote write to a PUBLIC repository, so it is never automatic. The export ends with ONE request card, "post a public issue on the lean-agent repo", with the exact title and the full anonymised body. Only your Approve, bound to that request, makes the mod run `gh issue create` (by argv, no shell, no labels; the result is the issue URL). The repo is fixed: any other is refused. No standing approval, `allow` grant or own-PR default ever covers it, and a thread cannot ask for it. If `gh` is missing or not logged in, the export says so and keeps the local copy. Not tested against a real GitHub: check the card, then Approve.
+
 ### Remote writes go through the desk (typed actions)
 
 A thread may not make a remote write itself (Claude Code's permission check or classifier denies it, and the user would have to answer
@@ -364,6 +379,18 @@ refusals" and "Missing tools". `lean_thread new` takes
 exact lines the thread copies into its workers' prompts, for work that needs a path outside the worktree (a repo's `.claude/skills/...`
 file). No allow rule is added to any settings file to get past a classifier, and the guard is not widened for anything that writes or runs
 a program.
+
+#### Approvals: exact labels, reason codes and how a request ends (1.0.31)
+
+**Exact label.** The desk's question offers Approve, Deny, Edit first and, for some requests, "Approve, and allow this kind on this PR (or work item) for 24 h". An answer is one of them only when it is exactly that label (spaces at the ends are ignored); a prefix, a different case, a part of a label or a position never counts. The plain Approve sends that request once and never makes a standing approval. Your typed words keep the 1.0.28 rule (a clear "yes" is one Approve; "always approve" is the 24 h choice where the request offers it).
+
+**Where a 24 h approval came from.** Its record says whether you pressed the pane's button, chose the dialog's option or typed words. At the desk's start and in `action-list` the mod checks each one against your signed answer. One without a matching press is revoked and marked "recorded without your choice" (reason and time kept as evidence, a FIX row in the pane). Approvals made before 1.0.31 that name no request cannot be judged and stay. The pane's 24 h button records your choice and sends the request it is on once; if the request was already approved with the plain Approve, it is sent once and the pane says no 24 h approval was made.
+
+**Why an answer was not recorded.** The reply names the first thing that is wrong: no such request; already resolved; not pending; id or check code mismatch; text differs (the heading, the exact text or the target line, with the first characters that differ); the options or multi-select differ; the answer is not exactly one of the options. The request stays pending, nothing is sent.
+
+**How a request ends.** It leaves the pending list only by executed, denied, expired or withdrawn, and the exit (kind, reason, time) is written to its record, which is kept. A request that was not sent tells its thread and the desk one line ("request r12 expired unsent: nobody decided in 24 h", "withdrawn unsent: you rejected it in chat", "denied"). Expiry is `actions.pendingHours` (default 24). Withdraw: `lean_thread withdraw-action` with the request id and your reason, or type "withdraw <request id> ..." to the desk. `action-list` shows the requests that left in the last 24 h.
+
+Not tested live: the real desktop dialog (what the engine returns in `answers`) and the pane's buttons.
 
 ### Replying to and resolving PR threads without a block
 
@@ -574,6 +601,8 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `threads.stopGraceMinutes` | threads | number >= 0 | 3 | now | Minutes after the stop record before a still-working thread is restarted anyway. |
 | `threads.autoContinue` | threads | boolean | true | now | Continue a thread that ends its turn with "next: ..." (off: no automatic continue). |
 | `threads.continueSeconds` | threads | number >= 1 | 20 | now | Seconds a "next: ..." turn waits before the continue message is sent. |
+| `threads.keepGoing` | threads | boolean | true | now | Keep going is the standing order of every work thread (review threads excluded); a thread's own keep-going on / off wins. |
+| `threads.idleAlertMinutes` | threads | number >= 0 | 10 | now | Minutes a thread may be idle without a report before the desk gets one notice (0 = off). |
 | `threads.escalate` | threads | boolean | true | now | Restart a thread that ignored a message from the desk (off: ask you first). |
 | `threads.answerWaitSeconds` | threads | number >= 1 | 45 | now | Seconds a thread has to react to a message before it counts as ignored. |
 | `threads.waitReminderMinutes` | threads | number >= 1 | 15 | now | Minutes an unanswered thread question waits before it comes back once. |
@@ -604,6 +633,9 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `review.exclude` (sensitive) | review | list | [] | now | Globs of files left out of a review (generated files are always left out). |
 | `review.lessonTokens` | review | number >= 1 | 3200 | now | Tokens of review lessons a new review is given. |
 | `review.lessonMax` | review | number >= 1 | 1500 | now | Most review lessons kept per project. |
+| `review.contextLines` | review | number >= 0 <= 20 | 0 | now | Lines of context around a changed hunk that still count as part of the change (0 to 20). |
+| `review.maxFiles` (sensitive) | review | number >= 1 | 150 | now | Most files a review range may hold before prepare asks you to confirm it (a wrong range is the usual cause). |
+| `review.prChecks` | review | json | none | now | Review-side PR checks: false turns all off, or {"severity": false, "size": false} single ones. |
 | `rulesPr.minSessions` | review | number >= 1 | 3 | now | Sessions a learned rule must have loaded in before it is proposed upstream. |
 | `rulesPr.minDays` | review | number >= 1 | 7 | now | Days a learned rule must have been in use before it is proposed upstream. |
 | `rulesPr.minGaps` | review | number >= 1 | 2 | now | Reports of a missing piece of context before it is proposed as a rule. |
@@ -619,6 +651,10 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `pane.theme` | pane | on / off | off | desk restart | Give the app lean-agent's own look (on) or leave it alone (off). |
 | `feedback.destination` | feedback | local / folder / github / folder+github | local | now | Where the feedback export goes: local, folder, github or folder+github. |
 | `feedback.folder` | feedback | path | none | now | Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads. |
+| `memory.maxPerScope` | memory | number >= 1 | 12 | now | Items one memory scope (desk, always, a project, a thread, a task) may hold; an add over it asks you to retire one. |
+| `memory.indexTokens` | memory | number >= 50 | 400 | now | Token budget of the standing-orders list every session starts with (the lowest-ranked lines are dropped). |
+| `memory.relevantTokens` | memory | number >= 50 | 300 | now | Token budget of the one memory reminder line (at most 3 items) a session gets when it matters. |
+| `memory.autoCapture` | memory | boolean | true | now | Store typed "remember / always / never / from now on" and repeated corrections by script (off: only /lean-agent:remember and the tools). |
 | `threads.plugins` (sensitive) | safety | list or all | [] | next session | Plugins a thread loads besides lean-agent (all = every plugin you have). |
 | `threads.mcp` (sensitive) | safety | all / project / none | all | next session | MCP servers a thread may use: all, project (the project's only) or none. |
 | `threads.tools` (sensitive) | safety | list or all | none | next session | Built-in tools of a thread session (all = the full set; default is a short list). |
@@ -628,6 +664,8 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `agents.cap` (sensitive) | safety | number >= 1 | none | now | Most subagents a thread session may start (no cap by default; small workers do not count). |
 | `grants.ttlMinutes` (sensitive) | safety | number >= 1 | 120 | now | Minutes a worker slot is held before it counts as ended. |
 | `lean.orchestrate` (sensitive) | safety | boolean | true | next session | The desk only routes and threads only brief workers (off: threads edit and run things themselves). |
+| `actions.pendingHours` (sensitive) | safety | number >= 0.05 <= 720 | 24 | now | Hours a request for a remote write waits for your decision before it expires (0.05 to 720). |
+| `pr.checks` (sensitive) | safety | json | none | now | PR checks when a thread opens or pushes a PR: false turns all off, or {"guide": false, "size": false, "draft": false, "secrets": false, "force": false} single ones. |
 | `actions.holdSeconds` (sensitive) | safety | number >= 0 | 30 | now | Seconds a covered reply or comment is held before it is sent (0 = at once). |
 | `actions.ownPrDefault` (sensitive) | safety | boolean | true | now | A thread owns the pull request it opens: its replies go out without a question. |
 | `actions.ownPrMaxPerDay` (sensitive) | safety | number >= 1 <= 1000 | 20 | now | Pull requests a thread may take as its own per day. |
@@ -982,6 +1020,38 @@ the push output). No PR is attempted after a failed push. The reply, the thread'
 thread ("the desk pushed `<sha>`; PR `<url>`") say what happened; a failure names the step and its first error line. A second
 `push` needs a new approval.
 
+## Reviews cover only changed code (1.0.31)
+
+A review reports on the lines the change adds or edits, and nothing else. The reviewers are handed the diff, not the repository: the brief of each pass carries the changed hunks with their new-side line numbers (cut to a size budget; over it, the file list and the line ranges), and says: report only on lines in these ranges, every finding is `file:line` of a listed range plus a one-line reason. An area review gets its whole diff in one file, `scratch/diff-<area>.patch`.
+
+The tool checks it again, at `lean_review merge` and `lean_review record`, and drops (and counts) every finding that is not anchored on a changed line: no file, or a file the PR does not change; no line, or a line outside every changed range (a removal is reported at the line where it was cut); a finding about something absent ("no rate limiting", "missing validation") that names no changed line; a `tests`, `docs`, `scope` or `completeness` finding that names no changed file. A dropped finding names the ranges that would be accepted. `review.contextLines` (default 0; 1.0.29 to 1.0.30 used 3) keeps findings within that many lines of a changed range.
+
+**The range.** For a PR ref (`lean_review prepare` with `ref`) the range is what the forge shows as the PR change: when the head is the PR's merge commit, the base is its FIRST PARENT, so only the PR's own commits are reviewed; otherwise the merge base of the target and the source head. On GitHub the forge's own file list is the ground truth: when the git range holds more files, it is cut to the forge's and the reply says "range corrected to the PR's own files". `base` accepts a branch, `parent1`, `merge-base`, or any commit sha of the PR's history (its refs are fetched first). If the range holds more files than 20 times the files the PR's own commits touch, or more than `review.maxFiles` (default 150), `prepare` refuses with "range looks wrong: N files / L lines for a PR of K commits"; the thread asks you and goes on with `confirm: true` only when you say so. A review thread, its workers and its reviewers never pull, merge, rebase, reset, commit or switch branches in the PR's checkout (the guard refuses it).
+
+If the PR diff cannot be read, `merge` and `record` refuse with "could not read the PR diff: review not recorded" and write nothing: a review is never recorded unfiltered. A PR too large for one review is split into areas built only from its changed files ("N changed files, M changed lines"), never from folders. The reviewer's JSON block is saved to `scratch/review-<area>-<pass>.json` when it answers, so a restart does not lose it; the reviewer has one budget, 16 tool calls. The review summary says what the filter did (`reviewed 12 changed files (340 lines); 3 findings dropped: outside the change (files: ...)`) and names the lean-agent version the thread ran; a review thread older than 1.0.29 is told to restart first.
+
+## Pull request guidelines and review votes (1.0.31)
+
+A review used to post its comments and leave the PR without a state. Now the comments and the state go in one request, and a PR is checked against the repo's own guidelines before it is created. Every write keeps the usual pattern: a typed action, the exact text on the card, your Approve, the token only on stdin.
+
+**Waiting for author, with the comments.** When a review thread asks to post its comments on a PR and the review is not an approval (a posted comment is blocking, major or minor, or the verdict is not green; a script decides), the same request ends with ONE vote item for that PR: Azure DevOps `ado-pr-vote wait-for-author`, GitHub `gh-pr-review` with `request-changes` and the body "N comments: M blocking". The card lists it last ("then: set the PR to Waiting for author"); one Approve covers all, in order: comments first, the vote after them, and when every comment fails the vote is not sent. A batch of PR comments for one PR may hold up to 60 comments plus this one vote; any other mix stays at 10. The vote is never covered by the own-PR default or a standing approval. A review with no comments and a green verdict proposes `approve` (asked), or nothing when the PR is yours; the mod never approves a PR the thread opened or a PR you wrote, and never completes a PR. After the author pushed and every thread is fixed or closed, the review thread proposes ONE request: reset the vote or approve (asked).
+
+**GitHub reviews.** `gh-pr-review {repo, pr, event: comment | request-changes | approve, body?}` posts `pulls/<n>/reviews` through `gh api` (argv, no shell, the text on stdin), with `commit_id` = the head commit read right before it is sent. `comment` and `request-changes` need a body.
+
+**What the mod checks by script.**
+
+| Check | What it does | Switch |
+|---|---|---|
+| Guidelines (`guide`) | Reads the PR template, CONTRIBUTING, CODEOWNERS and the title style of the last 20 merged PRs; a short record per project, read again only when those files change. `lean_run {pr-guide: true}` shows it, `{pr-guide: {title, body}}` checks a text. Before the PR is created the push refuses a text whose title does not match, with an empty template section, without a work item when the history links them, or without a test line when a `lean_run` is on record, naming each part; the approval is kept. | `pr.checks.guide` |
+| Size (`size`) | "large PR: consider splitting" above 400 lines or 15 files, at create and at `lean_review prepare`. A warning only. | `pr.checks.size`, `review.prChecks.size` |
+| Draft first (`draft`) | A PR whose commit has no green `lean_run` on record opens as a draft, with the reason; `draft: false` opens it ready. | `pr.checks.draft` |
+| Secrets (`secrets`) | Private keys, tokens, connection strings with a password, passwords in URLs in the lines the PR adds: refused with file:line; "lean-agent: allow-secret" on a line is a false alarm. | `pr.checks.secrets` |
+| No force-push (`force`) | A forced push to a branch whose open PR has comments is refused: "push new commits instead". When the forge cannot be asked the push goes on. | `pr.checks.force` |
+| Severity (`severity`) | A review comment with a `severity` (blocker, major, minor, nit, question) starts with that word. | `review.prChecks.severity` |
+| Work item steps | After an Azure DevOps PR is created the thread is told to link it to its stored work items and set them to Reviewing (two asked requests). | none |
+
+`pr.checks: false` turns every create-side check off, `pr.checks: {size: false}` one of them; the same for `review.prChecks`. Unset means on. Not tested live: everything is covered by specs with canned `gh`, `az` and `curl` output; nothing was sent to a real Azure DevOps or GitHub.
+
 ## Fewer turns, cheaper roles, visible cost (1.0.27)
 
 A thread's own session is its biggest cost: every turn re-reads the whole context, and one orchestration step used to take about five turns (brief a worker, wait for the notification, read the diff, commit, report). 1.0.27 attacks that, and shows where the money goes.
@@ -1141,6 +1211,26 @@ A restart prompt is built by script and bounded. `handover.mode` in `config.json
 
 A thread reads its inbox file only at its next tool call, so a thread that asked a question and ended its turn never saw the answer. The mod now delivers by script (`hooks/deliver-to-thread.ts`): a message for a thread whose session is alive goes straight to it with `$.session.send` (`send`, `wake`, the answer to a question, approval results, the chaser). The engine runs `$.session.send` only in a session whose tool pool has the `SendMessage` tool, so the desk keeps that tool in its pool and its settings (`doctor fix` removes the old deny entry; a desk started before needs a restart); the desk model itself still cannot call it, only the mod's own marked send passes the guard. No setting or environment variable turns messaging on beyond that. If the send is refused for the session, the refusal is remembered for 10 minutes and the next route runs at once: a session shown as `blocked` + `idle` with no `waitingFor` (a thread that asked and ended its turn) is idle, so the wake resumes it with the message (stop the idle process, `claude --bg --resume`, conversation kept). A session on an open permission prompt cannot take a message; the reply says so and the inbox keeps it. With no live session the old inbox + wake runs. Whichever route carried it, the desk's timer checks the thread's `activity.json`: no prompt, tool call, worker call or received message within `threads.answerWaitSeconds` (default 45) for an idle or waiting thread means it did not react, and the mod stops that session and starts a fresh one whose first prompt carries the message (its notes are kept), with one notice and no question to the user. Not for FYI / status-check messages, an open permission prompt or a working session that asked nothing. `threads.escalate: false` turns the restart off (one notice asks instead). A thread that asked a question shows `waiting for your answer` (not `running`) until it does something or the answer arrives; after `threads.waitReminderMinutes` (default 15) the question comes back once as a notice.
 
+#### Message states, unread escalation, idle alert (1.0.31)
+
+Every message the desk sends a thread is line n of `threads/tN/inbox.jsonl` and is called `m<n>`. Its state is derived from the files:
+
+| state | meaning |
+|---|---|
+| `queued` | waits in the inbox; read at the thread's next tool call, or by the wake |
+| `delivered` | handed to the live session directly, not read back yet |
+| `consumed` | the thread's own mod handed it to the session |
+| `failed` | the automatic restart for it failed three times |
+
+- **`send`** answers with the id and state ("m3: queued, not read yet ..."). A thread reachable only through its inbox is told so: it is read at its next tool call; if it is idle or hung the mod wakes it by script after 45 s. **`lean_thread messages tN`** lists the last 8 messages with state and age (no model).
+- **Unread escalation by script.** Unread after `threads.answerWaitSeconds` (default 45) and the session is idle, waiting for its answer, blocked, or working with no tool call for `threads.stallMinutes` (default 10): the mod stops it and starts a fresh session whose first prompt carries the unread messages last, with one desk notice. A working session that still makes tool calls, a permission prompt and FYI / status-check messages are never restarted for it. `threads.escalate: false` makes the notice ask instead. After three failed restarts the message is `failed`.
+- **No double send.** An identical text still unread within 10 minutes answers "already queued as m3 (age)" and queues nothing.
+- **An answer clears waiting.** A message sent to a thread that waits for its answer ends the waiting state at once and shows as "answer queued, not read yet (4 min)" in `lean_thread list` and the pane row until consumed; the question drops out of "Needs you" and is not relayed again.
+- **Idle without a report.** `threads.idleAlertMinutes` (default 10; 0 = off): an open thread whose turn ended, that is not a keep-going thread and has reported nothing since its session started (or whose last word was a `[working]` report), raises one notice per idle spell and `lean_thread list` shows `idle 12 min, no report`. A thread that really waits (see below: `waitingOn()`) raises none.
+- **A restart keeps the corrections and distrusts old findings.** Whenever a fresh session replaces an old one, its first prompt starts with "user corrections not yet answered" (the last 5 messages newer than the thread's last report, each by id and state) and says the previous session's findings and area records are UNVERIFIED (`threads/tN/unverified.json`; signed review records are never edited). `lean_thread list` shows "unverified (session replaced at hh:mm)" until the thread's next `lean_report`.
+
+Not tested against real sessions: the specs drive the real code with a fake host and a fake clock.
+
 ### Threads that stop, keep going, and hold before they send
 
 **An open task at the end of a turn (1.0.31, structural: no phrase decides it).** A turn that ends while the thread's task list (TodoWrite / TaskCreate, as kept in `state.json`) still has an open item (pending or in progress) did not finish the work, whatever words it used ("I'm continuing with TODO 2 in the next step" stopped agents on 1.0.30). Unless the turn's last report is done, blocked or waiting, the last text is not a question, no request for you is pending and nothing the thread waits for is on record (below), the thread's own mod writes `continue-pending.json` and, after `threads.continueSeconds` (default 20) with no newer activity, the desk's timer sends ONE short prompt by script: "Continue: <title of the first open item>. Do it now; do not end your turn announcing the next step." It works with and without keep-going, once per turn end, never while a tool runs, never after your own message arrived meanwhile (any activity newer than the turn end cancels it). At most 6 such continues in a row without a tool call and without a changed task list; then ONE desk notice ("<tN> keeps ending its turns without doing the next item") and the stall state, never a loop. A thread whose items are all completed is not continued. `threads.autoContinue` (default true) switches the automatic continues off.
@@ -1158,6 +1248,42 @@ A thread reads its inbox file only at its next tool call, so a thread that asked
 **Grants hold before they send** (`hooks/sendhold.ts`). A covered request (standing grant, written instruction, own-PR default) is not sent when a prompt of yours is newer than the last time the desk delivered anything to that thread and is less than 30 minutes old: it is held and asked as usual ("a newer instruction from you may not have reached <tN>: ..."). A covered reply or comment (anything with text) waits `actions.holdSeconds` (default 30; 0 sends at once): the desk gets the exact text in its next context, the pane shows it with the countdown and Send now / Cancel buttons, `lean_thread action-cancel <id>` cancels (the request then stays pending for your own answer). Status-only writes are not held.
 
 **Parked means parked.** `park` clears the restart marker, the pending continue, the delivery watch and the usage-limit resume record; every automatic path checks `state === 'open'` at the moment it acts. Messages to a parked thread stay queued in its inbox until it is reopened.
+
+## Memory: remember this without bloating context (1.0.31)
+
+There is ONE private memory store (`~/.lean-agent/memory/items.json`, outside every repository; never `CLAUDE.md`, never a project's rule files) and a script that decides what of it a session sees, under a token budget you can read.
+
+**What an item is.** `id`, a scope, a kind, a text of at most 200 characters, when, who (`user-typed`, `desk`, `thread`, `script`), how often it was used, and optionally a trigger and an output path. Scopes: `desk`, `global` (always), `project:<name>`, `thread:<tN>`, `task:<id>`. Kinds: rule, fact, decision, preference, correction. Status: active, candidate (waits for you), retired.
+
+**Budgets** (all by script, tokens are characters / 4; the keys are in the settings table above):
+
+| what | default | config key |
+|---|---|---|
+| one item | 200 characters; longer is refused ("shorten it") | fixed |
+| items per scope | 12; over it the add is refused and names the 3 oldest least-used to retire | `memory.maxPerScope` |
+| the standing-orders list every session starts with | 400 tokens; the lowest-ranked lines are dropped ("+N more") | `memory.indexTokens` |
+| the "memory: ..." reminder line (at most 3 items) and a trigger line | 300 tokens | `memory.relevantTokens` |
+| automatic capture of typed words | on | `memory.autoCapture` |
+
+Measured (spec `memoryindex.test.ts`, 12 ordinary standing orders): the list is 201 tokens against the 400 budget; the old thread memory section carried the last 20 notes (about 500 tokens) on every request.
+
+**Who sees what.** The desk: its own items and the user's habits (`global`). A thread: its own, its project's, its tasks', and the habits; never another thread's or project's. Ranked thread > task > project > global, then newest. The list is a prompt section (it stays after a compaction) and part of every restart handover. Only rules, preferences and corrections are in it; facts and decisions are found: `lean_memory find <words>` on the desk, `lean_run {pull: "memory", section: "<words>"}` in a thread, or by a one-line "memory: ..." reminder when your prompt matches an item that is not already in the list (word overlap, no model; each item once per session).
+
+**What is captured automatically** (only from what YOU typed in the chat box or through Remote Control):
+- explicit words ("remember", "from now on", "going forward", "always", "never", "don't ... again"): stored at once, with one line "remembered: <text> (undo: lean_memory retire m3)". A question and a complaint are not captured.
+- softer corrections ("no, I said", "that's wrong", "I told you"): a candidate, shown once to confirm (`lean_memory confirm mN`) or drop.
+- a rule that would loosen a safety rule (permissions, approvals, pushes, sends): never stored on its own; only your own typed `/lean-agent:remember <text>` keeps it. A thread cannot add one.
+- the scope is guessed by script; when it cannot tell, the desk asks "for this thread, this project or always?". A text with a secret, an email address or a path in a home folder is refused (write `~/...`).
+
+**Rules with a trigger.** `trigger`: `after-commit`, `after-step`, `before-push`, `on-pr-open` or `keyword:<word>`, and an `output` path. The mod adds ONE line at that event ("memory trigger (after-commit): m4 keep the living plan doc up to date -> update ~/Downloads/plan.md"), at most one line per turn.
+
+**Standing rules for one thread.** `lean_thread rule tN <text>` (`on: false` turns one or all off; `trigger`, `output`) and `rules: [..]` at `new` store `thread:<tN>` rules: first in the thread's list at its first prompt and every restart; `lean_thread list` and the pane say "N rules"; `lean_memory edit` / `retire` change them. A follow-on thread inherits them only when you say so ("same rules as t3"). Your habit rules ("after a PR is opened, link the work item and set it to Reviewing") are `global`: every thread has them, without `CLAUDE.md`.
+
+**Hygiene.** `lean_memory list [scope]`, `retire`, `edit`, `prune` (suggests, never does it: unused facts, contradicted items, unconfirmed candidates, a closed thread's rules). `lean_doctor memory` prints per scope the items and tokens, what the last sessions really got, and an OVER BUDGET line; `lean_doctor check` has a `memory:` row.
+
+**Notes from before 1.0.31** (`memory/notes.jsonl`) are imported once as facts (a thread's note stays that thread's, a project's note that project's); a note with neither is no longer shown to every thread.
+
+Not tested live: the real `origin` of a typed prompt in the desktop app and in Remote Control, whether the app hands `/lean-agent:remember <text>` to the prompt hook as typed, and the pane's "N rules" text; token numbers are characters / 4.
 
 ## The store is the memory
 

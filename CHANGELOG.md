@@ -1,5 +1,70 @@
 # Changelog
 
+## 1.0.31
+
+### Added
+
+Reviews
+- Reviews of a PR use the PR's own range: the merge commit against its first parent (what the forge shows), not the old branch point. A PR of 8 files is no longer reviewed as 1151 files. On GitHub the PR's own file list wins when git has more files, and the reply says so.
+- `lean_review prepare` refuses a range that looks wrong (more than 20 times the files the PR's own commits touch, or more than `review.maxFiles`, default 150) until you confirm; the thread asks you and passes `confirm: true` only with your word.
+- `base` accepts any commit sha of the PR's history, and the words `parent1` and `merge-base`; the error when it cannot says which refs were fetched.
+- Reviews no longer report on files or lines that are not in the PR. A finding must name a changed line: findings with no file or line, about a file the PR does not touch, or about something missing without a changed line, are dropped and counted, and the reply names the ranges that would have been accepted. Context lines around a change are 0 by default (they were 3); `review.contextLines` brings them back.
+- The reviewers get the changed hunks with line numbers in their brief and are told to report only on those lines. If the PR diff cannot be read, `lean_review merge` and `record` refuse instead of recording an unfiltered review.
+- A PR too large for one review is split into areas from its changed files only, with "N changed files, M changed lines", and the thread shows you those numbers first. The summary says "reviewed N changed files (M lines); K findings dropped: outside the change", and names the lean-agent version the thread ran; a review thread older than 1.0.29 is told to restart first.
+- A review never changes the PR's checkout: pull, merge, rebase, reset, commit, checkout and the like are refused in a review thread, its workers and its reviewers.
+- The reviewer's answer is saved to the thread's scratch folder when it arrives, so a restart does not lose it; recording an area again says it replaces the earlier record.
+- A review that posts comments now sets "Waiting for author": the SAME request carries one last item, on Azure DevOps the vote "Waiting for author", on GitHub a review with "request changes" and a one-line summary. You press Approve once; the comments go first, then the vote, and if every comment fails the vote is not sent. The vote is always asked: the own-PR default and standing approvals never cover it. A batch of PR comments for one PR may hold 60 comments plus this one vote; every other mix stays at 10. After the author pushed and every thread is fixed or closed, the review thread proposes ONE request: reset the vote or approve (asked).
+- Review comments can name their severity (blocker, major, minor, nit, question); the text then starts with "blocking:", "major:", "minor:", "nit:" or "question:", added by the mod when it is missing.
+
+Pull requests
+- New request kind `gh-pr-review` (comment, request-changes or approve, with a body) posts a GitHub review through `gh api`, with the head commit read when it is sent. An approval of a PR you wrote is refused, and so is any approval of the PR a thread opened for you (also on Azure DevOps): the mod never approves your own work and never completes a PR.
+- PR guidelines by script. For the repo of a thread, the mod reads the PR template, CONTRIBUTING, CODEOWNERS and the title style of the last merged PRs, and keeps a short record per project. `lean_run {pr-guide: true}` shows it; `{pr-guide: {title, body}}` checks a PR text. The PR skill builds title and description from the template's headings, and the desk's push refuses a PR text that does not follow them, naming the exact missing parts. The approval is kept.
+- More PR checks, each with a switch: a PR over 400 changed lines or 15 files gets a "large PR: consider splitting" note (never a refusal); a diff that adds a private key, a token or a password in a URL is refused with file:line (false alarm: "lean-agent: allow-secret" on the line); a PR whose commit has no green `lean_run` on record opens as a DRAFT; a force-push to a branch whose open PR has comments is refused; after an Azure DevOps PR is created the thread links its work items and moves them to Reviewing (each asked). Switches: `pr.checks: false` or `{guide, size, draft, secrets, force: false}`; `review.prChecks: false` or `{severity, size: false}` for the review side.
+
+Approvals
+- Requests expire after 24 hours (was 2 h): `actions.pendingHours` (default 24).
+- The desk can withdraw a request that still waits with `lean_thread withdraw-action <id>` and your reason, and typing "withdraw <request id> ..." in the desk does it too. The thread is told and an Approve can no longer send it.
+- A request never leaves unsent without a word. It leaves the pending list only by executed, denied, expired or withdrawn; each exit is written to the request with its reason and time, and the thread and the desk get one line. A closed thread's open requests are withdrawn the same way.
+- A 24-hour approval says where it came from (the pane button, the dialog's option, or your typed words). At startup and in the action list the mod checks each one against your signed answer; one that rests on no press of yours is revoked, marked "recorded without your choice", and shows a FIX row in the pane.
+- "Answer not recorded" now says why (no such request, already resolved, not pending, id or check code mismatch, which part of the text differs, options differ, not exactly one of the options). The request stays pending.
+
+Delivery and waiting
+- Every message to a thread has a state. `lean_thread send` answers with the message id and where it stands ("m3: queued, not read yet", "delivered", later "consumed"); `lean_thread messages tN` lists the last messages with state and age, without a model. A message nobody reads no longer sits for ever: after `threads.answerWaitSeconds` the mod wakes or restarts the thread by script with the text as its last instruction, and the desk gets one line.
+- The same text is never sent twice: an identical, still-unread text within 10 minutes answers "already queued as m3 (age)" and queues nothing.
+- An answer clears "waiting for your answer": `lean_thread list` and the pane row say "answer queued, not read yet (4 min)" until the thread reads it, and the question drops out of "Needs you".
+- Idle with no report is no longer silent: a thread idle for `threads.idleAlertMinutes` (default 10, 0 = off) without a report raises one desk notice and a flag in `lean_thread list`. A thread that really waits (push result, an action, your answer, CI) raises none.
+- A restart keeps the corrections in flight and distrusts the old findings: the new session's first prompt starts with the user corrections not yet answered and says the old session's findings are UNVERIFIED until it reports.
+- Agents no longer stop in the middle of a task list. A thread that ends its turn while an item of its task list is open, or announces a next step ("I'm continuing with TODO 2", "moving on to", "in the next step"), is told to continue it after 20 seconds, never while it works or after you wrote to it; after 6 tries without progress the desk tells you once.
+- Keep going is on by default for work threads (not review threads): `threads.keepGoing`; `lean_thread keep-going tN off` still turns it off for one thread.
+- A thread that is really waiting (for the push result, an approved action, your answer, CI) is no longer pushed on or flagged as stuck, and `lean_thread list` says what it waits for. The desk shows what the mod did: "continued N x", and one line per continue in the thread folder.
+
+Memory
+- "Remember this" is one store, and it no longer bloats the context. One private file of lean-agent (never CLAUDE.md); every item has a scope (desk, always, project, thread, task), a kind and at most 200 characters; secrets, tokens, emails and home paths are never stored; near-duplicates are merged; each scope holds at most 12 items.
+- Every session starts knowing your standing orders: a short list, most specific first, cut to 400 tokens; facts and decisions are found by words or come as a one-line "memory: ..." reminder when your prompt matches (at most 3, 300 tokens).
+- Typed "remember", "from now on", "always", "never" is remembered at once; softer corrections are kept as a candidate for you to confirm or drop. A rule that would loosen a safety rule is stored only from your own typed `/lean-agent:remember <text>`.
+- New `/lean-agent:remember <text>`, `lean_memory` on the desk (add, list, get, find, retire, edit, confirm, prune) and an extended `lean_remember` for threads (scope, kind, trigger, output).
+- A rule can have a trigger and an output path ("after every commit, update ~/Downloads/plan.md"): the mod reminds the thread with one line at that moment. Habit rules said once on the desk reach every thread.
+- Standing rules for ONE thread (`lean_thread rule tN <text>`, or `rules: [..]` at `new`): they survive restarts, show as "N rules" in `list` and in the pane, and never reach another thread unless you say so.
+- `lean_doctor memory` shows per scope the items and tokens and what the last sessions got; `lean_doctor check` has a `memory:` row.
+
+Settings (lean_config)
+- Settings can be changed from the chat: `/lean-agent:config` lists every setting by group, `<key>` shows one, `<key> <value>` sets it, `reset <key>` restores the default, `validate` checks the file. Every change is checked, written safely, keeps unknown keys and your file's style, never stores a secret, and says when it applies.
+- Settings that loosen a safety rule change only when you typed the name yourself or press Approve on the question for exactly that change; a thread or worker can never change settings. A typo gets "did you mean ...?", and `lean_doctor check` has a settings row.
+- The README has a "Settings (lean_config)" table of all 97 settings, generated from the one list the code uses; a spec fails when the code reads a setting that is not in it.
+
+Pane
+- The inbox is on each thread's card, folded by default: a chip with the unread count ("3 new", amber when the thread also needs you) and "Show messages" / "Hide messages". The bottom "Inbox" lists only senders without a card; "N unread" and "ack all" are on the Threads header.
+
+Feedback export
+- You choose where the export goes: `feedback.destination` is `"local"` (default), `"folder"`, `"github"` or `"folder+github"`, and `feedback.folder` a path like `"~/Downloads"`. To a folder the mod copies the anonymised file by script, never over an existing file.
+- To GitHub, never automatic: one Approve card "public issue on the lean-agent repo" with the exact title and body; only your Approve runs `gh issue create`. Never covered by standing approvals. Not tested against a real GitHub.
+
+### Changed
+- A thread's restart no longer carries "everything it remembered": your rules come first, the older notes were imported once as facts and are found with `lean_run {pull: "memory"}`.
+- Messages that told you to "raise X in config.json" now name `lean_config set <key> <value>`.
+- A plain Approve is only ever a plain Approve: an answer counts as an option only when it is exactly that option's label, and only the exact "Approve, and allow this kind ... for 24 h" label makes a 24-hour approval.
+- The pane's 24 h button sends the request it is on and says so; if the request was already approved, it is sent once and the pane says no 24 h approval was made.
+
 ## 1.0.30
 
 ### Changed

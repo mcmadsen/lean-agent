@@ -6,7 +6,7 @@
 // spellings: the writer keeps the file's style; `flat: true` marks the keys whose reader also accepts the flat spelling.
 
 export type KeyType = 'boolean' | 'number' | 'enum' | 'string' | 'path' | 'list' | 'json'
-export type Group = 'desk' | 'threads' | 'workers' | 'review' | 'budget' | 'pane' | 'feedback' | 'safety' | 'other'
+export type Group = 'desk' | 'threads' | 'workers' | 'review' | 'budget' | 'pane' | 'feedback' | 'memory' | 'safety' | 'other'
 export type Applies = 'now' | 'next-session' | 'desk-restart'
 export type Entry = {
   key: string // dotted path
@@ -30,7 +30,7 @@ export type Entry = {
 
 export const MODELS = ['haiku', 'sonnet', 'opus'] as const
 export const EFFORTS = ['low', 'medium', 'high'] as const
-export const GROUPS: readonly Group[] = ['desk', 'threads', 'workers', 'review', 'budget', 'pane', 'feedback', 'safety', 'other']
+export const GROUPS: readonly Group[] = ['desk', 'threads', 'workers', 'review', 'budget', 'pane', 'feedback', 'memory', 'safety', 'other']
 export const APPLIES_TEXT: Record<Applies, string> = { now: 'takes effect now', 'next-session': 'takes effect from the next session (threads already running keep the old value)', 'desk-restart': 'takes effect after the desk restarts' }
 
 const n = (min: number, extra: Partial<Entry> = {}): Partial<Entry> => ({ min, ...extra })
@@ -63,6 +63,8 @@ export const REGISTRY: readonly Entry[] = [
   mk('threads.stopGraceMinutes', 'number', 3, 'threads', 'now', 'autorestart.ts', 'Minutes after the stop record before a still-working thread is restarted anyway.', n(0)),
   mk('threads.autoContinue', 'boolean', true, 'threads', 'now', 'continuepending.ts', 'Continue a thread that ends its turn with "next: ..." (off: no automatic continue).'),
   mk('threads.continueSeconds', 'number', 20, 'threads', 'now', 'continuepending.ts', 'Seconds a "next: ..." turn waits before the continue message is sent.', n(1)),
+  mk('threads.keepGoing', 'boolean', true, 'threads', 'now', 'continuepending.ts', 'Keep going is the standing order of every work thread (review threads excluded); a thread\'s own keep-going on / off wins.'),
+  mk('threads.idleAlertMinutes', 'number', 10, 'threads', 'now', ['threadstate.ts', 'stall.ts'], 'Minutes a thread may be idle without a report before the desk gets one notice (0 = off).', n(0)),
   mk('threads.escalate', 'boolean', true, 'threads', 'now', 'deliver-to-thread.ts', 'Restart a thread that ignored a message from the desk (off: ask you first).'),
   mk('threads.answerWaitSeconds', 'number', 45, 'threads', 'now', 'deliver-to-thread.ts', 'Seconds a thread has to react to a message before it counts as ignored.', n(1)),
   mk('threads.waitReminderMinutes', 'number', 15, 'threads', 'now', 'deliver-to-thread.ts', 'Minutes an unanswered thread question waits before it comes back once.', n(1)),
@@ -104,6 +106,9 @@ export const REGISTRY: readonly Entry[] = [
   mk('review.exclude', 'list', [], 'review', 'now', ['reviewtool.ts', 'reviewexclude.ts'], 'Globs of files left out of a review (generated files are always left out).', S),
   mk('review.lessonTokens', 'number', 3200, 'review', 'now', 'reviewlessons.ts', 'Tokens of review lessons a new review is given.', n(1, { int: true })),
   mk('review.lessonMax', 'number', 1500, 'review', 'now', 'reviewlessons.ts', 'Most review lessons kept per project.', n(1, { int: true })),
+  mk('review.contextLines', 'number', 0, 'review', 'now', 'reviewtool.ts', 'Lines of context around a changed hunk that still count as part of the change (0 to 20).', { min: 0, max: 20, int: true }),
+  mk('review.maxFiles', 'number', 150, 'review', 'now', 'reviewtool.ts', 'Most files a review range may hold before prepare asks you to confirm it (a wrong range is the usual cause).', n(1, { int: true, ...S })),
+  mk('review.prChecks', 'json', null, 'review', 'now', ['reviewtool.ts', 'deskactions.ts', 'prvote.ts'], 'Review-side PR checks: false turns all off, or {"severity": false, "size": false} single ones.', { shape: 'object' }),
   mk('rulesPr.minSessions', 'number', 3, 'review', 'now', 'rulespr.ts', 'Sessions a learned rule must have loaded in before it is proposed upstream.', n(1, { int: true })),
   mk('rulesPr.minDays', 'number', 7, 'review', 'now', 'rulespr.ts', 'Days a learned rule must have been in use before it is proposed upstream.', n(1, { int: true })),
   mk('rulesPr.minGaps', 'number', 2, 'review', 'now', 'rulespr.ts', 'Reports of a missing piece of context before it is proposed as a rule.', n(1, { int: true })),
@@ -124,7 +129,14 @@ export const REGISTRY: readonly Entry[] = [
   // ---- feedback ----
   mk('feedback.destination', 'enum', 'local', 'feedback', 'now', 'feedbackdest.ts', 'Where the feedback export goes: local, folder, github or folder+github.', { values: ['local', 'folder', 'github', 'folder+github'], flat: true }),
   mk('feedback.folder', 'path', null, 'feedback', 'now', 'feedbackdest.ts', 'Folder the feedback export is copied to (for folder and folder+github), e.g. ~/Downloads.', { flat: true }),
+  // ---- memory (memory.ts) ----
+  mk('memory.maxPerScope', 'number', 12, 'memory', 'now', 'memory.ts', 'Items one memory scope (desk, always, a project, a thread, a task) may hold; an add over it asks you to retire one.', n(1, { int: true })),
+  mk('memory.indexTokens', 'number', 400, 'memory', 'now', 'memory.ts', 'Token budget of the standing-orders list every session starts with (the lowest-ranked lines are dropped).', n(50, { int: true })),
+  mk('memory.relevantTokens', 'number', 300, 'memory', 'now', 'memory.ts', 'Token budget of the one memory reminder line (at most 3 items) a session gets when it matters.', n(50, { int: true })),
+  mk('memory.autoCapture', 'boolean', true, 'memory', 'now', 'memory.ts', 'Store typed "remember / always / never / from now on" and repeated corrections by script (off: only /lean-agent:remember and the tools).'),
   // ---- safety ----
+  mk('actions.pendingHours', 'number', 24, 'safety', 'now', 'deskactions.ts', 'Hours a request for a remote write waits for your decision before it expires (0.05 to 720).', { min: 0.05, max: 720, flat: true, ...S }),
+  mk('pr.checks', 'json', null, 'safety', 'now', ['prchecks.ts', 'forcepr.ts', 'prvote.ts'], 'PR checks when a thread opens or pushes a PR: false turns all off, or {"guide": false, "size": false, "draft": false, "secrets": false, "force": false} single ones.', { shape: 'object', ...S }),
   mk('actions.holdSeconds', 'number', 30, 'safety', 'now', 'sendhold.ts', 'Seconds a covered reply or comment is held before it is sent (0 = at once).', n(0, S)),
   mk('actions.ownPrDefault', 'boolean', true, 'safety', 'now', 'ownpr.ts', 'A thread owns the pull request it opens: its replies go out without a question.', { flat: true, ...S }),
   mk('actions.ownPrMaxPerDay', 'number', 20, 'safety', 'now', 'ownpr.ts', 'Pull requests a thread may take as its own per day.', { min: 1, max: 1000, int: true, flat: true, ...S }),
@@ -229,6 +241,7 @@ export function checkValue(e: Entry, v: unknown): Checked {
       return { ok: true, value: v.map(x => x.trim()) }
     }
     case 'json': {
+      if (v === false && (e.key === 'pr.checks' || e.key === 'review.prChecks')) return { ok: true, value: v } // false = every check of that side off
       if (e.shape === 'array' ? !Array.isArray(v) : !isObj(v)) return bad(`must be a JSON ${e.shape ?? 'value'}`)
       if (SECRET.test(JSON.stringify(v))) return bad('looks like a secret: lean_config never stores secrets')
       if (e.key === 'workerCaps' && !Object.values(v as Cfg).every(x => typeof x === 'number' && x > 0)) return bad('must map worker names to a USD number above 0')

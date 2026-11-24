@@ -69,12 +69,12 @@ async function preparedLevel(h: Host, project: string, sha: string): Promise<Lev
 
 // The two arguments this file adds to the lean_review tool's inputSchema (delivery.ts spreads them into its properties)
 export const REVIEW_EXTRA_PROPS = {
-  level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (default: one cheap pass, never green) or full (the strict review the push gate needs; only before "ready to push")' },
-  ref: { type: 'string', description: 'prepare: review someone else\'s work (PR number or URL, branch or sha), read-only; record it with mode "external"' },
-  mode: { type: 'string', enum: ['external'], description: 'record: the review of a ref (never green, never for the push gate)' },
-  worktree: { type: 'string', description: 'prepare, record: absolute path of a registered worktree to review (default: this thread\'s own)' },
-  confirm: { type: 'boolean', description: 'prepare: go on although the range looks wrong (far more files than the PR\'s own commits touch); only with the user\'s word' },
-  scope: { type: 'string', description: 'prepare, record: one area (area-1 ...) of a PR too large for one review, as the prepare text lists them; an area record is never green' },
+  level: { type: 'string', enum: ['light', 'full'], description: 'prepare, record: light (default, one cheap pass, never green) or full (the push gate\'s strict review, only before "ready to push")' },
+  ref: { type: 'string', description: 'prepare: review another\'s work (PR number or URL, branch, sha), read-only; record with mode "external"' },
+  mode: { type: 'string', enum: ['external'], description: 'record: the review of a ref (never green)' },
+  worktree: { type: 'string', description: 'prepare, record: absolute path of a registered worktree (default: your own)' },
+  confirm: { type: 'boolean', description: 'prepare: go on although the range looks wrong; only with the user\'s word' },
+  scope: { type: 'string', description: 'prepare, record: one area (area-1 ...) of a PR too large for one review; never green' },
 }
 
 // The checkout a review reads: the calling thread's own registered worktree of this project (its HEAD is the work under review), else the

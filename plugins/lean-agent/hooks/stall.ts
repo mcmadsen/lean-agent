@@ -13,6 +13,7 @@ import type { DeskRec } from './delivery'
 import { setNotice } from './notices'
 import { idleNoReport, lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
 import { haltedSince } from './continuepending'
+import { waitingOn } from './waitevent'
 import { kTokens, readContext, threadLimits } from './threadcontext'
 import type { AgentRow, Out, Thread } from './threads'
 
@@ -73,7 +74,9 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     if (truth && halted) truth = { ...truth, word: 'stalled', stalledMs: Math.max(0, now - halted) }
     // idle with no report (1.0.31; field: three threads sat "idle · no report yet" and only a full listing found them): ONE notice per idle spell (keyed by the last activity)
     const lastRec = t ? deskRecs.filter(r => r && r.from === id && (r.kind === 'report' || r.kind === 'ask')).pop() : undefined
-    const idle = t && truth ? idleNoReport({ word: truth.word, keepGoing: t.keepGoing === true, lastAt: truth.lastAt, now, minutes: cfg.idleAlertMinutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec }) : null
+    const idle0 = t && truth ? idleNoReport({ word: truth.word, keepGoing: t.keepGoing === true, lastAt: truth.lastAt, now, minutes: cfg.idleAlertMinutes, since: Math.max(Number(t.lastWake) || 0, Number(t.created) || 0), lastRec }) : null
+    // a thread that really waits (for the push result, an action, your answer, CI: waitevent.ts) is not idle without a report: no alert
+    const idle = idle0 && (await waitingOn(h, home, id)) ? null : idle0
     if (idle && t) {
       if (idles[id] !== idle.since) {
         idles[id] = idle.since

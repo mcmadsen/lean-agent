@@ -332,6 +332,19 @@ test('idle but it reported done or blocked, or it is a keep-going thread, or the
   after(() => 0)
 })
 
+test('a thread that really waits (ready to push, no push yet) raises no idle alert; the same thread without that wait does', { timeoutMs: 20_000 }, async () => {
+  const ready = { ts: T0 - 12 * 60_000, from: 't1', kind: 'report', state: 'working', text: 'ready to push 1a2b3c4 (feature/x, Fix the thing)' }
+  const a = setup({ row: idleRow })
+  activity(a.h, T0 - 12 * 60_000)
+  report(a.h, ready)
+  expect(await stallTick(a.h.host, { agents: a.deps.agents, restart: a.deps.restart as any })).toEqual([]) // waitevent.ts: waiting for push
+  const b = setup({ row: idleRow })
+  activity(b.h, T0 - 12 * 60_000)
+  report(b.h, { ...ready, text: 'half way through the parser' })
+  expect(await stallTick(b.h.host, { agents: b.deps.agents, restart: b.deps.restart as any })).toHaveLength(1)
+  after(() => 0)
+})
+
 test('idleAlertMinutes is configurable; `lean_thread list` flags the idle thread with no report, the stall features stay as they were', { timeoutMs: 20_000 }, async () => {
   const { h, deps } = setup({ row: idleRow, config: { threads: { idleAlertMinutes: 3 } } })
   activity(h, T0 - 4 * 60_000)
