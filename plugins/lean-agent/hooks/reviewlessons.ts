@@ -16,7 +16,7 @@ import { countsLine, lastFetchCounts } from './prhost'
 
 export type Family = 'review-checklist' | 'shared-helpers'
 export const FAMILIES: Family[] = ['review-checklist', 'shared-helpers']
-export type Lesson = { id: number; family: Family; topic: string; text: string; paths: string[]; keywords: string[]; source: string; added: string; batch?: string; dropped?: string; droppedWhy?: string }
+export type Lesson = { id: number; family: Family; topic: string; text: string; paths: string[]; keywords: string[]; source: string; added: string; broad?: boolean; batch?: string; dropped?: string; droppedWhy?: string }
 
 export const DEFAULT_TOKENS = 3200 // about 4 cards of 800 tokens, what 0.45 offered a review (config.json review.lessonTokens)
 export const TOPIC_TOKENS = 800
@@ -133,10 +133,13 @@ const nextId = (all: Lesson[]) => all.reduce((m, l) => Math.max(m, l.id), 0) + 1
 
 type Meta = { lastImport?: number; imported?: number; from?: string[] }
 type Op = { kind: 'add' | 'update' | 'rm'; id: number; old?: Lesson }
-export async function lessonCap(h: Host): Promise<{ tokens: number; max: number }> {
+export const FALLBACK_PER_TOPIC = 2 // config.json review.lessonsFallback (0 = off): the always-on general slice, per topic
+export const FALLBACK_TOTAL = 6
+export async function lessonCap(h: Host): Promise<{ tokens: number; max: number; fallback: number }> {
   const r = asObj(asObj(await readConfig(h, await homeDir(h)).catch(() => ({}))).review)
   const n = (v: unknown, d: number) => (Number.isInteger(v) && (v as number) > 0 ? (v as number) : d)
-  return { tokens: n(r.lessonTokens, DEFAULT_TOKENS), max: n(r.lessonMax, MAX_LESSONS) }
+  const fb = r.lessonsFallback
+  return { tokens: n(r.lessonTokens, DEFAULT_TOKENS), max: n(r.lessonMax, MAX_LESSONS), fallback: Number.isInteger(fb) && (fb as number) >= 0 ? Math.min(fb as number, FALLBACK_TOTAL) : FALLBACK_PER_TOPIC }
 }
 
 async function logBatch(h: Host, home: string, project: string, ops: Op[], ts: number) {
@@ -145,9 +148,90 @@ async function logBatch(h: Host, home: string, project: string, ops: Op[], ts: n
   await atomicWrite(h, batchFile(home, project), JSON.stringify([...(Array.isArray(d) ? d : []), { ts, ops }].slice(-30), null, 1) + '\n')
 }
 
+// ---- path validation: a lesson's `paths` must be path GLOBS that the repository's own files can match ---------------------------------
+// pathsIn() reads paths out of the line's words, so an identifier ("vaultId/groupId") or a phrase ("fail-open/fail-closed") used to land in
+// `paths` and never matched a changed file. At learn time (and in lessons-check / lessons-repair) every path is checked: syntax first, then
+// against `git ls-files` (case-insensitive); the rest is DERIVED by script from the finding's file or from the words matched against file names.
+const GLOB_EXAMPLE = 'e.g. src/auth/** or src/lib/dates.ts'
+export function globSyntax(p: string): string {
+  if (/\s/.test(p)) return `has a space: a phrase is not a path glob (${GLOB_EXAMPLE})`
+  if (!/^[A-Za-z0-9._\-*/@]+$/.test(p)) return `has characters other than letters, digits and . _ - * / (${GLOB_EXAMPLE})`
+  const segs = p.split('/')
+  if (segs.some((s, i) => (!s && i < segs.length - 1) || s === '..')) return `has an empty or .. segment (${GLOB_EXAMPLE})`
+  if (!/[/*]/.test(p) && !/\.[A-Za-z0-9]{1,8}$/.test(p)) return `has no / , * or file extension: a bare word is an identifier, not a path (${GLOB_EXAMPLE})`
+  const g = p.includes('*') ? globProblem(p) : ''
+  return g ? `is not a valid glob: ${g}` : ''
+}
+const globLike = (p: string) => p.includes('*') || EXT.test(p) || /\.[A-Za-z0-9]{1,8}$/.test(p)
+export async function repoFiles(h: Host, repo: string): Promise<string[] | null> {
+  if (!repo.startsWith('/')) return null
+  const out = await git(h, repo, 'ls-files')
+  return out === null ? null : out.split('\n').filter(Boolean)
+}
+const lowFiles = (files: string[]) => files.map(f => f.toLowerCase())
+// the paths worth keeping, and what was wrong with the others; files null = syntax only (no repo to look at)
+export function checkPaths(paths: string[], files: string[] | null): { keep: string[]; notes: string[] } {
+  const keep: string[] = []
+  const notes: string[] = []
+  const low = files ? lowFiles(files) : null
+  for (const raw of paths) {
+    const p = clean(String(raw))
+    const bad = globSyntax(p)
+    if (bad) { notes.push(`path "${p.slice(0, 60)}" rejected: ${bad}`); continue }
+    if (low && !pathHit(p.toLowerCase(), low)) {
+      if (!globLike(p)) { notes.push(`path "${p}" rejected: matches no file in the repo and is no glob (an identifier or phrase?); ${GLOB_EXAMPLE}`); continue }
+      notes.push(`warning: path "${p}" matches no file in the repo`)
+    }
+    if (!keep.includes(p)) keep.push(p)
+  }
+  return { keep, notes }
+}
+// derived globs: the finding's own file, else the top 3 directories whose file names the lesson's words match
+export function derivePaths(text: string, files: string[], file = ''): { paths: string[]; how: string } {
+  const low = lowFiles(files)
+  const f = clean(file).toLowerCase()
+  if (f) {
+    const i = low.indexOf(f)
+    if (i >= 0) return { paths: [files[i]!], how: "the finding's own file" }
+    const d = dirName(f)
+    if (d && low.some(x => x.startsWith(d + '/'))) return { paths: [`${files[low.findIndex(x => x.startsWith(d + '/'))]!.slice(0, d.length)}/**`], how: "the folder of the finding's file" }
+  }
+  const words = [...new Set(wordsOf(text).filter(w => w.length >= 4))].slice(0, 20)
+  const byDir = new Map<string, number>()
+  low.forEach((p, i) => {
+    const segs = files[i]!.split('/')
+    if (segs.length < 2) return
+    const dir = segs.slice(0, Math.min(2, segs.length - 1)).join('/')
+    const n = words.filter(w => p.includes(w)).length
+    if (n) byDir.set(dir, (byDir.get(dir) ?? 0) + n)
+  })
+  const top = [...byDir].sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0])).slice(0, 3)
+  return { paths: top.map(([d]) => `${d}/**`), how: top.length ? `the words of the line matched file names in ${top.map(([d]) => d).join(', ')}` : '' }
+}
+export type PathExtra = { file?: string; paths?: string[]; broad?: boolean }
+// l.paths = the valid ones, else derived ones; ok false = no valid path could be found and the learner did not say `broad`
+export function settlePaths(l: Lesson, files: string[] | null, ex: PathExtra = {}): { ok: boolean; notes: string[] } {
+  const c = checkPaths([...(ex.paths ?? []), ...l.paths], files)
+  const notes = c.notes.map(n => `#${l.id}: ${n}`)
+  let paths = c.keep
+  if (!paths.length && files) {
+    const d = derivePaths(l.text, files, ex.file)
+    paths = d.paths
+    if (paths.length) notes.push(`#${l.id}: paths derived from ${d.how}: ${paths.join(', ')}`)
+  }
+  if (!paths.length) {
+    if (ex.broad === true) { l.paths = []; l.broad = true; notes.push(`#${l.id}: stored with paths [] and broad: true (offered by its words and in the general slice)`); return { ok: true, notes } }
+    if (!files) { l.paths = []; return { ok: true, notes: [...notes, `#${l.id}: no path (the repo was not read)`] } }
+    return { ok: false, notes: [...notes, `NOT added: no valid path for "${l.text.slice(0, 70)}": give {text, file: "src/x.ts"} (the file of the finding) or {text, paths: ["src/x/**"]}, or {text, broad: true} for a line that holds for every change`] }
+  }
+  l.paths = paths.slice(0, 6)
+  return { ok: true, notes }
+}
+
 // ---- learning: add (near-duplicates skipped, a helper's name updates its line), replace, remove, undo, list -----------------
-export type LearnIn = { checklist?: unknown[]; helpers?: unknown[]; replace?: unknown[]; source?: string }
-export type LearnOut = { added: string[]; updated: string[]; skipped: string[]; refused: string[] }
+// `files`: the repo's file list (git ls-files) the paths are checked against; null = no repo, syntax only; undefined = not checked at all
+export type LearnIn = { checklist?: unknown[]; helpers?: unknown[]; replace?: unknown[]; source?: string; files?: string[] | null }
+export type LearnOut = { added: string[]; updated: string[]; skipped: string[]; refused: string[]; unpathed: string[]; notes: string[] }
 const helperLine = (h: any): string => (typeof h === 'string' ? lineOf(h) : h && typeof h === 'object' && String(h.name ?? '').trim() ? lineOf(`${String(h.name).trim()} (${String(h.where ?? '?').trim() || '?'}): ${String(h.what ?? '').trim()}`.replace(/: $/, '')) : '')
 export async function learnLessons(h: Host, project: string, inp: LearnIn): Promise<LearnOut> {
   if (!slugOk(project)) throw new Error('review lessons need a project name')
@@ -156,13 +240,19 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
   const cap = await lessonCap(h)
   return withFolderLock(h, lockOf(home, project), async () => {
     const all = await readLessons(h, project)
-    const out: LearnOut = { added: [], updated: [], skipped: [], refused: [] }
+    const out: LearnOut = { added: [], updated: [], skipped: [], refused: [], unpathed: [], notes: [] }
     const ops: Op[] = []
     const source = (inp.source || 'review-learn').slice(0, 60)
     const batch = `${day(now)}-${now}`
     const upd = (l: Lesson, text: string) => {
-      ops.push({ kind: 'update', id: l.id, old: { ...l } })
+      const old = { ...l }
+      ops.push({ kind: 'update', id: l.id, old })
       Object.assign(l, makeLesson(l.id, l.family, text, { source: l.source, added: l.added, batch: l.batch }))
+      if (inp.files !== undefined && l.family === 'review-checklist') {
+        const s = settlePaths(l, inp.files, { broad: old.broad })
+        out.notes.push(...s.notes)
+        if (!s.ok) { l.paths = old.paths; if (old.broad) l.broad = true } // (a corrected line that finds no path keeps the old ones)
+      }
     }
     for (const r of Array.isArray(inp.replace) ? inp.replace : []) {
       const o = lineOf(String(asObj(r).old ?? ''))
@@ -171,20 +261,27 @@ export async function learnLessons(h: Host, project: string, inp: LearnIn): Prom
       const hit = live(all).map(l => ({ l, s: jaccard(wset(l.text), wset(o)) })).filter(x => x.s >= 0.7).sort((a, b) => b.s - a.s || a.l.id - b.l.id)[0]
       if (hit) { upd(hit.l, n); out.updated.push(`corrected #${hit.l.id}: ${n}`) } else out.skipped.push(`replace: no line like "${o.slice(0, 60)}"`)
     }
-    const add = (family: Family, text: string) => {
+    const add = (family: Family, text: string, ex: PathExtra = {}) => {
       if (!text) return
       if (live(all).length >= cap.max) { out.refused.push(text); return }
       const fresh = makeLesson(nextId(all), family, text, { source, added: day(now), batch })
+      if (inp.files !== undefined && family === 'review-checklist') {
+        const s = settlePaths(fresh, inp.files, ex)
+        out.notes.push(...s.notes.filter(n => s.ok || !n.includes('NOT added')))
+        if (!s.ok) { out.unpathed.push(s.notes.find(n => n.includes('NOT added')) ?? text); return }
+      }
       all.push(fresh)
       ops.push({ kind: 'add', id: fresh.id })
       out.added.push(`#${fresh.id} ${family}: ${text}`)
     }
     for (const c of Array.isArray(inp.checklist) ? inp.checklist : []) {
-      const t = lineOf(String(c ?? ''))
+      const o = asObj(c)
+      const t = lineOf(String(typeof c === 'string' ? c : o.text ?? ''))
       if (!t) continue
+      const ex: PathExtra = typeof c === 'string' ? {} : { file: typeof o.file === 'string' ? o.file : undefined, paths: Array.isArray(o.paths) ? o.paths.filter((x: unknown): x is string => typeof x === 'string') : undefined, broad: o.broad === true }
       if (live(all).some(l => similar(l.text, t))) out.skipped.push(`already there: ${t.slice(0, 80)}`)
       else if (removedByUser(all).some(l => similar(l.text, t))) out.skipped.push(`removed earlier, not added again: ${t.slice(0, 80)}`)
-      else add('review-checklist', t)
+      else add('review-checklist', t, ex)
     }
     for (const hv of Array.isArray(inp.helpers) ? inp.helpers : []) {
       const t = helperLine(hv)
@@ -321,7 +418,7 @@ export async function verifyLessons(h: Host, project: string, repo: string, appl
 }
 
 // ---- selection --------------------------------------------------------------------------------------------------------------------
-export type Pick = { id: number; family: Family; topic: string; why: string; score: number }
+export type Pick = { id: number; family: Family; topic: string; why: string; score: number; general?: boolean }
 export type LessonsOut = { text: string; picked: Pick[]; tokens: number; total: number }
 const dirName = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')
 // a folder's neighbours: the same folder, or its parent / child one level away (never the repo root against a deep folder)
@@ -351,9 +448,9 @@ function newCode(diff: string): string {
   return (keep.length ? keep.map(l => (l[0] === '+' ? l.slice(1) : l)).join('\n') : d)
 }
 
-const section = (title: string, rows: Lesson[]) => (rows.length ? [`### ${title}`, ...rows.map(l => `- ${l.text}`)] : [])
+const section = (title: string, rows: Lesson[], general = new Set<number>()) => (rows.length ? [`### ${title}`, ...rows.map(l => `- ${l.text}${general.has(l.id) ? ' (general)' : ''}`)] : [])
 
-export async function reviewLessons(h: Host, project: string, changedPaths: string[], diffText: string, opts: number | { budget?: number; goal?: string; log?: boolean } = {}): Promise<LessonsOut> {
+export async function reviewLessons(h: Host, project: string, changedPaths: string[], diffText: string, opts: number | { budget?: number; goal?: string; log?: boolean; fallback?: number } = {}): Promise<LessonsOut> {
   const o = typeof opts === 'number' ? { budget: opts } : opts
   const cfg = await lessonCap(h)
   const budget = Math.max(100, Math.floor(o.budget ?? cfg.tokens))
@@ -383,7 +480,7 @@ export async function reviewLessons(h: Host, project: string, changedPaths: stri
     if (why.length) cands.push({ l, score, why, near: isNear })
   }
   cands.sort((a, b) => b.score - a.score || a.l.id - b.l.id)
-  const picked: { l: Lesson; why: string; score: number }[] = []
+  const picked: { l: Lesson; why: string; score: number; general?: boolean }[] = []
   const perTopic = new Map<string, number>()
   let used = tok(REUSE_RULE) + 40 // the rule and the header are always in
   let nearN = 0
@@ -397,15 +494,32 @@ export async function reviewLessons(h: Host, project: string, changedPaths: stri
     perTopic.set(key, (perTopic.get(key) ?? 0) + cost)
     used += cost
   }
+  // The general slice (config review.lessonsFallback, default 2 per topic, at most 6 in all): a checklist line with no path or keyword hit is
+  // not lost; the newest ones of each topic join the offered set, inside the same budget and topic caps, marked "(general)".
+  const perFallback = o.fallback ?? cfg.fallback
+  if (perFallback > 0) {
+    const have = new Set(picked.map(p => p.l.id))
+    const pool = TOPIC_NAMES.flatMap(t => all.filter(l => l.family === 'review-checklist' && l.topic === t && !have.has(l.id)).sort((a, b) => b.id - a.id).slice(0, perFallback))
+    let n = 0
+    for (const l of pool.sort((a, b) => b.id - a.id)) {
+      const cost = tok(l.text + ' (general)') + 1
+      if (n >= FALLBACK_TOTAL || used + cost > budget || (perTopic.get(l.topic) ?? 0) + cost > Math.min(TOPIC_TOKENS, budget)) continue
+      picked.push({ l, why: 'general', score: 0, general: true })
+      perTopic.set(l.topic, (perTopic.get(l.topic) ?? 0) + cost)
+      used += cost
+      n++
+    }
+  }
+  const generalIds = new Set(picked.filter(p => p.general).map(p => p.l.id))
   const head = `Learned review checklist for ${project} (what human reviewers caught before; leads, not facts: check each line that applies to this change against the code and say so in the review):`
   const build = () => {
     const helpers = picked.filter(p => p.l.family === 'shared-helpers').map(p => p.l)
     const topics = TOPIC_NAMES.map(t => ({ t, rows: picked.filter(p => p.l.family === 'review-checklist' && p.l.topic === t).map(p => p.l) })).filter(x => x.rows.length)
-    return [head, `General: ${REUSE_RULE}`, ...section('shared helpers: reuse these before adding new code with the same job', helpers), ...topics.flatMap(x => section(x.t, x.rows))].join('\n')
+    return [head, `General: ${REUSE_RULE}`, ...section('shared helpers: reuse these before adding new code with the same job', helpers), ...topics.flatMap(x => section(x.t, x.rows, generalIds))].join('\n')
   }
   let text = build()
   while (tok(text) > budget && picked.length) { picked.pop(); text = build() } // (headers and section titles are counted here: the lowest-scored line goes first)
-  const out: LessonsOut = { text, picked: picked.map(p => ({ id: p.l.id, family: p.l.family, topic: p.l.topic, why: p.why, score: p.score })), tokens: tok(text), total: all.length }
+  const out: LessonsOut = { text, picked: picked.map(p => ({ id: p.l.id, family: p.l.family, topic: p.l.topic, why: p.why, score: p.score, ...(p.general ? { general: true } : {}) })), tokens: tok(text), total: all.length }
   if (o.log !== false) {
     const home = await homeDir(h)
     await appendJsonl(h, logFile(home), { ts: Math.floor((await h.clock.now()) / 1000), project, changed: changed.length, total: all.length, offered: out.picked.map(p => ({ id: p.id, why: p.why })), tokens: out.tokens, budget }).catch(() => undefined)
@@ -445,6 +559,53 @@ export async function lessonsFor(h: Host, a: LessonsFor): Promise<{ ok: boolean;
   return { ok: true, text: r.text + tail }
 }
 
+// ---- the brief's block: lean_review prepare puts the lessons of the prepared files into every reviewer brief --------------------------
+// What a pass was offered: ids, how many of how many, and why none (a missing store, a selector error). The mod's store keeps it per head
+// sha and area (the record and merge replies, and the report evidence, say what was offered or that nothing was).
+export type Offered = { ids: number[]; n: number; total: number; general?: number; why?: string }
+export async function briefLessons(h: Host, project: string, changed: string[], diff: string, goal?: string): Promise<{ text: string; offered: Offered }> {
+  try {
+    const r = await reviewLessons(h, project, changed, diff, { goal })
+    if (!r.total) return { text: 'lessons: none offered (no learned lessons for this project yet)', offered: { ids: [], n: 0, total: 0, why: 'the store is missing or empty' } }
+    const ids = r.picked.map(p => p.id)
+    const general = r.picked.filter(p => p.general).length
+    if (!ids.length) return { text: `lessons: none offered (none of the ${r.total} learned lessons fit these ${changed.length} changed file(s))`, offered: { ids, n: 0, total: r.total, why: 'none fit these files' } }
+    return { text: `LESSONS (${ids.length} of ${r.total}, ids ${ids.map(i => `#${i}`).join(' ')}):\n${r.text}`, offered: { ids, n: ids.length, total: r.total, ...(general ? { general } : {}) } }
+  } catch (e) {
+    const why = String((e as Error)?.message ?? e).replace(/\s+/g, ' ').slice(0, 120)
+    return { text: `lessons: none offered (the selector failed: ${why})`, offered: { ids: [], n: 0, total: 0, why: `the selector failed: ${why}` } }
+  }
+}
+const offerKey = (project: string) => `review.lessons.${project}`
+const OFFER_KEEP = 20
+type OfferEntry = { ts: number; areas: Record<string, Offered> }
+const offers = async (h: Host, project: string): Promise<Record<string, OfferEntry>> => {
+  const v = await h.store.get(offerKey(project)).catch(() => undefined)
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, OfferEntry>) : {}
+}
+export async function noteOffered(h: Host, project: string, sha: string, scope: string, o: Offered): Promise<void> {
+  try {
+    const all = await offers(h, project)
+    const ts = await h.clock.now()
+    all[sha] = { ts, areas: { ...(all[sha]?.areas ?? {}), [scope]: o } }
+    const keep = Object.entries(all).sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0)).slice(0, OFFER_KEEP)
+    await h.store.set(offerKey(project), Object.fromEntries(keep))
+  } catch { /* the note is evidence, never a reason to fail a prepare */ }
+}
+// "lessons offered: #590, #594 (2 of 597)" (per area: "[area-1] ..."), "lessons: none offered (why)", or "lessons: not offered" (a visible WARNING)
+// when no prepare brief of that sha carried the block (the thread skipped prepare's brief). sha '' = the newest prepare of the project (merge names none).
+export async function offeredLine(h: Host, project: string, sha = '', scope = ''): Promise<string> {
+  const all = await offers(h, project)
+  const key = sha && all[sha] ? sha : sha ? '' : Object.keys(all).sort((a, b) => (all[b]?.ts ?? 0) - (all[a]?.ts ?? 0))[0] ?? ''
+  const e = key ? all[key] : undefined
+  const miss = 'WARNING lessons: not offered (no prepare brief of this head carried the lessons block: run lean_review prepare and give the reviewer its brief unchanged)'
+  if (!e || (scope && !e.areas[scope])) return miss
+  const one = (o: Offered) => (o.n ? `${o.ids.map(i => `#${i}`).join(', ')} (${o.n} of ${o.total}${o.general ? `, ${o.general} general` : ''})` : `none offered (${o.why ?? 'nothing fit'})`)
+  const rows = Object.entries(e.areas).sort((a, b) => a[0].localeCompare(b[0]))
+  if (rows.length === 1 && !rows[0]![0]) return rows[0]![1].n ? `lessons offered: ${one(rows[0]![1])}` : `lessons: ${one(rows[0]![1])}`
+  return `lessons offered: ${rows.map(([k, o]) => `${k ? `[${k}] ` : ''}${one(o)}`).join('; ')}`
+}
+
 // ---- learn, the tool side ------------------------------------------------------------------------------------------------------------
 // A checklist line is a string, or {text, area}: a line about ONE area's commands or layout (how that folder builds, tests or is laid
 // out) carries its `area` (a folder or rule name) and goes to that area's rule file, not to the store; a line a reviewer would check in
@@ -460,7 +621,7 @@ export function splitChecklist(list: unknown[]): { store: unknown[]; routed: { a
     const text = lineOf(String(typeof c === 'string' ? c : o.text ?? ''))
     if (!text) continue
     const area = typeof c === 'string' ? '' : String(o.area ?? '').trim()
-    if (!area) store.push(text)
+    if (!area) store.push(typeof c !== 'string' && (o.file || Array.isArray(o.paths) || o.broad === true) ? { text, file: o.file, paths: o.paths, broad: o.broad } : text) // (the learner's own path hints travel with the line)
     else if (AREA.test(area) && !area.split('/').includes('..')) routed.push({ area: area.replace(/\/+$/, ''), text })
     else bad.push(`area "${area.slice(0, 40)}" is not a folder or rule name: ${text.slice(0, 60)}`)
   }
@@ -488,8 +649,12 @@ async function learnTool(h: Host, project: string, i: any): Promise<{ ok: boolea
       helpers = ok
     }
   }
-  const r = await learnLessons(h, project, { checklist: split.store, helpers, replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined })
-  const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`), ...refusedHelpers, ...split.bad.map(x => `NOT added: ${x}`), ...notes]
+  // the paths of the checklist lines are checked against the repo's own files (git ls-files): null = no repo, only the syntax is checked
+  const repoDir = await repoOf(h, project, str(i.repo) || undefined)
+  const files = split.store.length || (Array.isArray(i.replace) && i.replace.length) ? await repoFiles(h, repoDir) : null
+  if (files === null && split.store.length) notes.push(`paths were NOT checked against the repo's files (${repoDir.startsWith('/') ? 'git ls-files failed' : 'no repo: pass repo, or register the project'}); lessons-check finds them later`)
+  const r = await learnLessons(h, project, { checklist: split.store, helpers, replace: Array.isArray(i.replace) ? i.replace : [], source: str(i.source) || undefined, files })
+  const rows = [...r.added.map(x => `added ${x}`), ...r.updated.map(x => `updated ${x}`), ...r.skipped.map(x => `skipped ${x}`), ...r.refused.map(x => `NOT added (the store is at its cap): ${x}`), ...r.unpathed, ...r.notes, ...refusedHelpers, ...split.bad.map(x => `NOT added: ${x}`), ...notes]
   if (split.routed.length) {
     const byArea = new Map<string, string[]>()
     for (const x of split.routed) byArea.set(x.area, [...(byArea.get(x.area) ?? []), x.text])
@@ -501,8 +666,77 @@ async function learnTool(h: Host, project: string, i: any): Promise<{ ok: boolea
   return { ok: true, text: rows.length ? rows.join('\n') : 'nothing to add' }
 }
 
+// ---- audit and repair of a store whose lines were learned before paths were validated ------------------------------------------------
+// lessons-check is read-only; lessons-repair writes the derived globs into the project's own local store file (a .bak copy first; never remote).
+const GENERIC_WORDS = new Set(['logger', 'loggers', 'logging', 'logged', 'log', 'logs', 'metric', 'metrics', 'comment', 'comments', 'mock', 'mocks', 'mocking', 'candidate', 'candidates', 'test', 'tests', 'value', 'values', 'field', 'fields', 'name', 'names', 'code', 'function', 'functions', 'file', 'files', 'check', 'checks', 'add', 'change', 'changes'].flatMap(w => [w, stem(w)]))
+type AuditRow = { l: Lesson; junk: string; generic: boolean; suggest: string[]; how: string }
+async function auditRows(h: Host, project: string, repo: string): Promise<{ rows: AuditRow[]; files: string[] | null; liveN: number; total: number }> {
+  const all = await readLessons(h, project)
+  const lv = live(all).filter(l => l.family === 'review-checklist')
+  const files = await repoFiles(h, repo)
+  const rows: AuditRow[] = []
+  for (const l of lv) {
+    const c = checkPaths(l.paths, files)
+    const bad = l.broad ? '' : !l.paths.length ? 'empty paths' : c.notes.some(n => n.includes('rejected')) || !c.keep.length ? `junk paths (${l.paths.slice(0, 3).join(', ')})` : ''
+    const strong = l.keywords.filter(isStrong)
+    const generic = !strong.length && l.keywords.filter(k => !isStrong(k) && !GENERIC_WORDS.has(k)).length < 2 && !c.keep.length
+    if (!bad && !generic) continue
+    let suggest: string[] = []
+    let how = ''
+    if (files) {
+      const d = c.keep.length ? { paths: [] as string[], how: '' } : derivePaths(l.text, files)
+      suggest = [...c.keep, ...d.paths].slice(0, 6)
+      how = c.keep.length ? 'the valid paths it has' : d.how
+    }
+    rows.push({ l, junk: bad, generic, suggest, how })
+  }
+  return { rows, files, liveN: lv.length, total: all.length }
+}
+async function checkTool(h: Host, project: string, repo: string): Promise<{ ok: boolean; text: string }> {
+  const a = await auditRows(h, project, repo)
+  const ids = (xs: AuditRow[]) => xs.map(r => `#${r.l.id}`).join(' ')
+  const junk = a.rows.filter(r => r.junk)
+  const gen = a.rows.filter(r => r.generic)
+  const out = [`review lessons of ${project}: ${a.total} lines (${a.liveN} live checklist lines checked${a.files ? `, paths matched against ${a.files.length} repo files` : ', no repo read: syntax only, no suggestions: pass repo'})`]
+  out.push(`empty or junk paths: ${junk.length}${junk.length ? ` (${ids(junk)})` : ''}`, `only generic words (logger, metric, comment, mock, candidate ...) and no path: ${gen.length}${gen.length ? ` (${ids(gen)})` : ''}`)
+  for (const r of a.rows.slice(0, 40)) out.push(`#${r.l.id} [${r.l.topic}] ${r.junk || 'generic words only'}: ${r.l.text.slice(0, 80)}\n    suggest ${r.suggest.length ? `${r.suggest.join(', ')} (${r.how})` : a.files ? 'nothing found: give it a file or paths, or broad: true (lessons-rm to drop it)' : '(needs the repo)'}`)
+  if (a.rows.length > 40) out.push(`... and ${a.rows.length - 40} more`)
+  out.push(a.rows.length ? 'Nothing was changed. lessons-repair writes the suggested globs (a .bak copy of the store file is kept; lessons-undo reverts the batch).' : 'Every live checklist line has a usable path or words.')
+  return { ok: true, text: out.join('\n') }
+}
+async function repairTool(h: Host, project: string, repo: string): Promise<{ ok: boolean; text: string }> {
+  if (!repo.startsWith('/')) return { ok: false, text: 'lessons-repair needs repo (an absolute path) or a registered project: the globs are derived from its files' }
+  const home = await homeDir(h)
+  const now = await h.clock.now()
+  const files = await repoFiles(h, repo)
+  if (!files) return { ok: false, text: `lessons-repair: git ls-files failed in ${repo}: nothing changed` }
+  return withFolderLock(h, lockOf(home, project), async () => {
+    const a = await auditRows(h, project, repo)
+    const todo = a.rows.filter(r => r.junk && r.suggest.length)
+    if (!todo.length) return { ok: true, text: `lessons-repair: nothing to repair (${a.rows.filter(r => r.junk).length} line(s) with junk paths, none with a derivable glob); nothing changed` }
+    const file = lessonFile(home, project)
+    const raw = await h.fs.read(file).catch(() => null)
+    let bak = `${file}.bak`
+    if (await h.fs.exists(bak).catch(() => false)) bak = `${file}.bak.${now}` // (the first backup is the untouched original: never overwritten)
+    if (typeof raw === 'string') await atomicWrite(h, bak, raw)
+    const all = await readLessons(h, project)
+    const ops: Op[] = []
+    const lines: string[] = []
+    for (const r of todo) {
+      const l = all.find(x => x.id === r.l.id && x.text === r.l.text && !x.dropped)
+      if (!l) continue
+      ops.push({ kind: 'update', id: l.id, old: { ...l } })
+      lines.push(`#${l.id}: ${l.paths.length ? l.paths.join(', ') : '(none)'} -> ${r.suggest.join(', ')} (${r.how})`)
+      l.paths = r.suggest
+    }
+    await logBatch(h, home, project, ops, now) // (the undo entry first)
+    await writeLessons(h, home, project, all)
+    return { ok: true, text: `lessons-repair: ${ops.length} line(s) got paths in ${file}; the copy before is ${bak} (lessons-undo reverts the batch). Nothing remote was touched.\n${lines.slice(0, 40).join('\n')}${lines.length > 40 ? `\n... and ${lines.length - 40} more` : ''}` }
+  })
+}
+
 // ---- the lean_review actions of the lesson store (reviewtool.ts hands them over; null = not one of mine) ------------------------------
-export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify']
+export const LESSON_ACTIONS = ['lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'lessons-check', 'lessons-repair']
 export async function lessonsTool(h: Host, project: string, i: any): Promise<{ ok: boolean; text: string } | null> {
   const action = typeof i?.action === 'string' ? i.action.trim() : ''
   if (!LESSON_ACTIONS.includes(action)) return null
@@ -514,6 +748,8 @@ export async function lessonsTool(h: Host, project: string, i: any): Promise<{ o
   if (action === 'lessons-list') return { ok: true, text: await listLessons(h, project) }
   if (action === 'lessons-rm') return str(i.which) ? removeLesson(h, project, str(i.which)) : { ok: false, text: 'lessons-rm needs which (the number from lessons-list, or a unique piece of the text)' }
   if (action === 'lessons-undo') return undoLessons(h, project)
+  if (action === 'lessons-check') return checkTool(h, project, await repoOf(h, project, str(i.repo) || undefined))
+  if (action === 'lessons-repair') return repairTool(h, project, await repoOf(h, project, str(i.repo) || undefined))
   const repo = await repoOf(h, project, str(i.repo) || undefined)
   if (!repo.startsWith('/')) return { ok: false, text: 'lessons-verify needs repo (an absolute path) or a registered project' }
   return { ok: true, text: (await verifyLessons(h, project, repo, i.apply === true)).lines.join('\n') }

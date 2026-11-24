@@ -33,6 +33,10 @@ roles: desk, thread
    capped at 25 lines; the store has its own, much larger cap). First `lean_review` `lessons-list` (`project`) to see what
    is there. Then one `lean_review` `learn` call (`project`, `source` e.g. "review-learn <date>"):
    - `checklist`: general lines, each "Before adding X, check Y in Z" or "When changing X, also Y". No PR numbers, names or dates.
+     A line's `paths` must be path globs the repo's files match (`src/auth/**`, `src/lib/dates.ts`), never an identifier or a phrase
+     (`vaultId/groupId`, `fail-open/fail-closed`): the tool rejects those and derives globs from the finding's file or the line's words,
+     and says what it derived. Give `{text, file}` (the file of the finding) or `{text, paths}` when you know them; `{text, broad: true}` only for a
+     line that holds for every change (stored with `paths: []`). A line that gets no valid path is refused with how to fix it.
      **One test for where a line goes:** would a reviewer check it in ANY change (a string, stored here), or does it only describe one
      area's commands or layout (how that folder builds, tests or is laid out)? Give the second kind as `{text, area}` (`area` = the
      folder or rule name): the tool does not store it, it hands it back under "NOT stored" and you put it into that area's rule with the
@@ -49,7 +53,9 @@ roles: desk, thread
 5. Manage the store with `lean_review`: `lessons-list`, `lessons-rm` (`which` = the number or a unique piece of text),
    `lessons-undo` (the last batch), `lessons-verify` (`repo` = absolute path; flags helper lines whose code path or symbol
    cannot be found; `apply: true` removes them; run it after a refactor). Nothing is deleted for good: a removed line is
-   marked dropped and `lessons-undo` brings it back.
+   marked dropped and `lessons-undo` brings it back. `lessons-check` (read-only; `repo` as above) lists lines with empty or junk paths or
+   only generic words, with the derived globs; `lessons-repair` writes them into the project's local store (a `.bak` copy is kept). Run
+   them only when the user asks.
 6. Report which themes were added, which skipped, how many lines went into the store (and how many were duplicates), which helpers were
    refused, which lines went to an area rule, and the comment counts: the last line of the `learn` answer gives them from the `prs`
    fetch ("comments seen N, kept K; excluded: the owner's own A, system threads B, deleted C; dropped as approval D, as typo fix E");

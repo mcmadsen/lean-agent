@@ -933,13 +933,29 @@ record for the reviewed sha; the mod appends the evidence (sha, level, passes, v
 **Review lessons.** What human reviewers caught that an automated review missed ("before adding a date parser, check
 `parseDate` in `src/lib/dates.ts`") and the shared helpers that already exist are kept per project in
 `~/.lean-agent/<project>/review-lessons.jsonl`, not in `rules/*.md`: a rule holds 25 lines, a project that has been reviewed for a
-year has hundreds. A review does not read them all. `lean_review` `lessons` (`project`, `base`/`head` or `paths`) picks, with a script
-and no model, the lines whose paths or globs match the changed files, whose helper name occurs in the diff, or whose keywords occur in
-the diff or the goal, plus the helpers in the same or the next folder; they are grouped by topic and capped at about 3200 tokens
+year has hundreds. A review does not read them all, and the thread does not have to fetch them: **`lean_review` `prepare` picks them
+itself** and puts a `LESSONS (n of N, ids #...)` block into the brief it returns (per area for a PR reviewed by area: the lessons of
+that area's files), or the line `lessons: none offered (<reason>)` (an empty store, nothing fitting, a selector error): never silent. The
+selection is a script, no model: the lines whose paths or globs match the changed files, whose helper name occurs in the diff, or whose
+keywords occur in the diff or the goal, plus the helpers in the same or the next folder; grouped by topic and capped at about 3200 tokens
 (`config.json` `review.lessonTokens`), always under a short rule to search for an existing helper before accepting new code that detects,
-parses or normalises something. Every call logs which lines and why to `~/.lean-agent/logs/review-lessons.jsonl`. The store holds at most
-1500 live lines (`review.lessonMax`). Manage it with `lean_review` `learn`, `lessons-list`, `lessons-rm`, `lessons-undo` and
-`lessons-verify` (helper lines whose code cannot be found). Coming from 0.45: `migrate` copies `library/<project>/cards.json`,
+parses or normalises something. Lines with no path or keyword hit are not lost: a small general slice (`review.lessonsFallback`, default 2
+per topic, at most 6 in all, newest first, `0` = off) joins the offered set inside the same budget, marked "(general)". `lean_review`
+`lessons` (`project`, `base`/`head` or `paths`) stays for a manual look. What was offered is kept: `merge`, `record` and the report evidence
+say `lessons offered: #590, #594 (2 of 597)`, and a head whose prepare brief was never made says `lessons: not offered` as a warning
+(the thread skipped prepare's brief). Every selection logs which lines and why to `~/.lean-agent/logs/review-lessons.jsonl`. The store
+holds at most 1500 live lines (`review.lessonMax`). Manage it with `lean_review` `learn`, `lessons-list`, `lessons-rm`, `lessons-undo`
+and `lessons-verify` (helper lines whose code cannot be found).
+**Paths are validated when a line is learned**: `paths` must be path globs (segments of letters, digits, `. _ - * **` with a `/`, a `*` or
+a file extension) that the project's own files (`git ls-files`, case-insensitive) can match. An identifier or phrase such as
+`vaultId/groupId` or `fail-open/fail-closed` is rejected with the reason and an example; a glob that matches nothing is kept with the
+warning "matches no file in the repo". Missing or rejected paths are derived by script from the finding's file (`{text, file}`), else the
+top 3 directories whose file names the line's words match, and the answer says what was derived. A line with no valid path is refused with
+how to fix it, unless the learner says `{text, broad: true}` (stored with `paths: []`). **`lessons-check`** (read-only) lists the lines of an
+existing store with empty or junk paths or only generic words (logger, metric, comment, mock, candidate) and the derived suggestion for
+each; **`lessons-repair`** writes those globs into the project's own local `review-lessons.jsonl` (a `.bak` copy first, `lessons-undo`
+reverts it; nothing remote). Both are explicit actions, never automatic. Not tested live: a real project store and a real diff (the
+specs use synthetic stores, diffs and file lists). Coming from 0.45: `migrate` copies `library/<project>/cards.json`,
 `review-learned.json` (with its lesson registry), `review-learn-batches.json` and `review-learned-threads.json` to
 `legacy-0.45/lessons-<project>/` (never deleting the originals) and imports the live lines; installs that migrated before get it at the
 next start. `lean_rules check` and the doctor say when 0.45 lessons are not imported yet.
@@ -1001,8 +1017,7 @@ file lists, the risk, the line count and the diff the reviewer reads (it gets `'
   the mod's own store, which a session cannot write), an earlier blocker or major must be listed again or named in `fixed`, and a new
   major about code that did not change since is a minor, so it converges. A record is refused green when git could not produce the diff,
   the range is empty, or `base` is not a branch or tag name (a sha or `HEAD~1` would shrink the range).
-- **Project lessons**: the review loads the matching review checklist and shared-helper lessons through `lean_review` `lessons`
-  (the lesson store is owned by a separate change; the review skips it when the action is absent).
+- **Project lessons**: `lean_review prepare` carries the matching review checklist and shared-helper lessons in its brief (see "Review lessons").
 
 **The push runs in the desk, not in a thread.** Claude Code judges every command in the session that runs it, and your "push and
 open a PR" is said to the desk, so a thread's own session would refuse `git push` as unwanted. A thread therefore never runs

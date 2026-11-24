@@ -121,9 +121,9 @@ export const DEFERRED_THREAD_TOOLS = new Set(['lean_profile', 'lean_rules', 'lea
 export const THREAD_TOOLS: Tool[] = [
   {
     name: 'lean_review',
-    description: 'The strict review\'s script side (review, review-learn skills): prepare (brief, reviewer; a later prepare replaces the earlier), reset-prepare (drops stale areas), merge (two runs), record (the verdict the push gate reads; green is refused with the reason), decline, lessons / learn / lessons-list / lessons-rm / lessons-undo / lessons-verify, prs (comments of recent PRs).',
+    description: 'The strict review\'s script side (review, review-learn skills): prepare (brief, reviewer; a later prepare replaces the earlier), reset-prepare (drops stale areas), merge (two runs), record (the verdict the push gate reads; green is refused with the reason), decline, lessons / learn / lessons-list|rm|undo|verify|check|repair, prs (comments of recent PRs).',
     inputSchema: obj({
-      action: { type: 'string', enum: ['prepare', 'reset-prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'prs'] },
+      action: { type: 'string', enum: ['prepare', 'reset-prepare', 'merge', 'record', 'decline', 'lessons', 'learn', 'lessons-list', 'lessons-rm', 'lessons-undo', 'lessons-verify', 'lessons-check', 'lessons-repair', 'prs'] },
       project: { type: 'string' },
       sha: { type: 'string', description: 'record: the full HEAD sha reviewed' },
       base: { type: 'string', description: 'prepare, record, lessons: base branch or sha' },
@@ -144,11 +144,11 @@ export const THREAD_TOOLS: Tool[] = [
       path: { type: 'string', description: 'decline: the file (with text)' },
       text: { type: 'string', description: 'decline: the finding\'s wording (with path)' },
       why: { type: 'string', description: 'decline: the user\'s reason' },
-      repo: { type: 'string', description: 'lessons, lessons-verify: absolute path of the checkout' },
+      repo: { type: 'string', description: 'lessons*, learn: absolute path of the checkout' },
       paths: { type: 'array', items: { type: 'string' }, description: 'lessons: changed paths' },
       goal: { type: 'string', description: 'lessons: the change\'s goal' },
       budget: { type: 'number', description: 'lessons: tokens' },
-      checklist: { type: 'array', items: {}, description: 'learn: checklist lines (a string, or {text, area})' },
+      checklist: { type: 'array', items: {}, description: 'learn: lines (a string, or {text, area|file|paths|broad})' },
       helpers: { type: 'array', items: { type: 'object' }, description: 'learn: {name, where, what}' },
       replace: { type: 'array', items: { type: 'object' }, description: 'learn: corrections {old, new}' },
       source: { type: 'string', description: 'learn: where the lines come from' },

@@ -26,7 +26,7 @@ import type { Context, Finding, Result } from './reviewgate'
 import { digestOf, mergeRuns, rememberMerged, sameBlocks, wasMerged } from './reviewmerge'
 import { addRequest, isExpensiveModel, modelAllowed } from './expensive'
 import { slugOk } from './rules'
-import { lessonsTool, repoOf } from './reviewlessons'
+import { briefLessons, lessonsTool, noteOffered, offeredLine, repoOf } from './reviewlessons'
 import { fetchPrs } from './prhost'
 import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
 import { addPrepNote, expectedReviewCost, expectedText, reviewCostLine } from './reviewcost'
@@ -286,11 +286,15 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   }
   lines.push(changedText(brief, { diff: areaDiff, context: await contextCfg(h) })) // the changed hunks with new-side line numbers (over the budget: the ranges): the reviewer reports on these only (reviewchange.ts)
   lines.push(prepText(capPrep(brief)))
+  // the learned lessons of THIS pass's files (an area: its own files), inside the brief: the thread pastes nothing (reviewlessons.ts)
+  const les = await briefLessons(h, project, brief.changed, areaDiff, str(i.goal) || undefined)
+  await noteOffered(h, project, range.head, area ? area.name : '', les.offered)
+  lines.push(les.text)
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
   const exp = await expectedReviewCost(h, project, nRuns, level)
-  const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
+  const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, lessons: les.offered.n, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
@@ -384,7 +388,7 @@ async function doMerge(h: Host, project: string, i: any, thread = ''): Promise<O
   const block = roundTrip(result)
   const digest = digestOf(block)
   await rememberMerged(h, project, digest)
-  const head = `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).${droppedNote ? ` ${droppedNote}.` : ''}${dropNotes(cs.dropped) ? `\n${dropNotes(cs.dropped)}` : ''}`
+  const head = `merged 2 reviewer runs: ${result.findings.length} finding(s), ${info.both} found by both [2/2], ${info.only} by one run [1/2] (the union counts).${droppedNote ? ` ${droppedNote}.` : ''}${dropNotes(cs.dropped) ? `\n${dropNotes(cs.dropped)}` : ''}\n${await offeredLine(h, project, str(i.sha), str(i.scope))}`
   const file = await spill(h, thread, `review-merged-${digest.slice(0, 12)}.json`, JSON.stringify(block))
   // COMPACT (1.0.28): counts by severity, the top 10 findings, the path of the full merged JSON; never the whole list into the thread's context
   if (file) return { ok: true, text: `${head}\nverdict: ${result.verdict || 'none'}; ${countsText(result.findings) || 'no findings'}.${result.findings.length ? `\ntop ${Math.min(10, result.findings.length)} of ${result.findings.length}:\n${topRows(result.findings).join('\n')}` : ''}\nThe full merged JSON (every finding, the lists) is in ${file}: pass that path, unchanged, as review to lean_review record (or pass the two blocks as reviews). Read it only for the findings you must fix.` }
@@ -506,16 +510,18 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
     rec.counts = {}
     for (const a of Object.values(areas)) for (const [k, n] of Object.entries(a.counts ?? {})) rec.counts[k] = (rec.counts[k] ?? 0) + n
   }
+  const lessonsNote = await offeredLine(h, project, sha, scope) // what the prepare brief(s) of this head offered the reviewer, or the visible "not offered"
+  rec.lessons = lessonsNote
   const file = await writeReview(h, rec)
   if (!ext && !area) await putCarry(h, project, sha, { open: v.open, reuse: v.reuse, coverage: v.coverage, branch, ts: await h.clock.now(), ...(light ? { light: true } : {}) })
   // COMPACT (1.0.28): up to 10 open findings are listed; more are counts by severity, the top 10 and the record file with every one
   const openText = v.open.length <= 10 ? `open findings:\n${v.open.map(findingLine).join('\n')}` : `open findings: ${v.open.length} (${countsText(v.open)}); top 10 (all of them are in ${file}):\n${topRows(v.open).join('\n')}`
-  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped), ext ? voteLine(voteAdvice(v.open.map(f => f.severity), v.green, false)) : ''].filter(Boolean).join('\n')
+  const tail = [v.open.length ? openText : 'no open findings', v.checks.length ? `checks:\n${v.checks.map(c => `- ${c.what}`).join('\n')}` : '', v.notes.length ? `notes: ${v.notes.join('; ')}` : '', lessonsNote, dropNotes(cs.dropped), scopeLine(rec.scoped ?? scoped), ext ? voteLine(voteAdvice(v.open.map(f => f.severity), v.green, false)) : ''].filter(Boolean).join('\n')
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await requiredAreas(h, thread, project, sha)).areas.filter(n => !(rec.areas ?? {})[n]) : [] // (the areas of the thread's LAST prepare)
   const areaLine = area ? `${replaced ? `\n${replaced}` : ''}\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
   if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
-  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
+  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${lessonsNote.startsWith('WARNING') ? ' [WARNING lessons: not offered]' : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
 }
 
 async function doDecline(h: Host, project: string, i: any): Promise<Out> {
