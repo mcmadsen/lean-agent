@@ -60,7 +60,11 @@ test('riskiest: size, new symbols, export changes and risky names, ten at most; 
 
 test('prepare on a diff over 300 files: counts only, the areas, no file list; scope reviews one area; an unknown scope is refused', async () => {
   const h = setup(bigDiff(320))
-  const r = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const asked = await tool(h, { action: 'prepare', base: 'main', level: 'full' }) // the fan-out (areas x passes) is over review.askAboveUsd: the user decides first
+  expect(asked.ok).toBe(false)
+  expect(asked.text).toContain('NOT started')
+  expect(asked.text).toContain('areas x 1 pass ~ $')
+  const r = await tool(h, { action: 'prepare', base: 'main', level: 'full', confirm: true })
   expect(r.ok).toBe(true)
   expect(r.text).toContain('PR TOO LARGE: 320 changed files')
   expect(r.text).toContain('this PR is too large for one review: review it by area')
@@ -80,7 +84,7 @@ test('prepare on a diff over 300 files: counts only, the areas, no file list; sc
 
 test('an area record is never green and joins the earlier ones of the sha; more than 10 open findings are counts, the top 10 and the record file', async () => {
   const h = setup(bigDiff(320))
-  const prep = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
+  const prep = await tool(h, { action: 'prepare', base: 'main', level: 'full', confirm: true })
   const names = [...prep.text.matchAll(/^- (area-\d+):/gm)].map(m => m[1]!)
   expect(names.length).toBeGreaterThan(1)
   const finding = (n: number) => ({ n, severity: n % 2 ? 'major' : 'minor', category: 'correctness', path: `api/mod${(5 * n) % 7}/file${5 * n}.txt`, line: 1, /* a changed file of bigDiff: findings outside the change are dropped */ text: 'it breaks on empty input', fix: 'guard it' })

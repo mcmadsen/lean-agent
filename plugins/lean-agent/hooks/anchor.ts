@@ -176,6 +176,12 @@ export async function verifyAnchors(r: Reader, thread: string, anchors: Anchor[]
   return { refusals, heads, infos }
 }
 
+// How many files the forge itself lists for a PR (GitHub pulls/<n>/files, Azure DevOps iteration changes: the same readers as the table below); null: could not be read.
+export async function forgeFileCount(r: Reader, a: Pick<Anchor, 'host' | 'org' | 'project' | 'repo' | 'pr' | 'iteration'>): Promise<{ files: number; truncated: boolean } | null> {
+  const l = await (a.host === 'github' ? loadGithub(r, a as Anchor) : loadAzure(r, a)).catch(() => null)
+  return l ? { files: l.paths.length, truncated: !!l.truncated } : null
+}
+
 // The table a thread reads (lean_run pr-changes): every changed file of a PR (an iteration of it, Azure DevOps) with the added / modified line ranges of the NEW side
 // and the removed ones of the OLD side, from the forge's own diff: no checkout, no git ref. null: the PR could not be read.
 export const MAX_TABLE_FILES = 200

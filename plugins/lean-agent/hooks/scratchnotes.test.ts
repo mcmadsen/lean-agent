@@ -28,14 +28,15 @@ function setup() {
 test('the warn line: at the warn level ONE line per session, with the numbers and the file; under the level or a second time nothing', () => {
   warnReset()
   expect(takeWarn('s1', 100_000, LIM)).toBeNull() // at the level is not over it
-  expect(takeWarn('s1', 101_000, LIM)).toBe('ctx 101k of 120k: write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart') // 1.0.29: the line names the checkpoint call
+  expect(takeWarn('s1', 101_000, LIM)).toBe('ctx 101k of 120k (soft limit 100k): at your next natural boundary (a finished step, before a new area) write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart') // 1.0.29: the line names the checkpoint call; 1.0.31: and the soft limit and the natural boundary
   expect(takeWarn('s1', 107_000, LIM)).toBeNull() // under 90% of the limit (108k)
-  expect(takeWarn('s1', 110_000, LIM)).toBe(warnLine(110_000, 120_000)) // 1.0.27: and once more at 90%
+  expect(takeWarn('s1', 110_000, LIM)).toBe(warnLine(110_000, 120_000, 100_000)) // 1.0.27: and once more at 90%
   expect(takeWarn('s1', 115_000, LIM)).toBeNull()
-  expect(takeWarn('s4', 112_000, LIM)).toBe(warnLine(112_000, 120_000)) // both levels passed at once: one line
+  expect(takeWarn('s4', 112_000, LIM)).toBe(warnLine(112_000, 120_000, 100_000)) // both levels passed at once: one line
   expect(takeWarn('s4', 113_000, LIM)).toBeNull()
   expect(takeWarn('s2', 99_000, LIM)).toBeNull()
-  expect(takeWarn('s2', 105_000, LIM)).toBe(warnLine(105_000, 120_000))
+  expect(takeWarn('s2', 105_000, LIM)).toBe(warnLine(105_000, 120_000, 100_000))
+  expect(warnLine(105_000, 120_000)).toBe('ctx 105k of 120k: write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart') // (no soft limit named: the 1.0.29 wording)
   expect(takeWarn('', 110_000, LIM)).toBeNull()
   expect(takeWarn('s3', null, LIM)).toBeNull()
 })
@@ -104,10 +105,10 @@ test('through the engine: a tool result of a thread at the warn level carries th
   const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? '' // (the thread's own folder: always allowed)
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 104_000
-  expect(await ctx()).toContain('ctx 104k of 120k: write what you learned to scratch/notes.md, then call lean_run checkpoint')
+  expect(await ctx()).toContain('ctx 104k of 120k (soft limit 80k): at your next natural boundary (a finished step, before a new area) write what you learned to scratch/notes.md, then call lean_run checkpoint')
   expect(await ctx()).not.toContain('scratch/notes.md') // once per session at the warn level
   tokens = 110_000
-  expect(await ctx()).toContain('ctx 110k of 120k: write what you learned') // and again at 90% of the limit
+  expect(await ctx()).toContain('ctx 110k of 120k (soft limit 80k): at your next natural boundary (a finished step, before a new area) write what you learned') // and again at 90% of the limit
   expect(await ctx()).not.toContain('scratch/notes.md')
 })
 
@@ -152,6 +153,6 @@ test('1.0.28: a jump nobody saw (the last call of a turn, the engine figure alon
   const ctx = async () => ((await $.tool.call({ tool: 'Read', file_path: `${T1}/brief.md`, limit: 10 } as any)) as any).context?.join('\n') ?? ''
   expect(await ctx()).not.toContain('scratch/notes.md')
   tokens = 118_000 // from under the warn level to over 90% of the limit between two calls: both levels at once, one line
-  expect(await ctx()).toContain('ctx 118k of 120k: write what you learned')
+  expect(await ctx()).toContain('ctx 118k of 120k (soft limit 80k): at your next natural boundary (a finished step, before a new area) write what you learned')
   expect(await ctx()).not.toContain('scratch/notes.md')
 })

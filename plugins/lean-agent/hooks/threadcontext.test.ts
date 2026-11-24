@@ -51,10 +51,13 @@ function setup(o: Opts = {}) {
 }
 
 // ---- config ----
-test('config: threadTokens defaults to 120000 and threadWarnTokens to 100000 (83% of the limit, to the nearest 1000)', () => {
+test('config: threadTokens defaults to 120000 and the warn level to the soft checkpoint size 80000 (threads.softCheckpointTokens, 1.0.31), never above 83% of the limit', () => {
   expect(limitsOf({})).toEqual({ limit: DEFAULT_LIMIT, warn: DEFAULT_WARN })
-  expect(limitsOf(null)).toEqual({ limit: 120_000, warn: 100_000 })
-  expect(limitsOf({ threadTokens: 200_000 })).toEqual({ limit: 200_000, warn: 166_000 }) // no warn key: 83% of the configured limit
+  expect(limitsOf(null)).toEqual({ limit: 120_000, warn: 80_000 })
+  expect(limitsOf({ threadTokens: 200_000 })).toEqual({ limit: 200_000, warn: 80_000 }) // the soft line stays where it is
+  expect(limitsOf({ threadTokens: 60_000 })).toEqual({ limit: 60_000, warn: 50_000 }) // 83% of a small limit
+  expect(limitsOf({ threads: { softCheckpointTokens: 70_000 } })).toEqual({ limit: 120_000, warn: 70_000 })
+  expect(limitsOf({ 'threads.softCheckpointTokens': 90_000 })).toEqual({ limit: 120_000, warn: 90_000 })
   expect(limitsOf({ threadTokens: 150_000, threadWarnTokens: 90_000 })).toEqual({ limit: 150_000, warn: 90_000 })
   expect(limitsOf({ threadWarnTokens: 80_000 })).toEqual({ limit: 120_000, warn: 80_000 })
   expect(limitsOf({ threadTokens: 50_000, threadWarnTokens: 70_000 })).toEqual({ limit: 50_000, warn: 50_000 }) // a warn level never passes the limit
@@ -62,20 +65,20 @@ test('config: threadTokens defaults to 120000 and threadWarnTokens to 100000 (83
 
 test('config: a value that is not a number (or too small, negative, NaN) is ignored: the default applies', () => {
   for (const bad of ['150000', '', null, undefined, {}, [], true, NaN, Infinity, -1, 0, 9_999]) {
-    expect(limitsOf({ threadTokens: bad, threadWarnTokens: bad })).toEqual({ limit: 120_000, warn: 100_000 })
+    expect(limitsOf({ threadTokens: bad, threadWarnTokens: bad, threads: { softCheckpointTokens: bad } })).toEqual({ limit: 120_000, warn: 80_000 })
   }
   expect(limitsOf({ threadTokens: 150_000.9 }).limit).toBe(150_000) // whole tokens
 })
 
 test('config: threadLimits reads config.json; a damaged file gives the defaults', async () => {
   const a = fakeHost(null)
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 100_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
   a.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 60_000, threadWarnTokens: 40_000 }))
   expect(await threadLimits(a.host)).toEqual({ limit: 60_000, warn: 40_000 })
   a.files.set(`${L}/config.json`, '{ not json')
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 100_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
   a.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 'lots' }))
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 100_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
 })
 
 // ---- level and text ----

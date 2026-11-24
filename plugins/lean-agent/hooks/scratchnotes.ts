@@ -13,8 +13,8 @@ export const SCRATCH_LIST_MAX = 20
 export const SCRATCH_NOTES_MAX = 3_000 // chars of notes.md the handover carries (its end)
 
 // the one line, said once per session (register.tsx), in the next tool result at or over the warn level
-export const warnLine = (tokens: number, limit: number): string =>
-  `ctx ${kTokens(tokens)} of ${kTokens(limit)}: write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart`
+export const warnLine = (tokens: number, limit: number, soft?: number): string =>
+  `ctx ${kTokens(tokens)} of ${kTokens(limit)}${soft !== undefined && soft < limit ? ` (soft limit ${kTokens(soft)})` : ''}: ${soft !== undefined && soft < limit ? 'at your next natural boundary (a finished step, before a new area) ' : ''}write what you learned to scratch/notes.md, then call lean_run checkpoint {next: <the next step>}: the mod restarts you at once and you continue with it. Never end your turn asking the desk or the user for a restart`
 
 // said by the hard stop in a few words
 export const STOP_NOTES = 'your reading is kept in scratch/notes.md and the scratch files'
@@ -73,5 +73,5 @@ export function takeWarn(sid: string, tokens: number | null | undefined, l: { li
   if (warnedHigh.size >= 200) warnedHigh.clear()
   warned.add(sid)
   if (high) warnedHigh.add(sid)
-  return warnLine(tokens, l.limit)
+  return warnLine(tokens, l.limit, l.warn)
 }

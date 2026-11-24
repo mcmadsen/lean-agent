@@ -20,6 +20,8 @@ import type { Host } from './state'
 import type { Role } from './role'
 import { modSending } from './modsend'
 import { forcedPrDenial, isForce } from './forcepr'
+import { agentWindowDenial, threadPriority } from './throttle'
+import { budgetFile, budgetRefusal } from './budgetthread'
 
 export type Ctx = { role: Role; cwd: string; agentType?: string; agentId?: string; version?: string; root?: string } // agentType/agentId: set inside a subagent loop; root: the plugin's folder (agents/*.md)
 export type Call = { tool: string; [k: string]: any }
@@ -1097,6 +1099,21 @@ async function expensiveDenial($: Host, ctx: Ctx, e: Call): Promise<string | nul
   return `lean-agent: ${needsApprovalText(family, what)}`
 }
 
+// a new Agent call while the 5h window is hot (throttle.ts): the model it would run on is the call's override, else its type's own, else the session's (unknown: not haiku)
+async function windowDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
+  if ((e.tool !== 'Agent' && e.tool !== 'Task') || (ctx.role.kind !== 'thread' && ctx.role.kind !== 'desk')) return null
+  if (ctx.role.kind === 'thread') { // the thread's own soft budget is used up (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut
+    const b = await readJson<{ budget?: number; over?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
+    if (b?.over && typeof b.budget === 'number' && b.budget > 0) return budgetRefusal(b.budget)
+  }
+  const sub = typeof e.subagent_type === 'string' ? e.subagent_type.trim() : ''
+  const over = typeof e.model === 'string' ? e.model.trim() : ''
+  const own = over && over.toLowerCase() !== 'inherit' ? over : sub ? ((await agentModel($, ctx.root ?? '', ctx.cwd, sub).catch(() => null)) ?? '') : ''
+  const model = own || (/haiku/i.test(sub) ? 'haiku' : '') // (an agent file that names no model: its name says haiku)
+  const urgent = ctx.role.kind === 'desk' || (await threadPriority($, ctx.role.id)) === 'urgent' // (the desk routes: it is never held by the block level)
+  return agentWindowDenial($, model, urgent)
+}
+
 // ---- the subagent cap ----------------------------------------------------------------------------------------
 // config.json `agents.cap` (a whole number; absent or 0 = lean-agent sets none, and a cap in the user's own CLAUDE.md is the model's to
 // count): the most subagents a thread's own loop may start in one session (the session id of thread.json; a restart starts again at 0).
@@ -1155,6 +1172,8 @@ export async function decide($: Host, ctx: Ctx, e: Call): Promise<string | null>
 async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   const dear = await expensiveDenial($, ctx, e)
   if (dear) return dear
+  const hot = await windowDenial($, ctx, e) // the 5-hour plan window (throttle.ts): haiku only above window.throttleAbove, nothing new above blockAbove or the user's cap
+  if (hot) return hot
   // grants are owned by a thread's own loop: an Agent call with allow-mcp lines from anyone else would start a
   // subagent that can do nothing, so it is refused up front with the reason
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type : ''

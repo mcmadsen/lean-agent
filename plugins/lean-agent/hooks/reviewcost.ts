@@ -107,5 +107,9 @@ export async function reviewCostLine(h: Host, project: string, thread: string, s
   return `review cost for ${sha.slice(0, 12)}: $${usd.toFixed(2)} over ${ps.length} pass${ps.length === 1 ? '' : 'es'}, ${reqs} request${reqs === 1 ? '' : 's'}`
 }
 
+// "3 areas x 1 pass ~ $4.50 (from your last 5 review runs)": the whole fan-out in one line, numbers from the ledger or the stated default
+export const fanOutText = (e: Expected, areas: number): string =>
+  `${areas} area${areas === 1 ? '' : 's'} x ${e.passes} pass${e.passes === 1 ? '' : 'es'} ~ $${(e.usd * areas).toFixed(2)} (${e.samples ? `from your last ${e.samples} review run${e.samples === 1 ? '' : 's'}` : `default $${DEFAULT_PASS_USD.toFixed(2)} a pass: no earlier review run in your ledger`})`
+
 // "expected review cost ~$1.20 (2 passes, sonnet; median of 5 earlier reviewer passes on this project)"
 export const expectedText = (e: Expected, model: string): string => `expected review cost ~$${e.usd.toFixed(2)} (${e.passes} pass${e.passes === 1 ? '' : 'es'}, ${model}; ${e.basis})`

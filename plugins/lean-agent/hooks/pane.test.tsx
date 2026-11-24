@@ -542,9 +542,10 @@ function deskFeed(on: any) {
 test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 }, handover: { mode: 'full' } })) // (the default is 60k and the core handover since 1.0.31)
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
-  await feed($, 85_000) // 85 % of the default limit: the button is beside the bar
+  await feed($, 85_000) // 85 % of the limit: the button is beside the bar
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   const ui = await $.ui.mount(DESKPANE as any)
   await ui.press({ key: 'restart-desk' })
@@ -575,6 +576,7 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
 test('header: a desk under 80 % of its limit has the bar and no Restart desk button beside it; from 80 % the button is beside the bar; over the limit it is also a need; the footer button is always there', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 60k since 1.0.31)
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
   const DESKPANE = { ...PANE, surface: 'desktop' } as const

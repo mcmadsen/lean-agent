@@ -80,7 +80,7 @@ import type { Loaded } from './profile'
 import { drawThreadPane, resetThreadPanes, threadOfPane } from './threadpane'
 import { resetRequestCache, touchActivity } from './threadstate'
 import { NEW_THREAD_PANE, drawNewThread, resetNewThread } from './newthread'
-import { recordContext, threadLimits } from './threadcontext'
+import { recordContext, threadLimits, threadLimitsFor } from './threadcontext'
 import { stallLines, stallTick } from './stall'
 import { autoRestartTick, hardStop, threadTurnEnd } from './autorestart'
 import { deliveryTick, directUnavailable, setThreadSender } from './deliver-to-thread'
@@ -96,6 +96,7 @@ import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited, takeEdited } from './snapshot'
 import { asksRestart, checkpointTick, noteWarn, requestCheckpoint } from './checkpoint'
 import { recordWindows, windowTick } from './windows'
+import { softBudgetTick, softCheckpointTick, windowParkTick } from './budgettick'
 
 setPreflight(preflightFor) // handover.ts includes the preflight pack (hooks/preflight.ts); a hooks module cannot import() lazily
 setRunning(VERSION) // the code in this session; skew.ts compares it with what is installed
@@ -206,7 +207,8 @@ const MEMORY = 'lean_memory' // the desk's memory tool (memorytool.ts); a thread
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'withdraw-action', 'find', 'ask', 'report', 'messages', 'dismiss', 'rule', 'set'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'withdraw-action', 'find', 'ask', 'report', 'messages', 'dismiss', 'rule', 'set', 'limit', 'budget'] },
+    priority: { type: 'string', enum: ['low', 'normal', 'urgent'], description: 'new: low waits and is parked while the 5h window is hot; urgent starts even above the block line' },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
     text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
@@ -311,7 +313,7 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
     const host = hostOf($)
     if (!stopped && ++mainCalls % STOP_EVERY === 0) {
       const tokens = Number((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.tokens)
-      const limit = (await threadLimits(host)).limit
+      const limit = (await threadLimitsFor(host, id)).limit
       if (Number.isFinite(tokens) && tokens >= limit) {
         const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
         lastTokens = tokens
@@ -320,7 +322,7 @@ async function stopCheckOnce($: any, e: any): Promise<{ deny: string } | null> {
       }
     }
     if (!stopped) return null
-    const limit = (await threadLimits(host)).limit
+    const limit = (await threadLimitsFor(host, id)).limit
     if (stopped.tokens < limit) {
       stopped = null // the limit was raised above the size
       return null
@@ -349,7 +351,7 @@ async function warnNote($: any, host: Host, addedChars = 0): Promise<string | nu
     const base = Number.isFinite(u) ? u : lastTokens
     // the engine's figure does not hold THIS result yet: one result that jumps over the warn level (two reviewer passes, a diff) says so in its own reply
     const tokens = typeof base === 'number' ? base + Math.ceil(Math.max(0, addedChars) / 4) : base
-    const limits = await threadLimits(host)
+    const limits = await threadLimitsFor(host, role.id)
     const line = takeWarn(sid, tokens, limits) // at the warn level and again at 90% of the limit
     if (!line) return null
     if (role.kind === 'thread') await noteWarn(host, role.id, sid) // the time of the warn line: the checkpoint wants notes newer than it
@@ -698,6 +700,15 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         })
         for (const text of lines) {
           $.ui.notify(text, { key: `lean-window-${text.slice(0, 2)}` })
+          pending.push(`[lean-agent] ${text}`)
+        }
+      })
+      // budget and window awareness (budgettick.ts): threads with priority low are parked while the 5h window is hot and resumed when it is not; one notice each way
+      every($, 60_000, 'desk', async host2 => {
+        const run = { thread: (i: { action: string; tN: string; reason?: string; force?: boolean; text?: string }) => leanThread(host2, $.plugin.root, i) }
+        const notes = [...(await windowParkTick(host2, run)), ...(await softCheckpointTick(host2, { ...run, agents: async () => (await listAgents(host2)) as any })), ...(await softBudgetTick(host2, run))]
+        for (const text of notes) {
+          $.ui.notify(text, { key: `lean-budget-${text.slice(0, 24)}` })
           pending.push(`[lean-agent] ${text}`)
         }
       })

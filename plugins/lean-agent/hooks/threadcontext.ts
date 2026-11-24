@@ -19,21 +19,38 @@ import { readConfig, priceOf } from './budget'
 import { readParts } from './ctxparts'
 
 export const DEFAULT_LIMIT = 120_000
-export const DEFAULT_WARN = 100_000
+export const DEFAULT_SOFT = 80_000 // config threads.softCheckpointTokens (1.0.31): a work thread this big is told once to checkpoint at its next natural boundary
+export const DEFAULT_WARN = DEFAULT_SOFT
 export const WARN_SHARE = 0.83
 export const MIN_TOKENS = 10_000 // a smaller configured value is ignored (a restart every few turns would be worse than none)
+export const OVERRIDE_MIN = 40_000 // lean_thread limit tN <tokens>: the range one thread's own hard limit may have
+export const OVERRIDE_MAX = 200_000
 
 export type Limits = { limit: number; warn: number }
 const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= MIN_TOKENS
+export const overrideOk = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= OVERRIDE_MIN && v <= OVERRIDE_MAX
 
-// the two limits from a config object (pure); the warn level never exceeds the limit
-export function limitsOf(cfg: { threadTokens?: unknown; threadWarnTokens?: unknown } | null | undefined): Limits {
-  const limit = valid(cfg?.threadTokens) ? Math.floor(cfg!.threadTokens as number) : DEFAULT_LIMIT
-  const asked = valid(cfg?.threadWarnTokens) ? Math.floor(cfg!.threadWarnTokens as number) : Math.round((limit * WARN_SHARE) / 1000) * 1000 // (83% of 120000 = 100000)
+type LimitCfg = { threadTokens?: unknown; threadWarnTokens?: unknown; threads?: { softCheckpointTokens?: unknown } | null; 'threads.softCheckpointTokens'?: unknown }
+// the two limits from a config object (pure); the warn level never exceeds the limit. The warn level is the soft checkpoint size (threads.softCheckpointTokens, default 80k)
+// unless the old threadWarnTokens key is set; a per-thread `override` of the hard limit moves the warn level with it (the same share of it as the default pair: 80k of 120k).
+export function limitsOf(cfg: LimitCfg | null | undefined, override?: number | null): Limits {
+  const base = valid(cfg?.threadTokens) ? Math.floor(cfg!.threadTokens as number) : DEFAULT_LIMIT
+  const limit = overrideOk(override) ? Math.floor(override) : base
+  const softRaw = cfg?.threads?.softCheckpointTokens ?? cfg?.['threads.softCheckpointTokens']
+  const soft = valid(softRaw) ? Math.floor(softRaw) : DEFAULT_SOFT
+  const share83 = Math.round((limit * WARN_SHARE) / 1000) * 1000 // a soft line never sits above 83% of the limit
+  const scaled = overrideOk(override) ? Math.round((limit * soft) / base / 1000) * 1000 : soft
+  const asked = valid(cfg?.threadWarnTokens) ? Math.floor(cfg!.threadWarnTokens as number) : Math.min(scaled, share83)
   return { limit, warn: Math.min(asked, limit) }
 }
 export async function threadLimits(h: Host): Promise<Limits> {
   return limitsOf((await readConfig(h, await homeDir(h)).catch(() => null)) as any)
+}
+// the limits of ONE thread: the same, with the thread's own override (thread.json tokenLimit) when it has one
+export async function threadLimitsFor(h: Host, id: string): Promise<Limits> {
+  const home = await homeDir(h)
+  const t = /^t\d+$/.test(id) ? await readJson<{ tokenLimit?: unknown } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null).catch(() => null) : null
+  return limitsOf((await readConfig(h, home).catch(() => null)) as any, overrideOk(t?.tokenLimit) ? t!.tokenLimit : null)
 }
 
 // ---- the record: <thread folder>/context.json {tokens, at, sid} ----
@@ -106,7 +123,8 @@ export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string
   const rec = await readContext(h, home, t)
   const parts = rec ? await readParts(h, home, t.id).catch(() => null) : null
   const fixed = parts && parts.sid === rec!.sid ? parts.first?.fixed : undefined // only the breakdown of the session the size belongs to
-  return ctxView(rec, l ?? (await threadLimits(h)), fixed)
+  const own = await readJson<{ tokenLimit?: unknown } | null>(h, `${threadsDir(home)}/${t.id}/thread.json`, null).catch(() => null) // the thread's own limit (lean_thread limit) wins over the shared one
+  return ctxView(rec, overrideOk(own?.tokenLimit) ? await threadLimitsFor(h, t.id) : (l ?? (await threadLimits(h))), fixed)
 }
 
 // ---- the decision ----

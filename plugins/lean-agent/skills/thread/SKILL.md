@@ -18,6 +18,8 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 | `park` / `close` / `reopen` | `tN` | `close` stops a finished session, clears the goal, never deletes the folder; `reopen` of a closed thread starts a NEW session with a handover |
 | `keep` | `tN`, `on?` | keep mode: follow-ups to a done thread resume it until its context passes the limit; offer it only for many small follow-ups |
 | `keep-going` | `tN`, `on?` | keep-going is ON by default for work threads (config `threads.keepGoing`); `on: false` turns it off for one thread, `on: true` forces it: the mod continues the thread by script at every turn end that is not done, blocked, waiting or a question, and always when its task list still has an open item (also `keepGoing: true|false` on `new` / `start`) |
+| `limit` | `tN`, `text` | `text` = tokens (`90k`, 40k-200k) or `off`: this thread's own hard context limit; its soft checkpoint moves with it |
+| `budget` | `tN`, `text` | `text` = USD (`6`; `0` = none, `off` = config `threads.softUsd`): at 80% the thread gets a nudge, at 100% it is told to report and stop. `new` also takes `priority: low` (waits and is parked while the 5 h window is above `window.throttleAbove`) or `urgent` |
 | `action-cancel` | `id` | cancels a covered reply that waits in its 30 s hold window (the pane has Send now / Cancel) |
 | `list` | none | state, running / idle / stuck, queued, model, `ctx` size, agents |
 | `messages` | `tN` | the last messages sent to it with id, state (`queued` / `delivered` / `consumed` / `failed`) and age, from the files, no model |

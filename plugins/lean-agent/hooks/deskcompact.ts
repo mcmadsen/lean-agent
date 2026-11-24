@@ -35,9 +35,11 @@ import { dismissOldDesk, recordOldDesk, titleOf } from './olddesk'
 import { autoGuard, cancelAutoStart, lastAutoRun, noteAutoRun, resetAuto, retiredInfo, sayGuardOnce, writeAutoStart } from './deskauto'
 import type { AutoKind } from './deskauto'
 import { readDeskModel } from './deskmodel'
+import { handoverMode } from './handover'
+import type { HandoverMode } from './handover'
 import type { Thread } from './threads'
 
-export const DEFAULT_TOKENS = 100_000 // (was 200k: the desk only routes, a conversation that big is mostly old reports)
+export const DEFAULT_TOKENS = 60_000 // (was 100k, 200k before 1.0.20: the desk only routes, a conversation that big is mostly old reports; the field's desk read 70k+ of context on every routing request)
 export const MIN_TOKENS = 10_000 // a smaller configured value is ignored (a compaction every few turns would be worse than none)
 export const DESK_RETRY_MS = 10 * 60_000 // after a vetoed or failed compaction, when no turn end comes sooner
 export const SOON_PCT = 80 // from here: the handover is written, the pane says "restart the desk soon" with the Restart desk button
@@ -45,11 +47,13 @@ export const soonAt = (limit: number): number => Math.floor((limit * SOON_PCT) /
 export const HANDOVER_MAX_CHARS = 12_000 // the desk handover: at most 3k tokens (characters / 4)
 const SOON_MS = 30_000
 
-// config.json `deskTokens` (default 100000). The 1.0.6 key `checkpoint.deskTokens` is still read when `deskTokens` is not set.
+// config.json `desk.contextLimit` (1.0.31, default 60000), else the older `deskTokens`, else the 1.0.6 key `checkpoint.deskTokens`: the context size the desk restarts at
+// (the automatic restart does the restart, deskauto.ts). A value that is not a number of at least MIN_TOKENS is ignored.
 export async function deskTokens(h: Host): Promise<number> {
   const c: any = await readConfig(h, await homeDir(h))
-  const v = c?.deskTokens ?? c?.checkpoint?.deskTokens
-  return typeof v === 'number' && Number.isFinite(v) && v >= MIN_TOKENS ? Math.floor(v) : DEFAULT_TOKENS
+  const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= MIN_TOKENS
+  const v = [c?.desk?.contextLimit, c?.['desk.contextLimit'], c?.deskTokens, c?.checkpoint?.deskTokens].find(ok)
+  return v !== undefined ? Math.floor(v) : DEFAULT_TOKENS
 }
 
 export type Usage = { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null | undefined
@@ -363,8 +367,8 @@ async function doingOf(h: Host, home: string, id: string, goal: string): Promise
   return task ? task.text : goal
 }
 
-async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid: string, tight: boolean): Promise<string> {
-  const w = (n: number) => (tight ? Math.floor(n / 2) : n) // a handover over its size is built again with half the widths and without the user's last words
+async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid: string, tight: boolean, core = false): Promise<string> {
+  const w = (n: number) => Math.floor((tight ? n / 2 : n) * (core ? 0.6 : 1)) // a handover over its size is built again with half the widths and without the user's last words; core: narrower cells still
   const home = await homeDir(h)
   const goals = await readJson<Record<string, { text?: string }>>(h, `${leanDir(home)}/goals.json`, {})
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`)
@@ -411,15 +415,29 @@ async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid:
     recent.length && !tight ? `## What the user said last (newest last; their preferences and decisions of the old session are in the old conversation)\n${recent.map(m => `- ${flat(m, 300)}`).join('\n')}` : '',
     sidOk(sid) ? `<!-- lean-agent: written-by-session ${sid} -->` : '',
   ]
-  return parts.filter(Boolean).join('\n\n') + '\n'
+  // core (config handover.mode, default core; full = the sections above): the open items and a one-line-per-thread table, plus an INDEX of what the old desk knew (a pull list:
+  // sizes and file names, nothing loaded). The user's last words and the goals (already in each thread's "doing") stay in their files.
+  const memory = (await readJsonl(h, `${leanDir(home)}/memory/notes.jsonl`).catch(() => [])).length
+  // (the same section titles as the full form: deskauto.ts handoverDigest counts the lines under them; a section with nothing in it is left out)
+  const open = [qs.length ? `## Unanswered thread questions\n${qs.join('\n')}` : '', reqs.length ? `## Pending requests (wait for the user's yes)\n${reqs.join('\n')}` : '', waiting.length ? `## Pending approvals\n${waiting.join('\n')}` : '', grantLines.length ? `## Grants in force (written approvals of the user)\n${grantLines.join('\n')}` : ''].filter(Boolean)
+  const coreParts = [
+    `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'}, core)`,
+    `This desk session replaces the previous one. Open items and threads are below; everything else is a pull (index at the end).`,
+    ...(open.length ? open : ['## Open items\nnone: no unanswered question, pending request, pending approval or grant']),
+    `## Open threads\n| id | title | project | state | doing | last report |\n|---|---|---|---|---|---|\n${rows.length ? rows.join('\n') : '| - | no open threads | | | | |'}`,
+    `## Index (pull what you need; nothing here is loaded for you)\n- thread reports: ${deskState(home)}/inbox.jsonl (${unread} unread)\n- handoff notes: ${deskState(home)}/notes.md\n- goals: ${goalLines.length} set (lean_thread list shows them; ${leanDir(home)}/goals.json)\n- remembered items: ${memory} (${leanDir(home)}/memory/notes.jsonl; lean_thread find <words>)${recent.length && !tight ? `\n- the user's last words: ${recent.length} messages in the old conversation (ask the user if a preference matters)` : ''}`,
+    sidOk(sid) ? `<!-- lean-agent: written-by-session ${sid} -->` : '',
+  ]
+  return (core ? coreParts : parts).filter(Boolean).join('\n\n') + '\n'
 }
 const untilText = (exp: number, now: number): string => (exp > now ? `${Math.max(1, Math.round((exp - now) / 60_000))} min left` : 'expired')
 
 // at most HANDOVER_MAX_CHARS (3k tokens): over it, built again with half the widths and without the user's last words; still over, the middle is cut
 // (the writer's id stays the LAST line: serveHandover reads it there)
-export async function deskHandover(h: Host, tokens: number, recent: string[], sid = ''): Promise<string> {
-  let text = await buildDeskHandover(h, tokens, recent, sid, false)
-  if (text.length > HANDOVER_MAX_CHARS) text = await buildDeskHandover(h, tokens, recent, sid, true)
+export async function deskHandover(h: Host, tokens: number, recent: string[], sid = '', mode?: HandoverMode): Promise<string> {
+  const core = (mode ?? (await handoverMode(h, await homeDir(h)))) === 'core' // config handover.mode (default core), the same key as the threads' handover
+  let text = await buildDeskHandover(h, tokens, recent, sid, false, core)
+  if (text.length > HANDOVER_MAX_CHARS) text = await buildDeskHandover(h, tokens, recent, sid, true, core)
   if (text.length <= HANDOVER_MAX_CHARS) return text
   const tail = WRITER.exec(text)?.[0] ?? '\n'
   const head = text.slice(0, text.length - tail.length)
