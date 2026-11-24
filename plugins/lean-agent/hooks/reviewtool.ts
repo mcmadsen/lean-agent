@@ -5,6 +5,8 @@ import { atomicWrite, homeDir, leanDir, readJson, threadsDir } from './state'
 import { readConfig } from './budget'
 import { readReview, writeReview } from './reviews'
 import { externalOf, fetchExternal, noteExternal } from './reviewext'
+import type { External } from './reviewext'
+import { forgeFiles, ownCommits, rangeLooksWrong } from './reviewforge'
 import { logRefusal } from './feedback'
 import { noteReviewed, reviewedBy } from './reviewkind'
 import type { Review } from './reviews'
@@ -69,6 +71,7 @@ export const REVIEW_EXTRA_PROPS = {
   ref: { type: 'string', description: 'prepare: review someone else\'s work (PR number or URL, branch or sha), read-only; record it with mode "external"' },
   mode: { type: 'string', enum: ['external'], description: 'record: the review of a ref (never green, never for the push gate)' },
   worktree: { type: 'string', description: 'prepare, record: absolute path of a registered worktree to review (default: this thread\'s own)' },
+  confirm: { type: 'boolean', description: 'prepare: go on although the range looks wrong (far more files than the PR\'s own commits touch); only with the user\'s word' },
   scope: { type: 'string', description: 'prepare, record: one area (area-1 ...) of a PR too large for one review, as the prepare text lists them; an area record is never green' },
 }
 
@@ -119,15 +122,32 @@ async function findEarlier(h: Host, project: string, r: Range, branch: string, s
   return null
 }
 
-async function loadContext(h: Host, project: string, r: Range, branch: string, since: string, second?: Context['second'], light = false) {
+// `ext`: someone else's PR. GitHub's own file list of the PR is the ground truth: when the git range holds more files, it is cut to the forge's
+// (`corrected` says so), and `forgeN` is the number of files the forge lists (null: not read)
+async function loadContext(h: Host, project: string, r: Range, branch: string, since: string, second?: Context['second'], light = false, ext?: External | null) {
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { exclude?: unknown } }
   const exclude = globsOk(cfg?.review?.exclude)
-  const { prep, diff, failed } = await prepare(h, r, r.mb, exclude)
+  let { prep, diff, failed } = await prepare(h, r, r.mb, exclude)
+  let forgeN: number | null = null
+  let corrected = ''
+  if (ext?.pr && !failed) {
+    const ff = await forgeFiles(h, ext.forge, ext.pr)
+    if (ff) {
+      forgeN = ff.length
+      const set = new Set(ff)
+      const keep = (p: string) => set.has(p)
+      if (prep.changed.some(p => !keep(p))) {
+        corrected = `range corrected to the PR's own files (forge: ${ff.length} files; git range: ${prep.changed.length})`
+        diff = keepSections(diff, keep)
+        prep = scopedPrep(prep, keep, diff)
+      }
+    }
+  }
   const earlier = await findEarlier(h, project, r, branch, since, light)
   const d = earlier ? await prepare(h, r, earlier.sha, exclude) : null
   const declines = await declinesFor(h, project, branch)
   const ctx: Context = { prep, delta: d?.prep ?? null, earlier: earlier ? earlier.carry : null, declines, ...(second ? { second } : {}) }
-  return { ctx, diff, deltaDiff: d?.diff ?? null, earlier, failed: failed || !!d?.failed }
+  return { ctx, diff, deltaDiff: d?.diff ?? null, earlier, failed: failed || !!d?.failed, forgeN, corrected }
 }
 
 const namedRef = async (git: (...a: string[]) => Promise<{ exitCode: number } | null>, name: string): Promise<boolean> => {
@@ -176,10 +196,18 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   if (ext) await noteExternal(h, project, ext)
   if (ext) await noteReviewed(h, thread, project, range.head) // a review thread's report gate looks for a record of this sha (reviewevidence.ts)
   const branch = str(i.branch)
-  const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), undefined, light)
+  const { ctx, diff, deltaDiff, earlier, failed, forgeN, corrected } = await loadContext(h, project, range, branch, str(i.since), undefined, light, ext)
   if (failed) return { ok: false, text: `prepare: git could not produce the diff of ${range.mb}...${range.head} (an error or a timeout): nothing was computed. Try again; do not review without the lists` }
-  // a diff over 300 files or 20000 lines (generated files out) is not reviewed in one: counts only, and the areas to review one by one (reviewarea.ts)
   const scopeArg = str(i.scope)
+  // a range that is far larger than the PR (the files its own commits touch, or config review.maxFiles, default 150) is most likely the wrong range:
+  // refused until the user says to go on (an area pass of an already confirmed review is not asked again)
+  if (ext && !scopeArg && i.confirm !== true) {
+    const rc = ((await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { maxFiles?: unknown } })?.review
+    const maxFiles = typeof rc?.maxFiles === 'number' && rc.maxFiles >= 1 ? Math.floor(rc.maxFiles) : undefined
+    const own = await ownCommits(h, range)
+    if (rangeLooksWrong(ctx.prep.changed.length, own, maxFiles)) return { ok: false, text: `prepare: range looks wrong: ${ctx.prep.changed.length} files / ${ctx.prep.lines} lines for a PR of ${own?.commits ?? '?'} commits (${forgeN !== null ? `the forge lists ${forgeN} files` : 'the forge list was not read'}). Range: merge base ${range.mb.slice(0, 8)}, head ${range.head.slice(0, 8)}. Pass base (parent1 = the merge commit's first parent, merge-base, or a commit sha) or confirm: true. Do NOT confirm on your own: ask the user (lean_ask, or a desk question item) with these numbers and prepare again with confirm: true only when they say go on.` }
+  }
+  // a diff over 300 files or 20000 lines (generated files out) is not reviewed in one: counts only, and the areas to review one by one (reviewarea.ts)
   const whole = perFileStats(diff)
   const areasAll = partition(whole)
   if (!scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))) {
@@ -229,6 +257,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const lines: string[] = []
   if (area) lines.push(`AREA REVIEW ${area.name} of ${areasAll.length} (${area.files} changed files, ${area.lines} changed lines: ${area.keys.map(keyLabel).join(', ')}). The PR is too large for one review: review ONLY the changed files and lines listed below under these paths (a folder is only a way to group them: its unchanged files are not part of the review) (the other areas are separate passes); every git diff below is limited to them. Record with lean_review record and scope "${area.name}" (an area record is never green); keep your answer short.`)
   if (ext) lines.push(`EXTERNAL REVIEW of ${ext.label} (someone else's work, read read-only from a scratch repository; the user's tree is never touched). Record it with mode: "external" and the head sha below: it is recorded NOT green and never counts for the push gate. Do not edit anything and do not push.`)
+  lines.push(`reviewing ${range.head.slice(0, 8)} against merge base ${range.mb.slice(0, 8)} (target not merged)${ext?.note ? `: ${ext.note}` : ''}${corrected ? `\n${corrected}` : ''}. The checkout is read-only: never pull, merge or rebase the target into the PR; the diff is against the merge base.`)
   lines.push(ext ? `Scratch repository (every git command is git -C this path, never cd): ${co}` : `Project checkout (the worktree: every git command is git -C this path, never cd): ${co}`)
   lines.push(`Range: merge base ${range.mb}, head ${range.head}. The whole change: git -C ${co} diff ${range.mb}...${range.head}${cut} (code before the change: git -C ${co} show ${range.mb}:<path>)`)
   const grants = [`git -C ${co} diff ${range.mb}...${range.head}`, `git -C ${co} log ${range.mb}..${range.head}`, `git -C ${co} show ${range.head}`, `git -C ${co} merge-base ${range.mb} ${range.head}`, ...(rereview ? [`git -C ${co} diff ${earlier!.sha}...${range.head}`] : [])]
@@ -323,7 +352,7 @@ async function changePrep(h: Host, project: string, i: any, thread: string): Pro
     const checkout = ext ? ext.path : await checkoutOf(h, project, thread, str(i.branch), str(i.worktree))
     const range = ext ? await resolveRange(h, project, ext.base, sha, ext.path) : await resolveRange(h, project, str(i.base) || undefined, sha || undefined, checkout)
     if (typeof range === 'string') return null
-    const { ctx, failed } = await loadContext(h, project, range, str(i.branch), '', undefined, true)
+    const { ctx, failed } = await loadContext(h, project, range, str(i.branch), '', undefined, true, ext)
     return failed ? null : ctx.prep
   } catch {
     return null
@@ -397,7 +426,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const second = Array.isArray(i.second) ? i.second.filter((x: any) => x && typeof x.symbol === 'string').map((x: any) => ({ symbol: String(x.symbol), candidate: typeof x.candidate === 'string' ? x.candidate : '' })) : undefined
   // a light pass never records green: said by the call (level: "light") or by the last prepare of this sha (the mod's store)
   const light = str(i.level).toLowerCase() === 'light' || (await preparedLevel(h, project, sha)) === 'light'
-  const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light)
+  const { ctx, diff, deltaDiff, earlier, failed } = await loadContext(h, project, range, branch, str(i.since), second, light, ext)
   // only changed code counts (reviewchange.ts): a finding about a file the change does not touch, or a line outside every changed hunk (+-3), is dropped and counted
   if (failed) return noDiff('git could not produce the diff of the range (an error or a timeout)') // never recorded unfiltered
   const cs = changeScope(res.findings, ctx.prep, await contextCfg(h))

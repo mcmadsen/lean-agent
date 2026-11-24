@@ -5,9 +5,10 @@
 import type { Host } from './state'
 import { homeDir, leanDir, mkdirp } from './state'
 import { projectPath, refOk } from './reviewprep'
+import { parseOrigin } from './prhost'
 
 export type ExtRef = { pr: number } | { ref: string }
-export type External = { path: string; base: string; head: string; label: string; pr?: number; note?: string }
+export type External = { path: string; base: string; head: string; label: string; pr?: number; forge?: string /* GitHub owner/repo: the forge's own file list */; note?: string }
 
 const SHA = /^[0-9a-f]{40,64}$/
 // '12', '#12', a PR URL (GitHub .../pull/12, Azure DevOps .../pullrequest/12), a branch or a sha
@@ -95,20 +96,21 @@ export async function fetchExternal(h: Host, project: string, rawRef: string, ba
     }
     if (!base) return `cannot read the base ${baseIn && word !== 'merge-base' ? baseIn : '(main, master, develop)'} from the origin of ${project}: pass base (a branch, parent1, or a commit sha of the PR's history; fetched refs: ${fetched.join(', ')})`
   }
-  return { path: scratch, base, head, label, ...('pr' in parsed ? { pr: parsed.pr } : {}), ...(note ? { note } : {}) }
+  const origin = parseOrigin(url)
+  return { path: scratch, base, head, label, ...('pr' in parsed ? { pr: parsed.pr } : {}), ...(origin.kind === 'github' ? { forge: `${origin.owner}/${origin.repo}` } : {}), ...(note ? { note } : {}) }
 }
 
 // what record (mode external) needs to find again: the scratch repo and the base of a prepared head sha (the mod's store; newest 20)
-type Entry = { path: string; base: string; label: string; ts: number; pr?: number; note?: string }
+type Entry = { path: string; base: string; label: string; ts: number; pr?: number; forge?: string; note?: string }
 export async function noteExternal(h: Host, project: string, x: External): Promise<void> {
   const v = await h.store.get(extKey(project)).catch(() => undefined)
   const all: Record<string, Entry> = v && typeof v === 'object' && !Array.isArray(v) ? (v as any) : {}
-  all[x.head] = { path: x.path, base: x.base, label: x.label, ts: await h.clock.now(), ...(x.pr ? { pr: x.pr } : {}), ...(x.note ? { note: x.note } : {}) }
+  all[x.head] = { path: x.path, base: x.base, label: x.label, ts: await h.clock.now(), ...(x.pr ? { pr: x.pr } : {}), ...(x.forge ? { forge: x.forge } : {}), ...(x.note ? { note: x.note } : {}) }
   const keep = Object.entries(all).sort((a, b) => (b[1]?.ts ?? 0) - (a[1]?.ts ?? 0)).slice(0, 20)
   await h.store.set(extKey(project), Object.fromEntries(keep)).catch(() => undefined)
 }
 export async function externalOf(h: Host, project: string, sha: string): Promise<External | null> {
   const v = (await h.store.get(extKey(project)).catch(() => undefined)) as Record<string, Entry> | undefined
   const e = v && typeof v === 'object' ? v[sha] : undefined
-  return e && typeof e.path === 'string' && typeof e.base === 'string' ? { path: e.path, base: e.base, head: sha, label: String(e.label ?? ''), ...(typeof e.pr === 'number' ? { pr: e.pr } : {}), ...(typeof e.note === 'string' ? { note: e.note } : {}) } : null
+  return e && typeof e.path === 'string' && typeof e.base === 'string' ? { path: e.path, base: e.base, head: sha, label: String(e.label ?? ''), ...(typeof e.pr === 'number' ? { pr: e.pr } : {}), ...(typeof e.forge === 'string' ? { forge: e.forge } : {}), ...(typeof e.note === 'string' ? { note: e.note } : {}) } : null
 }

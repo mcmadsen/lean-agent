@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { threadTool } from './delivery'
 import { fetchExternal } from './reviewext'
 
 // The range of a PR ref (1.0.31): the merge commit against its FIRST PARENT, never the old branch point. A synthetic origin: PR 7 has a source
@@ -46,6 +47,48 @@ test('a PR without a merge commit is read as the source head against the default
   expect(r.head).toBe(S!)
   expect(r.base).toBe(T!)
   expect(r.note).toBeUndefined()
+})
+
+// a prepare of PR 7 whose git range holds `n` files (a range from the wrong base) while its own commits touch two files
+function bigPr(n: number) {
+  const h = origin(true)
+  h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', project: 'app' }))
+  const diff = Array.from({ length: n }, (_, i) => [`diff --git a/f${i}.ts b/f${i}.ts`, 'new file mode 100644', '--- /dev/null', `+++ b/f${i}.ts`, '@@ -0,0 +1 @@', '+x']).flat().join('\n') + '\n'
+  const base = h.git.handler
+  h.git.handler = (a: string[], c: any) => {
+    const s = a.join(' ')
+    if (s.includes('rev-list --count')) return { exitCode: 0, stdout: '3\n' }
+    if (s.includes(' log ')) return { exitCode: 0, stdout: 'f0.ts\nf1.ts\n' }
+    if (s.includes('merge-base --is-ancestor')) return { exitCode: 1, stdout: '' }
+    if (s.includes('merge-base')) return { exitCode: 0, stdout: `${P1}\n` }
+    if (s.includes('--name-status')) return { exitCode: 0, stdout: Array.from({ length: n }, (_, i) => `A\tf${i}.ts`).join('\n') + '\n' }
+    if (s.includes(' diff ')) return { exitCode: 0, stdout: diff }
+    return base(a, c)
+  }
+  return h
+}
+const prep = (h: any, extra: Record<string, unknown> = {}) => threadTool(h.host, 't1', 'lean_review', { action: 'prepare', ref: '7', level: 'full', ...extra })
+
+test('a range far larger than the PR is refused until the user confirms; the forge list wins over the git range', { timeoutMs: 20_000 }, async () => {
+  const h = bigPr(200)
+  const refused = await prep(h)
+  expect(refused.ok).toBe(false)
+  expect(refused.text).toContain('range looks wrong: 200 files / 200 lines for a PR of 3 commits (the forge list was not read)')
+  expect(refused.text).toContain('Pass base')
+  expect(refused.text).toContain('confirm: true')
+  const go = await prep(h, { confirm: true })
+  expect(go.ok).toBe(true)
+  expect(go.text).toContain(`reviewing ${M!.slice(0, 8)} against merge base ${P1!.slice(0, 8)} (target not merged)`)
+  expect(go.text).toContain('against its first parent')
+  // the forge lists two files: the range is cut to them, and the sanity check no longer fires
+  h.exec.handler = (a: string[]) => (a[0] === 'gh' && a.join(' ').includes('pulls/7/files') ? { exitCode: 0, stdout: 'f0.ts\nf1.ts\n' } : { exitCode: 127, stdout: '' })
+  const cut = await prep(h)
+  expect(cut.ok).toBe(true)
+  expect(cut.text).toContain("range corrected to the PR's own files (forge: 2 files; git range: 200)")
+  expect(cut.text).toContain('f1.ts')
+  expect(cut.text).not.toContain('f150.ts')
+  // a small range is never asked about
+  expect((await prep(bigPr(5))).ok).toBe(true)
 })
 
 test('base accepts parent1, merge-base and a commit sha of the scratch repository; a sha it cannot read says what was fetched', { timeoutMs: 20_000 }, async () => {
