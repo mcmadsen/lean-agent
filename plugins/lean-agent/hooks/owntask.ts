@@ -10,7 +10,8 @@ import type { Host } from './state'
 import { readerOf } from './deskactions'
 import { recentPrompts } from './humanprompts'
 
-export type OwnTarget = { pr?: { org: string; project: string; repo: string; number: number }; workItem?: { org: string; project: string; id: number } }
+// `link`: the request is a LINK of the PR to the work item (ado-pr-workitem-link), so its refusal says "not linking it" (a state move says "not moving it")
+export type OwnTarget = { pr?: { org: string; project: string; repo: string; number: number }; workItem?: { org: string; project: string; id: number }; link?: boolean }
 export type OwnResult = { ok: boolean; why: string }
 type Who = { id?: string; unique?: string; name: string }
 const enc = encodeURIComponent
@@ -50,6 +51,7 @@ function identity(h: Host, org: string): Promise<Who | null> {
 }
 
 export const CANT = 'could not verify the owner/assignee: not moving it'
+const SAY_LINK = (_id: number): string => "(say 'link it anyway' in the chat to allow once)" // (userSaidAnyway accepts these words for a link request)
 export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
   const org = t.workItem?.org ?? t.pr?.org
   if (!org || (!t.workItem && !t.pr)) return { ok: false, why: CANT }
@@ -61,8 +63,8 @@ export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
     const g = (await rd.az('GET', `https://dev.azure.com/${enc(w.org)}/${enc(w.project)}/_apis/wit/workitems/${w.id}?fields=System.AssignedTo&api-version=7.1`).catch(() => null)) as { fields?: Record<string, unknown> } | null
     if (!g || typeof g !== 'object' || !g.fields || typeof g.fields !== 'object') return { ok: false, why: CANT }
     const a = whoOf(g.fields['System.AssignedTo'])
-    if (!a) return { ok: false, why: `WI ${w.id} is unassigned: not moving it` }
-    if (!same(who, a)) return { ok: false, why: `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
+    if (!a) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item that is unassigned, not yours: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is unassigned: not moving it` }
+    if (!same(who, a)) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item assigned to ${a.name}, not you: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
   }
   if (t.pr) {
     const p = t.pr
@@ -86,7 +88,7 @@ export async function checkMove(h: Host, kind: string, params: Record<string, un
   for (const it of items) {
     const p = it?.params ?? {}
     let target: OwnTarget | null = null
-    if (it?.kind === 'ado-pr-workitem-link') target = { workItem: { org: str(p.org), project: str(p.project), id: num(p.workitem) }, pr: { org: str(p.org), project: str(p.project), repo: str(p.repo), number: num(p.pr) } }
+    if (it?.kind === 'ado-pr-workitem-link') target = { link: true, workItem: { org: str(p.org), project: str(p.project), id: num(p.workitem) }, pr: { org: str(p.org), project: str(p.project), repo: str(p.repo), number: num(p.pr) } }
     else if (it?.kind === 'ado-workitem-update' && p.fields && typeof p.fields === 'object' && 'state' in (p.fields as object)) target = { workItem: { org: str(p.org), project: str(p.project), id: num(p.id) } }
     if (!target || !(target.workItem!.id > 0)) continue // (a work item a create step of the same batch is making has no number yet: the user approves that whole batch)
     const r = await moveAllowed(h, home, target)
@@ -102,9 +104,9 @@ export async function onlyOwn(h: Host, home: string): Promise<boolean> {
   return v !== false
 }
 // the user's OWN typed words lift the rule for the one work item they name ("move WI 4210 anyway"); a thread cannot pass anything that does
-export async function userSaidAnyway(h: Host, wi: number): Promise<boolean> {
+export async function userSaidAnyway(h: Host, wi: number, link = false): Promise<boolean> {
   const named = new RegExp(`(?:\\bWI|work\\s?items?|_workitems/edit/|#)\\s*${wi}\\b`, 'i')
-  return (await recentPrompts(h).catch(() => [])).some(p => named.test(p.text) && /\banyway\b|\bregardless\b|\beven though\b/i.test(p.text))
+  return (await recentPrompts(h).catch(() => [])).some(p => (named.test(p.text) && /\banyway\b|\bregardless\b|\beven though\b/i.test(p.text)) || (link && /\blink it anyway\b/i.test(p.text))) // (a link refusal says "say 'link it anyway'": those words count for a link request)
 }
 // the check the typed actions and the after-PR batch use: config off or the user's words -> allowed; else ownTask
 // the specs of the executor (deskactions, standing, ownpr ...) test the writes, not the owner: they call this once at the top of the file (a spec file runs in its own process)
@@ -117,6 +119,6 @@ export async function moveAllowed(h: Host, home: string, t: OwnTarget): Promise<
   if (relaxed || !(await onlyOwn(h, home))) return { ok: true, why: '' }
   const r = await ownTask(h, t)
   if (r.ok) return r
-  if (t.workItem && r.why !== CANT && (await userSaidAnyway(h, t.workItem.id))) return { ok: true, why: '' } // (a failed read is never lifted: the words do not make the read succeed)
+  if (t.workItem && r.why !== CANT && (await userSaidAnyway(h, t.workItem.id, t.link === true))) return { ok: true, why: '' } // (a failed read is never lifted: the words do not make the read succeed)
   return r // (the refusal is exactly the why: nothing is added to it)
 }

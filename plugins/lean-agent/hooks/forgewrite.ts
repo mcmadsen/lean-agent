@@ -1,9 +1,14 @@
 // A forge WRITE made by script (curl / wget / az rest / az repos|boards|devops|pipelines write subcommands / gh api with a write method /
 // gh pr|issue comment|review|edit ...) against Azure DevOps or GitHub. A thread and a subagent never make one: the write is an action KIND the
-// thread requests with lean_report (deskactions.ts), the user approves, the mod sends it. This module is the ONE detector (text based, so it also
-// reads a command inside `bash -c`, a heredoc or a brief) used by the refusal (orchestrate.ts, guard.ts), the brief lint (thread tool) and the
-// stale-memory retirement (memory load, doctor). The refusal text lists the kinds FROM THE TABLE, never by hand.
+// thread requests with lean_report (deskactions.ts), the user approves, the mod sends it. This module is the ONE detector used by the refusal
+// (orchestrate.ts, guard.ts), the brief lint (thread tool) and the stale-memory retirement (memory load, doctor). The refusal text lists the kinds
+// FROM THE TABLE, never by hand. 1.0.34: az / gh are judged by the READ allow-list (forgecli.ts): only a read verb runs, every other form is a write.
+//   forgeCommandWrite(command)  a shell command (guards): the scanner of shell.ts finds az / gh at a PROGRAM position (also inside bash -c, eval, $(...),
+//                               xargs, a python -c string ...), so `git commit -m "docs: gh pr create"` and `echo gh pr create` are data, not writes
+//   isForgeWrite(text)          prose, a brief, a memory item: text based, az / gh anywhere in the text
 import { ACTION_KINDS } from './deskactions'
+import { DATA, HOST, METHOD, textForgeWrite } from './forgecli'
+import { analyze } from './shell'
 import { appendJsonl, atomicWrite, homeDir, leanDir } from './state'
 import type { Host } from './state'
 
@@ -58,29 +63,36 @@ export async function retireMemory(h: Host): Promise<string> {
 export const FORGE_RULE = 'forge-write'
 export const forgeRefusalHead = /^forge writes go through the desk/
 
-const HOST = /dev\.azure\.com|\.visualstudio\.com|api\.github\.com|github\.com|\/_apis\/|\/pullRequests\/\S*\/threads/i // (a note that gives only the path `.../pullRequests/<pr>/threads/<id>` is the same write)
-const METHOD = /(?:^|[\s'"])(?:-X|--request|--method|--http-method|-m)[\s=]*['"]?(?:POST|PATCH|PUT|DELETE)\b/i
-// `gh api graphql` that only READS: the one gh api in the text, a query text that starts with `query` or `{`, no mutation / subscription, no other method, no --input
-const GH_API = /(?:^|[^\w./-])gh\s+(?:-\S+\s+)*api(?![\w-])/g
-const GQL_QUERY = /(?:^|\s)(?:-f|-F|--field|--raw-field)[\s=]*['"]?query=\s*['"]?\s*(?:query\b|\{)/
-const gqlRead = (t: string): boolean => (t.match(GH_API)?.length ?? 0) === 1 && /\bgh\s+(?:-\S+\s+)*api\s+graphql\b/.test(t) && GQL_QUERY.test(t) && !/\b(mutation|subscription)\b/i.test(t) && !METHOD.test(t) && !/--input\b/.test(t)
-// `az devops invoke` is a write only with a method that is not GET or a request body file
-const azInvokeWrite = (t: string): boolean => METHOD.test(t) || /--in-file\b|--http-method[\s=]+['"]?(?!get\b)\w/i.test(t)
-const GET_METHOD = /(?:^|[\s'"])(?:-X|--request|--method)[\s=]*['"]?GET\b/i
-const DATA = /(?:^|\s)(?:(?:-d|-F|-T)(?=[\s='"@{]|$)|--(?:data(?:-binary|-raw|-urlencode|-ascii)?|json|form(?:-string)?|upload-file|post-data|post-file|body-data|body-file)(?=[\s=]|$))/
-const GH_FIELD = /(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?=[\s='"]|$)/
-const AZ_READ = /^(list|show|query|get|list-.*|show-.*)$/
-const AZ_WRITE = /^(create|update|delete|add|remove|set|set-vote|set-auto-complete|abandon|complete|approve|reject|reactivate|reset|run|queue|invoke|import|restore|move|vote)$/
-const PROG = (name: string): RegExp => new RegExp(`(?:^|[^\\w./-])${name}(?![\\w-])`)
+// curl / wget at a forge host with a method that is not GET or a body (text based: the host and the flags may be anywhere in the command)
+function fetchWrite(t: string): string | null {
+  const fetch = /(?:^|[^\w./-])(?:curl|wget)(?![\w-])/.exec(t)
+  return fetch && HOST.test(t) && (METHOD.test(t) || DATA.test(t)) ? fetch[0].replace(/^[^\w]/, '') : null
+}
+const clean = (c: string): string => c.replace(/\\\r?\n/g, ' ')
 
-export function isForgeWrite(command: string): boolean {
-  const t = command.replace(/\\\r?\n/g, ' ')
-  if ((PROG('curl').test(t) || PROG('wget').test(t)) && HOST.test(t) && (METHOD.test(t) || DATA.test(t))) return true
-  if (/(?:^|[^\w./-])az\s+(?:-\S+\s+)*rest(?![\w-])/.test(t) && METHOD.test(t)) return true
-  for (const m of t.matchAll(/(?:^|[^\w./-])az\s+(?:repos|boards|devops|pipelines)((?:\s+[a-z][a-z-]*){1,4})/g)) {
-    const first = m[1]!.trim().split(/\s+/).find(w => AZ_READ.test(w) || AZ_WRITE.test(w))
-    if (first === 'invoke' ? azInvokeWrite(t) : first && AZ_WRITE.test(first)) return true
-  }
-  if (/(?:^|[^\w./-])gh\s+(?:-\S+\s+)*api(?![\w-])/.test(t) && !gqlRead(t) && (METHOD.test(t) || (GH_FIELD.test(t) && !GET_METHOD.test(t)))) return true
-  return /(?:^|[^\w./-])gh\s+(?:(?:-R|--repo)\s+\S+\s+)?(?:pr|issue)\s+(?:comment|review|edit|close|reopen|merge|ready|lock|unlock)(?![\w-])/.test(t)
+// the label of the first forge write in a TEXT ("az repos", "gh pr", "curl"), or null (prose, brief, memory: az / gh anywhere in it)
+export const forgeTextWrite = (text: string): string | null => fetchWrite(clean(text)) ?? textForgeWrite(text)
+export const isForgeWrite = (text: string): boolean => forgeTextWrite(text) !== null
+
+// the label of the first forge write in a SHELL COMMAND, or null. az / gh at a program position are judged by the read allow-list; a command the scanner cannot
+// read (unbalanced quotes, a script on stdin) and a variable as the program name that names gh / az fall back to the text scan
+export function forgeCommandWrite(command: string): string | null {
+  const t = clean(command)
+  const c = fetchWrite(t)
+  if (c) return c
+  const a = analyze(t)
+  if (a.forge) return a.forge
+  if (a.unsure) return textForgeWrite(t)
+  if (a.dynamic && /\b(gh|az)\b|\b(repos|boards|pipelines)\s+\w|\bpr\s+(create|merge|comment|review|edit|close|update)\b/i.test(t)) return 'gh|az'
+  return null
+}
+// the action kind that does the same write, when one does (a hint appended to the refusal)
+const KIND_FOR: Array<[RegExp, string]> = [
+  [/\bpr\s+work-item\s+add\b/, 'ado-pr-workitem-link'], [/\bpr\s+work-item\s+remove\b/, 'ado-pr-workitem-unlink'], [/\bpr\s+set-vote\b/, 'ado-pr-vote'], [/\bpr\s+reviewer\b/, 'ado-pr-reviewer'],
+  [/\bpr\s+update\b/, 'ado-pr-update'], [/\bwork-item\s+update\b/, 'ado-workitem-update'], [/\bwork-item\s+create\b/, 'ado-workitem-create'],
+]
+export function forgeHint(command: string): string {
+  const t = command.replace(/['"]\s*,\s*['"]/g, ' ')
+  const k = KIND_FOR.find(([re]) => re.test(t))
+  return k ? ` (closest kind: ${k[1]})` : ''
 }

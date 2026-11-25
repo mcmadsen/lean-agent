@@ -1,5 +1,5 @@
 // Job types (execution model, fail fast): the first line of a worker brief names the job, `job: lookup|edit|run|check`. By job:
-//  - a step budget (tool calls): lookup 10, edit 16, run 6, check 10; config.json `workers.stepsByJob`; `workers.steps` (24) stays the ceiling.
+//  - a step budget (tool calls): lookup 12, edit 20, run 6, check 12; config.json `workers.stepsByJob`; `workers.steps` (24) stays the ceiling.
 //    At 75% of the budget the worker's next tool result carries "N tool calls left: finish and answer" (orchestrate.ts); the refusal stays at the budget.
 //  - a return schema, enforced by script: the Agent result is cut to it and marked (trimJobResult / jobResult)
 //  - a retry count per (thread, job hash): the second identical brief needs a `why-sonnet:` line, the third is refused (retryDenial checks, retryRan counts)
@@ -8,7 +8,7 @@ import { mapTexts } from './cap'
 
 export type Job = 'lookup' | 'edit' | 'run' | 'check'
 export const JOBS: readonly Job[] = ['lookup', 'edit', 'run', 'check']
-export const STEPS_BY_JOB: Record<Job, number> = { lookup: 10, edit: 16, run: 6, check: 10 }
+export const STEPS_BY_JOB: Record<Job, number> = { lookup: 12, edit: 20, run: 6, check: 12 } // (1.0.34: +25%; field data: the runs cut off at 16 / 10 needed about 2 more calls, and a cut-off costs a whole extra worker start)
 // the reviewer's tool-call budget: ONE number for the guard, the brief and agents/reviewer.md (a 10-call budget needed ~12 turns: 1.0.31 makes it 16)
 export const REVIEWER_STEPS = 16
 export const reviewerBudget = (ceiling: number): number => Math.min(REVIEWER_STEPS, Math.max(1, ceiling))

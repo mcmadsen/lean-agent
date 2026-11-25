@@ -652,10 +652,10 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `attribution` | threads | boolean | false | next session | Let threads add Claude attribution lines to commits and pull requests. |
 | `workers.briefChars` (sensitive) | workers | number >= 1 | 3000 | now | Longest brief a worker accepts, in characters. |
 | `workers.steps` (sensitive) | workers | number >= 1 | 24 | now | Most tool calls one worker may make before it must return what it has. |
-| `workers.stepsByJob.lookup` (sensitive) | workers | number >= 1 | 10 | now | Tool calls for a lookup job. |
-| `workers.stepsByJob.edit` (sensitive) | workers | number >= 1 | 16 | now | Tool calls for an edit job. |
+| `workers.stepsByJob.lookup` (sensitive) | workers | number >= 1 | 12 | now | Tool calls for a lookup job. |
+| `workers.stepsByJob.edit` (sensitive) | workers | number >= 1 | 20 | now | Tool calls for an edit job. |
 | `workers.stepsByJob.run` (sensitive) | workers | number >= 1 | 6 | now | Tool calls for a run job. |
-| `workers.stepsByJob.check` (sensitive) | workers | number >= 1 | 10 | now | Tool calls for a check job. |
+| `workers.stepsByJob.check` (sensitive) | workers | number >= 1 | 12 | now | Tool calls for a check job. |
 | `workers.requireJob` | workers | boolean | false | now | Refuse a worker brief whose first line does not name the job. |
 | `workers.answerChars` | workers | number >= 100 | 1200 | now | Characters of a subagent answer that come back into the conversation. |
 | `agentResultChars` | workers | number >= 1 | 6000 | now | Largest result a subagent keeps whole, in characters. |
@@ -764,10 +764,10 @@ All work goes to small workers; the guard enforces it (hooks/orchestrate.ts), no
 |---|---|---|
 | desk | `lean_*` tools, AskUserQuestion, Skill, Read / read-only Bash inside `~/.lean-agent` only (each result cut to `deskToolResultChars`, default 6000) | "the desk routes: start or ask a thread (lean_thread new / send)" |
 | thread | `lean_*` tools (incl. `lean_run`), Agent (workers), `git status/log/add/commit/worktree/diff --stat…`, its own thread-folder files, at most `threads.directReads` (default 3) direct Reads per turn of ≤ 200 lines | "one step for a small worker: lean-agent:worker-haiku (allow-edit: <path>) / lean-agent:reader-haiku" |
-| worker / reader | ONE step, a tool-call budget `workers.steps` (default 15), answer ≤ 30 lines; never starts agents | at the budget: "return what you have; the thread splits the rest" |
+| worker / reader | ONE step, a tool-call budget (`workers.steps` default 24 is the ceiling; per job below), answer ≤ 30 lines; never starts agents | at the budget: "return what you have; the thread splits the rest" |
 
 - Haiku by default: an Agent call to `worker-sonnet` / `reader-sonnet` needs a prompt line `why-sonnet: <reason>`; opus stays under the
-  pane approval. A worker brief is at most `workers.briefChars` (default 1500); at most `threads.workers` (default 4) run at once.
+  pane approval. A worker brief is at most `workers.briefChars` (default 3000); at most `threads.workers` (default 4) run at once.
 - An Agent result of a worker / reader is cut to `agentResultChars` (default 6000, head + tail); the full text is a file under
   `~/.lean-agent/output/`.
 - Small workers and the reviewer passes do not count against a user `agents.cap`.
@@ -901,10 +901,14 @@ to the job's schema and marked `[lean-agent: result outside the <job> schema, tr
 
 | job | result | tool calls |
 |---|---|---:|
-| lookup | `answer:` (<= 20 lines), `refs: path:line, ...` | 5 |
-| edit | `files:`, `diffstat:`, `result: pass\|fail`, `note:` (one line) | 8 |
-| run | `result: pass\|fail`, <= 20 lines | 3 |
-| check | `result: pass\|fail`, <= 20 lines | 5 |
+| lookup | `answer:` (<= 20 lines), `refs: path:line, ...` | 12 |
+| edit | `files:`, `diffstat:`, `result: pass\|fail`, `note:` (one line) | 20 |
+| run | `result: pass\|fail`, <= 20 lines | 6 |
+| check | `result: pass\|fail`, <= 20 lines | 12 |
+
+Since 1.0.34 the budgets are lookup 12, edit 20, check 12 (run stays 6): in the 1.0.33 field data the runs that hit the old caps (edit 16, lookup 10)
+needed only about 2 more calls, and a worker that is cut off costs a whole extra worker start. The reviewer keeps its 16 (`REVIEWER_STEPS`; the
+export has only its refusal count, not how many calls those runs still needed). The brief cap (`workers.briefChars`, 3000) is unchanged.
 
 `config.json` `workers.stepsByJob: { "lookup": 5, ... }` sets the budgets; `workers.steps` stays the ceiling. At the budget the guard refuses
 further calls ("return what you have in the <job> schema") and the worker's `maxTurns` is the hard stop. `workers.requireJob: true` refuses a
@@ -1456,6 +1460,17 @@ All fail closed (a guard that throws denies):
 
 - **Desk strict mode**: the desk may read lean-agent state and use its own tools; it may not edit code or run builds. Its shell is limited to read-only status commands (`gh pr view|list|status`, `gh search prs`, `az repos pr list|show`, `git -C <dir> log|status|remote get-url`).
 - **Push gate**: see above. The review must be green for the commit each pushed ref points at (not just HEAD).
+- **Forge writes by shell (1.0.34)**: a thread (orchestration on or off, private project or not) and every subagent run only READS of `az` / `gh` /
+  `curl` / `wget`. For `az` under `repos|boards|devops|pipelines|artifacts` the last word of the command path must be a read verb (`list`, `show`, `query`,
+  `get`, `download`, `diff`, `list-*`, `show-*`); `az devops invoke` and `az rest` only as GET without a body. For `gh` under `pr|issue|release|repo|workflow|run|...`
+  the verb must be `view|list|diff|checks|status|...`; `gh api` only as GET without fields. curl / wget to a forge host with a method other than GET or
+  a body are writes. Every other form (`az repos pr work-item add`, `az boards work-item update`, `gh pr create|merge`, `gh release create`,
+  `gh api -X POST`, also in `bash -c`, after `FOO=1`, or in a `python3 -c` argv list) is refused with the action kinds and, where one exists, the closest one
+  (`closest kind: ado-pr-workitem-link`). What the user told the thread in its own session is not the desk's approval. Before 1.0.34 a thread's own
+  `az` / `gh` passed as "judged by the other guards", which only judge private projects. A link of a PR to a work item that is not yours is refused with
+  "linking this PR to WI 4210 changes a work item assigned to <name>, not you: not linking it (say 'link it anyway' in the chat to allow once)".
+  `git tag` (read forms `-l`, `--list`, `-n`, `--contains`, `--points-at`, `--format` ...), `git describe`, `gh release view|list` are reads for a subagent;
+  creating or deleting a tag or a release stays refused.
 - **Guarded branches** (every repo): a plain `git push` to `main`, `master`, `develop` or `release/*` (or a project's own `guards.push-deny`
   list in `projects.json`, even an empty one) is refused in the shell guard and in the pre-push hook: "Push your own branch and open a
   pull request". Pushes to a local path or `file://` URL are not checked (`LEAN_AGENT_PUSH_GUARD_LOCAL=1` checks them); the session

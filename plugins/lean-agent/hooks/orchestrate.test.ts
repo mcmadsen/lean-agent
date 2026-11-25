@@ -70,7 +70,9 @@ test('thread: a Bash refusal says what was tried (program and subcommand only) a
   const r = (command: string) => String(call(th, { tool: 'Bash', command }))
   expect(r('npm test')).toContain(tried('npm test'))
   expect(r('npm test')).toContain('lean_run')
-  expect(call(th, { tool: 'Bash', command: 'az pipelines run --name x' })).toBeNull() // az is judged by the other guards: allowed here
+  expect(r('az pipelines run --name x')).toContain('forge writes go through the desk') // 1.0.34: az / gh WRITES are refused here too (they used to pass as "judged by the other guards")
+  expect(r('az pipelines run --name x')).toContain(tried('az pipelines'))
+  expect(call(th, { tool: 'Bash', command: 'az pipelines runs list --top 3' })).toBeNull() // a read runs
   expect(r('git -C /r/app checkout main')).toContain(tried('git checkout')) // outside its own worktrees
   expect(r('git -C /r/app checkout main')).toContain('git switch')
   expect(r('cd /x && npm test')).toContain(tried('cd')) // (the folder is never named)

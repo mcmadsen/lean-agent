@@ -68,6 +68,6 @@ with the token in the header, read from an environment variable and never printe
   (never a PAT, never printed). Use the CLI forms by hand only when the tool is missing. To re-read the threads later (a status check after
   a write): `lean_run` `get` `{host: "ado", org, project, repo, pr, threads: true}` = one line per thread (id, status, first words), or a `get` path
   with `select`; GitHub `{host: "github", path: "repos/<owner>/<repo>/pulls/<n>/comments"}`; no token in a shell.
-- **update status** (thread only): `az repos pr update --id <n> --status abandoned|active|completed`; github: the user does it, or `gh pr ready` / `gh pr close`.
+- **update status** (thread only): `lean_report` with the action kind `ado-pr-update` (`status` abandoned|active, or `draft`); never by shell (1.0.34: `az repos pr update` and `gh pr close` are refused like every forge write); completing is the user's. github: the user does it.
 - Merging, completing, closing and deleting remote branches are the user's call. thread: ask first with `lean_ask`; desk: ask with AskUserQuestion,
   then `send` the decision to the thread.

@@ -21,18 +21,18 @@ test('the job is named by the first non-blank line of the brief; anything else i
   expect(jobOf(undefined)).toBeNull()
 })
 
-test('step budgets: lookup 10, edit 16, run 6, check 10; config per job; workers.steps (24) is the ceiling; no job = the ceiling', () => {
-  expect(STEPS_BY_JOB).toEqual({ lookup: 10, edit: 16, run: 6, check: 10 })
+test('step budgets: lookup 12, edit 20, run 6, check 12 (1.0.34: +25%); config per job; workers.steps (24) is the ceiling; no job = the ceiling', () => {
+  expect(STEPS_BY_JOB).toEqual({ lookup: 12, edit: 20, run: 6, check: 12 })
   expect(orchConfig({}).steps).toBe(24)
-  expect(stepBudget('lookup', 24)).toBe(10)
-  expect(stepBudget('edit', 24)).toBe(16)
+  expect(stepBudget('lookup', 24)).toBe(12)
+  expect(stepBudget('edit', 24)).toBe(20)
   expect(stepBudget('run', 24)).toBe(6)
-  expect(stepBudget('check', 24)).toBe(10)
+  expect(stepBudget('check', 24)).toBe(12)
   expect(stepBudget('edit', 6)).toBe(6) // the ceiling wins
-  expect(stepBudget('edit', 24, { edit: 20 })).toBe(20)
+  expect(stepBudget('edit', 24, { edit: 18 })).toBe(18)
   expect(stepBudget('edit', 10, { edit: 12 })).toBe(10)
   expect(stepBudget('edit', 24, { edit: 40 })).toBe(24)
-  expect(stepBudget('lookup', 24, { lookup: 0 })).toBe(10) // junk: the built-in
+  expect(stepBudget('lookup', 24, { lookup: 0 })).toBe(12) // junk: the built-in
   expect(stepBudget(undefined, 24)).toBe(24)
   expect(stepBudget('nonsense', 24)).toBe(24)
   expect(orchConfig({ workers: { stepsByJob: { run: 2, edit: 'x', lookup: 4.9, other: 3 } } }).stepsByJob).toEqual({ run: 2, lookup: 4 })
@@ -46,10 +46,12 @@ test('guard: a worker is refused at its job budget with the schema line; a job-l
   const refused = orchDecide(c, worker('run', 'r1'), { tool: 'Bash' })
   expect(refused).toContain('step budget of a run job (6 tool calls)')
   expect(refused).toContain('run schema')
-  for (let i = 0; i < 10; i++) expect(orchDecide(c, worker('lookup', 'l1'), { tool: 'Read' })).toBeNull()
-  expect(orchDecide(c, worker('lookup', 'l1'), { tool: 'Read' })).toContain('lookup job (10')
-  for (let i = 0; i < 16; i++) expect(orchDecide(c, worker('edit', 'e1'), { tool: 'Read' })).toBeNull()
-  expect(orchDecide(c, worker('edit', 'e1'), { tool: 'Read' })).toContain('edit job (16')
+  for (let i = 0; i < 12; i++) expect(orchDecide(c, worker('lookup', 'l1'), { tool: 'Read' })).toBeNull()
+  expect(orchDecide(c, worker('lookup', 'l1'), { tool: 'Read' })).toContain('lookup job (12')
+  for (let i = 0; i < 20; i++) expect(orchDecide(c, worker('edit', 'e1'), { tool: 'Read' })).toBeNull()
+  expect(orchDecide(c, worker('edit', 'e1'), { tool: 'Read' })).toContain('edit job (20')
+  for (let i = 0; i < 12; i++) expect(orchDecide(c, worker('check', 'c1'), { tool: 'Read' })).toBeNull()
+  expect(orchDecide(c, worker('check', 'c1'), { tool: 'Read' })).toContain('check job (12')
   for (let i = 0; i < 24; i++) expect(orchDecide(c, worker(undefined, 'n1'), { tool: 'Read' })).toBeNull()
   expect(orchDecide(c, worker(undefined, 'n1'), { tool: 'Read' })).toContain('split')
   const low = orchConfig({ workers: { steps: 2 } }) // the ceiling is below the job budget: the general refusal
@@ -62,16 +64,16 @@ test('at 75% of the budget the worker\'s next tool result carries "N tool calls 
   orchReset()
   const c = orchConfig({})
   const lines: (string | null)[] = []
-  for (let i = 1; i <= 16; i++) {
+  for (let i = 1; i <= 20; i++) {
     expect(orchDecide(c, worker('edit', 'e9'), { tool: 'Read' })).toBeNull()
     lines.push(takeStepNote('e9'))
   }
-  expect(lines.slice(0, 11).every(l => l === null)).toBe(true) // calls 1..11
-  expect(lines[11]).toBe('4 tool calls left: finish and answer') // call 12 = 75% of 16
-  expect(lines.slice(12, 14)).toEqual([null, null])
-  expect(lines[14]).toBe('1 tool call left: finish and answer')
-  expect(lines[15]).toBeNull() // the last allowed call: nothing is left to say
-  expect(orchDecide(c, worker('edit', 'e9'), { tool: 'Read' })).toContain('edit job (16')
+  expect(lines.slice(0, 14).every(l => l === null)).toBe(true) // calls 1..14
+  expect(lines[14]).toBe('5 tool calls left: finish and answer') // call 15 = 75% of 20
+  expect(lines.slice(15, 18)).toEqual([null, null, null])
+  expect(lines[18]).toBe('1 tool call left: finish and answer')
+  expect(lines[19]).toBeNull() // the last allowed call: nothing is left to say
+  expect(orchDecide(c, worker('edit', 'e9'), { tool: 'Read' })).toContain('edit job (20')
   expect(takeStepNote('e9')).toBeNull()
   expect(takeStepNote('e9')).toBeNull() // said once per call
   expect(stepNote(5, 6)).toBe('1 tool call left: finish and answer') // run job: 75% of 6 is call 5

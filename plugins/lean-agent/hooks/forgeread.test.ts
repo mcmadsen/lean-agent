@@ -120,5 +120,5 @@ test('1.0.26: a reader, a worker and the reviewer run the read forms; every writ
   const outside = String(await run(`curl -sS -o /home/x/t.json ${Q}`, 'lean-agent:reader-haiku'))
   expect(outside).toContain('read it with lean_run get')
   expect(ruleOf(outside)).toBe('forge-read')
-  expect(String(await run(`az rest --method get --body '{}' --url ${Q}`, 'lean-agent:worker-haiku'))).toContain('a subagent makes no forge write')
+  expect(String(await run(`az rest --method get --body '{}' --url ${Q}`, 'lean-agent:worker-haiku'))).toContain('forge writes go through the desk') // (a body makes it a write, whatever the method says)
 })

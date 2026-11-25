@@ -5,7 +5,7 @@ import { plainPipeline } from './shell'
 import { jobOf, retryDenial, retryRan, retryReset, reviewerBudget, stepBudget, stepNote } from './jobs'
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
-import { forgeRefusal, isForgeWrite } from './forgewrite'
+import { forgeHint, forgeRefusal, forgeCommandWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { threadHint } from './denial'
 
@@ -169,7 +169,7 @@ const inLean = (ctx: OCtx, p: string) => {
 
 const GIT_OK = new Set(['status', 'log', 'add', 'commit', 'worktree', 'branch', 'rev-parse', 'remote', 'push', 'fetch', 'switch', 'show', 'diff'])
 const DIFF_OK = /^--(stat|shortstat|numstat|name-only|name-status)(=.*)?$/
-const OTHER_CLI = new Set(['lean-agent', 'claude', 'gh', 'az']) // the other guards judge these (gh / az: reads and the thread's own forge work; a subagent's forge write is refused in guard.ts)
+const OTHER_CLI = new Set(['lean-agent', 'claude', 'gh', 'az']) // the other guards judge these (gh / az reads; a forge WRITE by gh / az / curl is refused first, in threadDenial, and in guard.ts for a subagent)
 const LIST = new Set(['ls', 'cat', 'head', 'tail', 'wc', 'find', 'mkdir'])
 const SEARCH = new Set(['grep', 'rg'])
 const PKG = new Set(['npm', 'pnpm', 'yarn', 'bun'])
@@ -330,8 +330,10 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
     return p && (inLean(ctx, p) || deniedEdit(ctx, e) || selfEditOk(ctx, e)) ? null : THREAD_STEP + fallbackNote(ctx) + tried(`${t} ${pathKind(ctx, p || ctx.cwd || '/')}`)
   }
   if (t === 'Bash') {
+    // a forge write by shell (az / gh / curl / a script text): never, whatever else the command is (1.0.34: gh / az used to pass here as "judged by the other guards", which only judge private projects)
+    const fw = forgeCommandWrite(String(e.command ?? ''))
+    if (fw) return forgeRefusal() + forgeHint(String(e.command ?? '')) + tried(fw) // say what to do instead (the action kinds)
     const bad = bashBad(ctx, String(e.command ?? ''))
-    if (bad && isForgeWrite(String(e.command ?? ''))) return forgeRefusal() + tried(triedWords(bad)) // a forge write: say what to do instead (the action kinds)
     if (bad && isForgeFetch(bad)) return forgeReadRefusal() + tried(triedWords(bad)) // a forge read outside the allow-list
     return bad ? BASH_STEP + bashInstead(bad) + tried(triedWords(bad)) : null
   }

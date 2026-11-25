@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { REVIEW_EXEMPT, capKind, decide, forgeTried, isWorker, parseGrants, readerWrite, recordGrant, redirectTargets, releaseGrant, statePattern } from './guard'
+import { REVIEW_EXEMPT, capKind, decide, forgeTried, isWorker, parseGrants, readerWrite, recordGrant, redirectTargets, releaseGrant, statePattern, tagWrite } from './guard'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
 
@@ -120,8 +120,8 @@ test('push parsing is per git push segment: chained commands are neither over- n
   }
   await writeReview(h.host, { green: true, sha: SHA, project: 'app' })
   const r = (command: string) => run(h, thread, { tool: 'Bash', command })
-  expect(await r('git push -u origin HEAD && gh pr create --fill')).toBeNull()
-  expect(await r('git push origin feature && gh pr create --base main')).toBeNull()
+  expect(await r('git push -u origin HEAD && gh pr create --fill')).toContain('forge writes go through the desk') // (1.0.34: the review lets the push go; the PR is a forge write, which a thread never makes by shell)
+  expect(await r('git push origin feature && gh pr create --base main')).toContain('forge writes go through the desk')
   expect(await r('git push origin feature && echo main')).toBeNull()
   expect(await r('echo "a; b" && git -C /r/app push origin feature')).toBeNull()
   expect(await r('echo push; git push origin main')).toContain('never pushes')
@@ -322,9 +322,10 @@ test('private projects never push or publish, review or not', async () => {
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, null])
   for (const command of ['ssh h "git push origin x"', 'ssh h git push', 'timeout 60 git push', 'xargs git push', 'if true; then git push; fi', 'git push origin x 2>&1'])
     expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/secret')]).toEqual([command, expect.stringContaining('private project')])
-  // non-private: no publishing denial
-  for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x', 'git remote add x u'])
-    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, null])
+  // non-private: no publishing denial (git); 1.0.34: a forge write by shell is refused for a thread in any project, with the action-kind text instead
+  expect(await run(h, thread, { tool: 'Bash', command: 'git remote add x u' }, '/r/app')).toBeNull()
+  for (const command of ['gh pr create --fill', 'gh release create v1', 'gh api -X POST x'])
+    expect([command, await run(h, thread, { tool: 'Bash', command }, '/r/app')]).toEqual([command, expect.stringContaining('forge writes go through the desk')])
 })
 
 test('workers: readers are read-only; unknown subagent types are readers; grants come from the Agent call', async () => {
@@ -830,7 +831,7 @@ test('1.0.22: the reviewer has the readers\' shell rule (reads that write nothin
     expect([c, typeof (await rev(c))]).toEqual([c, 'string'])
   // the never-list holds for the reviewer too
   expect(await rev('git push origin x')).toContain('never pushes')
-  expect(await rev('gh pr create --fill')).toContain('no forge write')
+  expect(await rev('gh pr create --fill')).toContain('forge writes go through the desk') // (1.0.34: the one detector names it; it used to be the shell scanner's "no forge write" line)
   expect(await rev('gh pr create --fill')).toContain('[tried: gh pr]')
   expect(await rev('claude plugin install x')).toContain('never changes permissions or settings')
   expect(await rev('claude -p "fix the comments on PR 42"')).toContain('never starts a Claude session') // a shell-started session cannot pose as the desk
@@ -916,4 +917,32 @@ test('a reader: a > in a shell comment or a quoted heredoc body is text, not a r
   expect(redirectTargets('echo \\# > /r/out.md')).toEqual(['/r/out.md']) // an escaped # is no comment
   expect(redirectTargets('echo $# > /r/out.md')).toEqual(['/r/out.md']) // neither is $#
   expect(redirectTargets("cat <<-'EOF'\n\tbody > x\n\tEOF\n> /r/out.md")).toEqual(['/r/out.md']) // <<- with an indented terminator
+})
+
+// 1.0.34: "a subagent never creates or deletes a tag or a release" refused reads x10 a day (reviewer, worker-haiku, worker-sonnet): the word "tag" anywhere after git counted
+const TAG_READS = [
+  'git tag', 'git tag -l', 'git tag --list', "git tag -l 'v1.*'", 'git tag -n', 'git tag -n5', 'git tag -ln', 'git tag --contains abc1234', 'git tag --no-contains HEAD', 'git tag --points-at HEAD',
+  'git tag --merged main', 'git tag --no-merged main', 'git tag --sort=-creatordate', 'git tag --sort -creatordate', 'git tag --format=%(refname:short)', 'git tag -v v1.0.0', 'git tag --column',
+  'git -C /r/app tag -l', 'git --no-pager tag --list', 'git tag -l | wc -l', 'git describe', 'git describe --tags', 'git describe --tags --abbrev=0', 'git show-ref --tags', 'git for-each-ref refs/tags',
+  'git ls-remote --tags origin', 'git log --tags --oneline', 'git log --grep=tag --oneline', 'git log --oneline -- docs/tag.md', 'git show HEAD --stat -- tag.ts', 'git rev-list --tags --max-count=1',
+  'git grep -n tag', 'gh release view v1.0.0', 'gh release list',
+]
+const TAG_WRITES = [
+  'git tag v1.0.0', 'git tag -d v1.0.0', 'git tag --delete v1.0.0', 'git tag -a v1 -m x', 'git tag -am "release" v1', 'git tag -s v1', 'git tag -f v1', 'git tag --force v1 HEAD', 'git tag v1 HEAD~1',
+  'git tag -m msg v1', 'git tag -u key v1', 'git -C /r/app tag v1', 'git --no-pager tag v1', 'bash -c "git tag v1"', '/usr/bin/git tag v1', 'x=1 git tag v1', 'git status && git tag v1',
+]
+const TAG_OTHER = ['git push origin --tags', 'git push origin :refs/tags/v1', 'git push origin refs/tags/v1', 'gh release create v1', 'gh release delete v1', 'gh release edit v1 --notes x', 'gh release upload v1 a.zip']
+
+test('1.0.34: tag reads are allowed for a worker and the reviewer; creating or deleting a tag or a release stays refused (a table)', { timeoutMs: 20_000 }, async () => {
+  expect(TAG_READS.length + TAG_WRITES.length + TAG_OTHER.length).toBeGreaterThanOrEqual(40)
+  for (const c of TAG_READS) expect([c, tagWrite(c)]).toEqual([c, false])
+  for (const c of TAG_WRITES) expect([c, tagWrite(c)]).toEqual([c, true])
+  const h = setup()
+  let n = 0
+  const as = (command: string, agentType: string) => run(h, thread, { tool: 'Bash', command }, '/r/app', agentType, `ag${++n}`)
+  for (const agent of ['lean-agent:worker-haiku', 'lean-agent:worker-sonnet', 'lean-agent:reviewer']) {
+    for (const c of TAG_READS) expect([agent, c, await as(c, agent)]).toEqual([agent, c, null])
+    for (const c of TAG_WRITES) expect([agent, c, String(await as(c, agent)).includes('never creates or deletes a tag or a release')]).toEqual([agent, c, true])
+    for (const c of TAG_OTHER) expect([agent, c, typeof (await as(c, agent))]).toEqual([agent, c, 'string'])
+  }
 })

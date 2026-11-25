@@ -7,9 +7,12 @@
 // variable / substitution used as a program name. A command that cannot be lexed is judged by token only.
 // pushes: the words after `push` of every git push found; known=false when the subcommand could not be determined (fail closed)
 export type Push = { args: string[]; known: boolean }
-export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[] }
+// forge: the label of the first az / gh WRITE by the read allow-list (forgecli.ts, 1.0.34: any az / gh whose verb is not a read), found at a program position or in the
+// string of a python / node -c; dynamic: a variable / substitution is used as a program name
+export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[]; forge: string | null; dynamic: boolean }
 
 import { forgeReadOk } from './forgeread'
+import { azWrite, ghWrite, textForgeWrite } from './forgecli'
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
@@ -38,6 +41,7 @@ const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o
 const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], search: ['prs', 'issues', 'repos', 'commits', 'code'], repo: ['view', 'list'], run: ['view', 'list'], release: ['view', 'list'], auth: ['status'] }
 const KW = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'time'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
+const INTERP = /^(python[\d.]*|node(js)?|ruby|perl|php|deno|bun|lua)$/
 // programs that run a command given among their own arguments (the git word is looked for anywhere after them)
 const SCAN_ANY = new Set(['ssh', 'flock', 'parallel', 'chroot', 'strace', 'su', 'runuser', 'script', 'sg', 'newgrp', 'systemd-run', 'nsenter', 'unshare', 'proot'])
 const PLAIN_WRAP = new Set(['exec', 'nohup', 'builtin', 'nice', 'ionice', 'stdbuf', 'setsid', 'unbuffer', 'chronic', 'watch'])
@@ -253,7 +257,7 @@ function segEval(seg: Seg, depth: number, v: Verdict) {
     const x = w[i]!
     if (isAssign(x)) { i++; continue }
     const b = base(x)
-    if (b.includes(EXP)) { v.write = true; return } // a variable / substitution as the program name
+    if (b.includes(EXP)) { v.write = true; v.dynamic = true; return } // a variable / substitution as the program name
     if (KW.has(x)) { i++; continue }
     if (b === 'sudo' || b === 'doas') { i++; skipFlags(/^-(u|g|h|p|C|r|t|U|D|R)$/); continue }
     if (b === 'command') { i++; while (i < w.length && w[i]!.startsWith('-')) { if (/^-[a-zA-Z]*[vV]/.test(w[i]!)) return; i++ } continue }
@@ -287,8 +291,10 @@ function segEval(seg: Seg, depth: number, v: Verdict) {
       for (const d of seg.docs) scan(d, depth + 1, v)
       return
     }
-    if (b === 'gh') { if (ghDenied(w.slice(i + 1))) v.write = true; return }
-    if (b === 'az') { if (azDenied(w.slice(i + 1))) v.write = true; return }
+    if (b === 'gh') { if (ghDenied(w.slice(i + 1))) v.write = true; v.forge ??= ghWrite(w.slice(i + 1)); return }
+    if (b === 'az') { if (azDenied(w.slice(i + 1))) v.write = true; v.forge ??= azWrite(w.slice(i + 1)); return }
+    // an interpreter's own code (python -c "subprocess.run(['az', ...])", node -e, a heredoc on its stdin) is not lexed as a shell: its strings are scanned as text
+    if (INTERP.test(b)) { for (const x of [...w.slice(i + 1), ...seg.docs]) if (/\b(az|gh)\b/.test(x)) v.forge ??= textForgeWrite(x); return }
     if (b === 'lean-agent') { if (LEAN_OUT.test('lean-agent ' + w.slice(i + 1).join(' '))) v.write = true; return }
     if (b === 'git') {
       let j = i + 1
@@ -300,7 +306,7 @@ function segEval(seg: Seg, depth: number, v: Verdict) {
     }
     if (SCAN_ANY.has(b)) {
       for (let k = i + 1; k < w.length; k++) {
-        if (base(w[k]!) === 'git') { segEval({ words: w.slice(k), docs: [] }, depth, v); return }
+        if (/^(git|gh|az)$/.test(base(w[k]!))) { segEval({ words: w.slice(k), docs: [] }, depth, v); return }
         if (/\s/.test(w[k]!)) scan(w[k]!, depth + 1, v)
       }
     }
@@ -314,7 +320,7 @@ function scan(c: string, depth: number, v: Verdict) {
 }
 
 export function analyze(c: string): Verdict {
-  const v: Verdict = { push: false, write: false, unsure: false, pushes: [] }
+  const v: Verdict = { push: false, write: false, unsure: false, pushes: [], forge: null, dynamic: false }
   try {
     scan(c, 0, v)
   } catch (e) {

@@ -9,7 +9,7 @@ import { analyze, isGlobWord, plainPipeline, plainWords, privateText, readOnlyFo
 import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
-import { forgeRefusal, isForgeWrite } from './forgewrite'
+import { forgeHint, forgeRefusal, forgeCommandWrite } from './forgewrite'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { WHY_SONNET, jobOf } from './jobs'
 import { haikuRecord } from './workerruns'
@@ -873,8 +873,42 @@ async function threadReadOnly($: Host, ctx: Ctx, c: string): Promise<boolean> {
 // anything and run any shell command that writes nothing outside a temp folder or the calling thread's `scratch/` (the reviewer has the same
 // rule since 1.0.22). The auditor stays on the read-only command list (its verdict must be trustworthy). Never, for any of them: git push /
 // tags / releases, a forge write (gh / az), a change of permissions or settings, lean-agent's own state under the lean home (except that scratch). `allow-edit:` / `allow-cmd:` lines in a brief are accepted and ignored.
-const GIT_TAG = /\bgit\b[^;&|\n]*\btag\b[ \t]*([^;&|\n]*)/g
-const TAG_LIST = /^(-l\b|--list\b|-n\b|--contains\b|--points-at\b|--merged\b|--no-merged\b|--sort\b|$)/
+// `git [global options] tag ...` that CREATES or DELETES a tag (1.0.34: the word "tag" anywhere after `git` used to count, so `git log --grep=tag`, `git tag -n5`,
+// `git tag --format=...` and `git tag --no-contains` were refused x10 a day). The subcommand is the first word after git's own options; a tag is listed
+// (read) when no write flag is given and either a list flag is present or there is no tag name; a name without a list flag creates it.
+const GIT_AT = /(?:^|[^\w./-])(?:[\w.~-]*\/)*git(?=\s)([^;&|\n]*)/g
+const GIT_VALUE_OPTS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env'])
+const TAG_WRITE_LONG = /^--(delete|annotate|sign|local-user|force|message|file|edit|create-reflog|cleanup)(=|$)/
+const TAG_LIST_FLAG = /^(?:-[a-zA-Z]*[lnv][a-zA-Z0-9]*|--(?:list|contains|no-contains|points-at|merged|no-merged|verify)(?:=.*)?)$/
+const TAG_VALUE_LONG = /^--(?:sort|format)$/
+export function tagWrite(c: string): boolean {
+  for (const m of c.matchAll(GIT_AT)) {
+    const w = m[1]!.split(/\s+/).map(x => x.replace(/^['"`(]+|['"`)]+$/g, '')).filter(Boolean)
+    let i = 0
+    while (i < w.length && w[i]!.startsWith('-')) i += GIT_VALUE_OPTS.has(w[i]!) ? 2 : 1
+    if (w[i] !== 'tag') continue
+    const args = w.slice(i + 1)
+    let list = false
+    let name = false
+    for (let j = 0; j < args.length; j++) {
+      const a = args[j]!
+      if (a.startsWith('--')) {
+        if (TAG_WRITE_LONG.test(a)) return true
+        if (TAG_LIST_FLAG.test(a)) list = true
+        if (TAG_VALUE_LONG.test(a)) j++ // (`--sort -creatordate`, `--format <fmt>`: the next word is the value, even one that starts with a dash)
+        continue
+      }
+      if (/^-[a-zA-Z0-9]+$/.test(a)) {
+        if (/[dasufmFe]/.test(a)) return true // a bundle with d / a / s / u / f / m / F / e
+        if (TAG_LIST_FLAG.test(a)) list = true
+        continue
+      }
+      name = true
+    }
+    if (name && !list) return true
+  }
+  return false
+}
 const SETTINGS_CMD = /\bclaude\s+(config|mcp|plugin|permissions|settings|login|logout|setup-token)\b|(^|[\s/'"])(\.claude\/settings(\.local)?\.json|managed-settings\.json)/
 const SETTINGS_PATH = /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)managed-settings\.json$/
 const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr|stdout)$|\$\{?TMPDIR\}?\/|[^\0]*\/\.claude\/jobs\/[^/]+\/tmp\/|[^\0]*\/\.lean-agent\/tmp\/)/
@@ -970,9 +1004,10 @@ export function workerGitDenial(c: string, commit = true): string | null {
 async function neverDenial($: Host, c: string): Promise<string | null> {
   const a = analyze(c)
   if (a.push || PUSH.test(c)) return 'lean-agent: a subagent never pushes; report to the thread (the desk pushes after the review)'
-  if (isForgeWrite(c)) return forgeRefusal() + tried(forgeTried(c))
+  const fw = forgeCommandWrite(c)
+  if (fw) return forgeRefusal() + forgeHint(c) + tried(forgeTried(c))
   if (a.write) return `lean-agent: a subagent makes no forge write (gh / az), no remote change and no outward lean-agent command; report to the thread${tried(forgeTried(c))}`
-  for (const m of c.matchAll(GIT_TAG)) if (!TAG_LIST.test(m[1]!.trim())) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
+  if (tagWrite(c)) return 'lean-agent: a subagent never creates or deletes a tag or a release; report to the thread'
   if (SETTINGS_CMD.test(c)) return 'lean-agent: a subagent never changes permissions or settings'
   // a subagent never starts a Claude session (a session started from a shell could pose as a desk or a thread)
   if (/(^|[\s;&|(`'"/])claude(\s+|$)(?!plugin\s+(validate|test)\b)/.test(UNQUOTED(c)) && !/^\s*claude\s+(--version|--help|-v|-h)\s*$/.test(c)) return 'lean-agent: a subagent never starts a Claude session (claude ...); report to the thread'
@@ -1217,6 +1252,11 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   }
   const capped = await capDenial($, ctx, e)
   if (capped) return capped
+  // a thread's own shell never makes a forge write (az / gh / curl / a script text), with orchestration on or off, in a private project or not, and whatever the user told the thread in its session: the write is an action kind the desk approves (1.0.34)
+  if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'Bash') {
+    const fw = forgeCommandWrite(String(e.command ?? ''))
+    if (fw) return (await pushDenial($, String(e.command ?? ''), ctx.cwd, ctx.role)) ?? forgeRefusal() + forgeHint(String(e.command ?? '')) + tried(fw) // (a private project's own line first)
+  }
   const orch = await loadOrch($)
   const ownGit = ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'Bash' && orch.on && (await threadReadOnly($, ctx, String(e.command ?? '')))
   if (orch.on && !ownGit) {

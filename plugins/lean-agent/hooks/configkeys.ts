@@ -101,10 +101,10 @@ export const REGISTRY: readonly Entry[] = [
   // ---- workers ----
   mk('workers.briefChars', 'number', 3000, 'workers', 'now', 'orchestrate.ts', 'Longest brief a worker accepts, in characters.', n(1, { int: true, flat: true, ...S })),
   mk('workers.steps', 'number', 24, 'workers', 'now', 'orchestrate.ts', 'Most tool calls one worker may make before it must return what it has.', n(1, { int: true, flat: true, ...S })),
-  mk('workers.stepsByJob.lookup', 'number', 10, 'workers', 'now', 'orchestrate.ts', 'Tool calls for a lookup job.', n(1, { int: true, ...S })),
-  mk('workers.stepsByJob.edit', 'number', 16, 'workers', 'now', 'orchestrate.ts', 'Tool calls for an edit job.', n(1, { int: true, ...S })),
+  mk('workers.stepsByJob.lookup', 'number', 12, 'workers', 'now', 'orchestrate.ts', 'Tool calls for a lookup job.', n(1, { int: true, ...S })),
+  mk('workers.stepsByJob.edit', 'number', 20, 'workers', 'now', 'orchestrate.ts', 'Tool calls for an edit job.', n(1, { int: true, ...S })),
   mk('workers.stepsByJob.run', 'number', 6, 'workers', 'now', 'orchestrate.ts', 'Tool calls for a run job.', n(1, { int: true, ...S })),
-  mk('workers.stepsByJob.check', 'number', 10, 'workers', 'now', 'orchestrate.ts', 'Tool calls for a check job.', n(1, { int: true, ...S })),
+  mk('workers.stepsByJob.check', 'number', 12, 'workers', 'now', 'orchestrate.ts', 'Tool calls for a check job.', n(1, { int: true, ...S })),
   mk('workers.requireJob', 'boolean', false, 'workers', 'now', 'orchestrate.ts', 'Refuse a worker brief whose first line does not name the job.', { flat: true }),
   mk('workers.commit', 'boolean', true, 'safety', 'now', 'orchestrate.ts', 'A worker may commit its own change when the brief says commit.', { flat: true, ...S }),
   mk('workers.answerChars', 'number', 1200, 'workers', 'now', 'answers.ts', 'Characters of a subagent answer that come back into the conversation.', n(100, { int: true, flat: true })),

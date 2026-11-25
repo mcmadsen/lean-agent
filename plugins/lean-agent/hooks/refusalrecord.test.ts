@@ -81,13 +81,13 @@ test('a step-budget refusal records the job, the run\'s calls, its budget and th
   const h = await session($, on, `${L}/threads/t1`, answer)
   const prompt = `job: edit\nchange thing${'x'.repeat(980)}` // 1000+ characters, within the brief cap
   await $.tool.call({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', prompt } as any)
-  for (let i = 0; i < 18; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any) // an edit job: 16 calls, then 2 refused ones
+  for (let i = 0; i < 22; i++) await $.tool.call({ tool: 'Read', file_path: '/r/app/a.ts', agentId: 'agent-1' } as any) // an edit job: 20 calls, then 2 refused ones
   const got = (await rows(h)).filter(r => r.rule === 'worker-step-budget')
   expect(got).toHaveLength(2)
-  expect(got[0]).toMatchObject({ role: 'worker', job: 'edit', calls: 17, budget: 16, chars: prompt.length, run: 'agent1' })
-  expect(got[1]).toMatchObject({ calls: 18, budget: 16 })
+  expect(got[0]).toMatchObject({ role: 'worker', job: 'edit', calls: 21, budget: 20, chars: prompt.length, run: 'agent1' })
+  expect(got[1]).toMatchObject({ calls: 22, budget: 20 })
   const t = await exported(h)
-  expect(t).toContain(`step budget used by 1 edit run(s) (2 refused calls; budget 16 tool calls; median 17 calls made; brief characters: median ${prompt.length}, largest ${prompt.length})`)
+  expect(t).toContain(`step budget used by 1 edit run(s) (2 refused calls; budget 20 tool calls; median 21 calls made; brief characters: median ${prompt.length}, largest ${prompt.length})`)
 })
 
 test('answer-too-long rows of 1.0.31 are not listed as refusals (a counter now)', { timeoutMs: 20_000 }, async ($, on) => {
