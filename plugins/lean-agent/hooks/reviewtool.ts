@@ -16,7 +16,7 @@ import type { Review } from './reviews'
 import { capPrep, perFileStats, prepText, prepare, refOk, resolveRange, statsText } from './reviewprep'
 import { MIN_FILTER_VERSION, changeScope, changedText, contextOf, dropNotes, droppedText, scopeLine, scopedOf, withArea } from './reviewchange'
 import { compareVersions, running, runningOf } from './skew'
-import { areaOf, bigText, countsText, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
+import { areaCount, areaOf, areasCoverage, bigText, countsText, coverageNote, inArea, keepSections, keyLabel, noteAreas, partition, pathspecs, scopedPrep, tooLarge, topRows } from './reviewarea'
 import { REVIEWER_STEPS, reviewerBudget } from './jobs'
 import { loadOrch } from './orchestrate'
 import type { Range } from './reviewprep'
@@ -217,7 +217,14 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const whole = perFileStats(diff)
   const stop = await forgeCountStop(h, project, thread, refAsked, whole.length) // the forge's own file count (preflight-review.ts)
   if (stop) return { ok: false, text: stop }
-  const areasAll = partition(whole)
+  // a LOCAL branch or sha range (no PR ref) that is far larger than the thread's own commits (a long feature branch reviewed against a far base, 393 files for a few commits): a warning, never
+  // a refusal (the range may be what the user wants); an external ref is refused above until the user says go
+  let rangeWarn = ''
+  if (!ext && !scopeArg && i.confirm !== true) {
+    const own = await ownCommits(h, range).catch(() => null)
+    if (own && own.files > 0 && rangeLooksWrong(whole.length, own, Infinity)) rangeWarn = `\nRANGE WARNING: ${whole.length} files in ${range.mb.slice(0, 8)}...${range.head.slice(0, 8)}, while the ${own.commits} commit${own.commits === 1 ? '' : 's'} of the range touch ${own.files} file${own.files === 1 ? '' : 's'} themselves (a long feature branch reviewed against a far base?). Check the base before the reviewers are paid (prepare with base: <the PR's target or the last reviewed commit>); if the range is what the user wants, go on`
+  }
+  const areasAll = partition(whole, areaCount(diff.length)) // (more than MAX_AREAS when one pass per area could not read the diff: reviewarea.ts passBytes)
   const big = !scopeArg && tooLarge(perFileStats(earlier && deltaDiff !== null ? deltaDiff : diff))
   // the prepared state of this thread and ref: a later prepare REPLACES the earlier one (reviewprepared.ts); an area pass (scope) is part of its prepare
   const replaces = ext && !scopeArg ? await notePrepare(h, thread, ext.label, { project, head: range.head, mb: range.mb, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), forgeN, areas: big ? areasAll.map(a => a.name) : [] }) : ''
@@ -227,7 +234,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     const bigFan = fanOutText(bigExp, areasAll.length)
     const bigStop = await spendStop(h, project, bigExp.usd * areasAll.length, bigFan, i.confirm === true)
     if (bigStop) return { ok: false, text: bigStop }
-    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head, expectedUsd: Math.round(bigExp.usd * areasAll.length * 100) / 100 })}\n${bigText(whole, ctx.prep, areasAll)}\n${bigFan}.${replaces ? `\n${replaces}` : ''}` }
+    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head, expectedUsd: Math.round(bigExp.usd * areasAll.length * 100) / 100 })}\n${bigText(whole, ctx.prep, areasAll)}\n${areasCoverage(diff, areasAll)}${rangeWarn}\n${bigFan}.${replaces ? `\n${replaces}` : ''}` }
   }
   const area = scopeArg ? areaOf(areasAll, scopeArg) : undefined
   if (scopeArg && !area) return { ok: false, text: `prepare: scope ${JSON.stringify(scopeArg.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'the diff has no changed files'}); run prepare without scope to see the areas` }
@@ -263,7 +270,8 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   const fan = fanOutText(exp, 1)
   const costStop = await spendStop(h, project, exp.usd, fan, i.confirm === true) // above review.askAboveUsd / maxUsd: the user decides first (reviewspend.ts)
   if (costStop) return { ok: false, text: costStop }
-  const hot = await reviewWindowGate(h, thread) // the 5h window (throttle.ts): blocked or capped = no reviewers; throttled = haiku only
+  const hot = await reviewWindowGate(h, thread, { level, bytes: areaDiff.length, confirm: i.confirm === true }) // the 5h window (throttle.ts): blocked or capped = no reviewers; throttled = haiku only, and a full review that haiku cannot cover is HELD
+  const cover = coverageNote(areaDiff.length, area ? area.name : 'this diff') // one pass reads passBytes: a bigger diff says so (the partition already split a too-large one)
   if (hot.stop) return { ok: false, text: hot.stop }
   const brief0 = rereview ? ctx.delta! : ctx.prep // a re-review looks at what changed since; enforcement still covers the whole range
   const brief = area ? scopedPrep(brief0, keep, areaDiff) : brief0
@@ -314,7 +322,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'
     : 'level: FULL (the strict review the push gate needs; a green record is possible).'
   const twice = nRuns === 2 ? `\nThis is a high-risk diff: run TWO independent reviewer passes on ${model} (two separate Agent calls with the same prompt; neither sees the other's answer). Pass both JSON blocks to lean_review: action record with reviews: [<block 1>, <block 2>] (or action merge first to see the merged block). Findings both found are marked [2/2]; the union counts.` : ''
-  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.\n${fan}.${hot.note ? `\n${hot.note}` : ''}${spent}${held ? `\n${held}` : ''}${replaces ? `\n${replaces}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
+  return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify(meta)}\n${who}${second ? '; run the search-only second opinion first (a new abstraction or a big diff)' : ''}.\n${lvl}\n${expectedText(exp, model)}.\n${fan}.${hot.note ? `\n${hot.note}` : ''}${cover ? `\n${cover}. Review the riskiest files first and list in the record what you did not read.` : ''}${rangeWarn}${spent}${held ? `\n${held}` : ''}${replaces ? `\n${replaces}` : ''}${twice}\n${CAP_EXEMPT}\nPut everything below this line in the reviewer's prompt.\n\n${lines.join('\n\n')}` }
 }
 
 const parseResult = (v: unknown): unknown => {
@@ -466,7 +474,7 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   let areasAll: ReturnType<typeof partition> = []
   let replaced = '' // an area record that replaces an earlier one of the same area says so
   if (scope) {
-    areasAll = partition(perFileStats(diff))
+    areasAll = partition(perFileStats(diff), areaCount(diff.length))
     area = areaOf(areasAll, scope)
     if (!area) {
       const file = await writeReview(h, rec)

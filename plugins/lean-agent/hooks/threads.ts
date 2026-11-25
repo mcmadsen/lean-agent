@@ -43,6 +43,7 @@ import { SYNTH_MARK, readSynth } from './synthline'
 import { dismissAction } from './dismiss'
 import { loadView } from './view'
 import { loadOrch, threadToolsArgv } from './orchestrate'
+import { cfgRaw } from './budgetcfg'
 import { threadSpendLine } from './stats'
 import { baseLine, readBase } from './base'
 import { readParts } from './ctxparts'
@@ -438,8 +439,9 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   const old = t.sid
   const gen = old ? (t.gen ?? 1) + 1 : t.gen ? t.gen + 1 : 1 // (no old id but a recorded generation: an earlier start whose session id was not found)
   const name = sessionName(t.id, t.title, gen)
-  const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, ...(await threadToolsArgv(h)), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
-  if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}`)
+  const rc = await remoteControlArgv(h, name)
+  const r = await h.process.run(['claude', '--bg', '-n', name, '--model', choice.model, '--effort', choice.effort, ...rc, ...(await threadToolsArgv(h)), '--', prompt], { cwd: folder, timeoutMs: 120_000 })
+  if (r.exitCode !== 0) return err(`claude --bg failed: ${(r.stderr || r.stdout).slice(0, 300)}${rc.length ? ' (config threads.remoteControl is on: the flag --remote-control was passed; set it to auto if the CLI refuses it for a background session)' : ''}`)
   let sid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(r.stdout + '\n' + r.stderr)?.[0] ?? ''
   if (!sid) {
     const rows = ((await agents(h)) ?? []).filter(a => a.cwd === folder || a.name === name)
@@ -626,6 +628,12 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
     await save(h, home, t)
   }
   return fresh(r) ? { ...r, text: `${r.text} · ${restartCost(ho.prompt, t.model ?? given.model ?? 'sonnet')}` } : r
+}
+
+// config threads.remoteControl (1.0.33): auto = nothing is passed (the user's own Claude Code setting decides); on = `--remote-control <session name>`. A NEW start only: `claude --bg --resume` takes no such flag.
+// Not confirmed for a background session: `claude --help` documents the flag for an interactive session and no field of `claude agents --json` says whether a session registered, so nothing here claims it did.
+export async function remoteControlArgv(h: Host, name: string): Promise<string[]> {
+  return (await cfgRaw(h, 'threads.remoteControl').catch(() => undefined)) === 'on' ? ['--remote-control', name] : []
 }
 
 // "new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old session's conversation is not resumed". The estimate:

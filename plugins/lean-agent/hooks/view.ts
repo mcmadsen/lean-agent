@@ -527,7 +527,7 @@ export function needsOf(v: Pick<View, 'threads' | 'openQuestions' | 'scripts' | 
   const asking = new Set((v.actionRequests ?? []).map(r => r.thread))
   for (const r of v.actionRequests ?? []) {
     const text = r.state === 'approved' ? `${r.thread}: you approved "${r.headline}" (request ${r.id}); the desk has not sent it yet` : r.items?.length ? `${r.thread} wants to ${r.headline}` : `${r.thread} wants to ${r.headline}: ${r.text.length > ACTION_CARD_MAX ? `${r.text.slice(0, ACTION_CARD_MAX - 1)}…` : r.text}` // a review batch: the pane draws its numbered one-liners; a text too long for the card: the pane says where it is approved
-    out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text, notify: r.state === 'pending', action: r, dk: { thread: r.thread, kind: 'action', id: `${r.id}:${r.state}` } })
+    out.push({ key: `action:${r.id}:${r.state}`, kind: 'action', thread: r.thread, text: r.fallback ? `${text}\n${r.fallback}` : text /* this kind failed twice: a command for your own shell (actionfallback.ts) */, notify: r.state === 'pending', action: r, dk: { thread: r.thread, kind: 'action', id: `${r.id}:${r.state}` } })
   }
   for (const t of v.threads) if (t.approval) out.push({ key: `approval:${t.id}:${t.recTs}`, kind: 'approval', thread: t.id, text: `${t.id} needs your yes in its own session: ${t.approval}`, notify: true, dk: { thread: t.id, kind: 'approval', id: String(t.recTs) } })
   // a classifier / rule denial: NO permission prompt exists, so no Open button: the real options (the pane draws the buttons)

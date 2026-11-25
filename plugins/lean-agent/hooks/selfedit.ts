@@ -157,7 +157,8 @@ export function selfEditQuestion(thread: string): { question: string; options: {
 type Q = { question?: unknown; options?: unknown; multiSelect?: unknown }
 // The desk's AskUserQuestion after the user answered it (the tool's own RESULT): a grant only for the canonical question of ONE open thread with its
 // worktrees, and only when the label chosen is the first option. Returns lines for the desk. Retry: the desk is told to have the thread retry narrowly.
-export async function bindSelfEditAnswers(h: Host, questions: unknown, answers: unknown): Promise<string[]> {
+// Free text that is no option label (the user typed instead of picking) is sent to the thread by `tell` as the user's words and noted: no grant.
+export async function bindSelfEditAnswers(h: Host, questions: unknown, answers: unknown, tell?: (thread: string, text: string) => Promise<void>): Promise<string[]> {
   const qs: Q[] = Array.isArray(questions) ? (questions as Q[]) : []
   const given = answers && typeof answers === 'object' && !Array.isArray(answers) ? (answers as Record<string, unknown>) : null
   const notes: string[] = []
@@ -180,6 +181,12 @@ export async function bindSelfEditAnswers(h: Host, questions: unknown, answers: 
     if (a === selfEditLabel(thread)) notes.push((await grantByHuman(h, thread, 'ask')).text)
     else if (a === RETRY_LABEL) notes.push(`the user chose to retry ${thread}'s worker with a narrower brief: send ${thread} a message to do so (lean_thread send; the mod adds the user's recorded words)`)
     else if (a === DISMISS_LABEL) notes.push(`the user dismissed the question about ${thread}: nothing changes`)
+    else if (a) { // free text typed instead of an option (1.0.33): never dropped, never a grant; the user's own words go to the thread by script
+      const words = a.replace(/\s+/g, ' ').slice(0, 400)
+      let sent = false
+      if (tell) sent = await tell(thread, `The user answered the desk's question "may you edit your worktree yourself?" with their own words: "${words}". Follow what they wrote. It is no grant: your own edits stay refused unless the mod says they are allowed.`).then(() => true, () => false)
+      notes.push(`the user typed an answer to the question about ${thread}, not one of the three options: "${words.slice(0, 120)}". It is not a grant. ${sent ? `The mod sent it to ${thread} as the user's words.` : `Send it to ${thread} yourself (lean_thread send), word for word.`}`)
+    }
   }
   return notes
 }

@@ -127,7 +127,15 @@ test('a human click (the pane) or the human answer to the desk\'s canonical ques
   expect(q.options.map(o => o.label)).toEqual(['Let t9 edit its worktree itself', 'Retry the worker with a narrower brief', 'Dismiss'])
   // another label, free text, no answers: nothing
   await bindSelfEditAnswers(s.host, asked, { [q.question]: 'Dismiss' })
-  await bindSelfEditAnswers(s.host, asked, { [q.question]: 'yes please' })
+  const sentTo: string[] = []
+  const typed = await bindSelfEditAnswers(s.host, asked, { [q.question]: 'yes please, but only the README' }, async (t, text) => { sentTo.push(`${t}: ${text}`) })
+  // free text is no grant and no silent drop: the user's words go to the thread by script and the desk is told so (1.0.33)
+  expect(typed.join()).toContain('not one of the three options')
+  expect(typed.join()).toContain('sent it to t9')
+  expect(sentTo).toHaveLength(1)
+  expect(sentTo[0]).toContain('yes please, but only the README')
+  const noTell = await bindSelfEditAnswers(s.host, asked, { [q.question]: 'later' })
+  expect(noTell.join()).toContain('lean_thread send')
   const lost = await bindSelfEditAnswers(s.host, asked, undefined)
   expect(lost.join()).toContain('could not be read')
   expect(await selfEditRoots(s.host, 't9')).toEqual([])
