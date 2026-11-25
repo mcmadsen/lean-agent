@@ -142,6 +142,66 @@ test('validate: unknown keys get their nearest key, bad values and ignored spell
   expect(ok.text).toContain('1 setting, 1 differ from the defaults, 0 problems')
 })
 
+test('deprecated USD keys: validate says "no longer used: replaced by budget.windowTokens ..." (not unknown); get / set say the same and change nothing; unset removes them, whatever the spelling; no value is converted', async () => {
+  const conf = { dailyCapUsd: { desk: 5, thread: 20 }, workerCapUsd: 2, workerCaps: { 'worker-opus': 4 }, budget: { daily: 25, threadDaily: 'off', windowTokens: 5_000_000 }, threads: { softUsd: 8, hardUsd: 20, softTokens: 1_000_000 }, 'review.maxUsd': 25, review: { askAboveUsd: 5 }, tips: false }
+  const h = setup(conf)
+  const v = await call(h, { action: 'validate' })
+  expect(v.ok).toBe(false)
+  expect(v.text).toContain('10 problems')
+  expect(v.text).toContain('budget.daily is no longer used: replaced by budget.windowTokens, budget.allTimeTokens, threads.softTokens, threads.hardTokens, review.askAboveTokens, review.maxTokens')
+  expect(v.text).toContain('threads.softUsd is no longer used: replaced by threads.softTokens')
+  expect(v.text).toContain('review.maxUsd is no longer used: replaced by review.maxTokens')
+  expect(v.text).toContain('dailyCapUsd.desk is no longer used')
+  expect(v.text).toContain('workerCaps is no longer used')
+  expect(v.text).not.toMatch(/unknown setting "(budget|dailyCapUsd|workerCap|threads\.(soft|hard)Usd|review\.(max|askAbove)Usd)/)
+  expect(v.text).toContain('lean_config unset budget.daily removes it')
+  // get and set on a deprecated key: said, nothing written
+  const g = await call(h, { action: 'get', key: 'threads.softUsd' })
+  expect(g.ok).toBe(false)
+  expect(g.text).toContain('threads.softUsd is no longer used')
+  const before = JSON.stringify(file(h))
+  const s = await call(h, { action: 'set', key: 'review.maxUsd', value: '40' })
+  expect(s.ok).toBe(false)
+  expect(s.text).toContain('review.maxUsd is no longer used: replaced by review.maxTokens')
+  expect(JSON.stringify(file(h))).toBe(before) // no silent conversion, nothing written
+  expect(file(h).review?.maxTokens).toBeUndefined()
+  // the doctor row counts them
+  expect((await configRow(h.host))!.ok).toBe(false)
+  // unset removes each, in any spelling, and keeps the rest
+  for (const k of ['budget.daily', 'budget.threadDaily', 'dailyCapUsd.desk', 'dailyCapUsd.thread', 'workerCapUsd', 'workerCaps', 'threads.softUsd', 'threads.hardUsd', 'review.maxUsd', 'review.askAboveUsd']) {
+    const u = await call(h, { action: 'unset', key: k })
+    expect(u.ok, k).toBe(true)
+    expect(u.text, k).toContain('removed from')
+  }
+  expect(file(h)).toEqual({ budget: { windowTokens: 5_000_000 }, threads: { softTokens: 1_000_000 }, tips: false })
+  expect((await call(h, { action: 'validate' })).ok).toBe(true)
+  // a deprecated key that is not in the file: said, not "unknown"
+  expect((await call(h, { action: 'unset', key: 'threads.softUsd' })).text).toContain('no longer used')
+  // the object spelling goes at once
+  const o = setup({ dailyCapUsd: { desk: 1 } })
+  expect((await call(o, { action: 'unset', key: 'dailyCapUsd' })).ok).toBe(true)
+  expect(file(o)).toEqual({})
+})
+
+test('budget.since: "today" starts the all-time usage again from this moment; a day or a moment is kept as typed; anything else is refused; lean_doctor budget-reset is the same', async () => {
+  const h = setup({})
+  const a = await call(h, { action: 'set', key: 'budget.since', value: 'today' })
+  expect(a.ok).toBe(true)
+  expect(file(h).budget.since).toBe('2026-11-18T14:07:00Z')
+  expect((await call(h, { action: 'set', key: 'budget.since', value: '2026-11-01' })).ok).toBe(true)
+  expect(file(h).budget.since).toBe('2026-11-01')
+  expect((await call(h, { action: 'set', key: 'budget.since', value: 'last week' })).ok).toBe(false)
+  expect((await call(h, { action: 'validate' })).ok).toBe(true)
+  expect((await call(h, { action: 'unset', key: 'budget.since' })).text).toContain('reset to the default')
+})
+
+test('pane.sort: "cost" (the old name) is read as usage; set stores usage', async () => {
+  const h = setup({ pane: { sort: 'cost' } })
+  expect((await call(h, { action: 'validate' })).ok).toBe(true) // not invalid
+  expect((await call(h, { action: 'set', key: 'pane.sort', value: 'cost' })).ok).toBe(true)
+  expect(file(h).pane.sort).toBe('usage')
+})
+
 test('sensitive: refused with the way forward unless the user typed the key; then it is changed', async () => {
   const h = setup({ lean: { orchestrate: true } })
   const r = await call(h, { action: 'set', key: 'lean.orchestrate', value: 'off' })

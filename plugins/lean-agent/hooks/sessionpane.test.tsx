@@ -152,13 +152,13 @@ test('a folded card is exactly ONE line (title cut with an ellipsis, chips besid
   await ui.unmount()
 })
 
-test('STATUS folded: state chip, cost today, age; unfolded: model, branch / worktree, started, restarts and the buttons (Open session, Restart from handover, Close, Refresh)', { timeoutMs: 20_000 }, async ($, on) => {
+test('STATUS folded: state chip, age (no dollar figure); unfolded: model, branch / worktree, started, restarts and the buttons (Open session, Restart from handover, Close, Refresh)', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
   const line = textOf(lines((await cardWith(ui, 'sec-status'))!)[0]!)
   expect(line).toMatch(/\[idle\]|\[done\]/)
-  expect(line).toContain('$1.25')
+  expect(line).not.toContain('$') // no dollar figure (the usage chip is checked in threadpane.test.tsx)
   expect(line).toMatch(/(just now|\d+ min ago|\d+ h ago|\d+ d ago)/)
   for (const b of ['open-session', 'restart', 'close', 'refresh']) expect(await ui.find({ type: 'Button', key: b }), b).toBeFalsy() // folded: none of them
   await openKey(ui, 'sec-status')

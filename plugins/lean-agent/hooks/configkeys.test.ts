@@ -27,11 +27,11 @@ test('registry: the values it lists are the ones the code accepts', async () => 
 })
 
 test('registry: the examples of the request are there, with the right type and sensitivity', async () => {
-  for (const [k, t] of [['feedback.destination', 'enum'], ['desk.autoRestart', 'boolean'], ['threads.autoRestart', 'boolean'], ['threadTokens', 'number'], ['budget.daily', 'number'], ['pane.theme', 'enum'], ['lean.orchestrate', 'boolean'], ['actions.holdSeconds', 'number'], ['workers.steps', 'number'], ['feedback.folder', 'path']] as const) {
+  for (const [k, t] of [['feedback.destination', 'enum'], ['desk.autoRestart', 'boolean'], ['threads.autoRestart', 'boolean'], ['threadTokens', 'number'], ['budget.windowTokens', 'number'], ['budget.since', 'string'], ['budget.weights', 'json'], ['stats.showUsd', 'boolean'], ['pane.theme', 'enum'], ['lean.orchestrate', 'boolean'], ['actions.holdSeconds', 'number'], ['workers.steps', 'number'], ['feedback.folder', 'path']] as const) {
     expect(findEntry(k)?.type).toBe(t)
   }
-  for (const k of ['lean.orchestrate', 'actions.holdSeconds', 'actions.ownPrDefault', 'actions.standing', 'threads.plugins', 'threads.mcp', 'workers.commit', 'private', 'dailyCapUsd.desk']) expect(findEntry(k)?.sensitive).toBe(true)
-  for (const k of ['desk.model', 'threadTokens', 'budget.daily', 'pane.theme', 'feedback.destination', 'tips']) expect(findEntry(k)?.sensitive).toBeUndefined()
+  for (const k of ['lean.orchestrate', 'actions.holdSeconds', 'actions.ownPrDefault', 'actions.standing', 'threads.plugins', 'threads.mcp', 'workers.commit', 'private', 'review.maxTokens', 'review.askAboveTokens']) expect(findEntry(k)?.sensitive).toBe(true)
+  for (const k of ['desk.model', 'threadTokens', 'budget.windowTokens', 'threads.softTokens', 'pane.theme', 'feedback.destination', 'tips']) expect(findEntry(k)?.sensitive).toBeUndefined()
   expect(findEntry('checkpoint.deskTokens')?.key).toBe('desk.contextLimit') // an alias the reader still accepts
   expect(findEntry('deskTokens')?.key).toBe('desk.contextLimit')
 })
@@ -63,7 +63,20 @@ test('values: each type parses text and rejects what the readers would ignore', 
   expect(parseValue(findEntry('threads.plugins')!, 'ALL')).toEqual({ ok: true, value: 'all' })
   expect(parseValue(findEntry('actions.standing')!, '[{"project":"alpha","kinds":["gh-pr-comment"]}]').ok).toBe(true)
   expect(parseValue(findEntry('actions.standing')!, '[{"project":1}]').ok).toBe(false)
-  expect(parseValue(findEntry('workerCaps')!, '{"worker-opus": 4}').ok).toBe(true)
+  expect(parseValue(findEntry('budget.weights')!, '{"output": 4}').ok).toBe(true)
+  expect(parseValue(findEntry('budget.weights')!, '{"output": -1}').ok).toBe(false)
+  expect(parseValue(findEntry('budget.weights')!, '{"cache": 1}').ok).toBe(false)
+  expect(parseValue(findEntry('budget.since')!, '2026-11-25')).toEqual({ ok: true, value: '2026-11-25' })
+  expect(parseValue(findEntry('budget.since')!, '2026-11-25T09:14:00Z').ok).toBe(true)
+  expect(parseValue(findEntry('budget.since')!, '2026-13-45').ok).toBe(false)
+  expect(parseValue(findEntry('budget.since')!, 'yesterday').ok).toBe(false)
+  expect(parseValue(findEntry('budget.windowTokens')!, '5000000')).toEqual({ ok: true, value: 5_000_000 })
+  expect(parseValue(findEntry('budget.windowTokens')!, '0').ok).toBe(false) // none = unset it
+  // pane.sort: "cost" is the old name of "usage": accepted, stored as usage
+  expect(parseValue(findEntry('pane.sort')!, 'cost')).toEqual({ ok: true, value: 'usage' })
+  expect(parseValue(findEntry('pane.sort')!, 'usage')).toEqual({ ok: true, value: 'usage' })
+  expect(checkValue(findEntry('pane.sort')!, 'cost')).toEqual({ ok: true, value: 'usage' })
+  expect(parseValue(findEntry('pane.sort')!, 'dollars').ok).toBe(false)
 })
 
 test('lookup: nested and flat spellings are read the same; an unknown key gets its nearest known key', async () => {

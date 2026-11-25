@@ -81,7 +81,7 @@ test('closed and done threads are one quiet row with their age ("closed 3 h ago"
   thr('t2', { lastWake: now - 2 * HOUR })
   h.files.set(`${L}/threads/t1/notes.md`, 'the last note of t1\n')
   h.files.set(`${L}/desk/inbox.jsonl`, line({ ts: now - 2 * HOUR, from: 't2', kind: 'report', text: 'merged', state: 'done' }))
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 1.25 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't1', model: 'x', in: 1250, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
@@ -90,7 +90,7 @@ test('closed and done threads are one quiet row with their age ("closed 3 h ago"
   expect(all).toContain('closed 3 h ago')
   expect(all).toContain('[done]')
   expect(all).toContain('2 h ago')
-  expect(all).toContain('$1.25 today') // the cost of the closed row
+  expect(all).toContain('window 1.3k tokens') // the usage of the closed row
   for (const k of ['view-t1', 'view-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy() // ONE row each: title, chip, cost, age, Open
   expect(await ui.find({ type: 'Button', key: 'reopen-t1' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /the last note of t1/ })).toBeFalsy()
@@ -110,7 +110,7 @@ test('the sort control: one tap changes the order, keeps it across a remount and
   thr('t3', { title: 'zulu', lastWake: now - 3 * HOUR })
   thr('t4', { title: 'bravo', state: 'closed', closedAt: now - 2 * HOUR })
   h.files.set(`${L}/desk/inbox.jsonl`, line({ ts: now - 4 * HOUR, from: 't2', kind: 'report', text: 'cannot go on: the credential is missing', state: 'blocked' }))
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't3', model: 'x', in: 1, out: 1, usd: 4 }) + line({ ts: now, role: 'thread', tN: 't4', model: 'x', in: 1, out: 1, usd: 2 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't3', model: 'x', in: 4000, usd: 0 }) + line({ ts: now, role: 'thread', tN: 't4', model: 'x', in: 2000, usd: 0 }))
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
   await setUp(ui)
@@ -123,8 +123,8 @@ test('the sort control: one tap changes the order, keeps it across a remount and
   expect(await order(ui)).toEqual(['t2', 't4', 't1', 't3'])
   expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('● name ↑')
   expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('last active')
-  await ui.press({ key: 'sort-cost' })
-  expect(await order(ui)).toEqual(['t3', 't4', 't1', 't2']) // dearest first, then the last activity
+  await ui.press({ key: 'sort-usage' })
+  expect(await order(ui)).toEqual(['t3', 't4', 't1', 't2']) // most usage tokens first, then the last activity
   await ui.press({ key: 'sort-needs' })
   expect(await order(ui)).toEqual(['t2', 't1', 't4', 't3']) // t2 is blocked: on top; the rest by last activity
   expect((await paneConfig(h.host)).sort).toBe('needs') // config pane.sort

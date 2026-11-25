@@ -32,7 +32,8 @@ import { excludeSpecs, excludedText, globsOk } from './reviewexclude'
 import { addPrepNote, expectedReviewCost, expectedText, fanOutText, reviewCostLine } from './reviewcost'
 import { spendStop } from './reviewspend'
 import { reviewWindowGate } from './throttle'
-// "\nreview cost for <sha>: $0.84 over 2 passes, 41 requests" (the line every prepare and record reply ends with), or '' when no pass ran for the sha
+import { fmtTokens } from './formatusage'
+// "\nreview usage for <sha>: 410k tokens over 2 passes, 41 requests" (the line every prepare and record reply ends with), or '' when no pass ran for the sha
 const costNote = async (h: Host, project: string, thread: string, sha: string): Promise<string> => {
   const l = await reviewCostLine(h, project, thread, sha).catch(() => '')
   return l ? `\n${l}` : ''
@@ -173,12 +174,12 @@ export const CAP_EXEMPT = "Reviewer passes and the second-opinion reader are exe
 const MIN_LINES = 60
 async function alreadyReviewed(h: Host, project: string, head: string, level: Level, since: number | null, sinceSha: string): Promise<string | null> {
   const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as { review?: { perMilestone?: unknown; minLines?: unknown } }
-  const skipLine = (reason: string) => `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedUsd: 0, summary: `${level.toUpperCase()} review skipped: ${reason}` })}\nalready reviewed at this milestone (${reason}): skip. Carry on with the work; run prepare again at the next milestone or with level "full" before "ready to push". (config review.perMilestone false prepares every time; review.minLines sets the line threshold.)`
+  const skipLine = (reason: string) => `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedTokens: 0, summary: `${level.toUpperCase()} review skipped: ${reason}` })}\nalready reviewed at this milestone (${reason}): skip. Carry on with the work; run prepare again at the next milestone or with level "full" before "ready to push". (config review.perMilestone false prepares every time; review.minLines sets the line threshold.)`
   if (level === 'full') {
     const rec = await readReview(h, project, head).catch(() => null)
     if (!rec || rec.mode === 'external' || rec.level === 'light') return null
     const f = rec.findings?.length ?? 0
-    return `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedUsd: 0, summary: `FULL review already recorded for ${head.slice(0, 12)}: ${rec.green ? 'green' : 'not green'}` })}\nthe full review of this head already has a record (${rec.green ? 'green' : 'NOT green'}, ${rec.passes ?? 1} pass${(rec.passes ?? 1) === 1 ? '' : 'es'}, ${f} finding${f === 1 ? '' : 's'}${rec.verdicts?.length ? `, verdicts ${rec.verdicts.join('/')}` : ''}). No second prepare: ${rec.green ? 'the push gate is open for this sha' : 'fix the findings and commit, then prepare again for the new head'}.`
+    return `LEAN-REVIEW-PREP ${JSON.stringify({ skip: true, level, runs: 0, head, expectedTokens: 0, summary: `FULL review already recorded for ${head.slice(0, 12)}: ${rec.green ? 'green' : 'not green'}` })}\nthe full review of this head already has a record (${rec.green ? 'green' : 'NOT green'}, ${rec.passes ?? 1} pass${(rec.passes ?? 1) === 1 ? '' : 'es'}, ${f} finding${f === 1 ? '' : 's'}${rec.verdicts?.length ? `, verdicts ${rec.verdicts.join('/')}` : ''}). No second prepare: ${rec.green ? 'the push gate is open for this sha' : 'fix the findings and commit, then prepare again for the new head'}.`
   }
   const rc = cfg?.review
   if (rc?.perMilestone === false || rc?.perMilestone === 'false') return null
@@ -232,9 +233,9 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
     await noteAreas(h, project, range.head, areasAll.map(a => a.name))
     const bigExp = await expectedReviewCost(h, project, 1, level) // one pass per area
     const bigFan = fanOutText(bigExp, areasAll.length)
-    const bigStop = await spendStop(h, project, bigExp.usd * areasAll.length, bigFan, i.confirm === true)
+    const bigStop = await spendStop(h, project, bigExp.tokens * areasAll.length, bigFan, i.confirm === true)
     if (bigStop) return { ok: false, text: bigStop }
-    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head, expectedUsd: Math.round(bigExp.usd * areasAll.length * 100) / 100 })}\n${bigText(whole, ctx.prep, areasAll)}\n${areasCoverage(diff, areasAll)}${rangeWarn}\n${bigFan}.${replaces ? `\n${replaces}` : ''}` }
+    return { ok: true, text: `LEAN-REVIEW-PREP ${JSON.stringify({ tooLarge: true, files: whole.length, lines: whole.reduce((n, s) => n + s.add + s.del, 0), areas: areasAll.length, mb: range.mb, head: range.head, expectedTokens: bigExp.tokens * areasAll.length })}\n${bigText(whole, ctx.prep, areasAll)}\n${areasCoverage(diff, areasAll)}${rangeWarn}\n${bigFan}.${replaces ? `\n${replaces}` : ''}` }
   }
   const area = scopeArg ? areaOf(areasAll, scopeArg) : undefined
   if (scopeArg && !area) return { ok: false, text: `prepare: scope ${JSON.stringify(scopeArg.slice(0, 40))} is not an area of this diff (${areasAll.map(a => a.name).join(', ') || 'the diff has no changed files'}); run prepare without scope to see the areas` }
@@ -268,7 +269,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   }
   const exp = await expectedReviewCost(h, project, nRuns, level)
   const fan = fanOutText(exp, 1)
-  const costStop = await spendStop(h, project, exp.usd, fan, i.confirm === true) // above review.askAboveUsd / maxUsd: the user decides first (reviewspend.ts)
+  const costStop = await spendStop(h, project, exp.tokens, fan, i.confirm === true) // above review.askAboveTokens / maxTokens: the user decides first (reviewspend.ts)
   if (costStop) return { ok: false, text: costStop }
   const hot = await reviewWindowGate(h, thread, { level, bytes: areaDiff.length, confirm: i.confirm === true }) // the 5h window (throttle.ts): blocked or capped = no reviewers; throttled = haiku only, and a full review that haiku cannot cover is HELD
   const cover = coverageNote(areaDiff.length, area ? area.name : 'this diff') // one pass reads passBytes: a bigger diff says so (the partition already split a too-large one)
@@ -316,7 +317,7 @@ async function doPrepare(h: Host, project: string, i: any, thread: string): Prom
   if (ctx.prep.truncated) lines.push('(the diff was over the size cap: the lists above may be incomplete; read the diff itself)')
   const d = declinesText(ctx.declines)
   if (d) lines.push(d)
-  const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, lessons: les.offered.n, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedUsd: Math.round(exp.usd * 100) / 100, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~$${exp.usd.toFixed(2)}` }
+  const meta = { ...(area ? { scope: area.name } : {}), level, model, runs: nRuns, why, secondOpinion: second, rereview, since: earlier?.sha ?? '', mb: range.mb, head: range.head, lessons: les.offered.n, newSymbols: ctx.prep.symbols.length, editedTests: ctx.prep.tests.length, lines: ctx.prep.lines, excluded: { files: brief.excluded?.files.length ?? 0, lines: brief.excluded?.lines ?? 0 }, expectedTokens: exp.tokens, summary: `${level.toUpperCase()} review, ${nRuns} pass${nRuns === 1 ? '' : 'es'} (${model}), expected ~${fmtTokens(exp.tokens)} usage tokens` }
   const who = nRuns === 2 ? `reviewer: ${model} x2 (${why})` : `reviewer: ${model} (${why})`
   const lvl = light
     ? 'level: LIGHT (default at a checkpoint: one sonnet pass, correctness + behaviour + reuse; it never records green). Before "ready to push" run prepare again with level: "full": the push gate needs the full review\'s record.'

@@ -54,7 +54,8 @@ export type Dim = Record<string, Agg>
 // row or a day folded earlier has none), keyed `tN|model|effort` = the thread's own choice (thread.json)
 export type Day = { t: Agg; model: Dim; agent: Dim; role: Dim; tN: Dim; rm: Dim; rmm: Dim; tme?: Dim }
 // files: bytes folded per ledger file; ids: the start of each file's first line (a file is the same file only while its start is)
-export type Rollup = { v: 2; files: Record<string, number>; ids: Record<string, string>; days: Record<string, Day>; rows: number; legacy: number; bad: number }
+// old: the totals of the days pruned past KEEP_DAYS (first day, last day, the sums): the all-time usage tokens (usage.ts) still count them
+export type Rollup = { v: 2; files: Record<string, number>; ids: Record<string, string>; days: Record<string, Day>; rows: number; legacy: number; bad: number; old?: { from: string; to: string; t: Agg } }
 const ID_LEN = 256
 const idOf = (text: string) => text.split('\n')[0]!.slice(0, ID_LEN) // the first line (a 1.0 row is one line of about 150 bytes)
 
@@ -80,7 +81,7 @@ export function addRow(ro: Rollup, r: Norm) {
   bump(d.model, r.model, r)
   bump(d.agent, r.agent, r)
   bump(d.role, r.role, r)
-  bump(d.tN, r.tN, r)
+  bump(d.tN, r.role === 'desk' || r.role === 'plain' ? '-' : r.tN, r) // a desk or plain row is in no thread's figure, whatever its tN says (usage.ts: a thread's usage is its own)
   bump(d.rm, `${r.role}|${r.model}`, r)
   if (r.agent === 'main') bump(d.rmm, `${r.role}|${r.model}`, r) // the session's own requests: a worker's model is chosen per call
   if (r.role === 'thread' && /^t\d{1,9}$/.test(r.tN) && r.effort) bump((d.tme ??= {}), `${r.tN}|${r.tmodel || r.model}|${r.effort}`, r) // a worker's rows count for the thread's choice (compare's throw-away t9<time> folders are no thread)
@@ -146,7 +147,15 @@ function valid(r: any): r is Rollup {
 const head = async (h: Host, path: string): Promise<string> => idOf(String((await h.process.run(['head', '-n', '1', path]).catch(() => null))?.stdout ?? ''))
 const prune = (ro: Rollup, now: number) => {
   const keep = Object.keys(ro.days).sort().slice(-KEEP_DAYS)
-  for (const d of Object.keys(ro.days)) if (!keep.includes(d) && d < dayOf(now)) delete ro.days[d]
+  for (const d of Object.keys(ro.days).sort()) {
+    if (keep.includes(d) || d >= dayOf(now)) continue
+    const day = ro.days[d]!
+    const o = (ro.old ??= { from: d, to: d, t: zero() })
+    merge(o.t, day.t)
+    if (d < o.from) o.from = d
+    if (d > o.to) o.to = d
+    delete ro.days[d]
+  }
 }
 
 // Bring the rollup up to date with every ledger file: only bytes past each file's offset are read. A file shorter than its

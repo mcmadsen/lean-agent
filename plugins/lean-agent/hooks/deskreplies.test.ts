@@ -5,9 +5,9 @@ import { fakeHost } from './fake'
 import { checkReply } from './doctor'
 import { LIST_LINE_MAX, REPLY_LINES, REPLY_TAIL_MAX, leanThread, listLine, threeLines } from './threads'
 
-test('listLine: id, state word, ctx, today, the first 80 characters of the last report; never longer than LIST_LINE_MAX', () => {
-  const l = listLine({ id: 't3', title: 'parser work', state: 'open', live: 'running', ctx: 'ctx 108k/120k', today: 'today $0.42 (reviews $0.10)', lastText: `${'word '.repeat(60)}` })
-  expect(l.startsWith('t3 running · ctx 108k/120k · today $0.42 · "word word')).toBe(true)
+test('listLine: id, state word, ctx, window usage, the first 80 characters of the last report; never longer than LIST_LINE_MAX', () => {
+  const l = listLine({ id: 't3', title: 'parser work', state: 'open', live: 'running', ctx: 'ctx 108k/120k', usage: 'window 42k tokens (reviews 10k)', lastText: `${'word '.repeat(60)}` })
+  expect(l.startsWith('t3 running · ctx 108k/120k · window 42k tokens · "word word')).toBe(true)
   expect(l).not.toContain('reviews')
   expect(l.length).toBeLessThanOrEqual(LIST_LINE_MAX)
   expect(listLine({ id: 't4', title: 'x'.repeat(100), state: 'closed' }).length).toBeLessThanOrEqual(LIST_LINE_MAX) // no report: the title, cut

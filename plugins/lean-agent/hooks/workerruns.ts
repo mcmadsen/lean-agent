@@ -1,11 +1,13 @@
 // Worker runs, by tier and job. The ledger has one row per model request with the agent type and agent id but no job; the thread's Agent call knows the
 // job (`job: edit` on the brief) and whether it was a second try of the same brief (the retry rule) or hit the step budget. So the mod writes ONE record per
 // worker Agent call to runs.jsonl (agent type, job, agent id, retry, budget, ok) and `lean_doctor stats` joins it with the ledger by agent id:
-// runs, requests, cost, cost per run, retry and budget shares per (agent type, job); the thread's own session; and what the edit runs on sonnet would
-// have cost on haiku (the same tokens at haiku's list prices, never a guess). The haiku record of a project's job type feeds the why-sonnet refusal.
+// runs, requests, usage tokens (usage.ts), tokens per run, retry and budget shares per (agent type, job); the thread's own session; and what the edit runs on sonnet
+// used. The haiku record of a project's job type feeds the why-sonnet refusal.
 import { appendJsonl, homeDir, leanDir } from './state'
 import type { Host } from './state'
-import { costUsd } from './budget'
+import { DEFAULT_WEIGHTS, rawOfRow, usageTokens, weightsOf } from './usage'
+import type { Weights } from './usage'
+import { fmtTokens } from './formatusage'
 import { fileSize, normalizeRow, readFrom } from './ledger'
 import type { Norm } from './ledger'
 import { ledgerTail } from './reviewcost'
@@ -73,12 +75,12 @@ export async function haikuRecord(h: Host, project: string, job: string): Promis
 }
 
 // ---- the stats section ---------------------------------------------------------------------------------------------------------------
-const usd = (n: number) => `$${n.toFixed(2)}`
 const pct = (n: number, d: number) => (d ? `${Math.round((100 * n) / d)}%` : '0%')
-type Tot = { usd: number; req: number; in: number; out: number; cr: number; cw: number }
-const emptyTot = (): Tot => ({ usd: 0, req: 0, in: 0, out: 0, cr: 0, cw: 0 })
-const addRow = (t: Tot, r: Norm) => {
-  t.usd += r.usd
+// tokens: the weighted usage tokens (usage.ts), `w` the factors
+type Tot = { tokens: number; req: number; in: number; out: number; cr: number; cw: number }
+const emptyTot = (): Tot => ({ tokens: 0, req: 0, in: 0, out: 0, cr: 0, cw: 0 })
+const addRowW = (w: Weights) => (t: Tot, r: Norm) => {
+  t.tokens += usageTokens(rawOfRow(r), w)
   t.req++
   t.in += r.in
   t.out += r.out
@@ -87,7 +89,8 @@ const addRow = (t: Tot, r: Norm) => {
 }
 
 // rows: the ledger rows of the window (any role); runs: the run records of the window. Pure: the specs feed a synthetic ledger.
-export function tierJobLines(runs: Run[], rows: Norm[], days: number): string[] {
+export function tierJobLines(runs: Run[], rows: Norm[], days: number, w: Weights = DEFAULT_WEIGHTS): string[] {
+  const addRow = addRowW(w)
   const byId = new Map<string, Tot>()
   const mainBy = new Map<string, Tot>()
   const reviewers = new Map<string, Tot>()
@@ -111,43 +114,38 @@ export function tierJobLines(runs: Run[], rows: Norm[], days: number): string[] 
     const t = r.agentId ? byId.get(r.agentId) : undefined
     if (t) {
       g.costed++
-      g.tot.usd += t.usd
+      g.tot.tokens += t.tokens
       g.tot.req += t.req
     }
   }
   if (reviewers.size) {
     const g = { runs: reviewers.size, costed: reviewers.size, retry: 0, budget: 0, tot: emptyTot() }
     for (const t of reviewers.values()) {
-      g.tot.usd += t.usd
+      g.tot.tokens += t.tokens
       g.tot.req += t.req
     }
     groups.set('reviewer · check', g)
   }
   out.push(`by worker tier and job (${days}d; runs of the thread's Agent calls joined with the ledger by agent id)`)
   if (!groups.size) out.push('  no worker run recorded yet (runs.jsonl is written from 1.0.27 on)')
-  for (const [k, g] of [...groups].sort((a, b) => b[1].tot.usd - a[1].tot.usd)) {
-    const per = g.costed ? `${usd(g.tot.usd / g.costed)}/run` : 'cost unknown'
+  for (const [k, g] of [...groups].sort((a, b) => b[1].tot.tokens - a[1].tot.tokens)) {
+    const per = g.costed ? `${fmtTokens(g.tot.tokens / g.costed)} tokens/run` : 'usage unknown'
     const retry = k.startsWith('reviewer') ? '' : ` · second try ${pct(g.retry, g.runs)} · step budget hit ${pct(g.budget, g.runs)}`
-    out.push(`  ${k}: ${g.runs} run${g.runs === 1 ? '' : 's'} · ${g.tot.req} req · ${usd(g.tot.usd)} · ${per}${retry}${g.costed < g.runs ? ` (cost known for ${g.costed} of ${g.runs})` : ''}`)
+    out.push(`  ${k}: ${g.runs} run${g.runs === 1 ? '' : 's'} · ${g.tot.req} req · ${fmtTokens(g.tot.tokens)} tokens · ${per}${retry}${g.costed < g.runs ? ` (usage known for ${g.costed} of ${g.runs})` : ''}`)
   }
-  // thread main session: requests, average context per request (input + cache read + cache write), cost
-  const mains = [...mainBy].filter(([id]) => /^t\d+$/.test(id)).sort((a, b) => b[1].usd - a[1].usd)
+  // thread main session: requests, average context per request (input + cache read + cache write), usage tokens
+  const mains = [...mainBy].filter(([id]) => /^t\d+$/.test(id)).sort((a, b) => b[1].tokens - a[1].tokens)
   if (mains.length) {
-    out.push('thread main session (requests · avg context · cost):')
-    for (const [id, t] of mains.slice(0, 8)) out.push(`  ${id}: ${t.req} requests · avg context ${Math.round((t.in + t.cr + t.cw) / Math.max(1, t.req) / 1000)}k · ${usd(t.usd)}`)
+    out.push('thread main session (requests · avg context · usage tokens):')
+    for (const [id, t] of mains.slice(0, 8)) out.push(`  ${id}: ${t.req} requests · avg context ${Math.round((t.in + t.cr + t.cw) / Math.max(1, t.req) / 1000)}k · ${fmtTokens(t.tokens)} tokens`)
   }
-  // the same edit runs on haiku: the same tokens at haiku's list prices
+  // the same edit runs on haiku: usage tokens weigh the same on every model, so the line says what sonnet edit runs used and how often haiku did the job
   const sonnetEdit = runs.filter(r => r.agent === 'worker-sonnet' && r.job === 'edit' && r.agentId && byId.has(r.agentId))
   if (sonnetEdit.length) {
     let x = 0
-    let y = 0
-    for (const r of sonnetEdit) {
-      const t = byId.get(r.agentId!)!
-      x += t.usd
-      y += costUsd('haiku', { input_tokens: t.in, output_tokens: t.out, cache_read_input_tokens: t.cr, cache_creation_input_tokens: t.cw })
-    }
+    for (const r of sonnetEdit) x += byId.get(r.agentId!)!.tokens
     const okEdit = runs.filter(r => r.job === 'edit' && r.ok)
-    out.push(`${sonnetEdit.length} edit run${sonnetEdit.length === 1 ? '' : 's'} on sonnet cost ${usd(x)}; the same on haiku would be about ${usd(y)} (haiku share of successful edit runs: ${pct(okEdit.filter(r => r.agent === 'worker-haiku').length, okEdit.length)})`)
+    out.push(`${sonnetEdit.length} edit run${sonnetEdit.length === 1 ? '' : 's'} on sonnet used ${fmtTokens(x)} usage tokens (haiku share of successful edit runs: ${pct(okEdit.filter(r => r.agent === 'worker-haiku').length, okEdit.length)})`)
   }
   return out
 }
@@ -165,6 +163,6 @@ export async function tierJobSection(h: Host, now: number, days: number): Promis
       /* a cut or damaged line */
     }
   }
-  const lines = tierJobLines(await readRuns(h, since), rows, days)
+  const lines = tierJobLines(await readRuns(h, since), rows, days, await weightsOf(h))
   return lines.length === 2 && lines[1]!.includes('no worker run recorded') ? [] : lines // nothing to say: no section
 }

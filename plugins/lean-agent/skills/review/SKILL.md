@@ -43,10 +43,10 @@ use, 2 hours) and pushes with `push` (and opens the PR) from the desk. Or the us
 **Two levels, so the review does not eat the day.** A **light** review (the default of `prepare`) is ONE sonnet pass on correctness,
 behaviour and reuse: use it at an intermediate checkpoint ("is this on the right track?"); it never records green. The **full** strict
 review (`level: "full"`: every pass, two runs for a high-risk diff, the record that unlocks `git push`) runs only when the work is done,
-right before you `lean_report` "ready to push". `prepare` prints the expected cost (`expected review cost ~$1.20 (2 passes, sonnet)`,
-the median of this project's earlier reviewer passes in the ledger, else a stated default): say it to the user before you start the
-reviewer agents, and never run a full review at every checkpoint. Above config `review.askAboveUsd` (default 5) `prepare` does not start: ask the user
-with `lean_ask` and run `prepare` again with `confirm: true` only after the user's yes (above `review.maxUsd`, default 25, the same, and prefer a light review or one scope at a time). If
+right before you `lean_report` "ready to push". `prepare` prints the expected usage (`expected review usage ~1.2M tokens (2 passes, sonnet)`,
+the median of this project's earlier reviewer passes in the ledger, else a stated default; usage tokens are weighted, areas x passes x that median): say it to the user before you start the
+reviewer agents, and never run a full review at every checkpoint. Above config `review.askAboveTokens` (default 2M) `prepare` does not start: ask the user
+with `lean_ask` and run `prepare` again with `confirm: true` only after the user's yes (above `review.maxTokens`, default 10M, the same, and prefer a light review or one scope at a time). If
 it says "prepared N files, the forge lists M: wrong range", no reviewer is started: fix the base or head. The push gate still needs the full review's record for the pushed sha.
 
 The review is strict on purpose: the reviewer works in ordered passes (completeness, correctness traced end to end, behaviour
@@ -65,9 +65,9 @@ tool's refusal: do what it says.
    (renamed, flipped, deleted, skipped), new parameters with defaults, new module-level state, changed or removed exported symbols,
    the user's declines for this branch, and on a later pass the open findings and the delta since the last reviewed sha. The first
    line is `LEAN-REVIEW-PREP {...}` (the model, the number of runs and why, whether a second opinion comes first, whether this is a
-   re-review; `summary`: level, passes and expected cost). A line before it saying `this thread runs lean-agent <v>: the changed-code filter needs 1.0.29 or newer: restart it`, or a prepare text without `CHANGED CODE ONLY`, means this thread would review unfiltered: stop and tell the user to restart it. If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
+   re-review; `summary`: level, passes and expected usage). A line before it saying `this thread runs lean-agent <v>: the changed-code filter needs 1.0.29 or newer: restart it`, or a prepare text without `CHANGED CODE ONLY`, means this thread would review unfiltered: stop and tell the user to restart it. If the first line says `"skip":true` ("already reviewed at this milestone"), start NO reviewer: carry on with the work (a full prepare for a head that has a record answers with that record). Everything after the first lines goes into the reviewer's prompt as it is, including the `allow-cmd:` line with your
    worktree path (git -C <worktree> ...). Print the reviewer line (`reviewer: sonnet x2
-   (risk: ...)`, or `reviewer: sonnet (...)`) and the expected cost line so the user sees who reviews, why and what it costs. The reviewer is **always sonnet**; never pass
+   (risk: ...)`, or `reviewer: sonnet (...)`) and the expected usage line so the user sees who reviews, why and how much it uses. The reviewer is **always sonnet**; never pass
    `model` to prepare yourself: it is only for a model the brief explicitly names.
 3. **Lessons:** the prepare text already carries the project's lessons (`LESSONS (n of N, ids ...)` or `lessons: none offered (why)`): paste nothing yourself (`action: "lessons"` is for a manual look only).
 4. **Second opinion (only when prepare says so: a new abstraction or a big diff, never on a re-review):** spawn

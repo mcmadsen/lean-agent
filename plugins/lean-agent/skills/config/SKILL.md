@@ -20,7 +20,7 @@ after the desk restarts): repeat that in your answer.
 
 An unknown key is answered with the nearest key ("did you mean ..."): say it and ask which one the user meant; never write a key the tool does not know.
 
-Sensitive keys loosen a safety rule (`lean.orchestrate`, the `actions.*` approvals and hold time, what a thread or worker may load or run, spend caps, review skips):
+Sensitive keys loosen a safety rule (`lean.orchestrate`, the `actions.*` approvals and hold time, what a thread or worker may load or run, review size caps and skips):
 the mod changes one only when the user's own typed words this session name the key, or when the user answers the mod's own question with Approve. If the tool refuses,
 tell the user: "this setting loosens a safety rule: type `/lean-agent:config <key> <value>` in the chat box, or I ask you with a question", then ask the question the reply carries with
 AskUserQuestion, pasted exactly, with exactly the options Approve, Not now; the mod reads the answer itself and makes the change, never answer for them and never call the tool again

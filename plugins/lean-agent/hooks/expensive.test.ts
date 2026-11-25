@@ -460,7 +460,8 @@ test('compare: a model that is not haiku or sonnet needs the thread\'s approval;
   expect((await compare(h.host, ROOT, { project: 'app', mode: 'overhead', model: 'haiku' }, 'desk')).text).not.toContain("needs the user's approval")
 })
 
-const row = (ts: number, o: Record<string, unknown> = {}) => JSON.stringify({ ts, role: 'thread', tN: 't1', model: 'claude-sonnet-5-5', in: 1000, out: 100, cache_read: 5000, cache_write: 200, usd: 1, ...o }) + '\n'
+// (a row with a `usd` of N is N thousand input tokens: the usage tokens of the opus share are weighted tokens, usd is only the old estimate)
+const row = (ts: number, o: Record<string, unknown> = {}) => JSON.stringify({ ts, role: 'thread', tN: 't1', model: 'claude-sonnet-5-5', in: 1000, out: 100, cache_read: 5000, cache_write: 200, usd: 1, ...(typeof o.usd === 'number' ? { in: o.usd * 1000, out: 0, cache_read: 0, cache_write: 0 } : {}), ...o }) + '\n'
 const NOON = Date.UTC(2026, 10, 18, 12)
 
 test('stats: the cost by model with the opus share and the threads on opus; doctor says so as a FIX row over 40 % of the last 7 days', async () => {
@@ -475,17 +476,17 @@ test('stats: the cost by model with the opus share and the threads on opus; doct
     row(NOON - 2 * 86_400_000, { tN: 't4', model: 'claude-opus-5-5', usd: 1 }) +
     row(NOON - 20 * 86_400_000, { tN: 't5', model: 'claude-sonnet-5-5', usd: 500 })) // outside the window
   const s = await opusShare(h.host)
-  expect(s.usd).toBe(7)
-  expect(s.total).toBe(11)
+  expect(s.tokens).toBe(7000)
+  expect(s.total).toBe(11_000)
   expect(Math.round(s.pct)).toBe(64)
   expect(s.threads).toEqual(['t1']) // the one that spent on opus (and is on it); t3 is closed and spent nothing, t4's row names no thread model
   const t = await statsText(h.host)
   expect(t).toContain('by model (7d):')
-  expect(t).toContain('opus share (7d): 64% of spend ($7.00 of $11.00); threads t1')
+  expect(t).toContain('opus share (7d): 64% of usage tokens (7k of 11k); threads t1')
   const c = await check(h.host, ROOT)
-  const fix = c.find(l => l.includes('opus is 64% of spend'))!
+  const fix = c.find(l => l.includes('opus is 64% of usage tokens'))!
   expect(fix.startsWith('FIX')).toBe(true)
-  expect(fix).toContain('opus is 64% of spend: threads t1')
+  expect(fix).toContain('opus is 64% of usage tokens: threads t1')
   expect(fix).toContain('run on opus')
   // under the line: an ok row
   const lowHost = fakeHost(null)
@@ -518,7 +519,7 @@ test('doctor: a high opus share is a FIX only while a thread is ON opus now, and
   // a thread starts on opus again: the FIX is back and names only that one (t1 is closed and no longer named)
   h.files.set(`${L}/threads/t5/thread.json`, JSON.stringify({ id: 't5', state: 'open', model: 'opus', effort: 'high' }))
   h.files.set(`${L}/threads/t2/thread.json`, JSON.stringify({ id: 't2', state: 'open', model: 'opus', effort: 'high' }))
-  const fix = (await check(h.host, ROOT)).find(l => l.includes('opus is 70% of spend'))!
+  const fix = (await check(h.host, ROOT)).find(l => l.includes('opus is 70% of usage tokens'))!
   expect(fix.startsWith('FIX')).toBe(true)
   expect(fix).toContain('threads t2, t5 run on opus now')
   expect(fix).not.toContain('t1')

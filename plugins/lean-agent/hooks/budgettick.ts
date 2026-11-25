@@ -49,7 +49,8 @@ export async function windowParkTick(h: Host, deps: TickDeps): Promise<string[]>
 }
 
 // The soft budget (budgetthread.ts): at 80% of a thread's own spend ONE nudge to the thread and ONE desk notice; at 100% ONE desk notice (raise / park / continue) and the thread goes on.
-// Only the hard cap (config threads.hardUsd, none by default) stops a thread: it is told to report and stop, and budget.json says "hard" so the guard refuses its new Agent calls.
+// Only the hard cap (config threads.hardTokens, none by default) stops a thread: it is told to report and stop, and budget.json says "hard" so the guard refuses its new Agent calls.
+// The figure is the thread's OWN usage tokens (usage.ts threadTotals: its sessions, restarts and subagents from its creation on; never the desk's or another thread's).
 // The levels are recorded per budget value (<thread>/budget.json): raising the budget announces them again.
 export async function softBudgetTick(h: Host, deps: TickDeps): Promise<string[]> {
   const out: string[] = []
@@ -71,15 +72,16 @@ export async function softBudgetTick(h: Host, deps: TickDeps): Promise<string[]>
       const now = await h.clock.now()
       const send = async (text: string) => deps.thread({ action: 'send', tN: id, text }).catch(() => null)
       const rec: BudgetRec = have && have.budget === (budget ?? 0) ? { ...have } : { budget: budget ?? 0 }
-      if (rec.hardUsd !== undefined && rec.hardUsd !== hard) { delete rec.hard; delete rec.hardUsd } // the cap was changed or removed: the refusal ends, a new cap is announced again
-      let changed = have?.budget !== rec.budget || have?.hardUsd !== rec.hardUsd
-      // the hard cap (threads.hardUsd, none by default): the only level that stops a thread: told to report and stop, new Agent calls refused (guard.ts reads budget.json)
+      if (rec.hardTokens !== undefined && rec.hardTokens !== hard) { delete rec.hard; delete rec.hardTokens } // the cap was changed or removed: the refusal ends, a new cap is announced again
+      if ((rec as { hardUsd?: number }).hardUsd !== undefined) { delete rec.hard; delete (rec as { hardUsd?: number }).hardUsd } // a USD cap of 1.0.33: no longer enforced
+      let changed = have?.budget !== rec.budget || have?.hardTokens !== rec.hardTokens || (have as { hardUsd?: number } | null)?.hardUsd !== undefined
+      // the hard cap (threads.hardTokens, none by default): the only level that stops a thread: told to report and stop, new Agent calls refused (guard.ts reads budget.json)
       if (hard !== null && spent >= hard && !rec.hard) {
         rec.hard = now
-        rec.hardUsd = hard
+        rec.hardTokens = hard
         await writeJson(h, budgetFile(home, id), rec)
         await send(hardNudge(spent, hard))
-        out.push(`${id}: hard cap ${budgetText(spent, hard)} reached: told to report and stop; its new Agent calls are refused (raise threads.hardUsd, or remove it, to let it go on)`)
+        out.push(`${id}: hard cap ${budgetText(spent, hard)} reached: told to report and stop; its new Agent calls are refused (raise threads.hardTokens, or remove it, to let it go on)`)
         changed = false
       }
       const level = budget === null ? 'ok' : budgetLevel(spent, budget)

@@ -110,7 +110,7 @@ test('a fresh session that starts over the limit stops and asks the user, once',
 })
 
 const rows = (state = 'idle') => async () => [{ sid: S1, name: '', cwd: T1, status: state, state, startedAt: 1, pid: 42, id: 'a', waitingFor: '' }] as any
-const ok = { ok: true, text: 't1 started (x) · sonnet/medium · new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old session\'s conversation is not resumed', data: { fresh: true } }
+const ok = { ok: true, text: 't1 started (x) · sonnet/medium · new session: handover about 3.2k usage tokens (first turn, estimate); the old session\'s conversation is not resumed', data: { fresh: true } }
 
 test('desk tick: restarts after 20 s idle with a notice naming size and cost; never earlier; once', async () => {
   const { h } = setup()
@@ -126,7 +126,7 @@ test('desk tick: restarts after 20 s idle with a notice naming size and cost; ne
   expect(calls[0]).toContain('t1|Its context was 205000 tokens (limit 120000)')
   expect(notes).toHaveLength(1)
   expect(notes[0]!.text).toMatch(/^t1: context .* was over the limit .*: restarted as a new session by script/)
-  expect(notes[0]!.text).toContain('handover about 3.2k tokens (~$0.01 first turn, estimate)')
+  expect(notes[0]!.text).toContain('handover about 3.2k usage tokens (first turn, estimate)')
   expect(marker(h)).toMatchObject({ last: { at: h.clock.t, oldSid: S1 } })
   expect(marker(h).pending).toBeUndefined()
   expect(await autoRestartTick(h.host, deps)).toEqual([])

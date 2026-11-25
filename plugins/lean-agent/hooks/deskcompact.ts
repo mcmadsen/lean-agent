@@ -38,6 +38,7 @@ import type { AutoKind } from './deskauto'
 import { readDeskModel } from './deskmodel'
 import { handoverMode } from './handover'
 import type { HandoverMode } from './handover'
+import { DOT_HINT, dotEnabled } from './dotcontinue'
 import type { Thread } from './threads'
 
 export const DEFAULT_TOKENS = 200_000 // (1.0.33: 200k again; 60k from 1.0.31 was passed at once by a desk that routes many threads. 100k before that, 200k before 1.0.20)
@@ -459,8 +460,9 @@ async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid:
   const unread = Math.max(0, recs.length - read)
   const when = new Date(await h.clock.now()).toISOString()
   const deskMem = await indexText(h, home, 'desk').catch(() => '')
+  const dot = (await dotEnabled(h)) ? ` - ${DOT_HINT}` : '' // (the first line tells the user what the new desk waits for: a lone "." is enough, dotcontinue.ts)
   const parts = [
-    `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'})`,
+    `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'})${dot}`,
     `This desk session replaces the previous one (restarted, or its context was too large). Read this at the start, then carry on; the full report texts are in ${deskState(home)}/inbox.jsonl (${unread} row(s) unread), earlier handoff notes in ${deskState(home)}/notes.md.`,
     deskMem ? `## Standing orders\n${deskMem}` : '', // the desk's own and the user's habits (memoryindex.ts: its own token budget)
     `## Unanswered thread questions\n${qs.length ? qs.join('\n') : 'none'}`,
@@ -478,7 +480,7 @@ async function buildDeskHandover(h: Host, tokens: number, recent: string[], sid:
   // (the same section titles as the full form: deskauto.ts handoverDigest counts the lines under them; a section with nothing in it is left out)
   const open = [qs.length ? `## Unanswered thread questions\n${qs.join('\n')}` : '', reqs.length ? `## Pending requests (wait for the user's yes)\n${reqs.join('\n')}` : '', waiting.length ? `## Pending approvals\n${waiting.join('\n')}` : '', grantLines.length ? `## Grants in force (written approvals of the user)\n${grantLines.join('\n')}` : ''].filter(Boolean)
   const coreParts = [
-    `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'}, core)`,
+    `# Desk handover (written ${when}, context ${tokens > 0 ? kTokens(tokens) : 'size unknown'}, core)${dot}`,
     `This desk session replaces the previous one. Open items and threads are below; everything else is a pull (index at the end).`,
     ...(open.length ? open : ['## Open items\nnone: no unanswered question, pending request, pending approval or grant']),
     `## Open threads\n| id | title | project | state | doing | last report |\n|---|---|---|---|---|---|\n${rows.length ? rows.join('\n') : '| - | no open threads | | | | |'}`,
@@ -579,5 +581,5 @@ async function restartDeskNow(h: Host, o: RestartIn): Promise<{ ok: boolean; tex
     if (recorded) await dismissOldDesk(h, 'the new desk did not open: nothing took over').catch(() => undefined) // nothing took over: there is no old desk to archive
     return { ok: false, text: `Handover written to ${handoverFile(home)}, but no new desk was opened: ${r.text}` }
   }
-  return { ok: true, text: `${DESK_RESTARTED}. The mod cannot close a desktop session: ${recorded ? 'archive it in the Claude app (right-click, Archive); the new desk reminds you until it is gone' : 'archive it in the Claude app (right-click, Archive); its session id was not known, so no reminder follows'}` }
+  return { ok: true, text: `${DESK_RESTARTED}. ${(await dotEnabled(h)) ? `In the new desk ${DOT_HINT}. ` : ''}The mod cannot close a desktop session: ${recorded ? 'archive it in the Claude app (right-click, Archive); the new desk reminds you until it is gone' : 'archive it in the Claude app (right-click, Archive); its session id was not known, so no reminder follows'}` }
 }

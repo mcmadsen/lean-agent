@@ -1,8 +1,8 @@
-// Budgets and the ledger (design 2.7). Every model request of a turn (main or subagent) is priced from its usage and
-// appended to ledger.jsonl; caps come from config.json. No verified plan-window source exists (R6), so the budget is
-// cost-only: a daily USD cap per role and an optional cap per worker.
-import { appendJsonl, homeDir, leanDir, readJson } from './state'
-import { LEDGER, fileSize, normalizeRow, readFrom, syncRollup } from './ledger'
+// The ledger of usage (design 2.7). Every model request of a turn (main or subagent) is appended to ledger.jsonl with its usage (input, output, cache read and
+// write tokens) and, as an ESTIMATE at public list prices, its cost in USD. Since 1.0.33 nothing is capped or shown in USD: budgets, cards and stats count usage
+// tokens (usage.ts); the USD estimate stays in the ledger only for the optional `stats.showUsd` line of `lean_doctor stats`.
+import { appendJsonl, homeDir, leanDir } from './state'
+import { LEDGER } from './ledger'
 import type { Host } from './state'
 
 export type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
@@ -24,31 +24,14 @@ export function costUsd(model: string, u: Usage | null | undefined): number {
   return Math.round(usd * 1e6) / 1e6
 }
 
-export type Config = { budget?: { daily?: unknown; threadDaily?: unknown } /* budgetalert.ts: alerts, not caps */; dailyCapUsd?: { desk?: number; thread?: number; plain?: number }; workerCapUsd?: number; workerCaps?: Record<string, number>; attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean; reportChars?: number /* reportdigest.ts: characters of a thread report the desk gets (default 400; 0 = the full text) */; autoRestart?: boolean /* deskcompact.ts: the mod opens the new desk itself when it must be restarted (default true; false = the Restart desk button only) */ }; deskTokens?: number; notify?: { toast?: boolean; sound?: boolean } /* notify.ts: toasts for the desk (default on); sound is accepted, no clip is bundled */; toolResultChars?: number; threadToolResultChars?: number /* cap.ts: a thread's own results (default 8000) */; refusals?: { repeat?: number } /* refusals.ts: how often one refusal pattern repeats before the doctor names it (default 3) */; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
+export type Config = { attribution?: boolean; learn?: { maxExplorers?: number }; desk?: { autoRelay?: boolean; autoResume?: boolean; reportChars?: number /* reportdigest.ts: characters of a thread report the desk gets (default 400; 0 = the full text) */; autoRestart?: boolean /* deskcompact.ts: the mod opens the new desk itself when it must be restarted (default true; false = the Restart desk button only) */ }; deskTokens?: number; notify?: { toast?: boolean; sound?: boolean } /* notify.ts: toasts for the desk (default on); sound is accepted, no clip is bundled */; toolResultChars?: number; threadToolResultChars?: number /* cap.ts: a thread's own results (default 8000) */; refusals?: { repeat?: number } /* refusals.ts: how often one refusal pattern repeats before the doctor names it (default 3) */; checkpoint?: { deskTokens?: number } /* the 1.0.6 key: deskTokens is still read from it */ }
 // effort / tmodel: a thread's row carries the effort and the model the thread was started with (thread.json); `model` is what answered
-// fresh: the first main-loop request of a thread session (what a restart costs before any work; stats.ts threadSpendLine)
+// fresh: the first main-loop request of a thread session (what a restart costs before any work; stats.ts threadSpendParts)
+// usd: the estimate at list prices (stats.showUsd); tN is set ONLY for a thread's own session and its subagents (register.tsx), never for the desk or a plain session
 export type Row = { ts: number; role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; fresh?: true; model: string; in: number; out: number; cache_read: number; cache_write: number; usd: number }
 
-// ---- alert thresholds (config.json `budget`): these only warn the desk, they never refuse a request (dailyCapUsd does that) ---------------
-export const DEFAULT_DAILY_USD = 25
-export const DEFAULT_THREAD_DAILY_USD = 15 // (20 before 1.0.27)
-// a positive number (or a numeric string) is the limit; "off" / false / 0 / a negative is none; absent or junk is the default
-export function limitOf(v: unknown, dflt: number): number | null {
-  if (v === undefined || v === null) return dflt
-  if (v === false || (typeof v === 'string' && /^\s*(off|none|false|no)\s*$/i.test(v))) return null
-  const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN
-  if (!Number.isFinite(n)) return dflt
-  return n > 0 ? n : null
-}
-export type Limits = { daily: number | null; thread: number | null }
-export async function budgetLimits(h: Host): Promise<Limits> {
-  const cfg = (await readConfig(h, await homeDir(h)).catch(() => ({}))) as Config
-  return { daily: limitOf(cfg?.budget?.daily, DEFAULT_DAILY_USD), thread: limitOf(cfg?.budget?.threadDaily, DEFAULT_THREAD_DAILY_USD) }
-}
-
 export const ledgerFile = (home: string) => `${leanDir(home)}/${LEDGER}`
-export const readConfig = (h: Host, home: string) => readJson<Config>(h, `${leanDir(home)}/config.json`, {})
-const day = (ts: number) => new Date(ts).toISOString().slice(0, 10)
+export { readConfig } from './budgetcfg'
 
 export async function record(h: Host, ctx: { role: string; tN?: string; agentId?: string; agent?: string; effort?: string; tmodel?: string; fresh?: true }, model: string, u: Usage | null | undefined): Promise<Row | null> {
   if (!u) return null
@@ -61,93 +44,7 @@ export async function record(h: Host, ctx: { role: string; tN?: string; agentId?
   const line: any = { ...row } // zero token counts are left out: a row is about 100 bytes shorter, every reader takes a missing number as 0
   for (const k of ['in', 'out', 'cache_read', 'cache_write'] as const) if (!line[k]) delete line[k]
   await appendJsonl(h, ledgerFile(home), line)
-  await syncCache(h, home, row.ts, line)
   return row
-}
-
-// Today's sums per role, kept in the mod's store with the byte offset of ledger.jsonl they cover (record and spentToday both
-// call syncCache; the size comes from fs.stat). Writers (other threads' sessions) only append, so a cache whose offset is
-// behind the file size is topped up from the file's tail: no row is lost to a concurrent read-modify-write. When the day changes,
-// the cache is missing, or the file is shorter than the offset (rotated: ledger.jsonl is a fresh file), it is rebuilt from the
-// rollup (ledger.ts, the one reader: incremental, both row schemas, every ledger file), never by reading the whole ledger again.
-const enc = new TextEncoder()
-const CACHE = 'ledger-today'
-type Cache = { day: string; byRole: Record<string, number>; offset?: number }
-async function cache(h: Host): Promise<Cache | null> {
-  const c = (await h.store.get(CACHE).catch(() => null)) as Cache | null
-  return c && typeof c.day === 'string' && c.byRole && typeof c.byRole === 'object' ? c : null
-}
-// caps count 1.0 rows by role; a row with role "unknown" (a 0.45 row, or a 1.0 row without a role) is never capped, here and in
-// the rollup path of syncCache alike
-function addRows(c: Cache, text: string): number {
-  const end = text.lastIndexOf('\n') + 1 // a torn last line waits for the next sync
-  for (const line of text.slice(0, end).split('\n')) {
-    try {
-      const r = normalizeRow(JSON.parse(line))
-      if (r && r.role !== 'unknown' && day(r.ts) === c.day) c.byRole[r.role] = (c.byRole[r.role] ?? 0) + (r.usd || 0)
-    } catch {
-      /* damaged line */
-    }
-  }
-  return enc.encode(text.slice(0, end)).length
-}
-async function syncCache(h: Host, home: string, now: number, own?: { role: string; usd: number }): Promise<Cache> {
-  const today = day(now)
-  let c = await cache(h)
-  const size = await fileSize(h, ledgerFile(home))
-  if (c && c.day === today && typeof c.offset === 'number' && size !== null && size >= c.offset) {
-    if (size === c.offset) return c
-    const ownLen = own ? enc.encode(JSON.stringify(own)).length + 1 : -1
-    if (own && size === c.offset + ownLen) {
-      c.byRole[own.role] = (c.byRole[own.role] ?? 0) + (own.usd || 0) // only our row is new
-      c.offset = size
-    } else {
-      try {
-        c.offset += addRows(c, await readFrom(h, ledgerFile(home), c.offset))
-      } catch {
-        return c // unreadable now: the offset stays, the new rows are added at the next call
-      }
-    }
-  } else {
-    const ro = await syncRollup(h, now)
-    // the offset is where the rollup stopped folding, whatever `size` said a moment earlier: a row appended between the stat and the
-    // sync is in the sums AND behind that offset (clamping to the older size would count it a second time at the next top-up); a
-    // file shorter than the offset is rebuilt from the rollup at the next call
-    c = { day: today, byRole: {}, offset: ro.files[LEDGER] ?? size ?? 0 }
-    for (const [k, a] of Object.entries(ro.days[today]?.role ?? {})) if (k !== 'unknown') c.byRole[k] = a[0]
-  }
-  await h.store.set(CACHE, c).catch(() => undefined)
-  return c
-}
-
-export async function spentToday(h: Host, role?: string): Promise<number> {
-  const home = await homeDir(h)
-  const c = await syncCache(h, home, await h.clock.now())
-  return role ? c.byRole[role] ?? 0 : Object.values(c.byRole).reduce((a, b) => a + b, 0)
-}
-
-// workerCaps keys may spell an agent bare (`worker-opus`) or with the plugin prefix (`lean-agent:worker-opus`)
-export function capFor(caps: Record<string, number> | undefined, type?: string): number | undefined {
-  if (!caps || !type) return undefined
-  const bare = type.replace(/^lean-agent:/, '')
-  for (const k of [type, bare, `lean-agent:${bare}`]) if (Object.prototype.hasOwnProperty.call(caps, k) && typeof caps[k] === 'number') return caps[k]
-  return undefined
-}
-
-// A reason to refuse the next request, or null. `spent` is what this worker has used so far.
-export async function overBudget(h: Host, role: string, agent: { type?: string; spent: number; cap?: number } | null): Promise<string | null> {
-  const home = await homeDir(h)
-  const cfg = await readConfig(h, home)
-  if (agent) {
-    const cap = agent.cap ?? capFor(cfg.workerCaps, agent.type) ?? cfg.workerCapUsd
-    if (cap !== undefined && agent.spent >= cap) return `lean-agent: this worker used $${agent.spent.toFixed(2)} of its $${cap.toFixed(2)} budget; stop and report what is done and what is left`
-  }
-  const cap = cfg.dailyCapUsd?.[role as 'desk']
-  if (cap !== undefined) {
-    const s = await spentToday(h, role)
-    if (s >= cap) return `lean-agent: the daily $${cap.toFixed(2)} budget for ${role} sessions is used ($${s.toFixed(2)}); raise it with lean_config set dailyCapUsd.${role} <usd> to continue`
-  }
-  return null
 }
 
 export function summarize(rows: Row[], since = 0): { total: number; byModel: Record<string, number>; byAgent: Record<string, number>; byThread: Record<string, number> } {

@@ -104,9 +104,9 @@ test('text: "ctx 108k/120k" (the card and the list), "ctx unknown" without a siz
   expect(overText(142_000, 120_000)).toBe('context was 142k (limit 120k): started a new session with the handover (old conversation kept read-only, not resumed)')
 })
 
-test('cost wording: the resume phrase says which rule applied and prices the cached re-read from the price table (estimate)', () => {
-  expect(resumedText('keep', 85_000, 'opus')).toBe('resumed (keep mode): context 85k, cached re-read ~$0.04 (estimate)') // 85k x $0.5 / 1M
-  expect(resumedText('', 85_000, 'sonnet')).toBe('resumed: context 85k, cached re-read ~$0.03 (estimate)') // 85k x $0.3 / 1M
+test('usage wording: the resume phrase says which rule applied and counts the cached re-read in usage tokens, 0.1 of an input token each (estimate)', () => {
+  expect(resumedText('keep', 85_000, 'opus')).toBe('resumed (keep mode): context 85k, cached re-read ~8.5k usage tokens (estimate)') // 85k x 0.1
+  expect(resumedText('', 85_000, 'sonnet')).toBe('resumed: context 85k, cached re-read ~8.5k usage tokens (estimate)') // 85k x 0.1 (any model)
   expect(resumedText('keep', null, 'opus')).toBe('resumed (keep mode): context size unknown')
 })
 
@@ -173,7 +173,7 @@ test('idle session under the limit: a send resumes it and says what the cached r
   expect(r.ok).toBe(true)
   expect(s.resumes().length).toBe(1)
   expect(s.starts().length).toBe(0)
-  expect(r.text).toContain('resumed: context 85k, cached re-read ~$0.03 (estimate)') // 85k x $0.3 / 1M (sonnet)
+  expect(r.text).toContain('resumed: context 85k, cached re-read ~8.5k usage tokens (estimate)') // 85k x 0.1
 })
 
 test('idle session AT the limit is still resumed; one token over starts a new session with the handover', async () => {
@@ -193,7 +193,7 @@ test('over the limit: the reply names the size, the limit and the handover cost;
   const r = await s.run({ action: 'send', tN: 't1', text: 'and the footer' })
   expect(r.ok).toBe(true)
   expect(r.text).toContain('context was 142k (limit 120k): started a new session with the handover (old conversation kept read-only, not resumed)')
-  expect(r.text).toMatch(/handover about [\d.]+k? tokens \(~\$0\.\d\d first turn, estimate\)/)
+  expect(r.text).toMatch(/handover about [\d.]+k? usage tokens \(first turn, estimate\)/)
   expect((r.data as any).resumed).toBe(false)
   const argv = s.starts()[0]!
   const prompt = argv[argv.length - 1]!
@@ -242,7 +242,7 @@ test('done + keep: the next message RESUMES the session (keep mode), and a finis
   const r = await s.run({ action: 'send', tN: 't1', text: 'follow-up' })
   expect(s.resumes().length).toBe(1)
   expect(s.starts().length).toBe(0)
-  expect(r.text).toContain('resumed (keep mode): context 85k, cached re-read ~$0.03 (estimate)')
+  expect(r.text).toContain('resumed (keep mode): context 85k, cached re-read ~8.5k usage tokens (estimate)')
   const fin = setup({ ctx: 85_000, thread: { keep: true, finished: 1 } }) // keep switched on after a finish
   const w = await fin.run({ action: 'wake', tN: 't1' })
   expect(w.text).toContain('resumed (keep mode)')

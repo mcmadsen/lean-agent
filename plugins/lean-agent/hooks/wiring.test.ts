@@ -22,13 +22,13 @@ test('a worker reply with LEAN-FEEDBACK files its missing context and memory', {
   expect(h.files.get('/h/.lean-agent/memory/items.json')).toContain('use pnpm') // the one memory store (memory.ts)
 })
 
-test('turn.step writes a ledger row and refuses past the daily cap', { timeoutMs: 20_000 }, async ($, on) => {
+test('turn.step writes a ledger row with its token counts; a request is never refused for a budget (a 1.0.33 dailyCapUsd in config.json enforces nothing)', { timeoutMs: 20_000 }, async ($, on) => {
   const h = await threadSession($, on, () =>
     on('turn.step', async function* (_: any, e: any) {
       return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: { model: 'haiku', input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } as any
     }),
   )
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ dailyCapUsd: { thread: 1 } }))
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ dailyCapUsd: { thread: 1 }, workerCapUsd: 1 })) // the USD caps of 1.0.33: not read
   const step = async (i: number) => {
     const st = $.turn.step({ turnId: 't', index: i, model: 'haiku', messageCount: 1 } as any)
     for (;;) {
@@ -38,9 +38,11 @@ test('turn.step writes a ledger row and refuses past the daily cap', { timeoutMs
   }
   const a: any = await step(0)
   expect(a.answer).toBe('ok')
-  expect(h.files.get('/h/.lean-agent/ledger.jsonl')).toContain('"usd":1')
+  expect(h.files.get('/h/.lean-agent/ledger.jsonl')).toContain('"in":1000000')
+  expect(h.files.get('/h/.lean-agent/ledger.jsonl')).toContain('"tN":"t1"') // the thread's own id on its own row
   const b: any = await step(1)
-  expect(b.answer).toContain('daily $1.00')
+  expect(b.answer).toBe('ok') // $1 of usage is past the old cap: nothing is refused any more
+  expect(h.files.get('/h/.lean-agent/ledger.jsonl')!.trim().split('\n')).toHaveLength(2)
 })
 
 test('an Agent call records the thread\'s job and mcp grants while it runs and removes them after (allow-edit lines are ignored)', { timeoutMs: 20_000 }, async ($, on) => {

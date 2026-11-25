@@ -11,7 +11,7 @@ import { macOf } from './reviews'
 import { destination } from './deliver'
 import { recentPrompts } from './humanprompts'
 import { typedApproval } from './writeinstr'
-import { APPLIES_TEXT, GROUPS, REGISTRY, allSpellings, checkValue, currentOf, defaultText, entriesOf, findEntry, locate, nearestKey, parseValue, sameValue, show } from './configkeys'
+import { APPLIES_TEXT, DEPRECATED, GROUPS, REGISTRY, allSpellings, checkValue, currentOf, defaultText, deprecatedKey, deprecatedText, entriesOf, findEntry, locate, nearestKey, parseValue, sameValue, show } from './configkeys'
 import type { Cfg, Entry } from './configkeys'
 
 export type Asked = { question: string; options: { label: string; description: string }[] }
@@ -82,7 +82,7 @@ function styleFor(cfg: Cfg, e: Entry): 'flat' | 'nested' {
 
 // ---- problems of a whole file ----
 type Leaf = { path: string; value: unknown; flat: boolean }
-const isContainer = (path: string) => REGISTRY.some(e => allSpellings(e).some(s => s.startsWith(`${path}.`)))
+const isContainer = (path: string) => REGISTRY.some(e => allSpellings(e).some(s => s.startsWith(`${path}.`))) || Object.keys(DEPRECATED).some(k => k.startsWith(`${path}.`))
 function leaves(cfg: Cfg): Leaf[] {
   const out: Leaf[] = []
   const walk = (path: string, v: unknown, flat: boolean) => {
@@ -100,6 +100,12 @@ export function reportOf(cfg: Cfg): Report {
     r.total++
     const e = findEntry(l.path)
     if (!e) {
+      const dep = deprecatedKey(l.path)
+      if (dep) { // a key of an earlier version (the USD budgets): said as such, enforces nothing, kept until the user removes it
+        r.problems.push(`${deprecatedText(dep)} (it enforces nothing and is kept: lean_config unset ${l.path} removes it)`)
+        r.keys.push(l.path)
+        continue
+      }
       const near = nearestKey(l.path)
       // a group name (desk, threads, ...) written as a bare key with a value that is not an object ({}, a text, a number, null, a list): the group holds settings, it is not one
       if (isContainer(l.path)) r.problems.push(`"${l.path}" is a group of settings (${l.path}.<name>) and must hold an object; ${l.value === null ? 'null' : Array.isArray(l.value) ? 'a list' : typeof l.value} is not read (it is kept: lean_config unset ${l.path} removes it)`)
@@ -275,6 +281,8 @@ export async function configTool(h: Host, a: ConfigArgs): Promise<ConfigResult> 
     if (!key) return { ok: false, text: `${action} needs key (e.g. desk.model)` }
     const e = findEntry(key)
     if (e) return e
+    const dep = deprecatedKey(key)
+    if (dep) return { ok: false, text: `${deprecatedText(dep)}${action === 'unset' ? '' : ` (it enforces nothing: lean_config unset ${dep} removes it from config.json)`}` }
     const near = nearestKey(key)
     return { ok: false, text: `unknown setting "${key.slice(0, 60)}"${near ? `: did you mean ${near}?` : ''} (lean_config list shows every setting)` }
   }
@@ -301,20 +309,21 @@ export async function configTool(h: Host, a: ConfigArgs): Promise<ConfigResult> 
   if (action === 'unset' && key && !findEntry(key)) {
     const ld = await load(h, home)
     if (ld.error) return { ok: false, text: `config.json ${ld.error}: not changed (fix the file first: lean_config validate)` }
-    if (!reportOf(ld.cfg).keys.includes(key)) return resolve() as ConfigResult // not in the file as a flagged key: the usual "unknown setting" answer
+    if (!reportOf(ld.cfg).keys.includes(key) && !(deprecatedKey(key) && locate(ld.cfg, key))) return resolve() as ConfigResult // not in the file as a flagged key: the usual "unknown setting" answer (a deprecated key that is not in the file says it is no longer used)
     const before = locate(ld.cfg, key)?.value ?? null
     removeSpelling(ld.cfg, key)
     await save(h, home, ld.cfg, ld.raw)
     await appendJsonl(h, HISTORY(home), { ts: await h.clock.now(), key, op: 'unset', was: before, via: 'tool (unknown key)' }).catch(() => undefined)
-    return { ok: true, text: `${key} removed from ${AT}: no version of lean-agent reads it` }
+    return { ok: true, text: `${key} removed from ${AT}: ${deprecatedKey(key) ? 'it was no longer used' : 'no version of lean-agent reads it'}` }
   }
   const e = resolve()
   if (!('type' in e)) return e
   let value: unknown
   if (action === 'set') {
     if (a.value === undefined || a.value === null || (typeof a.value === 'string' && a.value.trim() === '' && e.type !== 'list')) return { ok: false, text: `set needs value for ${e.key} (${getText({}, e).split('\n')[1]})` }
-    const raw = typeof a.value === 'string' ? a.value : JSON.stringify(a.value)
-    const p = typeof a.value === 'string' ? parseValue(e, raw) : checkValue(e, a.value)
+    let raw = typeof a.value === 'string' ? a.value : JSON.stringify(a.value)
+    if (e.key === 'budget.since' && /^\s*(today|now)\s*$/i.test(raw)) raw = new Date(await h.clock.now()).toISOString().replace(/\.\d+Z$/, 'Z') // "start again from now": the all-time usage restarts at this moment
+    const p = typeof a.value === 'string' || raw !== JSON.stringify(a.value) ? parseValue(e, raw) : checkValue(e, a.value)
     if (!p.ok) return { ok: false, text: `${e.key}: ${p.why}. Nothing was changed (${getText({}, e).split('\n')[1]})` }
     value = p.value
     if (e.type === 'path') {

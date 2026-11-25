@@ -9,11 +9,11 @@ import { decide } from './guard'
 
 const L = '/h/.lean-agent'
 type R = Norm & { agentId?: string }
-// a request row: tokens in / out / cache read / cache write, the cost as the ledger priced it
+// a request row: tokens in / out / cache read / cache write (usd: the old estimate, not shown any more); one worker request is 1000 + 5 x 600 + 0.1 x 24000 = 6400 usage tokens
 const req = (agent: string, agentId: string | undefined, usd: number, o: Partial<R> = {}): R => ({ ts: 1, role: 'thread', tN: 't1', agent, model: agent.endsWith('haiku') ? 'haiku' : 'sonnet', in: 1000, out: 600, cr: 24_000, cw: 0, usd, legacy: false, ...(agentId ? { agentId } : {}), ...o })
 const run = (agent: string, job: string, agentId: string | undefined, o: Partial<Run> = {}): Run => ({ ts: 1, tN: 't1', project: 'app', agent, job, ...(agentId ? { agentId } : {}), retry: false, budget: false, ok: true, ...o })
 
-test('by worker tier and job: runs, requests, cost, cost per run, second tries and step budgets; the thread\'s own session; the haiku saving estimate', () => {
+test('by worker tier and job: runs, requests, usage tokens, tokens per run, second tries and step budgets; the thread\'s own session; what the sonnet edit runs used', () => {
   const runs = [run('worker-sonnet', 'edit', 'a1'), run('worker-sonnet', 'edit', 'a2', { retry: true }), run('worker-sonnet', 'edit', 'a3', { budget: true, ok: false }), run('worker-sonnet', 'edit', 'a4'), run('worker-haiku', 'edit', 'h1'), run('worker-haiku', 'lookup', 'h2'), run('worker-haiku', 'lookup', undefined)]
   const rows = [
     req('worker-sonnet', 'a1', 0.3), req('worker-sonnet', 'a1', 0.3), req('worker-sonnet', 'a2', 0.4), req('worker-sonnet', 'a3', 0.5), req('worker-sonnet', 'a4', 0.3),
@@ -23,19 +23,19 @@ test('by worker tier and job: runs, requests, cost, cost per run, second tries a
   ]
   const out = tierJobLines(runs, rows, 7)
   expect(out[0]).toContain('by worker tier and job (7d')
-  expect(out).toContain('  worker-sonnet · edit: 4 runs · 5 req · $1.80 · $0.45/run · second try 25% · step budget hit 25%') // 0.6 + 0.4 + 0.5 + 0.3
-  expect(out).toContain('  worker-haiku · edit: 1 run · 1 req · $0.05 · $0.05/run · second try 0% · step budget hit 0%')
-  expect(out).toContain('  worker-haiku · lookup: 2 runs · 1 req · $0.02 · $0.02/run · second try 0% · step budget hit 0% (cost known for 1 of 2)')
-  expect(out).toContain('  reviewer · check: 2 runs · 3 req · $1.34 · $0.67/run')
-  // the thread's own session: requests, average context (input + cache), cost
-  expect(out).toContain('thread main session (requests · avg context · cost):')
-  expect(out).toContain('  t2: 1 requests · avg context 2k · $5.00') // dearest first
-  expect(out).toContain('  t1: 2 requests · avg context 81k · $3.00')
-  // the estimate: the SAME tokens at haiku's prices (in $1, out $5, cache read $0.10 per million), and the haiku share of successful edit runs
-  const tokens = (5 * (1000 * 1 + 600 * 5 + 24_000 * 0.1)) / 1e6 // five requests of the four sonnet edit runs: $0.032
-  expect(tokens.toFixed(2)).toBe('0.03')
-  const est = out.find(l => l.includes('edit runs on sonnet cost'))!
-  expect(est).toBe('4 edit runs on sonnet cost $1.80; the same on haiku would be about $0.03 (haiku share of successful edit runs: 25%)') // 1 of the 4 successful (a3 hit its budget)
+  expect(out).toContain('  worker-sonnet · edit: 4 runs · 5 req · 32k tokens · 8k tokens/run · second try 25% · step budget hit 25%') // 5 requests x 6400
+  expect(out).toContain('  worker-haiku · edit: 1 run · 1 req · 6.4k tokens · 6.4k tokens/run · second try 0% · step budget hit 0%')
+  expect(out).toContain('  worker-haiku · lookup: 2 runs · 1 req · 6.4k tokens · 6.4k tokens/run · second try 0% · step budget hit 0% (usage known for 1 of 2)')
+  expect(out).toContain('  reviewer · check: 2 runs · 3 req · 19k tokens · 9.6k tokens/run')
+  // the thread's own session: requests, average context (input + cache), usage tokens
+  expect(out).toContain('thread main session (requests · avg context · usage tokens):')
+  expect(out).toContain('  t2: 1 requests · avg context 2k · 4.1k tokens')
+  expect(out).toContain('  t1: 2 requests · avg context 81k · 28k tokens') // the biggest first
+  expect(out.indexOf('  t1: 2 requests · avg context 81k · 28k tokens')).toBeLessThan(out.indexOf('  t2: 1 requests · avg context 2k · 4.1k tokens'))
+  expect(out.join('\n')).not.toContain('$')
+  // usage tokens weigh the same on every model: no "the same on haiku" price estimate, only what the sonnet edit runs used and the haiku share of successful edit runs
+  const est = out.find(l => l.includes('edit runs on sonnet used'))!
+  expect(est).toBe('4 edit runs on sonnet used 32k usage tokens (haiku share of successful edit runs: 25%)') // 1 of the 4 successful (a3 hit its budget)
 })
 
 test('no run recorded yet: the section says so and still lists the thread sessions', () => {
@@ -95,6 +95,6 @@ test('an Agent call to a worker is one run record; the section (lean_doctor stat
   expect(runs[1]).toMatchObject({ agent: 'worker-haiku', retry: true, ok: false })
   h.files.set(`${L}/ledger.jsonl`, [{ ts: now, role: 'thread', tN: 't1', agent: 'lean-agent:worker-sonnet', agentId: 'w42abcd', model: 'sonnet', in: 1000, out: 600, cache_read: 24_000, usd: 0.3 }].map(r => JSON.stringify(r)).join('\n') + '\n')
   const sec = await tierJobSection(h.host, now + 1000, 7)
-  expect(sec.some(l => l.startsWith('  worker-sonnet · edit: 1 run · 1 req · $0.30'))).toBe(true)
-  expect(sec.some(l => l.includes('worker-haiku · edit: 1 run · 0 req · $0.00 · cost unknown'))).toBe(true)
+  expect(sec.some(l => l.startsWith('  worker-sonnet · edit: 1 run · 1 req · 6.4k tokens'))).toBe(true)
+  expect(sec.some(l => l.includes('worker-haiku · edit: 1 run · 0 req · 0 tokens · usage unknown'))).toBe(true)
 })

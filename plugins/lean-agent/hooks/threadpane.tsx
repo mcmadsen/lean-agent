@@ -28,6 +28,7 @@ import { paneLine } from './selfedit'
 import { fmtUntil } from './limits'
 import { sizeText } from './scratchnotes'
 import type { makeDecisions as MakeDecisions } from './pane'
+import { fmtTokens } from './formatusage'
 import type { Role } from './role'
 
 export const THREAD_PANE_PREFIX = 'lean-agent-thread-'
@@ -44,7 +45,6 @@ const GROUP_ROWS = 20
 const NARROW = 50 // a body narrower than this (cells) drops the context bar and the age from the status line
 const TONE = { working: 'success', waiting: 'warning', stuck: 'error', quiet: 'inactive' } as const
 const short = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/\s+/g, ' ')
-const usd = (n: number) => `$${n.toFixed(2)}`
 const stamp = (ts: number) => (Number.isFinite(ts) && ts > 0 ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') : '?')
 const msg = (err: unknown, n = 160) => String((err as Error)?.message ?? err).slice(0, n)
 
@@ -294,7 +294,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role, decide?: ty
   const reasonText = typeof reasonField === 'string' && reasonField.trim() ? reasonField.trim() : ''
 
   // ---- 1. STATUS ----
-  const costTxt = d.costBadge ? d.costBadge : d.cost && d.cost.today > 0 ? usd(d.cost.today) : ''
+  const costTxt = d.costBadge ? d.costBadge : d.cost && d.cost.window > 0 ? fmtTokens(d.cost.window) : ''
   const cm = d.ctx ? /(\d+)k\/(\d+)k/.exec(d.ctx.text) : null
   const cells = cm ? Math.max(0, Math.min(8, Math.round((Number(cm[1]) / Math.max(1, Number(cm[2]))) * 8))) : 0
   const ctxTxt = d.ctx && d.run !== 'parked' && !narrowLine() ? (cm ? `ctx ${'█'.repeat(cells)}${'░'.repeat(8 - cells)} ${cm[1]}k/${cm[2]}k${d.keep ? ' · keep' : ''}` : d.ctx.text) : ''
@@ -316,10 +316,10 @@ async function paint($: any, e: any, id: string, roleOf: () => Role, decide?: ty
       {t?.pausedUntil ? <Text key="paused" color="warning">{`paused until ${fmtUntil(t.pausedUntil, now)}`}</Text> : null}
       {d.cost ? (
         <Text key="cost" dimColor wrap="wrap">
-          {`${d.costLine ?? `today ${usd(d.cost.today)}`} · total ${usd(d.cost.total)} (the ledger's rollup, the last 120 days)`}
+          {`${d.costLine ?? `window ${fmtTokens(d.cost.window)} tokens`} · total ${fmtTokens(d.cost.total)} tokens (this thread's own sessions since it was created; the ledger's rollup, the last 120 days)`}
         </Text>
       ) : (
-        <Text key="cost" dimColor>cost not available</Text>
+        <Text key="cost" dimColor>usage not available</Text>
       )}
       {d.worktree ? (
         <Text key="work" color={d.worktree.exists ? undefined : 'yellow'} wrap="wrap">

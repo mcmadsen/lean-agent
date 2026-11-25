@@ -1,5 +1,5 @@
 // The desk pane (1.0.33: cards only, everything folded). EVERY block is a card (one border, one padding, the same fold) and nothing sits outside one: the header card
-// (folded: ONE line "lean-agent · today $0.00 · 5h 1% · desk 37k/60k" with the fix chip and Restart desk), the Health card (findings, fixes, standing approvals, messages from
+// (folded: ONE line "lean-agent · 1.2M tokens · window 1% · desk 37k/60k" with the fix chip and Restart desk), the Health card (findings, fixes, standing approvals, messages from
 // senders without a thread), a notice card (the result of a press), the Sessions toolbar card (title, ack all; unfolded: the sort chips), ONE card per thread session (open, done
 // or closed; folded = exactly two lines: title + state chip, then "N new", "N to decide", cost, context bar, age, Open), the "show more" card, More (goals, projects, scripts)
 // and the actions card. Everything starts folded, a session that needs you too: only the user's tap unfolds (pane.foldAll false brings the old auto-unfold of a decision back).
@@ -35,6 +35,7 @@ import { cancelHeld, sendHeldNow } from './sendhold'
 import { revokeOwn, revokeWrites } from './deskwrites'
 import { ARROW, SORTS, SORT_LABEL, ageText, canHide, capItems, effectiveDir, isHidden, itemsOf, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
 import type { Item, SortKey } from './panelist'
+import { closedText, deskText, foldedText, headerText } from './formatusage'
 import { healthSummary } from './panehealth'
 import { setNotice } from './notices'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
@@ -328,7 +329,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Text bold>lean-agent</Text>
           <Text color={stuck ? 'error' : 'success'}>{`${working} running · ${stuck} blocked`}</Text>
           <Text color={needN ? 'warning' : undefined} dimColor={!needN}>{`${needN} need${needN === 1 ? 's' : ''} you`}</Text>
-          <Text dimColor>{`desk context ${dpct} · today ${v?.spend ? `$${v.spend.today.toFixed(2)}` : 'n/a'}`}</Text>
+          <Text dimColor>{`desk context ${dpct} · ${deskText(v?.spend)}`}</Text>
           {errors.length > 0 && <Text color="error">{`error: ${short(errors[0]!, 60)}`}</Text>}
         </Box>
       )
@@ -994,7 +995,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Text>
       ) : null
       const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
-      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{`$${t.cost.toFixed(2)} today`}</Text> : null
+      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `window ${t.costBadge} tokens`}</Text> : t.cost > 0 ? <Text dimColor>{closedText(t.cost)}</Text> : null
       const age = <Text dimColor>{ageText(t.activity ?? t.recTs, now2)}</Text>
       const openBtn = <Button key={`view-${t.id}`} label="Open" onPress={openPaneOne(t.id)} />
       const resumeBtn = t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />
@@ -1073,7 +1074,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>,
         ],
         chipLen: 'closed'.length + 2,
-        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{`$${c.cost.toFixed(2)} today`}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
+        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{closedText(c.cost)}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
         primary: <Button key={`view-${c.id}`} label="Open" onPress={openPaneOne(c.id)} />,
         dim: true,
         details: open ? (
@@ -1248,9 +1249,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const lastErrorShown = !!lastError && !errors.includes(lastError) && notice !== lastError
     const headerOpen = isOpen(ui, 'header', false)
     const winShown = !!v?.window && (!winGone || showHidden)
-    // above its limit the desk's own figure comes right after the name ("lean-agent · desk 230k of 200k - Restart desk · today ..."), so a narrow line cuts the cost, not the warning
+    // above its limit the desk's own figure comes right after the name ("lean-agent · desk 230k of 200k - Restart desk · 1.2M tokens ..."), so a narrow line cuts the usage, not the warning
     const deskBit = ctx > 0 && limit > 0 ? (ctx >= limit ? `desk ${kTokens(ctx)} of ${kTokens(limit)} - Restart desk` : `desk ${kTokens(ctx)}/${kTokens(limit)}`) : ''
-    const restBits = [v?.spend ? `today $${v.spend.today.toFixed(2)}` : 'budget n/a', winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '']
+    const restBits = [foldedText(v?.spend), winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '']
     const foldedBits = (ctx > 0 && limit > 0 && ctx >= limit ? ['lean-agent', deskBit, ...restBits] : ['lean-agent', ...restBits, deskBit]).filter(Boolean)
     // Restart desk: always here (1.0.33), one tap (no second confirm), the same restart path as the automatic one (handover first, then the new desk). While a restart runs, or
     // for 60 s after the last one, a dim line says so instead of the button (the 30 min gap and the per-day count are for AUTOMATIC restarts only).
@@ -1278,7 +1279,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 </Text>
               )}
               <Text key="budget" dimColor>
-                {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
+                {headerText(v?.spend)}
               </Text>
             </Box>
             {restartCtl}

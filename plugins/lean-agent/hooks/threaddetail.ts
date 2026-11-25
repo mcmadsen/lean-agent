@@ -6,7 +6,8 @@ import { approvalOf, deskState, unconsumed } from './delivery'
 import { liveApproval } from './approvals'
 import { denialCard, noPromptText, sessionAlive } from './denial'
 import type { DeskRec } from './delivery'
-import { dayOf, syncRollup } from './ledger'
+import { syncRollup } from './ledger'
+import { threadTotals, windowUsage } from './usage'
 import type { Rollup } from './ledger'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
@@ -57,9 +58,9 @@ export type ThreadDetail = {
   diff?: DiffStat
   diffNote?: string // why there is no diff stat (no worktree, no base, git did not answer)
   review?: ReviewInfo
-  cost: { today: number; total: number } | null
-  costBadge?: string // "$6.20", "$21.30!" over the alert; absent when the thread spent nothing today
-  costLine?: string // "today $6.20 (reviews $2.10, restarts $0.90)"
+  cost: { window: number; total: number } | null // usage tokens (usage.ts): this thread's own, in the current window and in all
+  costBadge?: string // "48k", "2.1M!" over its soft budget; absent when the thread used nothing in the window
+  costLine?: string // "window 48k tokens (reviews 12k, restarts 3k)"
   reports: Report[] // newest first, at most REPORTS_MAX
   reportsTotal: number
   queued: { ts: number; from?: string; text: string }[]
@@ -136,13 +137,11 @@ function finish(head: string, review: ReviewInfo, base: string, out: string | nu
   return { head, review, diff: { base: base.slice(0, 12), ...s } }
 }
 
-async function costOf(h: Host, id: string, now: number): Promise<{ today: number; total: number } | null> {
+// the thread's OWN usage tokens: in the current window and over its lifetime (usage.ts: its tN, from its creation on; never the desk's or another thread's)
+async function costOf(h: Host, id: string, now: number): Promise<{ window: number; total: number } | null> {
   try {
     if (!rollupCache || now < rollupCache.at || now - rollupCache.at >= TTL_COST) rollupCache = { at: now, ro: await syncRollup(h, now) }
-    const ro = rollupCache.ro
-    let total = 0
-    for (const d of Object.values(ro.days)) total += d.tN?.[id]?.[0] ?? 0
-    return { today: ro.days[dayOf(now)]?.tN?.[id]?.[0] ?? 0, total }
+    return { window: (await windowUsage(h)).byThread[id]?.tokens ?? 0, total: (await threadTotals(h))[id] ?? 0 }
   } catch {
     return null
   }
@@ -228,8 +227,8 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
     d.cost = await costOf(h, id, now)
     const c = (await threadCostsToday(h))[id]
     if (c) {
-      d.costBadge = costBadge(c) // the header's badge, "!" over the alert
-      d.costLine = costLine(c, true) // main $a · workers $b · reviews $c
+      d.costBadge = costBadge(c) // the header's badge, "!" over the soft budget
+      d.costLine = costLine(c, true) // main 20k · workers 16k · reviews 12k
     }
   })
   await guard('context', async () => {

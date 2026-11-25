@@ -881,7 +881,7 @@ const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr
 // `scratch`: the calling thread's own `<thread folder>/scratch` (the one place under the lean home a subagent may write notes and drafts)
 const tempFile = (w: string, scratch?: string): boolean => (TEMP_OK.test(w) || (!!scratch && w.startsWith(`${scratch}/`))) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
 // the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
-// A heredoc body and a `# comment` are text, not commands: a `>` in them ("# result > no-passkey", "if v > 3.4.0" in a python heredoc)
+// A heredoc body and a `# comment` are text, not commands: a `>` in them ("# result > no-token", "if v > 3.4.0" in a python heredoc)
 // is no redirect (1.0.33: readers were refused with "redirect to ON" / "redirect to 3.4.0"). The rest of the `<<WORD` line stays scanned
 // (`cat <<EOF > f`); a `<<` inside quotes starts nothing; an UNQUOTED heredoc whose body has a substitution still runs that command: scanned.
 const HEREDOC_AT = /<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1/y
@@ -1128,9 +1128,9 @@ async function expensiveDenial($: Host, ctx: Ctx, e: Call): Promise<string | nul
 // a new Agent call while the 5h window is hot (throttle.ts): the model it would run on is the call's override, else its type's own, else the session's (unknown: not haiku)
 async function windowDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if ((e.tool !== 'Agent' && e.tool !== 'Task') || (ctx.role.kind !== 'thread' && ctx.role.kind !== 'desk')) return null
-  if (ctx.role.kind === 'thread') { // the thread's HARD cap (config threads.hardUsd, none by default) is reached (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut; the soft budget never refuses anything
-    const b = await readJson<{ hard?: number; hardUsd?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
-    if (b?.hard && typeof b.hardUsd === 'number' && b.hardUsd > 0) return budgetRefusal(b.hardUsd)
+  if (ctx.role.kind === 'thread') { // the thread's HARD cap (config threads.hardTokens, none by default) is reached (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut; the soft budget never refuses anything
+    const b = await readJson<{ hard?: number; hardTokens?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
+    if (b?.hard && typeof b.hardTokens === 'number' && b.hardTokens > 0) return budgetRefusal(b.hardTokens)
   }
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type.trim() : ''
   const over = typeof e.model === 'string' ? e.model.trim() : ''

@@ -1,4 +1,5 @@
-// Window-aware throttling (1.0.31), by script. The caps of lean-agent are USD per day; the plan's 5-hour window is what actually stops work, so it is read
+// Window-aware throttling (1.0.31), by script. The plan's 5-hour window is what actually stops work (the optional token caps of 1.0.33, budget.windowTokens and
+// budget.allTimeTokens, hold new work the same way), so it is read
 // from desk/windows.json (windows.ts, written by every session's mod) and acted on:
 //   window.throttleAbove (70): above it every new Agent call must run on haiku (the guard refuses the others), the desk warns on `new` / `start` and refuses a thread
 //     with priority low, and running threads with priority low are PARKED by script (and resumed by script when the window is below again or has reset).
@@ -10,9 +11,12 @@ import type { Host } from './state'
 import { cfgNum, cfgRaw } from './budgetcfg'
 import { kb, passBytes } from './reviewarea'
 import { fmtUntil } from './limits'
+import { capReached } from './usage'
+import type { TokenCap } from './usage'
+import { fmtTokens } from './formatusage'
 
 export type WLevel = 'ok' | 'throttled' | 'blocked' | 'capped'
-export type WState = { pct: number | null; resetsAt: number; level: WLevel; throttleAbove: number; blockAbove: number; cap: number | null }
+export type WState = { pct: number | null; resetsAt: number; level: WLevel; throttleAbove: number; blockAbove: number; cap: number | null; tokenCap?: TokenCap }
 export type Priority = 'low' | 'normal' | 'urgent'
 export const priorityOf = (v: unknown): Priority => (v === 'low' || v === 'urgent' ? v : 'normal')
 
@@ -25,7 +29,17 @@ export function levelFor(pct: number | null, throttleAbove: number, blockAbove: 
   return 'ok'
 }
 
+// The optional token caps (config budget.windowTokens, budget.allTimeTokens; usage.ts) hold new work the way window.capFiveHourPct does: level 'capped', tokenCap says which.
 export async function windowState(h: Host): Promise<WState> {
+  const s = await pctState(h)
+  const tc = await capReached(h) // (none set = no ledger read)
+  return tc ? { ...s, level: 'capped', tokenCap: tc } : s
+}
+// held text of a reached token cap: "your cap of 5M usage tokens (budget.windowTokens) is reached (5.2M used)"
+const tokenCapText = (c: TokenCap): string => `your cap of ${fmtTokens(c.cap)} usage tokens (${c.key}) is reached (${fmtTokens(c.used)} used)`
+const tokenCapEnd = async (h: Host, s: WState): Promise<string> => (s.tokenCap?.scope === 'allTime' ? 'until you raise budget.allTimeTokens or start again (lean_config set budget.since today)' : `until the window resets (${await resetText(h, s)})`)
+
+async function pctState(h: Host): Promise<WState> {
   const throttleAbove = (await cfgNum(h, 'window.throttleAbove')) ?? 70
   const blockAbove = (await cfgNum(h, 'window.blockAbove')) ?? 92
   const cap = await cfgNum(h, 'window.capFiveHourPct')
@@ -45,12 +59,13 @@ export async function windowState(h: Host): Promise<WState> {
   }
 }
 
-const pctText = (s: WState) => `${Math.round(s.pct ?? 0)}%`
+const pctText = (s: WState) => (s.pct === null && s.tokenCap ? 'not measured' : `${Math.round(s.pct ?? 0)}%`)
 const resetText = async (h: Host, s: WState): Promise<string> => (s.resetsAt ? `resets ${fmtUntil(s.resetsAt, await h.clock.now())}` : 'reset time unknown')
 
 // "5h window 74%: throttled (haiku only, no low priority threads)" for `lean_thread list` and `lean_doctor stats`; '' when nothing is measured
 export async function throttleLine(h: Host): Promise<string> {
   const s = await windowState(h)
+  if (s.tokenCap) return `5h window ${pctText(s)}: ${tokenCapText(s.tokenCap)}: all new work is held ${await tokenCapEnd(h, s)}`
   if (s.pct === null) return ''
   const what = s.level === 'capped' ? `cap ${s.cap}% reached: all new work is held, ${await resetText(h, s)}` : s.level === 'blocked' ? `blocked above ${s.blockAbove}%: no new threads or reviewers (urgent excepted), ${await resetText(h, s)}` : s.level === 'throttled' ? `throttled above ${s.throttleAbove}%: new agents haiku only, low priority threads wait, ${await resetText(h, s)}` : `under the throttle line ${s.throttleAbove}%${s.cap !== null ? `, cap ${s.cap}%` : ''}`
   return `5h window ${pctText(s)}: ${what}`
@@ -62,6 +77,7 @@ export async function throttleLine(h: Host): Promise<string> {
 export async function agentWindowDenial(h: Host, model: string, urgent: boolean): Promise<string | null> {
   const s = await windowState(h)
   if (s.level === 'ok') return null
+  if (s.tokenCap) return `lean-agent: ${tokenCapText(s.tokenCap)}, so all new work is held ${await tokenCapEnd(h, s)}. Report to the desk with lean_report and wait; do not start agents`
   if (s.level === 'capped') return `lean-agent: 5h window at ${pctText(s)}: your cap of ${s.cap}% (window.capFiveHourPct) is reached, so all new work is held until the window resets (${await resetText(h, s)}). Report to the desk with lean_report and wait; do not start agents`
   if (s.level === 'blocked' && !urgent) return `lean-agent: 5h window at ${pctText(s)}: above ${s.blockAbove}%, no new agent or reviewer fan-out starts until the window resets (${await resetText(h, s)}; only a thread with priority urgent may). Finish and checkpoint your own work, then report with lean_report`
   if (/haiku/i.test(model)) return null
@@ -74,6 +90,7 @@ export async function newWorkGate(h: Host, priority: Priority): Promise<{ refuse
   const s = await windowState(h)
   if (s.level === 'ok') return {}
   const reset = await resetText(h, s)
+  if (s.tokenCap) return { refuse: `not started: ${tokenCapText(s.tokenCap)}. All new work is held ${await tokenCapEnd(h, s)}: tell the user when. Nothing was created` }
   if (s.level === 'capped') return { refuse: `not started: your 5h cap of ${s.cap}% (window.capFiveHourPct) is reached (window at ${pctText(s)}, ${reset}). All new work is held until the window resets: tell the user when. Nothing was created` }
   if (s.level === 'blocked' && priority !== 'urgent') return { refuse: `not started: the 5h window is at ${pctText(s)} (above window.blockAbove ${s.blockAbove}%, ${reset}). Only priority urgent starts now: tell the user, or wait for the reset. Nothing was created` }
   if (s.level === 'throttled' && priority === 'low') return { refuse: `not started: the 5h window is at ${pctText(s)} (above window.throttleAbove ${s.throttleAbove}%, ${reset}) and this thread has priority low: it waits until the window is below the line or resets. Nothing was created` }
@@ -95,6 +112,7 @@ export async function reviewWindowGate(h: Host, thread: string, o: { level?: str
   if (s.level === 'ok') return {}
   if (s.level === 'throttled' && o.level === 'full' && o.confirm !== true && (o.bytes ?? 0) > passBytes() && (await holdOn(h)) && !(/^t\d+$/.test(thread) && (await threadPriority(h, thread)) === 'urgent')) return { stop: heldText(pctText(s), s.throttleAbove, o.bytes ?? 0, await resetText(h, s)) }
   const urgent = /^t\d+$/.test(thread) && (await threadPriority(h, thread)) === 'urgent'
+  if (s.tokenCap) return { stop: `prepare: NOT started: ${tokenCapText(s.tokenCap)}, all new work is held ${await tokenCapEnd(h, s)}. Tell the user; run the review after that` }
   if (s.level === 'capped') return { stop: `prepare: NOT started: 5h window at ${pctText(s)}: your cap of ${s.cap}% (window.capFiveHourPct) is reached, all new work is held until the window resets (${await resetText(h, s)}). Tell the user; run the review after the reset` }
   if (s.level === 'blocked' && !urgent) return { stop: `prepare: NOT started: 5h window at ${pctText(s)}: above ${s.blockAbove}%, no reviewer fan-out starts until the window resets (${await resetText(h, s)}; only a thread with priority urgent may). Tell the user; run the review after the reset` }
   return { note: `5h window at ${pctText(s)}: throttled (above ${s.throttleAbove}%): start the reviewer agent with model "haiku" (an Agent call on sonnet is refused until the window drops, or the user lifts it with window.throttleAbove); it is a weaker review: say so in the record` }

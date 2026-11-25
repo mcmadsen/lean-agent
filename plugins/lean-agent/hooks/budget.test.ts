@@ -1,10 +1,12 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { costUsd, overBudget, record, spentToday, summarize } from './budget'
+import { costUsd, record, summarize } from './budget'
+import { dayOf, syncRollup } from './ledger'
+import { allTimeUsage, rawOfAgg, usageTokens } from './usage'
 
 const U = { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 1_000_000, cache_creation_input_tokens: 1_000_000 }
 
-test('prices by model family from the four token counts', () => {
+test('prices by model family from the four token counts (the estimate behind the optional stats.showUsd line)', () => {
   expect(costUsd('claude-haiku-5-5', U)).toBe(7.35)
   expect(costUsd('claude-sonnet-5-5', U)).toBe(22.05)
   expect(costUsd('claude-opus-5-5', U)).toBe(36.75)
@@ -12,30 +14,27 @@ test('prices by model family from the four token counts', () => {
   expect(costUsd('x', null)).toBe(0)
 })
 
-test('record appends a ledger row; spentToday sums only today, per role', async () => {
+test('record appends a ledger row with the four token counts (and the usd estimate); a null usage appends nothing; no store cache is kept', async () => {
   const h = fakeHost(null)
   await record(h.host, { role: 'thread', tN: 't1', agentId: 'a1', agent: 'worker-haiku' }, 'haiku', { input_tokens: 1_000_000 })
   await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
   h.clock.t += 2 * 86_400_000
   await record(h.host, { role: 'desk' }, 'sonnet', { output_tokens: 1_000_000 })
   expect(await record(h.host, { role: 'desk' }, 'sonnet', null)).toBeNull()
-  expect(await spentToday(h.host)).toBe(15)
-  expect(await spentToday(h.host, 'thread')).toBe(0)
   const rows = h.files.get('/h/.lean-agent/ledger.jsonl')!.trim().split('\n').map(l => JSON.parse(l))
+  expect(rows).toHaveLength(3)
   expect(rows[0]).toMatchObject({ role: 'thread', tN: 't1', agentId: 'a1', agent: 'worker-haiku', model: 'haiku', in: 1_000_000, usd: 1 })
+  expect(rows[1].tN).toBeUndefined() // the desk's row carries no thread id: it can never count for a thread
+  expect(await h.host.store.get('ledger-today')).toBeUndefined() // the daily USD cache of 1.0.33 is gone
 })
 
-test('cost-only caps: daily per role, per worker type, per-worker default; nothing set = no limit', async () => {
+test('the rollup keeps the tokens per day: weighted = input + 1.25 cache write + 0.1 cache read + 5 output, the raw sums beside them', async () => {
   const h = fakeHost(null)
-  expect(await overBudget(h.host, 'desk', { spent: 999 })).toBeNull()
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ dailyCapUsd: { desk: 1 }, workerCapUsd: 2, workerCaps: { 'worker-opus': 5 } }))
-  expect(await overBudget(h.host, 'desk', null)).toBeNull()
-  await record(h.host, { role: 'desk' }, 'haiku', { input_tokens: 1_000_000 })
-  expect(await overBudget(h.host, 'desk', null)).toContain('daily $1.00')
-  expect(await overBudget(h.host, 'thread', { type: 'worker-sonnet', spent: 1.5 })).toBeNull()
-  expect(await overBudget(h.host, 'thread', { type: 'worker-sonnet', spent: 2 })).toContain('$2.00 budget')
-  expect(await overBudget(h.host, 'thread', { type: 'worker-opus', spent: 4 })).toBeNull()
-  expect(await overBudget(h.host, 'thread', { type: 'worker-opus', spent: 5 })).toContain('$5.00 budget')
+  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1000, cache_creation_input_tokens: 1000, cache_read_input_tokens: 10_000, output_tokens: 100 })
+  const day = (await syncRollup(h.host)).days[dayOf(h.clock.t)]!
+  expect(rawOfAgg(day.t)).toEqual({ input: 1000, cacheWrite: 1000, cacheRead: 10_000, output: 100 })
+  expect(usageTokens(rawOfAgg(day.t))).toBe(1000 + 1250 + 1000 + 500)
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(3750)
 })
 
 test('summarize groups by model, agent and thread', () => {
@@ -45,47 +44,6 @@ test('summarize groups by model, agent and thread', () => {
   expect(s.byModel).toEqual({ haiku: 2, sonnet: 2 })
   expect(s.byAgent).toEqual({ main: 3, 'worker-haiku': 1 })
   expect(s.byThread).toEqual({ t1: 2, desk: 2 })
-})
-
-test('the daily sum is cached in the store: new rows are added, a new day is rebuilt from the rollup, not by reading the ledger from the top', async () => {
-  const h = fakeHost(null)
-  const reads = () => h.files.get('/h/.lean-agent/ledger.jsonl') !== undefined
-  let n = 0
-  const read = h.host.fs.read
-  h.host.fs.read = async (p: string) => { if (p.endsWith('ledger.jsonl')) n++; return read(p) }
-  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(reads()).toBe(true)
-  expect(await spentToday(h.host, 'desk')).toBe(3) // first call: builds the cache (one read)
-  const first = n
-  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host, 'desk')).toBe(6)
-  expect(await spentToday(h.host)).toBe(6)
-  expect(n).toBe(first) // no re-read after new rows
-  h.clock.t += 86_400_000 // next day: rebuilt from the rollup (which reads only what it has not folded: nothing)
-  expect(await spentToday(h.host, 'desk')).toBe(0)
-  expect(n).toBe(first)
-})
-
-test('the daily cache loses no row when another writer appended behind its back', async () => {
-  const h = fakeHost(null)
-  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host)).toBe(3)
-  // a parallel session appends (its cache update never reaches this store)
-  const f = '/h/.lean-agent/ledger.jsonl'
-  h.files.set(f, h.files.get(f)! + JSON.stringify({ ts: 10, role: 'thread', model: 'haiku', in: 0, out: 0, cache_read: 0, cache_write: 0, usd: 2 }) + '\n')
-  await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host)).toBe(8)
-  expect(await spentToday(h.host, 'thread')).toBe(2)
-})
-
-test('workerCaps accept the bare and the prefixed key for either spelling of the type', async () => {
-  const h = fakeHost(null)
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ workerCaps: { 'worker-opus': 5, 'lean-agent:worker-sonnet': 3 } }))
-  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-opus', spent: 5 })).toContain('$5.00 budget')
-  expect(await overBudget(h.host, 'thread', { type: 'worker-opus', spent: 5 })).toContain('$5.00 budget')
-  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-sonnet', spent: 3 })).toContain('$3.00 budget')
-  expect(await overBudget(h.host, 'thread', { type: 'worker-sonnet', spent: 3 })).toContain('$3.00 budget')
-  expect(await overBudget(h.host, 'thread', { type: 'lean-agent:worker-sonnet', spent: 2 })).toBeNull()
 })
 
 test('stats merge both spellings of an agent type into one line', () => {

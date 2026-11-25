@@ -15,7 +15,9 @@
 // model computes anything.
 import { homeDir, readJson, threadsDir, writeJson } from './state'
 import type { Host } from './state'
-import { readConfig, priceOf } from './budget'
+import { readConfig } from './budget'
+import { usageTokens } from './usage'
+import { fmtTokens } from './formatusage'
 import { readParts } from './ctxparts'
 
 export const DEFAULT_LIMIT = 120_000
@@ -139,14 +141,13 @@ export function decide(o: { done: boolean; keep: boolean; tokens: number | null;
   return { act: 'resume', why: o.done ? 'keep' : '' }
 }
 
-const usd = (n: number) => `~$${Math.max(0.01, n).toFixed(2)}`
-// "cached re-read ~$0.04": the recorded context read from the cache once, at the model's cache-read price (an estimate)
-export const rereadUsd = (tokens: number, model: string) => (tokens * priceOf(model).cacheRead) / 1e6
+// "cached re-read ~6k usage tokens": the recorded context read from the cache once, at the cache-read weight (0.1 of an input token; an estimate)
+export const rereadTokens = (tokens: number) => usageTokens({ cacheRead: tokens })
 
-// one phrase for the reply of a resume: which rule applied and what it costs (estimates)
-export function resumedText(why: 'keep' | '', tokens: number | null, model: string): string {
+// one phrase for the reply of a resume: which rule applied and what it uses (estimates)
+export function resumedText(why: 'keep' | '', tokens: number | null, _model?: string): string {
   const label = why === 'keep' ? 'resumed (keep mode)' : 'resumed'
-  return typeof tokens === 'number' ? `${label}: context ${kTokens(tokens)}, cached re-read ${usd(rereadUsd(tokens, model))} (estimate)` : `${label}: context size unknown`
+  return typeof tokens === 'number' ? `${label}: context ${kTokens(tokens)}, cached re-read ~${fmtTokens(rereadTokens(tokens))} usage tokens (estimate)` : `${label}: context size unknown`
 }
 // the head of the reply of a fresh session that replaced a resume: why (the start text then says the handover size and its cost)
 export const overText = (tokens: number, limit: number) => `context was ${kTokens(tokens)} (limit ${kTokens(limit)}): started a new session with the handover (old conversation kept read-only, not resumed)`

@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.33
+
+### Added
+
+Pane
+- Cards only, everything folded: every block of the desk pane (header, Health, Sessions toolbar, every session including done and closed ones, `show more`, More, actions) is a card with the same border and fold, and nothing sits outside one. Everything starts folded, a session that needs you too; a folded card says it with `N new` and `N to decide`. `pane.foldAll` (default true; false brings the old auto-unfold of a card with a decision back).
+- A folded session card is exactly two lines for every state (title and state chip; `N new`, `N to decide`, usage, context bar, age, Open). The unfolded card says one fact once: the stale-report and "waiting for you" lines no longer both appear.
+- The session's own pane (Open on a card) is cards too, folded: STATUS, REPORT, TO DECIDE (Approve / Deny / Send now / Dismiss, the desk pane's own presses), MESSAGES (queued / delivered / consumed / failed), TASK, RULES (Remove, Revoke), FILES and HEALTH (this thread only).
+- Sessions sort by thread number by default (t90 before t89; `pane.sort thread`, was `active`), and every sort has a direction: a `↓ desc` / `↑ asc` chip (a tap on the active sort chip flips it too); `pane.sortDir` (`auto` | `asc` | `desc`).
+- Hide for a done or closed session card (small button; nothing is closed or deleted), an `N hidden` chip with Unhide and Hide all completed on the toolbar. A hidden session comes back when it is woken, has an unread message or something waits for you.
+- Header card: folded it is ONE line, `lean-agent · 1.2M tokens · window 1% · desk 37k/60k`, with the `N fixes` chip and the Restart desk button at its right end; unfolded it adds the model chip, `window 1.2M tokens (1%) · 7d 65%`, the window bar, the desk context bar and the version line.
+
+Desk
+- `desk.contextLimit` defaults to 200000 (60000 in 1.0.31 and 1.0.32 was passed at once by a desk that routes many threads), never more than 90 % of the model's real context window; the doctor says `desk limit 200k (window 200k: effective 180k)`.
+- Restart desk is always in the header card: one tap, no second confirm, handover first, then the new desk. It ignores the automatic guards and keeps one floor of 1 restart per 60 s (`restarting…`, then `next restart possible in N s`). `/lean-agent-restart-desk` obeys the same floor.
+- The desk is never restarted by itself any more: `desk.autoRestart` is opt-in (default false, was true). Above the limit the desk goes on; the header says `desk 230k of 200k - Restart desk`, Health has one amber finding and one toast says it once. The handover stays prepared in the background. `desk.autoRestart: true` brings the old automatic path back; `desk.autoRestartPerDay` is used only then.
+- Type `.` to continue: after a desk restart the new desk waits for a first message; a first message of exactly `.` is sent to it as "Continue from the handover: read it, resume the open work, and tell me in 3 lines what is open." Any other first message goes through unchanged, and a later `.` means nothing special. The restart answer and the first line of the handover say "type . to continue". `desk.dotContinue` (default true).
+
+Token budget instead of dollars
+- Nothing is capped, shown or alerted in USD any more: the plan limits are the 5 h and the 7 d window, so every number is in usage tokens (`input + 1.25 x cache write + 0.1 x cache read + 5 x output`; `budget.weights` moves the factors; the raw sums stay next to them in `lean_doctor stats`). Scopes: the current 5 h window and all time since `budget.since` (`lean_doctor budget-reset`).
+- Pane, cards and `lean_thread list` say `window 48k tokens (reviews 12k, restarts 3k)`; the sort key `cost` is now `usage` (`pane.sort cost` still reads as `usage`). `stats.showUsd` (off) adds ONE estimated-cost line to `lean_doctor stats`.
+- New optional caps, all off by default: `budget.windowTokens`, `budget.allTimeTokens`, `threads.softTokens` (one nudge at 80 %, one desk notice at 100 %; the thread goes on), `threads.hardTokens` (a real stop), `review.askAboveTokens` (2M), `review.maxTokens` (10M); `LEAN-REVIEW-PREP` carries `expectedTokens` (was `expectedUsd`).
+- The old dollar keys (`budget.daily`, `budget.threadDaily`, `dailyCapUsd.*`, `workerCapUsd`, `workerCaps`, `threads.softUsd`, `threads.hardUsd`, `review.askAboveUsd`, `review.maxUsd`) enforce nothing; `lean_config validate` says "no longer used: replaced by ..." (not "unknown"); nothing is converted.
+- A thread's own usage counts only the rows of its own sessions from its creation on, never another thread's (a new thread that got the id of a removed one started "over budget"); thread numbers are handed out once.
+
+Follow-ups
+- Review hold: while the 5 h window is throttled, a FULL review of a diff one haiku pass cannot read is held (`review.holdWhenThrottled`, default true; `confirm: true` is the user's go). A diff above one pass (about 88 KB) is split into areas by script, each area's size is said, and a local range far larger than the commits' files warns.
+- After an action kind fails twice for a thread, a quoted command for your own shell (`az boards work-item create`, `az rest` for the PR thread, `gh issue create`) and the reason a thread cannot run it are added to `action-list`, the request card and a pane notice.
+- `threads.remoteControl` (`auto` default; `on`: a NEW thread start passes `--remote-control <session name>`); no "registered" state is claimed, the CLI does not report one.
+- Free text typed instead of an option in the desk's "edit its worktree itself?" question is sent to the thread as your words (never a grant) instead of being dropped.
+- Doctor: several threads that run an older plugin than the installed one are ONE row with the restart step per id (open threads only).
+
+Config keys added: `pane.sortDir`, `pane.foldAll`, `desk.dotContinue`, `threads.remoteControl`, `review.holdWhenThrottled`, `budget.windowTokens`, `budget.allTimeTokens`, `budget.since`, `budget.weights`, `threads.softTokens`, `threads.hardTokens`, `review.askAboveTokens`, `review.maxTokens`, `stats.showUsd`; no longer used (said so by `lean_config validate`): the eleven dollar keys above (125 keys in the registry). Changed defaults: `pane.sort`, `desk.autoRestart`, `desk.contextLimit`.
+
+### Changed
+- `desk.contextLimit` is a warning level (the restart at it only with `desk.autoRestart` true); `pane.sort` default `active` -> `thread`; `desk.autoRestart` default `true` -> `false`; the soft thread budget is `threads.softTokens`, the hard one `threads.hardTokens`.
+- A restart or fresh start says the handover size in usage tokens, not dollars.
+
+### Fixed
+- Hotfix, a thread that ended its turn at once: the mod now says why. A one-line reason on every turn end (the engine's reason, the API error, the number of model requests, tool calls and refused calls, the seconds) in `lean_thread list`, the desk alert and `lean_doctor`. A failed login is named ("not logged in (run claude auth login)"); such a thread is not nudged, the desk gets ONE alert, a standing pane notice and a doctor FIX row, and the waiting threads are restarted once when a later turn has model usage.
+- ONE shared nudge cap for the end-nudge, keep-going, "Continue" and next-step continues: at most 2 nudges with no tool call or report between, then the thread is marked "stuck: ended at once N times" and the desk gets one alert.
+- "consumed" means the model read the message: it is marked when the model answered a request that carried it, not when it arrived.
+- A request the server refused with a client error (HTTP 4xx other than 408 / 429) is shown as "failed (HTTP 400): <the service's message>", not as "approved", and is never sent again under the same id; a 5xx, a timeout or a rate limit stays retryable.
+- `ado-workitem-create` carries the service's own message on failure (the curl line hid the response body); the request form is pinned by a spec.
+- `lean_thread list` shows the open threads only and ends with "N closed (list closed)".
+- `lean_config validate`: a key nothing reads says "not read by any 1.0.x version" and `unset` removes it on request; a group name used as a bare key says it is a group.
+- `lean_thread deliver` copies a feedback draft into `feedback.folder` when `feedback.destination` includes folder, without a working thread (one file a call, never overwritten, 256 KB cap).
+- A reader (and the reviewer) no longer gets "a reader writes no file (redirect to ON)" for a `>` inside a shell `# comment` or a heredoc body.
+- The 16 saved feedback drafts of plugin 1.0.9 to 1.0.32 were triaged: 14 were already fixed, the rest is listed as proposals.
+
 ## 1.0.32
 
 ### Added

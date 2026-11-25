@@ -1,4 +1,4 @@
-// The Sessions toolbar card of the desk pane (1.0.33): the sort by thread number (the default, t199 before t198), the direction of every sort (asc / desc chip, a tap on the active chip,
+// The Sessions toolbar card of the desk pane (1.0.33): the sort by thread number (the default, t90 before t89), the direction of every sort (asc / desc chip, a tap on the active chip,
 // "sorted by thread ↓" in the folded title, kept in the mod's store and config pane.sortDir), and Hide / Unhide of completed sessions (the "N hidden" chip, Hide all completed, a hidden
 // session comes back by itself when it is woken, has an unread message or something waits). Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
@@ -49,19 +49,19 @@ const mount = async ($: any) => {
   return ui
 }
 
-// t7, t198, t199 and an id with no number
+// t7, t89, t90 and an id with no number
 function threeThreads(w: ReturnType<typeof world>) {
   w.thr('t7', { lastWake: w.h.clock.t - HOUR })
-  w.thr('t198', { lastWake: w.h.clock.t - 5 * HOUR })
-  w.thr('t199', { lastWake: w.h.clock.t - 3 * HOUR })
+  w.thr('t89', { lastWake: w.h.clock.t - 5 * HOUR })
+  w.thr('t90', { lastWake: w.h.clock.t - 3 * HOUR })
 }
 
-test('the default order is the thread number, the highest first (t199, t198, t7); the folded title says "sorted by thread ↓"', { timeoutMs: 20_000 }, async ($, on) => {
+test('the default order is the thread number, the highest first (t90, t89, t7); the folded title says "sorted by thread ↓"', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   threeThreads(w)
   await inDesk($)
   const ui = await mount($)
-  expect(await order(ui)).toEqual(['t199', 't198', 't7'])
+  expect(await order(ui)).toEqual(['t90', 't89', 't7'])
   expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · sorted by thread ↓$/)
   expect((await paneConfig(w.host)).sort).toBe('thread')
   await openToolbar(ui)
@@ -70,14 +70,14 @@ test('the default order is the thread number, the highest first (t199, t198, t7)
   await ui.unmount()
 })
 
-test('the direction chip flips the order (t7, t198, t199), the title and the chip follow, the choice is kept (a remount) and written to the store and config pane.sortDir; a tap on the active sort chip flips it back', { timeoutMs: 20_000 }, async ($, on) => {
+test('the direction chip flips the order (t7, t89, t90), the title and the chip follow, the choice is kept (a remount) and written to the store and config pane.sortDir; a tap on the active sort chip flips it back', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   threeThreads(w)
   await inDesk($)
   let ui = await mount($)
   await openToolbar(ui)
   await ui.press({ key: 'sort-dir' })
-  expect(await order(ui)).toEqual(['t7', 't198', 't199'])
+  expect(await order(ui)).toEqual(['t7', 't89', 't90'])
   expect(await toolbarTitle(ui)).toContain('sorted by thread ↑')
   expect(await btn(ui, 'sort-dir')).toBe('↑ asc')
   expect(await btn(ui, 'sort-thread')).toBe('● thread ↑')
@@ -85,14 +85,14 @@ test('the direction chip flips the order (t7, t198, t199), the title and the chi
   expect(JSON.parse(w.h.files.get(`${L}/config.json`)!)).toMatchObject({ pane: { sortDir: 'asc' } })
   await ui.unmount()
   ui = await mount($) // kept
-  expect(await order(ui)).toEqual(['t7', 't198', 't199'])
+  expect(await order(ui)).toEqual(['t7', 't89', 't90'])
   await ui.press({ key: 'sort-thread' }) // the active chip flips it
-  expect(await order(ui)).toEqual(['t199', 't198', 't7'])
+  expect(await order(ui)).toEqual(['t90', 't89', 't7'])
   expect(await toolbarTitle(ui)).toContain('sorted by thread ↓')
   await ui.unmount()
 })
 
-test('every sort key has both directions in the pane: last active, cost, name (A to Z by default), and "needs you first" keeps its group on top and flips inside each group', { timeoutMs: 20_000 }, async ($, on) => {
+test('every sort key has both directions in the pane: last active, usage, name (A to Z by default), and "needs you first" keeps its group on top and flips inside each group', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on)
   const now = w.h.clock.t
   w.thr('t1', { title: 'mike', lastWake: now - HOUR })
@@ -100,7 +100,7 @@ test('every sort key has both directions in the pane: last active, cost, name (A
   w.thr('t3', { title: 'zulu', lastWake: now - 3 * HOUR })
   w.thr('t4', { title: 'bravo', lastWake: now - 4 * HOUR })
   w.report({ ts: now - 4 * HOUR, from: 't2', kind: 'report', text: 'cannot go on: the credential is missing', state: 'blocked' })
-  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't3', model: 'x', in: 1, out: 1, usd: 4 }) + line({ ts: now, role: 'thread', tN: 't4', model: 'x', in: 1, out: 1, usd: 2 }))
+  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: now, role: 'thread', tN: 't3', model: 'x', in: 4000, out: 1, usd: 4 }) + line({ ts: now, role: 'thread', tN: 't4', model: 'x', in: 2000, out: 1, usd: 2 }))
   await inDesk($)
   const ui = await mount($)
   await openToolbar(ui)
@@ -108,10 +108,10 @@ test('every sort key has both directions in the pane: last active, cost, name (A
   expect(await order(ui)).toEqual(['t1', 't3', 't4', 't2']) // newest first (the default of this sort)
   await ui.press({ key: 'sort-dir' })
   expect(await order(ui)).toEqual(['t2', 't4', 't3', 't1'])
-  await ui.press({ key: 'sort-cost' }) // the direction is kept across the sort
-  expect(await order(ui)).toEqual(['t2', 't1', 't4', 't3']) // cheapest first (asc); ties by last activity, oldest first
+  await ui.press({ key: 'sort-usage' }) // the direction is kept across the sort
+  expect(await order(ui)).toEqual(['t2', 't1', 't4', 't3']) // least usage first (asc); ties by last activity, oldest first
   await ui.press({ key: 'sort-dir' })
-  expect(await order(ui)).toEqual(['t3', 't4', 't1', 't2']) // dearest first
+  expect(await order(ui)).toEqual(['t3', 't4', 't1', 't2']) // most usage first
   await ui.press({ key: 'sort-name' })
   expect(await order(ui)).toEqual(['t3', 't1', 't4', 't2']) // desc: Z to A (the explicit choice stays desc)
   await ui.press({ key: 'sort-dir' })
@@ -129,12 +129,12 @@ test('config pane.sortDir overrides the default direction of the sort (asc: t7 f
   w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sortDir: 'asc' } }))
   await inDesk($)
   let ui = await mount($)
-  expect(await order(ui)).toEqual(['t7', 't198', 't199'])
+  expect(await order(ui)).toEqual(['t7', 't89', 't90'])
   expect(await toolbarTitle(ui)).toContain('sorted by thread ↑')
   await ui.unmount()
   w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sortDir: 'sideways' } }))
   ui = await mount($)
-  expect(await order(ui)).toEqual(['t199', 't198', 't7'])
+  expect(await order(ui)).toEqual(['t90', 't89', 't7'])
   await ui.unmount()
 })
 

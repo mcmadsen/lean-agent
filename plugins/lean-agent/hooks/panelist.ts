@@ -8,13 +8,15 @@ import { stateOf } from './view'
 import type { ClosedRow, NeedRow, ThreadRow } from './view'
 import { configTool } from './configtool'
 
-export const SORTS = ['thread', 'active', 'needs', 'cost', 'name'] as const
+export const SORTS = ['thread', 'active', 'needs', 'usage', 'name'] as const
 export type SortKey = (typeof SORTS)[number]
-export const SORT_LABEL: Record<SortKey, string> = { thread: 'thread', active: 'last active', needs: 'needs you first', cost: 'cost', name: 'name' }
-// every sort has a direction (1.0.33): the default of each key is the order people expect (the highest thread number, the newest, the dearest first; names A to Z)
+export const SORT_LABEL: Record<SortKey, string> = { thread: 'thread', active: 'last active', needs: 'needs you first', usage: 'usage', name: 'name' }
+// the key the sort was called before 1.0.33 ("cost", in dollars) still reads as "usage" (usage tokens)
+export const sortAlias = (x: unknown): unknown => (x === 'cost' ? 'usage' : x)
+// every sort has a direction (1.0.33): the default of each key is the order people expect (the highest thread number, the newest, the most usage first; names A to Z)
 export type SortDir = 'asc' | 'desc'
 export const SORT_DIRS = ['auto', 'asc', 'desc'] as const
-export const DEFAULT_DIR: Record<SortKey, SortDir> = { thread: 'desc', active: 'desc', needs: 'desc', cost: 'desc', name: 'asc' }
+export const DEFAULT_DIR: Record<SortKey, SortDir> = { thread: 'desc', active: 'desc', needs: 'desc', usage: 'desc', name: 'asc' }
 export const ARROW: Record<SortDir, string> = { desc: '↓', asc: '↑' }
 export const MAX_SESSIONS = 30
 export const SORT_STORE = 'pane.sort'
@@ -28,7 +30,7 @@ export type Item = { id: string; title: string; activity: number; cost: number; 
 const WAITING_WORDS = ['waiting', 'waiting for answer', 'approval', 'asking', 'blocked', 'stuck', 'stalled']
 export const needsUser = (t: ThreadRow, needs: Pick<NeedRow, 'thread'>[] = []): boolean => WAITING_WORDS.includes(stateOf(t).word) || !!t.pending || !!t.noReport /* "idle, no report N min" (endnudge.ts) */ || needs.some(n => n.thread === t.id)
 const num = (id: string) => Number(id.replace(/^\D+/, '')) || 0
-// the thread number of an id ("t199" is 199); NaN for an id with no number (it sorts last, whatever the direction)
+// the thread number of an id ("t90" is 199); NaN for an id with no number (it sorts last, whatever the direction)
 const numOrNaN = (id: string): number => (/\d/.test(id) ? Number(id.replace(/^\D+/, '')) : NaN)
 
 export function itemsOf(threads: ThreadRow[], closed: ClosedRow[], needs: Pick<NeedRow, 'thread'>[] = []): Item[] {
@@ -38,11 +40,12 @@ export function itemsOf(threads: ThreadRow[], closed: ClosedRow[], needs: Pick<N
   ]
 }
 
-// thread (the default): the highest thread number first (t199 before t198), a thread without a number last; last active: newest first; needs you first: the waiting
-// group always on top, each group by last activity; cost: dearest first; name: A to Z. `dir` flips the order of the key (inside each group for needs you first); without
-// it the key's own default is used (DEFAULT_DIR).
-export function sortItems(items: Item[], key: SortKey, dir: SortDir = DEFAULT_DIR[key]): Item[] {
-  const s = dir === 'asc' ? 1 : -1
+// thread (the default): the highest thread number first (t90 before t89), a thread without a number last; last active: newest first; needs you first: the waiting
+// group always on top, each group by last activity; usage: most usage tokens (current window) first; name: A to Z. `dir` flips the order of the key (inside each group for
+// needs you first); without it the key's own default is used (DEFAULT_DIR).
+export function sortItems(items: Item[], key: SortKey, dir?: SortDir): Item[] {
+  const k = (sortAlias(key) as SortKey) in DEFAULT_DIR ? (sortAlias(key) as SortKey) : 'thread'
+  const s = (dir ?? DEFAULT_DIR[k]) === 'asc' ? 1 : -1
   const byActive = (a: Item, b: Item) => (a.activity - b.activity || num(a.id) - num(b.id)) * s
   const cmp: Record<SortKey, (a: Item, b: Item) => number> = {
     thread: (a, b) => {
@@ -53,10 +56,10 @@ export function sortItems(items: Item[], key: SortKey, dir: SortDir = DEFAULT_DI
     },
     active: byActive,
     needs: (a, b) => Number(b.needs) - Number(a.needs) || byActive(a, b),
-    cost: (a, b) => (a.cost - b.cost) * s || byActive(a, b),
+    usage: (a, b) => (a.cost - b.cost) * s || byActive(a, b),
     name: (a, b) => (a.title.toLowerCase().localeCompare(b.title.toLowerCase()) || num(a.id) - num(b.id)) * s,
   }
-  return [...items].sort(cmp[key])
+  return [...items].sort(cmp[k])
 }
 
 // ---- hidden sessions (1.0.33): a completed session (done, or closed) the user hid. The mod's store keeps id -> the session's last activity at the time of the press; the card is
@@ -109,7 +112,7 @@ export async function paneConfig(h: Host): Promise<PaneConfig> {
   const open = pick('healthOpen')
   const fold = pick('foldAll')
   return {
-    sort: isSort(pick('sort')) ? (pick('sort') as SortKey) : isSort(stored) ? stored : 'thread', // (the config key wins: it is what the user wrote; the store keeps the press when config.json cannot be written)
+    sort: isSort(sortAlias(pick('sort'))) ? (sortAlias(pick('sort')) as SortKey) : isSort(sortAlias(stored)) ? (sortAlias(stored) as SortKey) : 'thread', // (the config key wins: it is what the user wrote; the store keeps the press when config.json cannot be written; the old "cost" reads as usage)
     sortDir: isDirChoice(pick('sortDir')) ? (pick('sortDir') as SortDir | 'auto') : isDirChoice(storedDir) ? storedDir : 'auto', // (same rule; auto = the default direction of the sort)
     maxSessions: Number.isInteger(max) && max >= 5 && max <= 500 ? max : MAX_SESSIONS,
     healthOpen: open === true || open === 'open',

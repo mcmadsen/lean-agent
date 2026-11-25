@@ -15,6 +15,7 @@ import { dayOf } from './ledger'
 import { NOTICE_SET, deskModelStatus, deskModelText, readDeskModel, readDeskSwitch } from './deskmodel'
 import { costBadge, costLine, spendNumbers, spendText, threadCostsToday, windowLine } from './stats'
 import type { Spend, ThreadCost } from './stats'
+import { deskText } from './formatusage'
 import { isRunning, isWorking, needsYou, parseAgents } from './threads'
 import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, requestsOf, staleWorking, stallConfig, stallFor, stuckAdvice, threadsConfig, truthOf } from './threadstate'
 import type { Word } from './threadstate'
@@ -50,13 +51,13 @@ export type Verdict = 'green' | 'red' | 'none'
 // (a later question or progress makes it not done); asking: its last record is a question or one is unread; needsYou: the session
 // waits on a prompt nobody answers (open it in the app)
 // lastReport: the last report or question as one flat line; branch / sha: what its last reports name (and the review record knows);
-// review: the verdict of that sha; cost: today's usd; ready: done, a green review, and the report does not say it was pushed; recTs: when
+// review: the verdict of that sha; cost: usage tokens in the current window; ready: done, a green review, and the report does not say it was pushed; recTs: when
 // the last record was written (an event's identity)
 // live: what the session really is (threadstate.ts truthOf): running (alive and working) | idle (turn ended, `unread` queued messages) | stuck
 // (queued unread for threads.stuckMinutes, no tool call or inbox read) | done | parked; liveNote: the card's extra line (unread count, a stale
 // [working] report, a start that ended its turn at once)
 export type ThreadRow = { finishing?: boolean; restarting?: boolean /* hard-stopped at the context limit, the mod restarts it */; id: string; title: string; model?: string; effort?: string; state: string; run: 'running' | 'idle' | 'parked'; live?: Word; unread?: number; liveNote?: string; last: string; resumable: boolean; working: boolean; done: boolean; asking: boolean; blocked: boolean; needsYou: boolean; pausedUntil?: number; finished?: boolean; ctx?: string; ctxLevel?: Level /* "ctx 108k/120k" and its level (threadcontext.ts), only for an open thread with a recorded size */; keep?: boolean; keepGoing?: boolean /* the standing order "keep going" (continuepending.ts) */; rules?: number /* standing rules of this thread (threadrules.ts): the pane says "N rules" */; approval?: string; pending?: string /* "waiting for your Approve: reply to thread 7": a request for a remote write waits (the thread's state stays working, 1.0.28) */; denial?: string /* the reason category of a classifier denial: no permission prompt exists (denial.ts) */; lastReport: string; branch?: string; sha?: string; review: Verdict; cost: number; costBadge?: string; costLine?: string /* "today $12.40 (reviews $5.10, restarts $0.90)" */; costOver?: boolean; ready: boolean; recTs: number; agents?: string; blockedDismissed?: boolean /* its blocked report is the one the user dismissed */; waitId?: string /* which prompt wait (session + what it waits for), for Dismiss */; stallId?: string /* which stall (the last wake), for Dismiss */; noReport?: string /* "idle, no report 12 min": the turn ended with no report (endnudge.ts); a chip, and needs-you in the sort */; synth?: boolean /* lastReport is a script-made line from the last tool result (synthline.ts) */; activity?: number /* ms of its last event: the later of its last report, its recorded activity, its last wake and its newest queued message (the pane sorts by it) */ }
-export type ClosedRow = { id: string; title: string; last: string; activity: number /* ms of its last sign of life (closedAt, last record, last wake) */; cost: number /* today's usd */ }
+export type ClosedRow = { id: string; title: string; last: string; activity: number /* ms of its last sign of life (closedAt, last record, last wake) */; cost: number /* usage tokens in the current window */ }
 import { listProjects } from './projects'
 import type { ProjectRow } from './projects'
 import { scriptCounts, waitingScripts } from './scripts'
@@ -265,13 +266,13 @@ export async function loadView(h: Host): Promise<View> {
     if (mine) mine.push(r)
     else recsOf.set(r.from, [r])
   }
-  // spend first: a thread card shows what the thread cost today
+  // usage first: a thread card shows the usage tokens the thread's own sessions used in the current window
   let costs: Record<string, ThreadCost> = {}
   await guard('budget', async () => {
     v.spend = await loadBudget(h, home)
     v.budget = v.spend ? spendText(v.spend) : 'n/a'
     v.window = await windowLine(h) // the plan windows (windows.ts), one line under the header
-    costs = await threadCostsToday(h, v.spend).catch(() => ({}) as Record<string, ThreadCost>) // the card's badge: today's usd, "!" over the alert
+    costs = await threadCostsToday(h, v.spend).catch(() => ({}) as Record<string, ThreadCost>) // the card's badge: the window's usage tokens, "!" over its soft budget
   })
   const reviews: Reviews = new Map()
   await guard('threads', async () => {
@@ -554,12 +555,12 @@ export async function ackRows(h: Host, which: number | 'all'): Promise<void> {
   else if (Number.isInteger(which) && which >= 0 && which < total && !a.ns.includes(which)) await writeJson(h, paneAckFile(home), { upTo: a.upTo, ns: [...a.ns, which] } satisfies PaneAck)
 }
 
-// A thread's status line: its id, today's budget, lines in its inbox it has not seen.
+// A thread's status line: its id, the window's usage tokens, lines in its inbox it has not seen.
 export async function threadStatus(h: Host, id: string): Promise<string> {
   const home = await homeDir(h)
   const n = (await unconsumed(h, home, id)).msgs.length
   const sp = await loadBudget(h, home)
-  const b = sp ? spendText(sp) : 'budget n/a'
+  const b = sp ? deskText(sp) : 'usage n/a'
   const setNote = await peekNotice(h, NOTICE_SET)
   const notes = (await readNotices(h)).filter(n => n !== setNote).length
   return `${id} · ${b} · ${n} unread${notes ? ` · ⚠ ${notes} notice${notes > 1 ? 's' : ''} (see the desk pane)` : ''}`
