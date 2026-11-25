@@ -12,6 +12,7 @@ import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { SKEW_CAUSE, compareVersions, installedVersion, running, runsText, skewText, skewedThreads } from './skew'
 import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
+import { fmtTokens } from './formatusage'
 import { closedOwnerRows, pruneStale, staleEntries } from './worktreereg'
 import { removeStaleSessions, threadSessionRows } from './threadsessions'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
@@ -207,8 +208,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   // opus is the expensive model: a share over OPUS_SHARE_FIX percent of the last 7 days' spend is a FIX row naming the threads on it
   const os = await opusShare(h).catch(() => null)
   // Only a thread that is ON opus now is something to fix: once none is, the share is history (a note, not a FIX that stays for 7 days)
-  if (os && os.total > 0 && os.pct > OPUS_SHARE_FIX && os.now.length) row(false, `opus is ${Math.round(os.pct)}% of spend: threads ${os.now.join(', ')} run on opus now (last 7 days, $${os.usd.toFixed(2)} of $${os.total.toFixed(2)}; opus needs your approval in the pane, so start new work on sonnet)`)
-  else if (os && os.total > 0 && os.pct > OPUS_SHARE_FIX) out.push(`note opus was ${Math.round(os.pct)}% of the last 7 days' spend ($${os.usd.toFixed(2)} of $${os.total.toFixed(2)}); no thread runs on opus now (the desk or a worker used it, or a thread that is closed): nothing to fix`)
+  if (os && os.total > 0 && os.pct > OPUS_SHARE_FIX && os.now.length) row(false, `opus is ${Math.round(os.pct)}% of usage tokens: threads ${os.now.join(', ')} run on opus now (last 7 days, ${fmtTokens(os.tokens)} of ${fmtTokens(os.total)}; opus needs your approval in the pane, so start new work on sonnet)`)
+  else if (os && os.total > 0 && os.pct > OPUS_SHARE_FIX) out.push(`note opus was ${Math.round(os.pct)}% of the last 7 days' usage tokens (${fmtTokens(os.tokens)} of ${fmtTokens(os.total)}); no thread runs on opus now (the desk or a worker used it, or a thread that is closed): nothing to fix`)
   else if (os && os.total > 0) out.push(`ok   opus is ${Math.round(os.pct)}% of the last 7 days' spend`)
   // stale worktree registry entries (the key blocks a new worktree of that branch); `fix` drops them
   const stale = await staleEntries(h).catch(() => [])

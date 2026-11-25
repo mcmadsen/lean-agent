@@ -3,9 +3,10 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { dayOf, normalizeRow, rotateLedger, syncRollup } from './ledger'
 import { logRuleLoad, recordRule, rulesStats } from './rules'
-import { costLine, modelMismatches, modelRows, spendLine, statsText, threadCostsToday, threadSpendLine } from './stats'
+import { costLine, modelMismatches, modelRows, statsText, threadCostsToday, threadSpendLine } from './stats'
+import { allTimeUsage } from './usage'
 import { resetLocks } from './threads'
-import { record, spentToday } from './budget'
+import { record } from './budget'
 
 const L = '/h/.lean-agent'
 const NOON = Date.UTC(2026, 10, 18, 12)
@@ -50,17 +51,18 @@ test('the rollup reads only new bytes, never twice, and survives a torn last lin
   expect((await syncRollup(h.host)).rows).toBe(4) // nothing new: nothing folded
 })
 
-test('a day change starts a new day; the spend cap cache is rebuilt from the rollup, not by reading the ledger', async () => {
+test('a day change starts a new day; the all-time usage tokens come from the rollup, not by reading the ledger', async () => {
   const h = setup()
   await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host, 'desk')).toBe(3)
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(1_000_000)
   let reads = 0
   const read = h.host.fs.read
   h.host.fs.read = async (p: string) => { if (p.endsWith('ledger.jsonl')) reads++; return read(p) }
   h.clock.t += DAY
-  expect(await spentToday(h.host, 'desk')).toBe(0)
   await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host, 'desk')).toBe(3)
+  const both = await allTimeUsage(h.host)
+  expect(both.total.tokens).toBe(2_000_000)
+  expect(both.byRole.desk!.tokens).toBe(2_000_000)
   expect(reads).toBe(0)
   const ro = await syncRollup(h.host) // the stats side folds the new rows in when asked
   expect(Object.keys(ro.days).sort()).toEqual([dayOf(NOON), dayOf(NOON + DAY)])
@@ -99,8 +101,8 @@ test('rotation: a file that starts with a 0.45 row moves to ledger-legacy.jsonl 
   expect(Math.round(ro.days[dayOf(NOON)]!.t[0] * 1e6) / 1e6).toBe(1 + 2 + 3)
   expect(ro.days['2026-11-10']!.t[0]).toBe(0.5)
   expect(Object.keys(ro.files).sort()).toEqual(['ledger-legacy.jsonl', 'ledger.jsonl'])
-  // today's cap cache counts the 1.0 rows that moved with the legacy file, and not the 0.45 ones
-  expect(Math.round((await spentToday(h.host, 'thread')) * 1e6) / 1e6).toBe(6)
+  // the all-time usage counts the 1.0 rows that moved with the legacy file as thread usage, and the 0.45 rows (no role) not as any role's
+  expect((await allTimeUsage(h.host)).byRole.thread!.tokens).toBe(2250 + 2250 + 1_000_000)
   // a second legacy file never overwrites the first
   h.files.set(`${L}/ledger.jsonl`, old('2026-10-01T00:00:00'))
   await rotateLedger(h.host)
@@ -118,7 +120,7 @@ test('repair: a legacy file that already holds 1.0 rows (what 1.0.5 produced) gi
   expect(await rotateLedger(h.host)).toEqual([]) // idempotent
   const text = await statsText(h.host)
   expect(text).toContain('period: 2026-11-12 00:00Z to now; ledger files read: ledger-legacy.jsonl, ledger.jsonl (rows: 5)')
-  expect(text).toContain('spend: today $18.00')
+  expect(text).toContain('usage (weighted tokens): today 6.8k (3 req)')
   // a file that changes while it is being split is left alone (nothing lost); a ledger.jsonl that starts inside the window warns
   const g = setup()
   g.files.set(`${L}/ledger-legacy.jsonl`, old('2026-11-10T08:00:00') + row(NOON - 5000))
@@ -245,36 +247,42 @@ test('rotation: a file that starts in a past month moves to ledger-YYYY-MM.jsonl
   expect((await syncRollup(h.host)).rows).toBe(3)
 })
 
-test('stats text: spend today and 7 days, caps, tables by model / role x model / role / agent / thread with top 10 + rest, ledger line', async () => {
+test('stats text: usage tokens today and 7 days, caps, tables by model / role x model / role / agent / thread with top 10 + rest, ledger line', async () => {
   const h = setup()
+  const tk = (n: number) => ({ in: n, out: 0, cache_read: 0, cache_write: 0 }) // usage tokens = input tokens
   let ledger = ''
-  for (let i = 0; i < 12; i++) ledger += row(NOON - 1000, { tN: `t${i}`, usd: i + 1 }) // 12 threads
-  ledger += row(NOON, { role: 'desk', tN: undefined, model: 'claude-opus-5-5', usd: 20 })
-  ledger += row(NOON - 3 * DAY, { agent: 'lean-agent:worker-haiku', model: 'claude-haiku-5-5', usd: 0.25 })
-  ledger += row(NOON - 30 * DAY, { usd: 1000 }) // outside 7 days
+  for (let i = 0; i < 12; i++) ledger += row(NOON - 1000, { tN: `t${i}`, ...tk((i + 1) * 1000) }) // 12 threads: 1k .. 12k
+  ledger += row(NOON, { role: 'desk', tN: undefined, model: 'claude-opus-5-5', ...tk(20_000) })
+  ledger += row(NOON - 3 * DAY, { agent: 'lean-agent:worker-haiku', model: 'claude-haiku-5-5', ...tk(250) })
+  ledger += row(NOON - 30 * DAY, tk(1_000_000)) // outside 7 days
   ledger += old('2026-11-16T09:00:00') + '{damaged\n'
   h.files.set(`${L}/ledger.jsonl`, ledger)
-  h.files.set(`${L}/config.json`, JSON.stringify({ dailyCapUsd: { desk: 25, thread: 100 } }))
   const t = await statsText(h.host)
   expect(t.split('\n')[0]).toMatch(/^plan window: /) // the plan window leads (windows.ts)
   expect(t.split('\n')[1]).toBe('lean-agent stats: last 7 day(s) to 2026-11-18')
-  expect(t).toContain('spend: today $98.00 (13 req) · 7d $98.75 (15 req)')
-  expect(t).toContain('caps today: desk $20.00 of $25.00 · thread $78.00 of $100.00 · plain $0.00 of no cap')
-  expect(t).toContain('daily: 11-12 $0.00 · 11-13 $0.00 · 11-14 $0.00 · 11-15 $0.25 · 11-16 $0.50 · 11-17 $0.00 · 11-18 $98.00')
-  expect(t).toContain('by model (7d):\n  claude-sonnet-5-5  $78.00  12 req  in 12.0k out 1.2k cache r 60.0k w 2.4k\n  claude-opus-5-5  $20.00  1 req')
-  expect(t).toContain('  thread / claude-sonnet-5-5  $78.00')
-  expect(t).toContain('  desk / claude-opus-5-5  $20.00')
+  expect(t).toContain('usage (weighted tokens): today 98k (13 req) · 7d 98k (15 req) · raw 7d in 98.3k out 40 cache r 30 w 20')
+  expect(t).toContain('window: 98k tokens, 13 req, since 07:00Z (rolling 5 h: the engine reports no current window)') // no snapshot: the rolling 5 h
+  expect(t).toContain('all time since 2026-10-19 (the first usage; lean_config set budget.since today starts again): 1.1M tokens, 16 req')
+  expect(t).toContain('token caps (optional; the window percentages are the main control): window 98k of none · all time 1.1M of none · per thread soft none, hard none')
+  expect(t).toContain('daily: 11-12 0 · 11-13 0 · 11-14 0 · 11-15 250 · 11-16 238 · 11-17 0 · 11-18 98k')
+  expect(t).toContain('by model (7d):\n  claude-sonnet-5-5  78k tokens  12 req  raw in 78.0k out 0 cache r 0 w 0\n  claude-opus-5-5  20k tokens  1 req')
+  expect(t).toContain('  thread / claude-sonnet-5-5  78k tokens')
+  expect(t).toContain('  desk / claude-opus-5-5  20k tokens')
   expect(t).toContain('by role (7d):')
-  expect(t).toMatch(/  unknown {2}\$0\.50/) // the 0.45 row: role unknown
-  expect(t).toContain('  worker-haiku  $0.25')
-  expect(t).toContain('  t11  $12.00') // the biggest thread first
+  expect(t).toMatch(/  unknown {2}238 tokens/) // the 0.45 row: role unknown
+  expect(t).toContain('  worker-haiku  250 tokens')
+  expect(t).toContain('  t11  12k tokens') // the biggest thread first
   expect(t).toContain('(+3 more)') // 13 thread keys (12 + "-" + t9 of the old row = 14 keys, 10 shown)
   expect(t).toContain('ledger: 16 row(s) in 1 file(s), 1 pre-1.0 (0.45: cost_usd, no role), 1 unparsable line(s) skipped')
   expect(t).toContain('worker feedback (feedback.jsonl): 0 row(s)')
+  expect(t).not.toContain('$') // no dollar figure unless config stats.showUsd
+  expect(t).not.toContain('caps today')
   // a one-day window and a bad value
   expect((await statsText(h.host, { days: 1 })).split('\n')[1]).toBe('lean-agent stats: last 1 day(s) to 2026-11-18')
   expect((await statsText(h.host, { days: -3 })).split('\n')[1]).toContain('last 7 day(s)')
-  expect(await spendLine(h.host)).toBe('$98.00 · 7d $98.75')
+  // the optional dollar line, off by default, one line when on
+  h.files.set(`${L}/config.json`, JSON.stringify({ stats: { showUsd: true } }))
+  expect((await statsText(h.host)).split('\n').filter(l => l.includes('$'))).toEqual(['estimated cost (API list prices, not what a plan charges): today $13.00 · 7d $14.50'])
 })
 
 test('stats shows rule loads per project (_project.md counted), worker feedback and gaps from the 1.0 files, and 0.45 leftovers', async () => {
@@ -337,7 +345,8 @@ test('lean_doctor stats answers from the desk, in one call, without a model read
   const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'stats', days: 2 } as any)
   const t = String(r?.result ?? r)
   expect(t).toContain('lean-agent stats: last 2 day(s)')
-  expect(t).toContain('spend: today $5.00 (1 req) · 2d $5.50 (2 req)')
+  expect(t).toContain('usage (weighted tokens): today 2.3k (1 req) · 2d 2.5k (2 req)')
+  expect(t).not.toContain('$')
 })
 
 test('an expensive session on a model lean-agent did not configure is named (ledger and live listing)', async () => {
@@ -347,8 +356,8 @@ test('an expensive session on a model lean-agent did not configure is named (led
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', model: 'sonnet', sid: 'S1' }))
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify([{ sessionId: 'S1', status: 'busy', model: 'claude-opus-5-5', cwd: '/x' }, { sessionId: 'D', status: 'busy', model: 'claude-opus-5-5', cwd: '/h/lean-agent-desk' }]) } : { exitCode: 0, stdout: '' })
   const odd = await modelMismatches(h.host)
-  expect(odd.some(l => l.startsWith('the desk spent $7.00 today on claude-opus-5-5, lean-agent pins sonnet'))).toBe(true)
-  expect(odd.some(l => l.startsWith('threads spent $4.00 today on claude-opus-5-5'))).toBe(true)
+  expect(odd.some(l => l.startsWith('the desk used 2.3k tokens today on claude-opus-5-5, lean-agent pins sonnet'))).toBe(true)
+  expect(odd.some(l => l.startsWith('threads used 2.3k tokens today on claude-opus-5-5'))).toBe(true)
   expect(odd).toContain('live session t1 runs claude-opus-5-5, lean-agent started it on sonnet')
   expect(odd).toContain('the live desk session runs claude-opus-5-5, lean-agent pins sonnet')
   const ok = setup()
@@ -369,19 +378,19 @@ test('the desk spend on another model counts only what was spent AFTER the pin: 
   expect(await modelMismatches(h.host)).toEqual([])
   const r = await modelRows(h.host)
   expect(r.fix).toEqual([])
-  expect(r.info).toContain('the desk spent $7.28 today on claude-opus-5-5 before lean-agent pinned sonnet at 10:00 UTC; nothing on it since')
+  expect(r.info).toContain('the desk used 2.3k tokens today on claude-opus-5-5 before lean-agent pinned sonnet at 10:00 UTC; nothing on it since')
   // the desk's own request on opus after the pin: only that amount, named as after the pin
-  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON - 1000, { role: 'desk', model: 'claude-opus-5-5', usd: 0.5 }))
+  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON - 1000, { role: 'desk', model: 'claude-opus-5-5', in: 150, out: 0, cache_read: 0, cache_write: 0 }))
   const after = await modelRows(h.host)
   expect(after.fix).toHaveLength(1)
-  expect(after.fix[0]).toContain('the desk spent $0.50 on claude-opus-5-5 since lean-agent pinned sonnet at 10:00 UTC ($7.28 before that is history), lean-agent pins sonnet')
-  expect(after.fix[0]).not.toContain('$7.78')
+  expect(after.fix[0]).toContain('the desk used 150 tokens on claude-opus-5-5 since lean-agent pinned sonnet at 10:00 UTC (2.3k before that is history), lean-agent pins sonnet')
+  expect(after.fix[0]).not.toContain('2.4k')
   expect(after.info).toEqual([])
   // a pin from another day, or none recorded: the whole day counts, as before
   h.files.set(`${L}/desk/pinned.json`, JSON.stringify({ at: PIN - 2 * 86_400_000, model: 'sonnet' }))
-  expect((await modelRows(h.host)).fix[0]).toContain('the desk spent $7.78 today on claude-opus-5-5, lean-agent pins sonnet')
+  expect((await modelRows(h.host)).fix[0]).toContain('the desk used 2.4k tokens today on claude-opus-5-5, lean-agent pins sonnet')
   h.files.delete(`${L}/desk/pinned.json`)
-  expect((await modelRows(h.host)).fix[0]).toContain('the desk spent $7.78 today on claude-opus-5-5')
+  expect((await modelRows(h.host)).fix[0]).toContain('the desk used 2.4k tokens today on claude-opus-5-5')
 })
 
 test('a 50,000-row ledger folds within a time budget and the next sync reads nothing', async () => {
@@ -410,27 +419,49 @@ test('a recorded row leaves out zero token counts and is still read', async () =
   expect((await syncRollup(h.host)).days[dayOf(NOON)]!.t.slice(0, 3)).toEqual([0.015, 0, 1000])
 })
 
-test('a thread\'s daily spend line: reviewer passes and the first request of each restarted session are split out of today\'s total', async () => {
+test('a thread\'s window usage line: reviewer passes and the first request of each restarted session are split out of the window\'s total (the rolling 5 h when no window is known)', async () => {
   const h = setup()
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'p', state: 'open', sid: '', created: NOON - 3 * 3_600_000, lastWake: 0, delivered: 0 }))
+  const r = (ts: number, tokens: number, o: Record<string, unknown> = {}) => row(ts, { in: tokens, out: 0, cache_read: 0, cache_write: 0, ...o })
   const rows = [
-    row(NOON - 3 * 3_600_000 + 1000, { usd: 0.4, fresh: true }), // the thread's own first session: not a restart
-    row(NOON - 2 * 3_600_000, { usd: 6 }),
-    row(NOON - 90 * 60_000, { usd: 2, agent: 'lean-agent:reviewer' }),
-    row(NOON - 80 * 60_000, { usd: 3.1, agent: 'reviewer' }),
-    row(NOON - 60 * 60_000, { usd: 0.9, fresh: true }), // a restart
-    row(NOON - 50 * 60_000, { usd: 0.5, agent: 'worker-haiku' }),
-    row(NOON - DAY, { usd: 9, agent: 'reviewer' }), // yesterday
+    r(NOON - 3 * 3_600_000 + 1000, 400, { fresh: true }), // the thread's own first session: not a restart
+    r(NOON - 2 * 3_600_000, 6000),
+    r(NOON - 90 * 60_000, 2000, { agent: 'lean-agent:reviewer' }),
+    r(NOON - 80 * 60_000, 3100, { agent: 'reviewer' }),
+    r(NOON - 60 * 60_000, 900, { fresh: true }), // a restart
+    r(NOON - 50 * 60_000, 500, { agent: 'worker-haiku' }),
+    r(NOON - DAY, 9000, { agent: 'reviewer' }), // yesterday: outside the window
+    r(NOON - 30 * 60_000, 777_000, { role: 'desk', tN: undefined }), // the desk: in no thread's line
   ]
   h.files.set(`${L}/ledger.jsonl`, rows.join(''))
   const c = (await threadCostsToday(h.host)).t1!
-  expect(Math.round(c.usd * 100)).toBe(1290)
-  expect(Math.round(c.reviews! * 100)).toBe(510)
-  expect(Math.round(c.restarts! * 100)).toBe(90)
-  expect(costLine(c)).toBe('today $12.90 (reviews $5.10, restarts $0.90)') // the card and the list: the short form
-  expect(costLine(c, true)).toBe('today $12.90 (main $7.30 · workers $0.50 · reviews $5.10, restarts $0.90)') // the thread pane: where today's money went
-  expect(await threadSpendLine(h.host, 't1')).toBe('today $12.90 (reviews $5.10, restarts $0.90)')
+  expect(c.tokens).toBe(12_900)
+  expect(c.reviews).toBe(5100)
+  expect(c.restarts).toBe(900)
+  expect(costLine(c)).toBe('window 13k tokens (reviews 5.1k, restarts 900)') // the card and the list: the short form
+  expect(costLine(c, true)).toBe('window 13k tokens (main 7.3k · workers 500 · reviews 5.1k, restarts 900)') // the thread pane: where the window's usage went
+  expect(await threadSpendLine(h.host, 't1')).toBe('window 13k tokens (reviews 5.1k, restarts 900)')
   expect(await threadSpendLine(h.host, 't7')).toBeNull()
-  expect(costLine({ usd: 3, over: false })).toBe('today $3.00') // no split: nothing in brackets
-  expect(costLine({ usd: 25, over: true, reviews: 1 })).toBe('today $25.00! (reviews $1.00)')
+  expect(costLine({ tokens: 3000, over: false })).toBe('window 3k tokens') // no split: nothing in brackets
+  expect(costLine({ tokens: 25_000, over: true, reviews: 1000 })).toBe('window 25k tokens! (reviews 1k)')
+})
+
+test('lean_doctor budget-reset: the all-time usage tokens start again from now (config budget.since), the rows before are no longer counted; stats says where it starts', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = fakeHost(on)
+  resetLocks()
+  h.clock.t = NOON
+  h.files.set(`${L}/ledger.jsonl`, row(NOON - 3 * DAY, { role: 'desk', tN: undefined, in: 5000, out: 0, cache_read: 0, cache_write: 0 }) + row(NOON - 60_000, { role: 'desk', tN: undefined, in: 700, out: 0, cache_read: 0, cache_write: 0 }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
+  h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
+  await $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
+  const before: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'stats', days: 7 } as any)
+  expect(String(before?.result ?? before)).toContain('5.7k tokens, 2 req')
+  const r: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'budget-reset' } as any)
+  expect(String(r?.result ?? r)).toContain('budget.since set to 2026-11-18T12:00:00Z')
+  h.clock.t = NOON + 60_000
+  const after: any = await $.tool.call({ tool: 'mcp__lean-agent__lean_doctor', action: 'stats', days: 7 } as any)
+  const t = String(after?.result ?? after)
+  expect(t).toContain('all time since 2026-11-18 12:00Z (budget.since): 0 tokens, 0 req')
+  expect(t).toContain('usage (weighted tokens): today 700 (1 req)') // today and the period are not changed by it: only the all-time scope
 })

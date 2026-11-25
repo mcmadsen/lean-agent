@@ -263,12 +263,12 @@ function spent(rows: unknown[], pinned?: { at: number; model: string }) {
   h.claude.handler = (a: string[]) => (a[0] === 'agents' ? { exitCode: 0, stdout: JSON.stringify(rows) } : { exitCode: 0, stdout: '' })
   return h
 }
-const deskLine = async (h: any) => (await modelMismatches(h.host)).find(l => l.startsWith('the desk spent'))
+const deskLine = async (h: any) => (await modelMismatches(h.host)).find(l => l.startsWith('the desk used'))
 
 test('doctor: "started before setup pinned the model" only when the live desk session started before the pin was written; else the app chose it', async () => {
   const known = await deskLine(spent([desk(NOON - 7_200_000)], { at: NOON - 3_600_000, model: 'sonnet' }))
-  expect(known).toBe('the desk spent $0.65 today on claude-opus-5-5, lean-agent pins sonnet: that session started before setup pinned the model; close it and open the desk again')
-  const chose = 'the desk spent $0.65 today on claude-opus-5-5, lean-agent pins sonnet: the app chose another model for this session: pick Sonnet in its model menu'
+  expect(known).toBe('the desk used 2.3k tokens today on claude-opus-5-5, lean-agent pins sonnet: that session started before setup pinned the model; close it and open the desk again')
+  const chose = 'the desk used 2.3k tokens today on claude-opus-5-5, lean-agent pins sonnet: the app chose another model for this session: pick Sonnet in its model menu'
   expect(await deskLine(spent([desk(NOON - 1_800_000)], { at: NOON - 3_600_000, model: 'sonnet' }))).toBe(chose) // started after the pin
   expect(await deskLine(spent([desk(NOON - 7_200_000)]))).toBe(chose) // no record of when the pin was written
   expect(await deskLine(spent([], { at: NOON - 3_600_000, model: 'sonnet' }))).toBe(chose) // no live desk session to compare with
@@ -279,7 +279,7 @@ test('doctor: "started before setup pinned the model" only when the live desk se
 })
 
 test('doctor: spend on the model the app started the desk on is an info note, not FIX, once lean-agent switched the session to the pin', async () => {
-  const note = `the app started the desk on ${OPUS}; lean-agent switched it to sonnet ($0.65 spent on ${OPUS} today)`
+  const note = `the app started the desk on ${OPUS}; lean-agent switched it to sonnet (2.3k tokens used on ${OPUS} today)`
   // the switch is recorded when the session was really moved (verified), and only then
   const h = spent([desk(NOON - 100, 'claude-sonnet-5-5')])
   expect(await deskLine(h)).toContain('the app chose another model') // no record yet: still FIX
@@ -293,7 +293,7 @@ test('doctor: spend on the model the app started the desk on is an info note, no
   const rows = await check(h.host, '/p')
   expect(rows).toContain(`note ${note}`)
   expect(rows).toContain('ok   no session on an unexpected model today')
-  expect(rows.filter(r => r.startsWith('FIX ')).join('\n')).not.toContain('the desk spent')
+  expect(rows.filter(r => r.startsWith('FIX ')).join('\n')).not.toContain('the desk used')
   // a switch that did not take (the row was written but the model stayed) leaves no record
   const n = spent([])
   const stuck = engine([modelRow(), effortRow()], { models: [OPUS] })

@@ -97,7 +97,7 @@ test('stateOf: one word per thread, the colour a theme key', () => {
   ])
 })
 
-test('view: a thread\'s branch, commit, review verdict, cost today and "ready to push" come from its reports, the review record and the ledger', async () => {
+test('view: a thread\'s branch, commit, review verdict, usage tokens in the window and "ready to push" come from its reports, the review record and the ledger', async () => {
   const h = world()
   thr(h, 't1')
   thr(h, 't2')
@@ -110,12 +110,12 @@ test('view: a thread\'s branch, commit, review verdict, cost today and "ready to
   )
   await writeReview(h.host, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
   await writeReview(h.host, { green: false, sha: '1234567' + 'f'.repeat(33), project: 'proj', branch: 'feat/other-y' })
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.42 }) + line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.1 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 42_000, usd: 0 }) + line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 10_000, usd: 0 }))
   const v = await loadView(h.host)
   expect(v.errors).toEqual([])
   const row = (id: string) => v.threads.find(t => t.id === id)!
   expect([row('t1').branch, row('t1').sha, row('t1').review, row('t1').ready]).toEqual(['feat/synthetic-x', 'abcdef1', 'green', true])
-  expect(Math.round(row('t1').cost * 100)).toBe(52)
+  expect(row('t1').cost).toBe(52_000) // the usage tokens of its own rows in the current window
   expect([row('t2').branch, row('t2').review, row('t2').ready]).toEqual(['feat/other-y', 'red', false]) // a record that is not green, and it says pushed
   expect([row('t3').branch, row('t3').sha, row('t3').review, row('t3').ready, row('t3').cost]).toEqual([undefined, undefined, 'none', false, 0])
   expect(v.needs.map(n => [n.kind, n.thread])).toEqual([['push', 't1']])
@@ -243,7 +243,7 @@ test('1.0.32 a thread card: two lines collapsed (id and the whole title, state c
   thr(h, 't2', { state: 'open' })
   inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Halfway. Branch: feat/synthetic-x, commit ${SHA.slice(0, 7)}.\nSecond line.`, state: 'working' })
   await review(h, { green: true, sha: SHA, project: 'proj', branch: 'feat/synthetic-x' })
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 0.42 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 42_000, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
@@ -253,7 +253,8 @@ test('1.0.32 a thread card: two lines collapsed (id and the whole title, state c
   expect(cut.length).toBeLessThanOrEqual(80 - 4 - '[working]'.length - 1)
   expect(all).not.toContain(title)
   // the two lines: a status chip, the cost, the context bar (none recorded here), the age
-  for (const piece of ['[working]', 'today $0.42']) expect(all).toContain(piece)
+  for (const piece of ['[working]', 'window 42k tokens']) expect(all).toContain(piece)
+  expect(all.some(t => t.includes('$'))).toBe(false) // no dollar figure on a card
   expect(all.some(t => /^(just now|\d+ min ago|\d+ h ago|\d+ d ago)$/.test(t))).toBe(true)
   expect(all.some(t => /^busy$|\[running\]/.test(t))).toBe(false)
   for (const piece of ['sonnet/high', 'feat/synthetic-x', 'review green', 'Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.']) expect(all).not.toContain(piece) // folded
@@ -314,13 +315,13 @@ test('1.0.32: a done thread is ONE row (title, chip, cost, age, Open); Resume, R
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'idle', state: 'done', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1) })
   inbox(h, { ts: 100, from: 't1', kind: 'report', text: `Done. Branch: feat/synthetic-y, commit ${SHA.slice(0, 7)}.`, state: 'done' })
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 1, out: 1, usd: 2.5 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 2500, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   const all = await texts(ui)
   expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toBe('▸ t1 synthetic t1')
   expect(all).toContain('[done]')
-  expect(all.some(t => /today \$2\.50/.test(t))).toBe(true)
+  expect(all.some(t => /window 2\.5k tokens/.test(t))).toBe(true)
   expect(all.some(t => /^(just now|\d+ min ago|\d+ h ago|\d+ d ago)$/.test(t))).toBe(true) // the age of its last activity
   expect(all.some(t => /^Done\. Branch/.test(t))).toBe(false) // the report line is not on the one-row form
   expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy()
@@ -332,19 +333,19 @@ test('1.0.32: a done thread is ONE row (title, chip, cost, age, Open); Resume, R
 })
 
 // ---- the widget --------------------------------------------------------------------------------------------------------
-test('widget placement: a glance (running, blocked, needs you, desk context, budget today) and no button at all', { timeoutMs: 20_000 }, async ($, on) => {
+test('widget placement: a glance (running, blocked, needs you, desk context, the usage tokens of the window) and no button at all', { timeoutMs: 20_000 }, async ($, on) => {
   const h = world(on, [{ sessionId: SID(1), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }])
   thr(h, 't1', { sid: SID(1) })
   thr(h, 't2')
   inbox(h, { ts: 100, from: 't2', kind: 'report', text: 'stuck', state: 'blocked' })
-  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, usd: 1.5 }))
+  h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'desk', model: 'x', in: 1500, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(withProps({ placement: 'widget', bodyColumns: 24 }))
   expect(await ui.findAll({ type: 'Button' })).toHaveLength(0) // clicks may not reach a widget
   const all = await texts(ui)
   expect(all).toContain('1 running · 1 blocked')
   expect(all).toContain('1 needs you')
-  expect(all).toContain('desk context n/a · today $1.50')
+  expect(all).toContain('desk context n/a · last 5h 1.5k tokens') // (no window snapshot: the rolling 5 h)
   expect(all.some(t => /Threads|Inbox|Goals/.test(t))).toBe(false) // a glance, not the pane
   await ui.unmount()
 })
@@ -394,9 +395,9 @@ test('1.0.32 every section empty: an empty-state line for the list, Health quiet
   expect(await toolbarTitle(ui)).toContain('Sessions (0)')
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: '▸ Health: all good' })).toBeTruthy() // folded, quiet
   expect(await ui.find({ type: 'Button', key: 'health-chip' })).toBeFalsy() // no fix: no chip
-  for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // the chips are on the unfolded toolbar
+  for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // the chips are on the unfolded toolbar
   await openToolbar(ui)
-  for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: /▸ More \(0 goals, 0 projects, 0 scripts\)/ })).toBeTruthy()
   expect(String((await ui.find({ type: 'Button', key: 'sec-header' }))?.text)).toMatch(/^▸ lean-agent · /) // the header card, folded: one line
   expect(all.some(t => /lean-agent 1\.0\.\d+ · refreshed/.test(t))).toBe(false)

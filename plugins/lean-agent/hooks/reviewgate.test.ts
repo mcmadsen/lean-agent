@@ -454,12 +454,12 @@ test('lean_review prepare: light is the default (one pass, no second opinion, ne
   expect(light.text).toContain('LIGHT REVIEW')
   expect(light.text).toContain('level: "full"')
   expect(light.text).not.toContain('run TWO independent reviewer passes')
-  expect(light.text).toMatch(/expected review cost ~\$\d+\.\d\d \(1 pass, sonnet;/)
+  expect(light.text).toMatch(/expected review usage ~[\d.]+[kM] tokens \(1 pass, sonnet;/)
   const full = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
   expect(prepMeta(full)).toMatchObject({ level: 'full', runs: 2, secondOpinion: true })
   expect(full.text).toContain('level: FULL')
   expect(full.text).not.toContain('LIGHT REVIEW')
-  expect(full.text).toMatch(/expected review cost ~\$\d+\.\d\d \(2 passes, sonnet;/)
+  expect(full.text).toMatch(/expected review usage ~[\d.]+[kM] tokens \(2 passes, sonnet;/)
   const bad = await tool(h, { action: 'prepare', base: 'main', level: 'strict' })
   expect(bad.ok).toBe(false)
   expect(bad.text).toContain('level must be')
@@ -515,12 +515,13 @@ test('lean_review: a light pass is the "last reviewed sha" of the next light pas
   expect(prepMeta(full)).toMatchObject({ rereview: false, since: '' })
 })
 
-test('lean_review prepare says the expected cost: the median of the earlier reviewer passes of this project in the ledger, else a stated default', async () => {
+test('lean_review prepare says the expected usage: the median of the earlier reviewer passes of this project in the ledger (usage tokens), else a stated default', async () => {
   const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
   const none = await tool(h, { action: 'prepare', base: 'main' })
-  expect(none.text).toContain('expected review cost ~$1.50 (1 pass, sonnet; default $1.50 a pass, no earlier reviewer pass on this project in the ledger)')
-  expect(prepMeta(none).expectedUsd).toBe(1.5)
-  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: 1, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.5, ...o })
+  expect(none.text).toContain('expected review usage ~500k tokens (1 pass, sonnet; default 500k tokens a pass, no earlier reviewer pass on this project in the ledger)')
+  expect(prepMeta(none).expectedTokens).toBe(500_000)
+  // (a `usd` of N is N x 100k input tokens here: the passes are measured in usage tokens)
+  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: 1, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.5, ...o, in: Math.round(Number(o.usd ?? 0.5) * 100_000) })
   h.files.set(`${L}/threads/t2/thread.json`, JSON.stringify({ id: 't2', project: 'other' }))
   h.files.set(`${L}/ledger.jsonl`, [
     row({ agentId: 'a1', usd: 0.7 }), row({ agentId: 'a1', usd: 0.5, ts: 2 }), // one pass of $1.20
@@ -532,12 +533,12 @@ test('lean_review prepare says the expected cost: the median of the earlier revi
     'not json reviewer',
   ].join('\n') + '\n')
   const some = await tool(h, { action: 'prepare', base: 'main' })
-  expect(some.text).toContain('expected review cost ~$1.20 (1 pass, sonnet; median of 3 earlier reviewer passes on this project)')
-  expect(prepMeta(some).expectedUsd).toBe(1.2)
+  expect(some.text).toContain('expected review usage ~120k tokens (1 pass, sonnet; median of 3 earlier reviewer passes on this project)')
+  expect(prepMeta(some).expectedTokens).toBe(120_000)
   const risky = riskSetup() // two passes on the full level: twice the median
   for (const k of [`${L}/ledger.jsonl`, `${L}/threads/t2/thread.json`]) risky.files.set(k, h.files.get(k)!)
   const two = await tool(risky, { action: 'prepare', base: 'main', level: 'full' })
-  expect(two.text).toContain('expected review cost ~$2.40 (2 passes, sonnet; median of 3 earlier reviewer passes on this project)')
+  expect(two.text).toContain('expected review usage ~240k tokens (2 passes, sonnet; median of 3 earlier reviewer passes on this project)')
 })
 
 test('lean_review prepare: the reviewer gets per-file stats and a reading plan (10 tool calls, each file once); a re-review reads the diff since the last pass; the reply shows what the passes of this sha cost', async () => {
@@ -546,18 +547,18 @@ test('lean_review prepare: the reviewer gets per-file stats and a reading plan (
   expect(p.text).toMatch(/Changed files \(1, added\/removed lines, from the script\): src\/plain\.ts \+\d+\/-0/)
   expect(p.text).toContain('Read each changed file once, diff hunks only')
   expect(p.text).toContain('You have 16 tool calls')
-  expect(p.text).not.toContain('review cost for') // no pass ran yet
-  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: h.clock.t + 10, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.2, ...o })
+  expect(p.text).not.toContain('review usage for') // no pass ran yet
+  const row = (o: Record<string, unknown>) => JSON.stringify({ ts: h.clock.t + 10, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd: 0.2, ...o, in: Math.round(Number(o.usd ?? 0.2) * 100_000) })
   h.files.set(`${L}/ledger.jsonl`, [row({ agentId: 'a1' }), row({ agentId: 'a1', usd: 0.3 }), row({ agentId: 'a2', usd: 0.34 }), row({ agentId: 'z', tN: 't7', usd: 9 })].join('\n') + '\n')
   const again = await tool(h, { action: 'prepare', base: 'main' })
-  expect(again.text).toMatch(/\nreview cost for [0-9a-f]{12}: \$0\.84 over 2 passes, 3 requests/)
+  expect(again.text).toMatch(/\nreview usage for [0-9a-f]{12}: 84k tokens over 2 passes, 3 requests/)
   h.files.set(`${L}/config.json`, JSON.stringify({ workers: { steps: 7 } })) // the reviewer's one budget (16), never above the ceiling workers.steps
   expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('You have 7 tool calls')
 })
 
-test('lean_review prepare: the expected cost of a light pass is the median of the earlier LIGHT passes (full ones are dearer); fewer than two known: all passes', async () => {
+test('lean_review prepare: the expected usage of a light pass is the median of the earlier LIGHT passes (full ones are dearer); fewer than two known: all passes', async () => {
   const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
-  const row = (at: number, id: string, usd: number) => JSON.stringify({ ts: at, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd, agentId: id })
+  const row = (at: number, id: string, usd: number) => JSON.stringify({ ts: at, role: 'thread', tN: 't1', agent: 'lean-agent:reviewer', model: 'sonnet', usd, in: Math.round(usd * 100_000), agentId: id })
   const t = h.clock.t
   await tool(h, { action: 'prepare', base: 'main' }) // light, at t
   h.clock.t = t + 100
@@ -565,7 +566,7 @@ test('lean_review prepare: the expected cost of a light pass is the median of th
   h.files.set(`${L}/ledger.jsonl`, [row(t + 10, 'l1', 0.4), row(t + 20, 'l2', 0.5), row(t + 110, 'f1', 3), row(t + 120, 'f2', 3.2)].join('\n') + '\n')
   h.clock.t = t + 200
   const light = await tool(h, { action: 'prepare', base: 'main' })
-  expect(light.text).toContain('expected review cost ~$0.45 (1 pass, sonnet; median of 2 earlier light reviewer passes on this project)')
+  expect(light.text).toContain('expected review usage ~45k tokens (1 pass, sonnet; median of 2 earlier light reviewer passes on this project)')
   const full = await tool(h, { action: 'prepare', base: 'main', level: 'full' })
   expect(full.text).toContain('median of 2 earlier full reviewer passes on this project')
   h.files.set(`${L}/ledger.jsonl`, [row(t + 10, 'l1', 0.4), row(t + 110, 'f1', 3)].join('\n') + '\n') // one pass of each level: the median is over all
@@ -675,10 +676,10 @@ test('lean_review prepare: the reviewer prompt carries the thread\'s own worktre
   expect((await tool(h, { action: 'prepare', base: 'main' })).text).toContain('git -C /r/app diff')
 })
 
-test('lean_review prepare names the level, the passes and the expected cost in its first line', async () => {
+test('lean_review prepare names the level, the passes and the expected usage in its first line', async () => {
   const h = setup({ '*': plainDiff }, { '*': 'A\tsrc/plain.ts\n' })
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).summary).toMatch(/^LIGHT review, 1 pass \(sonnet\), expected ~\$\d+\.\d\d$/)
-  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).summary).toMatch(/^FULL review, 1 pass \(sonnet\), expected ~\$/)
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main' })).summary).toMatch(/^LIGHT review, 1 pass \(sonnet\), expected ~[\d.]+[kM] usage tokens$/)
+  expect(prepMeta(await tool(h, { action: 'prepare', base: 'main', level: 'full' })).summary).toMatch(/^FULL review, 1 pass \(sonnet\), expected ~/)
 })
 
 test('lean_review prepare, light: a head that already has a record, or under review.minLines changed lines since the last pass, is skipped; perMilestone false prepares every time', async () => {
@@ -690,7 +691,7 @@ test('lean_review prepare, light: a head that already has a record, or under rev
   await tool(h, { sha: H1, base: 'main', branch: 'feat', level: 'light', review: light })
   const small = await tool(h, { action: 'prepare', base: 'main', branch: 'feat' }) // one changed line since H1, default minLines 60
   expect(small.ok).toBe(true)
-  expect(prepMeta(small)).toMatchObject({ skip: true, level: 'light', runs: 0, expectedUsd: 0 })
+  expect(prepMeta(small)).toMatchObject({ skip: true, level: 'light', runs: 0, expectedTokens: 0 })
   expect(small.text).toContain('already reviewed at this milestone (1 changed line since the last pass at aaaaaaaaaaaa, under review.minLines 60): skip')
   expect(small.text).not.toContain('LIGHT REVIEW')
   // a bigger change than the threshold is prepared; so is a named `since`

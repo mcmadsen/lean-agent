@@ -1107,9 +1107,9 @@ async function expensiveDenial($: Host, ctx: Ctx, e: Call): Promise<string | nul
 // a new Agent call while the 5h window is hot (throttle.ts): the model it would run on is the call's override, else its type's own, else the session's (unknown: not haiku)
 async function windowDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if ((e.tool !== 'Agent' && e.tool !== 'Task') || (ctx.role.kind !== 'thread' && ctx.role.kind !== 'desk')) return null
-  if (ctx.role.kind === 'thread') { // the thread's HARD cap (config threads.hardUsd, none by default) is reached (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut; the soft budget never refuses anything
-    const b = await readJson<{ hard?: number; hardUsd?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
-    if (b?.hard && typeof b.hardUsd === 'number' && b.hardUsd > 0) return budgetRefusal(b.hardUsd)
+  if (ctx.role.kind === 'thread') { // the thread's HARD cap (config threads.hardTokens, none by default) is reached (budgetthread.ts, written by the desk's tick): no NEW agent call, nothing running is cut; the soft budget never refuses anything
+    const b = await readJson<{ hard?: number; hardTokens?: number } | null>($, budgetFile(await homeDir($), ctx.role.id), null).catch(() => null)
+    if (b?.hard && typeof b.hardTokens === 'number' && b.hardTokens > 0) return budgetRefusal(b.hardTokens)
   }
   const sub = typeof e.subagent_type === 'string' ? e.subagent_type.trim() : ''
   const over = typeof e.model === 'string' ? e.model.trim() : ''

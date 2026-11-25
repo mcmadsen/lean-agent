@@ -9,6 +9,7 @@ import { CONFIRM_MS } from './panestate'
 import { bounded, openThreadSession } from './setup'
 import { resetViewCache } from './view'
 import { hostOf } from './host'
+import { fmtTokens } from './formatusage'
 import type { Role } from './role'
 
 export const THREAD_PANE_PREFIX = 'lean-agent-thread-'
@@ -21,7 +22,6 @@ export const threadOfPane = (requestId: unknown): string | null => {
 
 const BRIEF_LINES = 4 // brief lines drawn until expanded
 const short = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/\s+/g, ' ')
-const usd = (n: number) => `$${n.toFixed(2)}`
 const stamp = (ts: number) => (Number.isFinite(ts) && ts > 0 ? new Date(ts).toISOString().slice(5, 16).replace('T', ' ') : '?')
 const msg = (err: unknown, n = 160) => String((err as Error)?.message ?? err).slice(0, n)
 
@@ -195,7 +195,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
         {id} · {short(d.title, 70)}
       </Text>
       <Text>
-        {`${d.state} · ${runLabel}${d.finished ? (d.keep ? ' · finished (keep mode: the next message resumes it until the context limit)' : ' · finished (the next message starts a new session)') : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'}${d.costBadge ? ` · ${d.costLine ?? `${d.costBadge} today`}` : ''} · project: ${d.project || 'none'}`}
+        {`${d.state} · ${runLabel}${d.finished ? (d.keep ? ' · finished (keep mode: the next message resumes it until the context limit)' : ' · finished (the next message starts a new session)') : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'}${d.costBadge ? ` · ${d.costLine ?? `window ${d.costBadge} tokens`}` : ''} · project: ${d.project || 'none'}`}
       </Text>
       {!!d.ctx && <Text color={d.ctx.level === 'over' ? 'red' : d.ctx.level === 'warn' ? 'yellow' : undefined} dimColor={d.ctx.level === 'ok' || d.ctx.level === 'unknown'}>{`${d.ctx.text}${d.keep ? ' · keep mode: a done session is resumed until the limit' : ''}${d.ctx.level === 'over' ? ' · over the limit: the next message starts a new session' : ''}`}</Text>}
       {!!d.liveNote && <Text color={d.live === 'stuck' ? 'red' : 'yellow'}>{d.liveNote}</Text>}
@@ -247,7 +247,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role): Promise<an
         <Text dimColor>{d.worktree ? 'no HEAD to look up a review for' : 'no worktree, so no review record to look up'}</Text>
       )}
       <Text bold>Cost</Text>
-      <Text dimColor={!d.cost}>{d.cost ? `today ${usd(d.cost.today)} · total ${usd(d.cost.total)} (the ledger's rollup, the last 120 days)` : 'cost not available'}</Text>
+      <Text dimColor={!d.cost}>{d.cost ? `window ${fmtTokens(d.cost.window)} tokens · total ${fmtTokens(d.cost.total)} tokens (this thread's own sessions since it was created; the ledger's rollup, the last 120 days)` : 'usage not available'}</Text>
       <Text bold>{`Reports (${d.reports.length}${d.reportsTotal > d.reports.length ? ` of ${d.reportsTotal}` : ''}, newest first)`}</Text>
       {!d.reports.length && <Text dimColor>No reports yet.</Text>}
       {d.reports.map(r => row(`r${r.n}`,`${stamp(r.ts)} ${r.kind === 'ask' ? '? ' : ''}${r.state ? `[${r.state}] ` : ''}${short(r.text, 70)}`, r.text, r.kind !== 'ask' && r.state !== 'blocked'))}

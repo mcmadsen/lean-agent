@@ -2,7 +2,7 @@
 
 Token-frugal orchestration for Claude Code, as one plugin. A **desk** session in the Claude desktop app routes work to
 **threads** (background Claude sessions, one folder each); cheap **workers** do the mechanical parts; learned
-**path-scoped rules** replace long project briefings; review gates, private projects and daily budgets keep it safe and
+**path-scoped rules** replace long project briefings; review gates, private projects and token budgets keep it safe and
 cheap. Version 1.0 is pure Claude Code: skills, subagents, a TypeScript mod and plain state files. There is no CLI and no
 Python.
 
@@ -27,7 +27,7 @@ Python.
 | **Desk** | A local Claude desktop session in `~/lean-agent-desk`. Its generated `CLAUDE.md` makes it a router: it never reads code or edits files, it starts and talks to threads |
 | **Threads** | Background sessions (`claude --bg`), one folder each under `~/.lean-agent/threads/tN`, visible in the Claude app. A thread works in its own git worktree and reports back with `lean_report` / `lean_ask` / `lean_goal` |
 | **Workers** | Subagents a thread starts: haiku for routine edits, sonnet by default, opus only when the user asks for it and approves it in the pane; read-only readers and a reviewer (always sonnet) |
-| **Pane** | The desk's side pane: what needs you, one card per thread, the inbox by thread, spend and the desk's context at a glance ([The pane](#the-pane)) |
+| **Pane** | The desk's side pane: what needs you, one card per thread, the inbox by thread, usage tokens and the desk's context at a glance ([The pane](#the-pane)) |
 | **Opener** | A login item that waits for the Claude app (never launches it) and opens a new session in the desk folder through the app's `claude://code/new?folder=…` link (`open`; `claude --desktop` only as the last fallback) |
 | **Rules** | What the `learn` skill writes per project: short `paths:`-scoped rules that load only when a matching file is read |
 
@@ -169,7 +169,7 @@ lean-agent folder without asking. Pushes stay behind the review gate and the pri
 Top to bottom (the desk's pane; any other session sees only the way to the desk or to setup):
 
 1. **Header.** The desk's model and effort as a chip (`[sonnet/high]`; `≠ pin` and a yellow line when the desk really runs another
-   model), today's spend and the last 7 days, the desk's context as a bar against `deskTokens` (green, yellow from 80 %, red from
+   model), the window's usage tokens with the 5 h and 7 d percentages (`window 1.2M tokens (1%) · 7d 65%`), the desk's context as a bar against `deskTokens` (green, yellow from 80 %, red from
    100 %) with **Restart desk** beside it from 80 %, and the version and refresh time, small and dim. The one-time line "lean-agent set
    sonnet / high" is drawn for 30 seconds after it first appears; after that the chip says "(set by lean-agent)".
 2. **Needs you (N)**, only when something waits: a thread blocked on an approval (**Open tN** opens its own session, where you
@@ -197,7 +197,7 @@ Top to bottom (the desk's pane; any other session sees only the way to the desk 
    **Setup / repair** and **Restart desk**, always here (the header's button shows only near the limit; both press twice and do the same).
 
 In the minimized widget form (Claude desktop), the pane draws a glance and no button, because clicks may not reach it: threads
-running and blocked, how many need you, the desk's context in percent and today's spend. On a narrow body (under 50 columns) the
+running and blocked, how many need you, the desk's context in percent and the window's usage tokens. On a narrow body (under 50 columns) the
 rows get shorter and the buttons wrap; the tree is the same on the terminal, the desktop app, VS Code and mobile.
 
 **Notifications.** The desk shows a toast, once per event, when a thread enters "Needs you" (an approval, a question, a report ready
@@ -572,7 +572,7 @@ The desk pane is a sessions-first overview. All of it is drawn from state the mo
 
 **Cards only, everything folded.** Every block of the pane is a card (one border, one padding, the same fold): the header, Health, the Sessions toolbar, every session (working, waiting, needs you, blocked, done, closed), "show more", More and the actions. There is no loose row. **Everything starts folded**, a session that needs you too: a folded card still shows what matters (title, state chip, `N new`, `N to decide` when approvals or held sends wait). Only your tap unfolds a card; the fold is kept across refreshes in the mod's store, and a new desk session starts folded again. `pane.foldAll` (default true): false brings back the old behaviour that a session card with a decision to take unfolds by itself.
 
-- **Header card:** folded it is ONE line, `lean-agent · today $1.50 · 5h 1% · desk 37k/60k`, with the `N fixes` chip (a tap opens Health) and the **Restart desk** button at its right end. Unfolded it adds the model chip, 7 days' spend, the 5 h window bar with its reset time and the snapshot age, the desk context bar and the version line. **Restart desk is always there**, not only over the limit: one tap, no second confirm; the handover is written first, then the new desk opens (then the old desk is named until you archive it). Your tap ignores the automatic guards (one per 30 minutes, `desk.autoRestartPerDay`); its only limit is a floor of one restart per 60 s: while one runs the card says `restarting…`, and for 60 s after the last one `next restart possible in N s` takes the button's place.
+- **Header card:** folded it is ONE line, `lean-agent · 1.2M tokens · window 1% · desk 37k/60k` (the usage tokens of the current window), with the `N fixes` chip (a tap opens Health) and the **Restart desk** button at its right end. Unfolded it adds the model chip, `window 1.2M tokens (1%) · 7d 65%`, the 5 h window bar with its reset time and the snapshot age, the desk context bar and the version line. **Restart desk is always there**, not only over the limit: one tap, no second confirm; the handover is written first, then the new desk opens (then the old desk is named until you archive it). Your tap ignores the automatic guards (one per 30 minutes, `desk.autoRestartPerDay`); its only limit is a floor of one restart per 60 s: while one runs the card says `restarting…`, and for 60 s after the last one `next restart possible in N s` takes the button's place.
 - **Desk limit:** `desk.contextLimit` is **200000** tokens (it was 60000 in 1.0.31 and 1.0.32, which a desk that routes many threads passed at once; thread limits are unchanged, 120000). It is never more than **90 % of the model's real context window** when the engine reports it (`$.session.usage().context.window`): a 200k setting on a 200k window restarts at 180k, and the doctor says so: `desk limit 200k (window 200k: effective 180k)`. From 80 % of the limit the handover is written and Health says "restart the desk"; from 95 % the mod restarts it itself (the guards above apply to that automatic restart only).
 - **Health card** (folded on startup): everything that is a warning, a finding or a fix, in one place. Folded it is one line, `Health: 2 findings`, with an amber border (red only for a real failure); when nothing needs a fix it is grey and quiet, `Health: all good`. Unfolded it has three groups, one line each with its own Dismiss or action button: *Needs a fix* (the doctor's findings with Run fix, the desk restart prompt, notices such as the old desk that is not archived, a script waiting for Adopt / Reject, the desk's own model request, MCP servers that need a value, unread messages from senders without a thread), *Standing approvals* (your written and standing approvals, the threads you let edit their worktree, and the own-PR lines "t5 owns PR 4321 ..." with a Revoke button: these are information, not errors) and *Info* (the other doctor lines, the "N dismissed" list with show). `pane.healthOpen` (true) starts it unfolded; a missing setup or a failed load is never folded (the pane is never blank).
 - **Sessions toolbar card:** folded it is its title, `Sessions (46) · 92 unread · sorted by last active`, and **ack all**. Unfolded it has the sort chips `last active`, `needs you first` (what waits for you on top, each group by last activity), `cost`, `name` and, with two or more finished threads, Close all done. The choice is remembered in the mod's store and in config `pane.sort`.
@@ -663,8 +663,8 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `review.lessonMax` | review | number >= 1 | 1500 | now | Most review lessons kept per project. |
 | `review.contextLines` | review | number >= 0 <= 20 | 0 | now | Lines of context around a changed hunk that still count as part of the change (0 to 20). |
 | `review.maxFiles` (sensitive) | review | number >= 1 | 150 | now | Most files a review range may hold before prepare asks you to confirm it (a wrong range is the usual cause). |
-| `review.askAboveUsd` (sensitive) | review | number >= 0 <= 1000 | 5 | now | A review expected to cost more than this (USD) is not started until you said yes (0 = never ask). |
-| `review.maxUsd` (sensitive) | review | number >= 0 <= 10000 | 25 | now | A review expected to cost more than this (USD) is refused unless you say yes anyway (0 = no limit). |
+| `review.askAboveTokens` (sensitive) | review | number >= 0 <= 1000000000000 | 2000000 | now | A review expected to use more than this many usage tokens (areas x passes x the average of your earlier reviewer runs) is not started until you said yes (0 = never ask). |
+| `review.maxTokens` (sensitive) | review | number >= 0 <= 1000000000000 | 10000000 | now | A review expected to use more than this many usage tokens is refused unless you say yes anyway (0 = no limit). |
 | `review.preflight` (sensitive) | review | boolean | true | now | Before any reviewer starts, compare the prepared file count with the forge's own count for the PR. |
 | `review.preflightMinFiles` | review | number >= 1 <= 100000 | 20 | now | The forge count check never stops a review of at most this many prepared files. |
 | `review.preflightRatio` | review | number >= 1 <= 100 | 3 | now | Prepared files above this many times the forge's count stop the review as a wrong range. |
@@ -674,21 +674,18 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `rulesPr.minDays` | review | number >= 1 | 7 | now | Days a learned rule must have been in use before it is proposed upstream. |
 | `rulesPr.minGaps` | review | number >= 1 | 2 | now | Reports of a missing piece of context before it is proposed as a rule. |
 | `rulesPr.windowDays` | review | number >= 1 | 90 | now | Days back that rule loads and reports are counted. |
-| `threads.softUsd` | budget | number >= 0 <= 10000 | 8 | now | Per-thread budget in USD from the ledger: one nudge at 80%, a desk notice at 100% (raise / park / continue); the thread goes on (0 = off; lean_thread budget tN overrides it). |
-| `threads.hardUsd` | budget | number >= 0 <= 10000 | none | now | Per-thread hard cap in USD from the ledger: the thread is told to report and stop, and its new Agent calls are refused (none by default; 0 = none). |
-| `budget.daily` | budget | number >= 0 | 25 | now | Daily spend in USD at which the desk is warned (0 = no alert). |
-| `budget.threadDaily` | budget | number >= 0 | 15 | now | Daily spend of one thread in USD at which the desk is warned (0 = no alert). |
-| `dailyCapUsd.desk` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for desk sessions; past it requests are refused (none by default). |
-| `dailyCapUsd.thread` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for thread sessions; past it requests are refused (none by default). |
-| `dailyCapUsd.plain` (sensitive) | budget | number >= 0.01 | none | now | Daily USD cap for plain sessions; past it requests are refused (none by default). |
-| `workerCapUsd` (sensitive) | budget | number >= 0.01 | none | now | USD one worker may spend before it ends and reports (none by default). |
-| `workerCaps` (sensitive) | budget | json | none | now | USD cap per worker kind, e.g. {"worker-opus": 4}. |
+| `threads.softTokens` | budget | number >= 0 <= 1000000000000 | none | now | Optional per-thread budget in usage tokens (its own sessions only): a nudge at 80%, a desk notice at 100%, the thread goes on (none by default; 0 = none; lean_thread budget tN overrides). |
+| `threads.hardTokens` | budget | number >= 0 <= 1000000000000 | none | now | Optional per-thread hard cap in usage tokens (its own sessions only): the thread is told to report and stop, its new Agent calls are refused (none by default; 0 = none). |
+| `budget.windowTokens` | budget | number >= 1 <= 1000000000000 | none | now | Optional cap in usage tokens per current 5 h window: at it all new work is held until the window resets (none by default; the window.* percentages are the main control). |
+| `budget.allTimeTokens` | budget | number >= 1 <= 1000000000000 | none | now | Optional cap in usage tokens since budget.since: at it all new work is held until you raise it or start again (none by default). |
+| `budget.since` | budget | string | none | now | Where the all-time usage starts: a day (2026-11-25) or a moment; "today" starts again now (default: the first usage lean-agent has). |
+| `budget.weights` | budget | json | none | now | The factors of a usage token: {"input": 1, "cacheWrite": 1.25, "cacheRead": 0.1, "output": 5} (a missing factor keeps its default). |
 | `window.throttleAbove` | budget | number >= 1 <= 100 | 70 | now | Percent of the 5 h window above which new agents run on haiku and low-priority threads wait (100 = off). |
 | `window.blockAbove` | budget | number >= 1 <= 100 | 92 | now | Percent of the 5 h window above which no new thread or reviewer starts (priority urgent excepted). |
 | `window.capFiveHourPct` | budget | number >= 1 <= 100 | none | now | Your own cap in percent of the 5 h window: at it all new work is held until the window resets (none by default). |
 | `window.holdAbove` | budget | number >= 1 <= 100 | 85 | now | Percent of the usage window above which starting a thread warns and holds. |
 | `pane.theme` | pane | on / off | off | desk restart | Give the app lean-agent's own look (on) or leave it alone (off). |
-| `pane.sort` | pane | active / needs / cost / name | active | now | How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), cost or name. The pane's sort chips set it. |
+| `pane.sort` | pane | active / needs / usage / name | active | now | How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), usage (most usage tokens first; "cost" is the old name) or name. The pane's sort chips set it. |
 | `pane.maxSessions` | pane | number >= 5 <= 500 | 30 | now | Sessions the desk pane lists before one "show more" row (a session with an unread message or something waiting for you is always listed). |
 | `pane.foldAll` | pane | boolean | true | now | Every card of the desk pane starts folded, a session that needs you too (true); false unfolds a session card with a decision to take (Approve / Deny, a held send) by itself. |
 | `pane.healthOpen` | pane | boolean | false | now | Start the pane's Health card (findings, fixes, standing approvals) unfolded (true); by default it starts folded and is highlighted when something needs a fix. |
@@ -718,6 +715,7 @@ The value is checked against one table (`hooks/configkeys.ts`): the type (true /
 | `actions.standing` (sensitive) | safety | json | [] | now | Standing approvals: a list of {project, kinds, statuses} that need no question. |
 | `private` (sensitive) | safety | on / off | on | now | Private projects: on keeps them hidden from lists, off shows them. |
 | `tools.plain.drop` | other | list | [] | next session | Tool names (globs allowed) taken away from plain sessions that are not the desk or a thread. |
+| `stats.showUsd` | other | boolean | false | now | Add one line to lean_doctor stats with the estimated cost at API list prices (off: tokens only). |
 | `toolResultChars` | other | number >= 2000 (0 = off) | 20000 | now | Largest tool result kept whole, in characters (0 = no cut). |
 | `refusals.repeat` | other | number >= 2 | 3 | now | How often one refusal pattern repeats before the doctor names it. |
 <!-- config-table:end -->
@@ -818,7 +816,7 @@ refusal is a card to approve or deny). An approval is signed (HMAC, the review k
 and ONE model family, ends when the thread closes and after 24 h at most, and is logged in the thread's `history.jsonl` with the time and
 what was approved. A desk the app started on an expensive model is switched to sonnet / high at start; when that cannot be done a red
 "Needs you" row says so. Your own `/model` or the app's menu is your choice and is never blocked. `lean_doctor stats` shows the opus
-share of the window's spend with the threads on it, and `check` has a FIX row when opus is over 40 % of the last 7 days' spend.
+share of the window's usage tokens with the threads on it, and `check` has a FIX row when opus is over 40 % of the last 7 days' usage tokens.
 
 A worker's last line is `LEAN-FEEDBACK {...}`: `missing` context becomes an entry in the project's `gaps.jsonl` (three
 for one area mark its rules stale) and `remember` items go to shared memory. A long Bash result is squeezed (head, tail
@@ -1017,8 +1015,8 @@ correctness, behaviour and reuse, for an intermediate checkpoint, and **never re
 (every pass, two runs for a high-risk diff, the record the push gate needs) and is asked for only right before the thread says "ready
 to push". The level a sha was prepared at is kept in the mod's own store, so a light pass cannot be recorded green by leaving the level
 out of the record call; a full review never takes a light pass for "the last reviewed sha". `prepare` also prints
-`expected review cost ~$1.20 (2 passes, sonnet; median of 5 earlier reviewer passes on this project)`: the median cost of this
-project's earlier reviewer passes in the usage ledger, else a stated default of $1.50 a pass. It carries the thread's own registered
+`expected review usage ~1.2M tokens (2 passes, sonnet; median of 5 earlier reviewer passes on this project)`: the median usage tokens of this
+project's earlier reviewer passes in the usage ledger, else a stated default of 500k tokens a pass. It carries the thread's own registered
 worktree (every reviewer command is `git -C <worktree> ...`) and the `allow-cmd:` line for it. **Generated files are left out** of the
 file lists, the risk, the line count and the diff the reviewer reads (it gets `':(exclude,literal)path'` pathspecs for them; a change that edits `.gitattributes` cannot mark its own files, and `record` reads the same worktree `prepare` did): files marked
 `linguist-generated` in `.gitattributes`, `*.snap`, paths under `golden` / `fixtures` / `__snapshots__`, lockfiles (`package-lock.json`,
@@ -1134,12 +1132,12 @@ Not tested live: a real Azure DevOps WIQL query and `connectionData` / `createdB
 
 ## Budget and window awareness (1.0.31)
 
-Caps used to be dollars per day only: the 5-hour plan window could be 47 % used while every cap said "no cap". Everything below is script-side; no thread-tool parameter was added. All keys are in the settings table (nested or flat).
+Caps used to be dollars per day only (in 1.0.34 they became usage tokens, see Budgets): the 5-hour plan window could be 47 % used while every cap said "no cap". Everything below is script-side; no thread-tool parameter was added. All keys are in the settings table (nested or flat).
 
-- **Review: wrong range and cost, before any reviewer starts.** `lean_review prepare` compares the prepared file count with the forge's own count (GitHub `pulls/<n>/files`, Azure DevOps the iteration changes): more than max(`review.preflightMinFiles` 20, `review.preflightRatio` 3 x forge files) stops it ("prepared 380 files, the forge lists 12: wrong range; not starting reviewers"); an unreadable forge never blocks (`review.preflight`). `prepare` prints "3 areas x 1 pass ~ $4.50 (from your last 5 review runs)" (the ledger's median, else $1.50 a pass). Above `review.askAboveUsd` (5) it does not start: the thread asks you with `lean_ask` and runs `prepare` again with `confirm: true` only after your yes; above `review.maxUsd` (25) it refuses unless you say yes anyway.
+- **Review: wrong range and cost, before any reviewer starts.** `lean_review prepare` compares the prepared file count with the forge's own count (GitHub `pulls/<n>/files`, Azure DevOps the iteration changes): more than max(`review.preflightMinFiles` 20, `review.preflightRatio` 3 x forge files) stops it ("prepared 380 files, the forge lists 12: wrong range; not starting reviewers"); an unreadable forge never blocks (`review.preflight`). `prepare` prints "3 areas x 1 pass ~ 1.5M usage tokens (from your last 5 review runs)" (the median of your earlier reviewer passes in the ledger, else 500k a pass; weighted usage tokens since 1.0.34, `LEAN-REVIEW-PREP` carries `expectedTokens`). Above `review.askAboveTokens` (2M) it does not start: the thread asks you with `lean_ask` and runs `prepare` again with `confirm: true` only after your yes; above `review.maxTokens` (10M) it refuses unless you say yes anyway.
 - **The 5-hour window** (read from `desk/windows.json`; a window past its reset counts as unmeasured). Over `window.throttleAbove` (70): agents run on haiku only (the guard refuses another model), a new thread with `priority: low` is refused, low-priority threads are parked by script and resumed when the window drops or resets, one desk notice each way; raise the key (100 = off) to lift it. Over `window.blockAbove` (92): no new thread, agent fan-out or reviewer except priority urgent. At your own `window.capFiveHourPct` all new work is held and the desk says when the window resets. `lean_thread list` starts with the window line; `lean_doctor stats` adds it.
 - **Context per thread.** `lean_thread limit tN <tokens>` (40k to 200k, `off` removes it) sets one thread's hard limit, kept over restarts, and the soft line moves with it. A thread over `threads.softCheckpointTokens` (80000, was 100k) is told once to checkpoint at its next natural boundary; an idle one with work left is checkpointed by script. The list shows "ctx 85k/120k (soft 80k)".
-- **Budget per thread.** `lean_thread budget tN <usd>` (0 = none, `off` = `threads.softUsd`, default 8). At 80 % one nudge and one desk notice; at 100 % one desk notice (raise, park or continue) and the thread goes on. Only the hard cap `threads.hardUsd` (none by default) tells a thread to report and stop and refuses its new agent calls. The list shows "$6.40/$8".
+- **Budget per thread** (usage tokens since 1.0.34, none by default). `lean_thread budget tN 2m` (0 = none, `off` = `threads.softTokens`). At 80 % one nudge and one desk notice; at 100 % one desk notice (raise, park or continue) and the thread goes on. Only the hard cap `threads.hardTokens` (none by default) tells a thread to report and stop and refuses its new agent calls. The list shows "6.4k/8k tokens". The figure is the thread's own usage only.
 - **The desk** restarts at `desk.contextLimit` tokens (200000 since 1.0.33; 60000 in 1.0.31 and 1.0.32, `deskTokens` 100000 before; never more than 90 % of the model window). Its handover holds the open items, a one-line-per-thread table and an index of what to pull (1789 to 804 tokens in the spec fixture; `handover.mode: full` brings the old one back). Automatic desk restarts keep the 30-minute gap and are capped at `desk.autoRestartPerDay` (default 12; the old fixed cap of 4 would be hit in a day by the lower limit); past it only the Restart desk button works.
 
 Not tested live: real `rateLimits` from a plan, a real Azure DevOps or GitHub PR through the pre-flight, the guard's window rule inside a real Agent call, and the saving itself (synthetic fixture; run `lean_doctor overhead` after a day).
@@ -1152,9 +1150,9 @@ A thread's own session is its biggest cost: every turn re-reads the whole contex
 
 **Effort by role.** With `lean.orchestrate` on, a thread that only briefs workers defaults to effort medium; `threads.effort` and `effort:` on `lean_thread new` still win, and `high` is for design and refactoring work the desk names. Fresh starts, restarts and auto restarts follow one rule (an effort a call named is kept, a recorded default is recomputed), and the start reply names the effort. Worker agents keep their own effort (medium for sonnet workers, low for haiku).
 
-**A cheaper reviewer.** `maxTurns: 12`, the tool-call budget of a `check` job (`workers.stepsByJob.check`), per-file added/removed line counts handed over by script with "read each changed file once, diff hunks only", a re-review that reads only the diff since the last reviewed sha (light and full), a JSON-only answer with at most 12 findings (`path:line`). Every `lean_review` reply ends with "review cost for <sha>: $ over N passes, M requests", and "expected ~$X" is the median of earlier passes of the same level in the project.
+**A cheaper reviewer.** `maxTurns: 12`, the tool-call budget of a `check` job (`workers.stepsByJob.check`), per-file added/removed line counts handed over by script with "read each changed file once, diff hunks only", a re-review that reads only the diff since the last reviewed sha (light and full), a JSON-only answer with at most 12 findings (`path:line`). Every `lean_review` reply ends with "review usage for <sha>: 410k tokens over N passes, M requests" (dollars until 1.0.33), and the expected usage is the median of earlier passes of the same level in the project.
 
-**Cost per tier and job.** `lean_doctor stats` has a section "by worker tier and job" (runs, requests, cost, cost per run, second tries, step budget hits per agent type and job type), "thread main session" (requests, average context, cost) and an estimate of what the sonnet edit runs would have cost on haiku. The thread pane shows "main $a · workers $b · reviews $c"; the card turns amber at `budget.threadDaily` (default $15 now). When a project has a good haiku record for a job type (at least 5 successful runs, at least 80%), the `why-sonnet` refusal says so.
+**Cost per tier and job.** `lean_doctor stats` has a section "by worker tier and job" (runs, requests, usage tokens, tokens per run, second tries, step budget hits per agent type and job type) and "thread main session" (requests, average context, usage tokens); 1.0.27 to 1.0.33 also priced them in dollars and estimated what the sonnet edit runs would have cost on haiku, which 1.0.34 dropped (a usage token weighs the same on every model). The thread pane shows "main 20k · workers 16k · reviews 12k"; the card turns amber when the thread is over its soft budget (`threads.softTokens`, none by default). When a project has a good haiku record for a job type (at least 5 successful runs, at least 80%), the `why-sonnet` refusal says so.
 
 ### Savings
 
@@ -1164,29 +1162,34 @@ What each part can save, in words (the section "by worker tier and job" and the 
 - **Effort medium for orchestrating threads** lowers the thinking the thread's own session does on every turn, where its job is only to brief, wait and check.
 - **The cheaper reviewer** cuts the reviewer's exploration (the budget and the per-file counts), and its re-reads of what did not change.
 - **Per-tier cost and the haiku record** save nothing by themselves: they show which edit jobs sonnet ran that haiku had already done well in the project, so the next brief can start on haiku.
-- **The lower thread alert** warns earlier, before a thread's day gets expensive.
+- **The soft thread budget** (an optional token budget since 1.0.34) warns before a thread's usage gets big.
 
-## Budgets
+## Budgets: usage tokens (1.0.34)
 
-Cost-only, from the per-request usage the mod sees. `~/.lean-agent/config.json`:
+lean-agent counts in **usage tokens**, not dollars: on a plan the limits are the 5 h and the 7 d windows. One usage token is input-equivalent and weighted,
+`input + 1.25 x cache write + 0.1 x cache read + 5 x output` (`budget.weights` {input, cacheWrite, cacheRead, output} moves the factors), from the per-request usage the mod sees; every request is a row
+in `ledger.jsonl` and the raw sums are kept next to the weighted ones ("raw" in `lean_doctor stats`). Numbers show as `950`, `48k`, `2.1M` and are labelled "tokens". `~/.lean-agent/config.json`:
 
 ```json
-{ "dailyCapUsd": { "desk": 5, "thread": 20 }, "workerCapUsd": 2, "workerCaps": { "lean-agent:worker-opus": 4 } }
+{ "budget": { "windowTokens": 5000000 }, "threads": { "softTokens": 2000000 } }
 ```
+
+Two scopes:
+
+- **The current window.** Tokens used since the window started: the reset time the engine reports (the snapshot the pane shows, `desk/windows.json`) minus 5 h, with the percentage the engine reports next to it; a rolling 5 h when no window is known (a snapshot past its reset counts as unknown). The pane header says `window 1.2M tokens (1%) · 7d 65%` (folded: `1.2M tokens` next to the window percentage), a thread card `window 48k tokens (reviews 12k, restarts 3k)`; `pane.sort usage` orders by it (`cost` still works as the old name).
+- **All time.** Tokens since `budget.since` (a day or a moment; default the first usage lean-agent has). `lean_doctor budget-reset` or `lean_config set budget.since today` starts again from now. The rollup keeps 120 days per day and the older days as one total, which counts when the start is on or before it.
+
+`lean_doctor stats` shows both per desk, per thread, per kind (main, reviewers, workers, readers) and per role, model and agent. **A thread's figure is its own**: the rows of that thread's sessions (its restarts and its subagents) from its creation on, never the desk's, never another thread's, and never an earlier thread that had the same number (numbers are handed out once).
+
+The window percentages are the main control (`window.throttleAbove`, `window.blockAbove`, `window.capFiveHourPct`, see below). The token caps are **optional extras, all off by default**: `budget.windowTokens` (per current window) and `budget.allTimeTokens` (since `budget.since`) hold all new work at the cap (a desk notice and a toast at 80 % and 100 %); `threads.softTokens` (one nudge at 80 %, one desk notice at 100 %, the thread goes on; `lean_thread budget tN 2m` sets one thread's own); `threads.hardTokens` (a real stop: told to report and stop, new Agent calls refused); `review.askAboveTokens` (2M) and `review.maxTokens` (10M) for the size of a review. No request is refused for a budget.
+
+**Old dollar keys** (`budget.daily`, `budget.threadDaily`, `dailyCapUsd.*`, `workerCapUsd`, `workerCaps`, `threads.softUsd`, `threads.hardUsd`, `review.askAboveUsd`, `review.maxUsd`) are no longer used and enforce nothing; `lean_config validate` says "no longer used: replaced by budget.windowTokens ..." and `lean_config unset <key>` removes them. Nothing is converted. The only dollar figure left is one optional line of `lean_doctor stats`, "estimated cost (API list prices)", behind `stats.showUsd` (off).
 
 Desk reports: while the desk is idle, a thread's question or `done` / `blocked` report starts one desk turn (at most once a minute);
 `{ "desk": { "autoRelay": false } }` in the same file turns that off, and reports then wait for your next message.
 
-Past a cap the next model request is refused with a notice; a worker past its cap ends and reports what is left. Every
-step is a row in `ledger.jsonl`. There is no plan-window percentage (no verified source exists).
-
-**Alerts by default** (they warn, they never refuse a request): `{ "budget": { "daily": 25, "threadDaily": 15 } }` (USD; both are
-the defaults, `"off"` turns one off). The desk gets a notice (the pane lists it) and a toast when the day's spend reaches 50% and 80% of
-`budget.daily`, once per day per level, with today's spend, the top 3 threads by cost and their models; and when one thread passes
-`budget.threadDaily` (once a day per thread). The goals chaser also asks a stale thread that is over `threadDaily` what the spend bought.
-A thread's cost today is on its pane card (`ThreadRow.cost`); `threadCostsToday` in `stats.ts` adds its model and whether it is over the alert.
-Doctor counts "the desk spent $X on opus today" only from the moment lean-agent pinned the model (earlier spend is a note), and shows
-"opus is N% of spend" as a FIX only while a thread is on opus now (then naming only those threads), otherwise as a note.
+Doctor counts "the desk used N tokens on opus today" only from the moment lean-agent pinned the model (earlier use is a note), and shows
+"opus is N% of usage tokens" as a FIX only while a thread is on opus now (then naming only those threads), otherwise as a note.
 
 ## Context size
 
@@ -1473,7 +1476,7 @@ Everything is plain JSON or JSONL under `~/.lean-agent` (one folder, resolved fr
 | `<project>/rules`, `skills`, `gaps.jsonl`, `reviews/`, `learn.json` | per-project learning and reviews |
 | `scripts/candidates/<name>/`, `scripts/<name>/`, `<project>/scripts/<name>/`, `scripts/uses.jsonl`, `decisions.jsonl` | proposed and adopted scripts (script, `meta.json`, recipe `SKILL.md`), their uses and the user's overrides |
 | `memory/`, `todo.json`, `worktrees.json`, `handovers/` | shared notes and lists |
-| `config.json`, `ledger.jsonl` | caps and spend |
+| `config.json`, `ledger.jsonl` | settings and usage |
 | `bin/open-desk.sh`, `logs/opener.log`, `migrated-1.0.json`, `legacy-0.45/` | opener, its log, migration marker and archive |
 | `mcp-env.json` (user-only, `chmod 600`), `mcp-env-import.json` | MCP variables a thread gets from a command or a value; what the 0.45 import did (names only) |
 

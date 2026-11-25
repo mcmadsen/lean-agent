@@ -35,6 +35,7 @@ import { cancelHeld, sendHeldNow } from './sendhold'
 import { revokeOwn, revokeWrites } from './deskwrites'
 import { SORTS, SORT_LABEL, ageText, capItems, itemsOf, paneConfig, saveSort, sortItems } from './panelist'
 import type { Item, SortKey } from './panelist'
+import { closedText, deskText, foldedText, headerText } from './formatusage'
 import { healthSummary } from './panehealth'
 import { setNotice } from './notices'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
@@ -177,7 +178,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Text bold>lean-agent</Text>
           <Text color={stuck ? 'error' : 'success'}>{`${working} running · ${stuck} blocked`}</Text>
           <Text color={needN ? 'warning' : undefined} dimColor={!needN}>{`${needN} need${needN === 1 ? 's' : ''} you`}</Text>
-          <Text dimColor>{`desk context ${dpct} · today ${v?.spend ? `$${v.spend.today.toFixed(2)}` : 'n/a'}`}</Text>
+          <Text dimColor>{`desk context ${dpct} · ${deskText(v?.spend)}`}</Text>
           {errors.length > 0 && <Text color="error">{`error: ${short(errors[0]!, 60)}`}</Text>}
         </Box>
       )
@@ -927,7 +928,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Text>
       ) : null
       const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
-      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `${t.costBadge} today`}</Text> : t.cost > 0 ? <Text dimColor>{`$${t.cost.toFixed(2)} today`}</Text> : null
+      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `window ${t.costBadge} tokens`}</Text> : t.cost > 0 ? <Text dimColor>{closedText(t.cost)}</Text> : null
       const age = <Text dimColor>{ageText(t.activity ?? t.recTs, now2)}</Text>
       const openBtn = <Button key={`view-${t.id}`} label="Open" onPress={openPaneOne(t.id)} />
       const resumeBtn = t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />
@@ -1006,7 +1007,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>,
         ],
         chipLen: 'closed'.length + 2,
-        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{`$${c.cost.toFixed(2)} today`}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
+        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{closedText(c.cost)}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
         primary: <Button key={`view-${c.id}`} label="Open" onPress={openPaneOne(c.id)} />,
         dim: true,
         details: open ? (
@@ -1168,7 +1169,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const lastErrorShown = !!lastError && !errors.includes(lastError) && notice !== lastError
     const headerOpen = isOpen(ui, 'header', false)
     const winShown = !!v?.window && (!winGone || showHidden)
-    const foldedBits = ['lean-agent', v?.spend ? `today $${v.spend.today.toFixed(2)}` : 'budget n/a', winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '', ctx > 0 && limit > 0 ? `desk ${kTokens(ctx)}/${kTokens(limit)}` : ''].filter(Boolean)
+    const foldedBits = ['lean-agent', foldedText(v?.spend), winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '', ctx > 0 && limit > 0 ? `desk ${kTokens(ctx)}/${kTokens(limit)}` : ''].filter(Boolean)
     // Restart desk: always here (1.0.33), one tap (no second confirm), the same restart path as the automatic one (handover first, then the new desk). While a restart runs, or
     // for 60 s after the last one, a dim line says so instead of the button (the 30 min gap and the per-day count are for AUTOMATIC restarts only).
     const restarting = restartingNow()
@@ -1195,7 +1196,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 </Text>
               )}
               <Text key="budget" dimColor>
-                {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
+                {headerText(v?.spend)}
               </Text>
             </Box>
             {restartCtl}

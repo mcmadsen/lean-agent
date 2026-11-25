@@ -21,6 +21,7 @@ export type Entry = {
   int?: boolean // whole numbers only
   zero?: boolean // 0 is allowed although below min (it means off)
   values?: readonly string[] // enum
+  valueAliases?: Record<string, string> // enum: an older value the reader still accepts, and the value it stands for
   special?: readonly string[] // list: a single word that stands for the whole (e.g. all)
   shape?: 'array' | 'object' // json
   aliases?: readonly string[] // other spellings the reader accepts
@@ -70,9 +71,9 @@ export const REGISTRY: readonly Entry[] = [
   mk('threads.requireReport', 'boolean', true, 'threads', 'now', ['endnudge.ts', 'continuepending.ts'], 'A thread whose brief asks for ONE action that ends its turn without lean_report is nudged at once with the whole report rule (a mod cannot refuse a Stop).'),
   mk('threads.idleAlertMinutes', 'number', 10, 'threads', 'now', ['threadstate.ts', 'stall.ts'], 'Minutes a thread may be idle without a report before the desk gets one notice (0 = off).', n(0)),
   mk('threads.softCheckpointTokens', 'number', 80000, 'threads', 'next-session', ['threadcontext.ts', 'budgetcfg.ts'], 'A work thread this big is told once to checkpoint at its next boundary (an idle one is checkpointed by script).', { min: 20000, max: 400000, int: true, flat: true }),
-  mk('threads.softUsd', 'number', 8, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts'], 'Per-thread budget in USD from the ledger: one nudge at 80%, a desk notice at 100% (raise / park / continue); the thread goes on (0 = off; lean_thread budget tN overrides it).', { min: 0, max: 10000, flat: true }),
+  mk('threads.softTokens', 'number', null, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts'], 'Optional per-thread budget in usage tokens (its own sessions only): a nudge at 80%, a desk notice at 100%, the thread goes on (none by default; 0 = none; lean_thread budget tN overrides).', { min: 0, max: 1e12, flat: true }),
   mk('tasks.splitHintTokens', 'number', 60000, 'threads', 'now', ['briefsize.ts', 'budgetcfg.ts'], 'The "split this task" hint for a big brief appears only when the files it names add up to at least this many tokens (bytes / 4); no hint when it names no files (0 = no floor).', { min: 0, max: 10000000, int: true, flat: true }),
-  mk('threads.hardUsd', 'number', null, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts', 'budgettick.ts', 'guard.ts'], 'Per-thread hard cap in USD from the ledger: the thread is told to report and stop, and its new Agent calls are refused (none by default; 0 = none).', { min: 0, max: 10000, flat: true }),
+  mk('threads.hardTokens', 'number', null, 'budget', 'now', ['budgetthread.ts', 'budgetcfg.ts', 'budgettick.ts', 'guard.ts'], 'Optional per-thread hard cap in usage tokens (its own sessions only): the thread is told to report and stop, its new Agent calls are refused (none by default; 0 = none).', { min: 0, max: 1e12, flat: true }),
   mk('workitems.afterPr', 'enum', 'ask', 'threads', 'now', 'workitemflow.ts', 'After a PR is opened the mod asks for one Approve to link it to the thread\'s work item and set it to Reviewing (off: never).', { values: ['ask', 'off'], flat: true }),
   mk('workitems.reviewState', 'string', 'Reviewing', 'threads', 'now', 'workitemflow.ts', 'The work item state that request sets after a PR is opened.', { flat: true }),
   mk('workitems.onlyOwn', 'boolean', true, 'safety', 'now', ['owntask.ts', 'workitemflow.ts'], 'Link and move only a work item assigned to you for a PR you created (off: any work item the thread has).', { flat: true, ...S }),
@@ -121,8 +122,8 @@ export const REGISTRY: readonly Entry[] = [
   mk('review.lessonMax', 'number', 1500, 'review', 'now', 'reviewlessons.ts', 'Most review lessons kept per project.', n(1, { int: true })),
   mk('review.contextLines', 'number', 0, 'review', 'now', 'reviewtool.ts', 'Lines of context around a changed hunk that still count as part of the change (0 to 20).', { min: 0, max: 20, int: true }),
   mk('review.maxFiles', 'number', 150, 'review', 'now', 'reviewtool.ts', 'Most files a review range may hold before prepare asks you to confirm it (a wrong range is the usual cause).', n(1, { int: true, ...S })),
-  mk('review.askAboveUsd', 'number', 5, 'review', 'now', 'budgetcfg.ts', 'A review expected to cost more than this (USD) is not started until you said yes (0 = never ask).', { min: 0, max: 1000, flat: true, ...S }),
-  mk('review.maxUsd', 'number', 25, 'review', 'now', 'budgetcfg.ts', 'A review expected to cost more than this (USD) is refused unless you say yes anyway (0 = no limit).', { min: 0, max: 10000, flat: true, ...S }),
+  mk('review.askAboveTokens', 'number', 2000000, 'review', 'now', 'budgetcfg.ts', 'A review expected to use more than this many usage tokens (areas x passes x the average of your earlier reviewer runs) is not started until you said yes (0 = never ask).', { min: 0, max: 1e12, flat: true, ...S }),
+  mk('review.maxTokens', 'number', 10000000, 'review', 'now', 'budgetcfg.ts', 'A review expected to use more than this many usage tokens is refused unless you say yes anyway (0 = no limit).', { min: 0, max: 1e12, flat: true, ...S }),
   mk('review.preflight', 'boolean', true, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'Before any reviewer starts, compare the prepared file count with the forge\'s own count for the PR.', { flat: true, ...S }),
   mk('review.preflightMinFiles', 'number', 20, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'The forge count check never stops a review of at most this many prepared files.', { min: 1, max: 100000, int: true, flat: true }),
   mk('review.preflightRatio', 'number', 3, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'Prepared files above this many times the forge\'s count stop the review as a wrong range.', { min: 1, max: 100, flat: true }),
@@ -133,13 +134,12 @@ export const REGISTRY: readonly Entry[] = [
   mk('rulesPr.minGaps', 'number', 2, 'review', 'now', 'rulespr.ts', 'Reports of a missing piece of context before it is proposed as a rule.', n(1, { int: true })),
   mk('rulesPr.windowDays', 'number', 90, 'review', 'now', 'rulespr.ts', 'Days back that rule loads and reports are counted.', n(1, { int: true })),
   // ---- budget ----
-  mk('budget.daily', 'number', 25, 'budget', 'now', 'budget.ts', 'Daily spend in USD at which the desk is warned (0 = no alert).', n(0)),
-  mk('budget.threadDaily', 'number', 15, 'budget', 'now', 'budget.ts', 'Daily spend of one thread in USD at which the desk is warned (0 = no alert).', n(0)),
-  mk('dailyCapUsd.desk', 'number', null, 'budget', 'now', ['budget.ts', 'stats.ts'], 'Daily USD cap for desk sessions; past it requests are refused (none by default).', n(0.01, S)),
-  mk('dailyCapUsd.thread', 'number', null, 'budget', 'now', ['budget.ts', 'stats.ts'], 'Daily USD cap for thread sessions; past it requests are refused (none by default).', n(0.01, S)),
-  mk('dailyCapUsd.plain', 'number', null, 'budget', 'now', ['budget.ts', 'stats.ts'], 'Daily USD cap for plain sessions; past it requests are refused (none by default).', n(0.01, S)),
-  mk('workerCapUsd', 'number', null, 'budget', 'now', ['budget.ts', 'stats.ts'], 'USD one worker may spend before it ends and reports (none by default).', n(0.01, S)),
-  mk('workerCaps', 'json', null, 'budget', 'now', 'budget.ts', 'USD cap per worker kind, e.g. {"worker-opus": 4}.', { shape: 'object', ...S }),
+  // Usage tokens (usage.ts): input + 1.25 cache write + 0.1 cache read + 5 output. The window.* percentages below are the main control; these caps are optional extras.
+  mk('budget.windowTokens', 'number', null, 'budget', 'now', ['budgetcfg.ts', 'usage.ts'], 'Optional cap in usage tokens per current 5 h window: at it all new work is held until the window resets (none by default; the window.* percentages are the main control).', { min: 1, max: 1e12 }),
+  mk('budget.allTimeTokens', 'number', null, 'budget', 'now', ['budgetcfg.ts', 'usage.ts'], 'Optional cap in usage tokens since budget.since: at it all new work is held until you raise it or start again (none by default).', { min: 1, max: 1e12 }),
+  mk('budget.since', 'string', null, 'budget', 'now', 'usage.ts', 'Where the all-time usage starts: a day (2026-11-25) or a moment; "today" starts again now (default: the first usage lean-agent has).'),
+  mk('budget.weights', 'json', null, 'budget', 'now', 'usage.ts', 'The factors of a usage token: {"input": 1, "cacheWrite": 1.25, "cacheRead": 0.1, "output": 5} (a missing factor keeps its default).', { shape: 'object' }),
+  mk('stats.showUsd', 'boolean', false, 'other', 'now', 'stats.ts', 'Add one line to lean_doctor stats with the estimated cost at API list prices (off: tokens only).'),
   mk('window.throttleAbove', 'number', 70, 'budget', 'now', ['budgetcfg.ts', 'throttle.ts'], 'Percent of the 5 h window above which new agents run on haiku and low-priority threads wait (100 = off).', { min: 1, max: 100, flat: true }),
   mk('window.blockAbove', 'number', 92, 'budget', 'now', ['budgetcfg.ts', 'throttle.ts'], 'Percent of the 5 h window above which no new thread or reviewer starts (priority urgent excepted).', { min: 1, max: 100, flat: true }),
   mk('window.capFiveHourPct', 'number', null, 'budget', 'now', ['budgetcfg.ts', 'throttle.ts'], 'Your own cap in percent of the 5 h window: at it all new work is held until the window resets (none by default).', { min: 1, max: 100, flat: true }),
@@ -148,7 +148,7 @@ export const REGISTRY: readonly Entry[] = [
   mk('refusals.repeat', 'number', 3, 'other', 'now', 'refusals.ts', 'How often one refusal pattern repeats before the doctor names it.', n(2, { int: true })),
   // ---- pane ----
   mk('pane.theme', 'enum', 'off', 'pane', 'desk-restart', 'look.ts', 'Give the app lean-agent\'s own look (on) or leave it alone (off).', { values: ['on', 'off'] }),
-  mk('pane.sort', 'enum', 'active', 'pane', 'now', 'panelist.ts', 'How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), cost or name. The pane\'s sort chips set it.', { values: ['active', 'needs', 'cost', 'name'], flat: true }),
+  mk('pane.sort', 'enum', 'active', 'pane', 'now', 'panelist.ts', 'How the desk pane orders its sessions: active (last activity, newest first), needs (needs you first), usage (most usage tokens first; "cost" is the old name) or name. The pane\'s sort chips set it.', { values: ['active', 'needs', 'usage', 'name'], valueAliases: { cost: 'usage' }, flat: true }),
   mk('pane.maxSessions', 'number', 30, 'pane', 'now', 'panelist.ts', 'Sessions the desk pane lists before one "show more" row (a session with an unread message or something waiting for you is always listed).', { min: 5, max: 500, int: true, flat: true }),
   mk('pane.foldAll', 'boolean', true, 'pane', 'now', 'panelist.ts', 'Every card of the desk pane starts folded, a session that needs you too (true); false unfolds a session card with a decision to take (Approve / Deny, a held send) by itself.', { flat: true }),
   mk('pane.healthOpen', 'boolean', false, 'pane', 'now', 'panelist.ts', 'Start the pane\'s Health card (findings, fixes, standing approvals) unfolded (true); by default it starts folded and is highlighted when something needs a fix.', { flat: true }),
@@ -172,8 +172,34 @@ export const REGISTRY: readonly Entry[] = [
   mk('private', 'enum', 'on', 'safety', 'now', 'projects.ts', 'Private projects: on keeps them hidden from lists, off shows them.', { values: ['on', 'off'], ...S }),
 ]
 
+// ---- keys that are no longer read (1.0.34: every budget is in usage tokens, not USD) ----
+// lean_config validate says "no longer used: ..." (never "unknown"), they enforce nothing, `lean_config unset <key>` removes them. Nothing is converted.
+const TOKENS = 'replaced by budget.windowTokens, budget.allTimeTokens, threads.softTokens, threads.hardTokens, review.askAboveTokens, review.maxTokens (usage tokens; the window.* percentages are the main control)'
+export const DEPRECATED: Record<string, string> = {
+  'budget.daily': TOKENS,
+  'budget.threadDaily': TOKENS,
+  dailyCapUsd: TOKENS, // the object form; the flat spellings are below
+  'dailyCapUsd.desk': TOKENS,
+  'dailyCapUsd.thread': TOKENS,
+  'dailyCapUsd.plain': TOKENS,
+  workerCapUsd: TOKENS,
+  workerCaps: TOKENS,
+  'threads.softUsd': 'replaced by threads.softTokens (usage tokens; no USD is converted)',
+  'threads.hardUsd': 'replaced by threads.hardTokens (usage tokens; no USD is converted)',
+  'review.askAboveUsd': 'replaced by review.askAboveTokens (usage tokens; no USD is converted)',
+  'review.maxUsd': 'replaced by review.maxTokens (usage tokens; no USD is converted)',
+}
+// the deprecated key a spelling is (an exact key, or a part of one: {"dailyCapUsd": {"desk": 5}} is dailyCapUsd.desk)
+export const deprecatedKey = (k: string): string | null => {
+  const key = norm(k)
+  return key in DEPRECATED ? key : null
+}
+export const deprecatedText = (k: string): string => `${k} is no longer used: ${DEPRECATED[k]}`
+
 // ---- lookup, in the spellings the readers accept ----
-const norm = (k: string) => k.trim()
+function norm(k: string): string {
+  return k.trim()
+}
 export const findEntry = (k: string): Entry | undefined => {
   const key = norm(k)
   return REGISTRY.find(e => e.key === key) ?? REGISTRY.find(e => e.aliases?.includes(key))
@@ -233,6 +259,12 @@ export function currentOf(cfg: Cfg, e: Entry): { value: unknown; spelling: strin
 }
 
 // ---- values ----
+// budget.since: a day or a moment (usage.ts parseSince says the same; no imports here, so the shapes are repeated)
+const parseSinceText = (s: string): number | null => {
+  const t = s.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return Number.isFinite(Date.parse(`${t}T00:00:00Z`)) && new Date(`${t}T00:00:00Z`).toISOString().slice(0, 10) === t ? 0 : null
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/.test(t) && Number.isFinite(Date.parse(t)) ? 0 : null
+}
 const SECRET = /\b(ghp_|gho_|ghs_|github_pat_|sk-[A-Za-z0-9_-]{16,}|xox[abp]-|AKIA[0-9A-Z]{12,}|eyJ[A-Za-z0-9_-]{20,})|-----BEGIN [A-Z ]*PRIVATE KEY|(password|secret|token)\s*[=:]\s*\S{6,}/i
 const CTRL = /[\u0000-\u001f]/
 export type Checked = { ok: true; value: unknown } | { ok: false; why: string }
@@ -244,8 +276,6 @@ export function checkValue(e: Entry, v: unknown): Checked {
     case 'boolean':
       return typeof v === 'boolean' ? { ok: true, value: v } : bad('must be true or false')
     case 'number': {
-      // the alert limits are read by budget.ts limitOf: "off" / "none" / false / a negative is none, a numeric string is the number (the 1.0.30 README documents "off")
-      if ((e.key === 'budget.daily' || e.key === 'budget.threadDaily') && (v === false || (typeof v === 'string' && (/^\s*(off|none|false|no)\s*$/i.test(v) || (v.trim() !== '' && Number.isFinite(Number(v))))) || (typeof v === 'number' && v < 0))) return { ok: true, value: v }
       if (typeof v !== 'number' || !Number.isFinite(v)) return bad('must be a number')
       if (e.int && !Number.isInteger(v)) return bad('must be a whole number')
       if (e.zero && v === 0) return { ok: true, value: v }
@@ -254,9 +284,11 @@ export function checkValue(e: Entry, v: unknown): Checked {
       return { ok: true, value: v }
     }
     case 'enum':
+      if (typeof v === 'string' && e.valueAliases && Object.prototype.hasOwnProperty.call(e.valueAliases, v)) return { ok: true, value: e.valueAliases[v] } // the old name: stored as the new one
       return typeof v === 'string' && e.values!.includes(v) ? { ok: true, value: v } : bad(`must be one of ${e.values!.join(', ')}`)
     case 'string':
     case 'path': {
+      if (e.key === 'budget.since') return typeof v === 'string' && parseSinceText(v) !== null ? { ok: true, value: v.trim() } : bad('must be a day like 2026-11-25, a moment like 2026-11-25T09:14:00Z, or today')
       if (typeof v !== 'string' || !v.trim() || CTRL.test(v) || v.length > 300) return bad(e.type === 'path' ? 'must be a folder path like ~/Downloads' : 'must be a short text')
       if (SECRET.test(v)) return bad('looks like a secret: lean_config never stores secrets')
       if (e.type === 'path' && !/^(~|\/)/.test(v.trim())) return bad('must be an absolute path or start with ~ (e.g. ~/Downloads)')
@@ -272,7 +304,7 @@ export function checkValue(e: Entry, v: unknown): Checked {
       if (v === false && (e.key === 'pr.checks' || e.key === 'review.prChecks')) return { ok: true, value: v } // false = every check of that side off
       if (e.shape === 'array' ? !Array.isArray(v) : !isObj(v)) return bad(`must be a JSON ${e.shape ?? 'value'}`)
       if (SECRET.test(JSON.stringify(v))) return bad('looks like a secret: lean_config never stores secrets')
-      if (e.key === 'workerCaps' && !Object.values(v as Cfg).every(x => typeof x === 'number' && x > 0)) return bad('must map worker names to a USD number above 0')
+      if (e.key === 'budget.weights' && !Object.entries(v as Cfg).every(([k, x]) => ['input', 'cacheWrite', 'cacheRead', 'output'].includes(k) && typeof x === 'number' && Number.isFinite(x) && x >= 0)) return bad('must be {"input": n, "cacheWrite": n, "cacheRead": n, "output": n} with numbers of at least 0 (any of them)')
       if (e.key === 'actions.standing' && !(v as unknown[]).every(x => isObj(x) && typeof x.project === 'string' && Array.isArray(x.kinds))) return bad('every entry needs a project (text) and kinds (a list)')
       return { ok: true, value: v }
     }

@@ -27,7 +27,8 @@ import type { Truth } from './threadstate'
 import { aliveRow, answered, deliverConfig, deliverToThread, kindOf, watchDelivery } from './deliver-to-thread'
 import { ageText, answerInfo, answerText, duplicateOf, markAnswer, markHanded, messageRecs, messagesText, readUnverified, sendLine, stateWord, unverifiedText } from './msgstate'
 import type { MsgKind } from './deliver-to-thread'
-import { priceOf, readConfig } from './budget'
+import { readConfig } from './budget'
+import { fmtTokens } from './formatusage'
 import { installedVersion, runningOf, threadSkew } from './skew'
 import { LIMIT_PROMPT, isLimitRow, readLimit, usable } from './limits'
 import { doneSession, finishedText } from './finish'
@@ -51,7 +52,7 @@ import { ctxOf, decide, keepText, notKeepText, overText, readContext, resumedTex
 import { askText, findText, reportText } from './threadask'
 import { holdWarning } from './windows'
 import { newWorkGate, priorityOf, threadPriority, throttleLine } from './throttle'
-import { budgetFile, budgetLevel, budgetOf, budgetText, limitReply, parseTokens, parseUsd, threadTotals } from './budgetthread'
+import { budgetFile, budgetLevel, budgetOf, budgetText, limitReply, parseBudget, parseTokens, threadTotals } from './budgetthread'
 import { briefLintLine, isForgeWrite } from './forgewrite'
 import { prepareRules, ruleAction, ruleCount, storeRules } from './threadrules'
 import { afterRefs, applyRefs, isNone, newLine, parsePr, prepareRefs, refsShort, setRefAction } from './workitems'
@@ -77,7 +78,7 @@ export type Thread = {
   priority?: 'low' | 'normal' | 'urgent' // lean_thread new priority (throttle.ts): low waits (and is parked) in a hot 5h window, urgent is the only one started above window.blockAbove
   windowParked?: boolean // parked BY SCRIPT because the 5h window was hot (budgettick.ts): resumed by script when it is below the line again, never a user's park
   tokenLimit?: number // lean_thread limit tN <tokens>: this thread's own hard context limit (threadcontext.ts threadLimitsFor), 40k-200k
-  budgetUsd?: number // lean_thread budget tN <usd>: this thread's own soft budget (budgetthread.ts), over config threads.softUsd
+  budgetTokens?: number // lean_thread budget tN <tokens>: this thread's own soft budget in usage tokens (budgetthread.ts), over config threads.softTokens
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
   lite?: boolean // started as haiku / low with a one-step brief (firstrequest.ts isLite): a lite first request while it still runs haiku / low (liteHolds)
@@ -342,6 +343,15 @@ async function nextId(h: Host, home: string): Promise<string> {
   } catch {
     /* no threads yet */
   }
+  // a number is handed out ONCE: the highest ever given is kept (a removed folder must not free its id: the new thread would meet the old one's ledger rows, usage.ts)
+  const mark = `${leanDir(home)}/thread-last-id` // (beside config.json, not inside threads/: nothing that lists that folder meets it)
+  try {
+    const m = Number(String((await h.fs.read(mark)) ?? '').trim())
+    if (Number.isInteger(m) && m > max && m < 1e9) max = m
+  } catch {
+    /* no mark yet */
+  }
+  await h.fs.write(mark, String(max + 1)).catch(() => undefined)
   return `t${max + 1}`
 }
 
@@ -628,14 +638,12 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   return fresh(r) ? { ...r, text: `${r.text} · ${restartCost(ho.prompt, t.model ?? given.model ?? 'sonnet')}` } : r
 }
 
-// "new session: handover about 3.2k tokens (~$0.01 first turn, estimate); the old session's conversation is not resumed". The estimate:
-// the handover prompt at about four characters a token, priced as uncached input of the model the session starts on (the guide and the
-// tool listing are not counted)
-export function restartCost(prompt: string, model: string): string {
+// "new session: handover about 3.2k usage tokens (first turn, estimate); the old session's conversation is not resumed". The estimate:
+// the handover prompt at about four characters a token, counted as uncached input (weight 1; the guide and the tool listing are not counted)
+export function restartCost(prompt: string, _model?: string): string {
   const tokens = Math.ceil(prompt.length / 4)
-  const usd = (tokens * priceOf(model).in) / 1e6
   const n = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens)
-  return `new session: handover about ${n} tokens (~$${Math.max(0.01, usd).toFixed(2)} first turn, estimate); the old session's conversation is not resumed`
+  return `new session: handover about ${n} usage tokens (first turn, estimate); the old session's conversation is not resumed`
 }
 
 // The thread's CLAUDE.md is regenerated from the template at every fresh start when lean-agent wrote it (its model line is the one the
@@ -822,12 +830,12 @@ async function continuedCount(h: Host, home: string, id: string): Promise<number
   const n = Number((await readJson<{ total?: unknown } | null>(h, `${tpath(home, id)}/continue-state.json`, null))?.total)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; why?: string; stuckEnded?: string; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean }): string {
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; usage?: string; lastText?: string; stale?: boolean; ended?: boolean; why?: string; stuckEnded?: string; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean }): string {
   // an answer on its way replaces "waiting for your answer" (1.0.31: "answer queued, not read yet (4 min)"); a stuck session stays named
   const stuckWord = o.live === 'stuck' || o.live === 'stalled' ? `, ${o.live}` : ''
   const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.waitsFor ? o.waitsFor : o.live === 'waiting' ? 'waiting for your answer' : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.stuckEnded ? ` (${o.stuckEnded}${o.why ? `: ${o.why}` : ''})` : o.ended ? ` (ended at once${o.why ? `: ${o.why}` : ''})` : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"${o.synthesised ? ` (${SYNTH_MARK})` : ''}` : `(no report) ${(o.title ?? '').slice(0, 40)}`
-  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.continued ? `continued ${o.continued} x` : '', o.refs, o.unverified, o.ctx, o.soft, o.budget, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.continued ? `continued ${o.continued} x` : '', o.refs, o.unverified, o.ctx, o.soft, o.budget, o.usage?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
 // `list` shows the OPEN threads (working, waiting, needs you, idle, blocked, done and not closed) and ends with "N closed (list closed)" (1.0.33; field: 160+ closed threads printed every time);
 // the existing `text` field picks the rest ("closed": only closed ones, "all": both), no new tool parameter
@@ -841,7 +849,7 @@ async function list(h: Host, home: string, root = '', verbose = false, scope: Li
   const stuckMinutes = (await threadsConfig(h, home)).stuckMinutes
   const stall = await stallConfig(h, home)
   const ctxLimits = await threadLimits(h)
-  const totals = await threadTotals(h).catch(() => ({}) as Record<string, number>) // each thread's lifetime spend, for "$6.40/$8" next to ctx (budgetthread.ts)
+  const totals = await threadTotals(h).catch(() => ({}) as Record<string, number>) // each thread's OWN lifetime usage tokens, for "6.4k/8k tokens" next to ctx (budgetthread.ts, usage.ts)
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) // the last report of each thread (a [working] one can be stale)
   const out: unknown[] = []
   let closedN = 0
@@ -896,7 +904,7 @@ async function list(h: Host, home: string, root = '', verbose = false, scope: Li
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
     // a turn that ended on a tool result with no text: a short script-made line, marked synthesised (synthline.ts); never a report, never silences the idle alert
     const synth = t.state === 'open' && t.sid ? await readSynth(h, home, t.id, { idle: truth?.word === 'idle', lastReportTs: lastRec?.ts ?? 0 }) : null
-    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), ...(why ? { why } : {}), ...(stuckRec ? { stuckEnded: stuckEnded(stuckRec.n) } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), ...(why ? { why } : {}), ...(stuckRec ? { stuckEnded: stuckEnded(stuckRec.n) } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { usage: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
   const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.waitsFor && !o.answerQ ? `, ${o.waitsFor}` : o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.stuckEnded ? ` · ${o.stuckEnded}` : o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.why ? ` · why: ${o.why}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.soft ? ` · ${o.soft}` : ''}${o.budget ? ` · ${o.budget}` : ''}${o.priority ? ` · priority ${o.priority}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.continued ? ` · continued ${o.continued} x` : ''}${o.refs ? ` · ${o.refs}` : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
@@ -947,7 +955,7 @@ const USES: Record<string, string[]> = {
   rule: [...TEXTY, 'on', 'trigger', 'output'], // a standing rule of one thread (threadrules.ts)
   set: ['workitem', 'pr'], // the thread's work item / PR (workitems.ts): "none" clears one
   limit: ['text'], // limit tN <tokens>: text carries the number (no new field in the schema); "off" removes the override
-  budget: ['text'], // budget tN <usd>: the same
+  budget: ['text'], // budget tN <tokens>: the same
   send: TEXTY,
   wake: TEXTY,
   close: [],
@@ -1467,16 +1475,17 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           await save(h, home, t)
           return { ok: true, text: limitReply(id, v, await readConfig(h, home).catch(() => ({}))), data: { tokenLimit: v } }
         }
-        case 'budget': { // `budget tN <usd>` (text): this thread's own soft budget; 0 = none for it, "off" = config threads.softUsd again (budgetthread.ts)
-          const v = parseUsd(i.text)
+        case 'budget': { // `budget tN <tokens>` (text): this thread's own soft budget in usage tokens (2m, 500k); 0 = none for it, "off" = config threads.softTokens again (budgetthread.ts)
+          const v = parseBudget(i.text)
           if (typeof v === 'string') return err(v)
-          if (v === null) delete t.budgetUsd
-          else t.budgetUsd = v
+          if (v === null) delete t.budgetTokens
+          else t.budgetTokens = v
+          delete (t as { budgetUsd?: number }).budgetUsd // a USD budget of 1.0.33: no longer used
           await save(h, home, t)
           await writeJson(h, budgetFile(home, id), {}) // the levels are announced again for the new value
           const b = await budgetOf(h, t)
-          const spent = (await threadTotals(h).catch(() => ({}) as Record<string, number>))[id] ?? 0
-          return { ok: true, text: b === null ? `${id}: no soft budget (spent $${spent.toFixed(2)})` : `${id}: soft budget $${b}${v === null ? ' (config threads.softUsd)' : ''}, spent ${budgetText(spent, b)}: a nudge at 80%, a desk notice at 100% (the thread goes on; only config threads.hardUsd stops it); "budget ${id} off" uses the shared one`, data: { budgetUsd: v } }
+          const spent = (await threadTotals(h).catch(() => ({}) as Record<string, number>))[id] ?? 0 // this thread's OWN usage tokens (usage.ts)
+          return { ok: true, text: b === null ? `${id}: no soft budget (used ${fmtTokens(spent)} tokens)` : `${id}: soft budget ${fmtTokens(b)} usage tokens${v === null ? ' (config threads.softTokens)' : ''}, used ${budgetText(spent, b)}: a nudge at 80%, a desk notice at 100% (the thread goes on; only config threads.hardTokens stops it); "budget ${id} off" uses the shared one`, data: { budgetTokens: v } }
         }
         case 'window-park': { // (the desk's tick, budgettick.ts: a hot 5h window parks the threads with priority low; the user's parks are never marked)
           if (t.state !== 'open' || t.priority !== 'low') return err(`${id} is not an open thread with priority low`)

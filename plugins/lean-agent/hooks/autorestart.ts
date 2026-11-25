@@ -143,7 +143,7 @@ export type RestartDeps = {
 export type Notice = { id: string; text: string }
 
 // "new session: handover about 3.2k tokens (~$0.01 first turn, estimate)" taken out of the reply of a start, or ''
-const costOf = (text: string) => /handover about [^(]*\(~\$[\d.]+[^)]*\)/.exec(text)?.[0] ?? ''
+const costOf = (text: string) => /handover about [^(]*\([^)]*\)/.exec(text)?.[0] ?? ''
 
 let ticking = false // one tick at a time: a restart can take longer than the timer's period
 export async function autoRestartTick(h: Host, deps: RestartDeps): Promise<Notice[]> {

@@ -147,7 +147,7 @@ test('1.0.33 pane.foldAll false: the card with a pending approval is unfolded by
 test('1.0.33 a folded session card is exactly two lines, the same for working / done / closed / needs-you: title and state chip, then "N new", cost, context bar, age and Open at the right end', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on, [])
   everything(w)
-  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: w.h.clock.t, role: 'thread', tN: 't2', model: 'x', in: 1, out: 1, usd: 0.42 }) + line({ ts: w.h.clock.t, role: 'thread', tN: 't4', model: 'x', in: 1, out: 1, usd: 1.25 }))
+  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: w.h.clock.t, role: 'thread', tN: 't2', model: 'x', in: 420, usd: 0 }) + line({ ts: w.h.clock.t, role: 'thread', tN: 't4', model: 'x', in: 1250, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
@@ -168,7 +168,7 @@ test('1.0.33 a folded session card is exactly two lines, the same for working / 
   }
   const t4 = textOf((await cardWith(ui, 'card-t4'))!)
   expect(t4).toMatch(/closed \d+ h ago/)
-  expect(t4).toContain('$1.25 today')
+  expect(t4).toContain('window 1.3k tokens')
   expect(textOf(lines((await cardWith(ui, 'card-t2'))!)[1]!)).toContain('1 new')
   // the unfolded card has more than the two lines, and still one Open
   await openCard(ui, 't2')
@@ -202,11 +202,11 @@ test('1.0.33 a long title is cut with an ellipsis on ONE line (the chips and Ope
   await ui.unmount()
 })
 
-test('1.0.33 the header card: ONE line folded ("lean-agent · today $1.61 · 5h 1% · desk 37k/60k") with the fix chip and Restart desk at its right end; unfolded it has the reset time, 7d, the snapshot age and the version line', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.33 the header card: ONE line folded ("lean-agent · 1.6k tokens · 5h 1% · desk 37k/60k") with the fix chip and Restart desk at its right end; unfolded it has the reset time, 7d, the snapshot age and the version line', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on, [])
   w.thr('t1')
   w.h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 60_000 } }))
-  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: w.h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, cache_read: 0, cache_write: 0, usd: 1.5 }))
+  w.h.files.set(`${L}/ledger.jsonl`, line({ ts: w.h.clock.t, role: 'desk', model: 'x', in: 1500, out: 0, cache_read: 0, cache_write: 0, usd: 0 }))
   w.h.files.set(`${L}/desk/windows.json`, JSON.stringify({ at: w.h.clock.t - 60_000, windows: [{ kind: 'five_hour', percentUsed: 1, resetsAt: w.h.clock.t + 288 * 60_000 }, { kind: 'seven_day', percentUsed: 65, resetsAt: 0 }] }))
   await inDesk($)
   w.h.files.set(`${L}/notices/rules-cap.txt`, 'rules synthetic: 1 over the size cap, still loaded\n') // (after the session start, which clears one it finds nothing behind) one fix: the chip
@@ -216,7 +216,7 @@ test('1.0.33 the header card: ONE line folded ("lean-agent · today $1.61 · 5h 
   const header = (await cardWith(ui, 'sec-header'))!
   expect(lines(header)).toHaveLength(1) // ONE line
   expect(lines(header)[0]!.props?.flexWrap).toBe('nowrap')
-  expect((await ui.find({ type: 'Button', key: 'sec-header' }))?.text).toMatch(/^▸ lean-agent · today \$\d+\.\d\d · 5h 1% · desk 37k\/60k$/) // (the desk's own request is priced too: not exactly $1.50)
+  expect((await ui.find({ type: 'Button', key: 'sec-header' }))?.text).toMatch(/^▸ lean-agent · [\d.]+[kM]? tokens · 5h 1% · desk 37k\/60k$/) // (the window's usage tokens, no dollars; the desk's own request counts too: not exactly 1.5k)
   expect(has(lines(header)[0]!, x => keyOf(x) === 'health-chip')).toBe(true) // the fix chip on the same line
   expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toMatch(/^\d+ fix(es)?$/)
   expect(has(lines(header)[0]!, x => keyOf(x) === 'restart-desk')).toBe(true) // and the Restart desk chip-button
@@ -227,6 +227,8 @@ test('1.0.33 the header card: ONE line folded ("lean-agent · today $1.61 · 5h 
   expect(lines(open).length).toBeGreaterThan(1)
   const t = await texts(ui)
   expect(t.some(x => /resets .* \| 7d: 65% \(snapshot 1 min old\)/.test(x))).toBe(true) // the reset time, 7d and the snapshot age
+  expect(t.some(x => /^window [\d.]+[kM]? tokens \(1%\) · 7d 65%$/.test(x))).toBe(true) // the unfolded header: the window's usage tokens with the engine's percentages
+  expect(t.some(x => x.includes('$'))).toBe(false)
   expect(t.some(x => /^lean-agent 1\.0\.\d+ · refreshed \d\d:\d\d:\d\d/.test(x))).toBe(true) // the version line
   expect(t.some(x => /37k of 60k/.test(x))).toBe(true) // the desk context bar
   expect((await ui.find({ type: 'Button', key: 'restart-desk' }))?.text).toBe('Restart desk') // unfolded: a normal button
@@ -243,13 +245,13 @@ test('1.0.33 the Sessions toolbar card: folded it is its title (the sort is name
   expect(lines(card)).toHaveLength(1)
   expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(9\) · \d+ unread · sorted by last active$/)
   expect(has(lines(card)[0]!, x => keyOf(x) === 'ack-all')).toBe(true) // ack all stays on the folded line
-  for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeFalsy()
+  for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeFalsy()
   await openToolbar(ui)
   expect((await toolbarTitle(ui)).startsWith('▾')).toBe(true)
-  for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeTruthy()
+  for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeTruthy()
   expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active')
-  await ui.press({ key: 'sort-cost' })
-  expect(await toolbarTitle(ui)).toContain('sorted by cost') // the title names the current sort
+  await ui.press({ key: 'sort-usage' })
+  expect(await toolbarTitle(ui)).toContain('sorted by usage') // the title names the current sort
   await ui.unmount()
 })
 

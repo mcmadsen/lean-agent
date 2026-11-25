@@ -4,7 +4,7 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { leanThread } from './threads'
 import { ctxText, limitsOf, threadLimitsFor } from './threadcontext'
-import { budgetLine, budgetLevel, budgetOf, budgetText, hardOf, limitReply, parseTokens, parseUsd, threadTotals } from './budgetthread'
+import { budgetLine, budgetLevel, budgetOf, budgetText, hardOf, limitReply, parseBudget, parseTokens, threadTotals } from './budgetthread'
 import { takeWarn, warnLine, warnReset } from './scratchnotes'
 import { softBudgetTick, softCheckpointTick } from './budgettick'
 import { decide } from './guard'
@@ -101,120 +101,185 @@ test('softCheckpointTick: an idle thread with work left over its soft size is ch
   expect(calls).toHaveLength(1)
 })
 
-// ---- the soft budget in USD ------------------------------------------------------------------------------------------------------------------
-// A sonnet-heavy day of the field report: 1310 requests, $44.69; the desk $4.74 over 144 requests, one thread 530 requests at $21.00, the other thread requests $18.94 and haiku $0
-const row = (o: Record<string, unknown>) => JSON.stringify({ ts: 1_000_000, role: 'thread', model: 'claude-sonnet-5-5', in: 1, out: 1, cache_read: 1, cache_write: 1, usd: 0.01, ...o })
-function sonnetDay(h: ReturnType<typeof fakeHost>) {
+// ---- the soft budget in usage tokens ----------------------------------------------------------------------------------------------------------
+// A busy day: the desk 144 requests, one thread 530 requests, the other threads 636 requests. One request here is 1000 input tokens (usage token weight 1).
+const row = (o: Record<string, unknown>) => JSON.stringify({ ts: 1_000_000, role: 'thread', model: 'claude-sonnet-5-5', in: 1000, usd: 0.01, ...o })
+function busyDay(h: ReturnType<typeof fakeHost>) {
   const rows: string[] = []
-  for (let i = 0; i < 144; i++) rows.push(row({ role: 'desk', usd: 4.74 / 144 }))
-  for (let i = 0; i < 530; i++) rows.push(row({ tN: 't1', usd: 21 / 530 }))
-  for (let i = 0; i < 636; i++) rows.push(row({ tN: i % 2 ? 't2' : 't3', usd: 18.94 / 636 }))
+  for (let i = 0; i < 144; i++) rows.push(row({ role: 'desk' }))
+  for (let i = 0; i < 530; i++) rows.push(row({ tN: 't1' }))
+  for (let i = 0; i < 636; i++) rows.push(row({ tN: i % 2 ? 't2' : 't3' }))
   h.files.set(`${L}/ledger.jsonl`, rows.join('\n') + '\n')
 }
 
-test('threadTotals / budgetOf / budgetLine on the sonnet-heavy day: the 530-request thread is over the default $8, the others are not', async () => {
+test('threadTotals / budgetOf / budgetLine on the busy day: the 530-request thread is over a 400k budget, the desk is in no thread, the others are not', async () => {
   const h = fakeHost(null)
-  sonnetDay(h)
-  thread(h, 't1'); thread(h, 't2'); thread(h, 't3', { budgetUsd: 0 })
+  busyDay(h)
+  thread(h, 't1'); thread(h, 't2'); thread(h, 't3', { budgetTokens: 0 })
   const totals = await threadTotals(h.host)
-  expect(Math.round((totals.t1 ?? 0) * 100) / 100).toBe(21)
-  expect(Math.round(((totals.t2 ?? 0) + (totals.t3 ?? 0)) * 100) / 100).toBe(18.94)
-  expect(await budgetOf(h.host, {})).toBe(8)
-  expect(await budgetOf(h.host, { budgetUsd: 0 })).toBeNull() // 0 = none for this thread
-  expect(await budgetOf(h.host, { budgetUsd: 12.5 })).toBe(12.5)
-  expect(budgetText(21, 8)).toBe('$21.00/$8')
-  expect(budgetText(6.4, 8.5)).toBe('$6.40/$8.50')
-  expect(budgetLevel(6.4, 8)).toBe('near')
-  expect(budgetLevel(6.39, 8)).toBe('ok')
-  expect(budgetLevel(8, 8)).toBe('over')
-  expect(await budgetLine(h.host)).toBe('thread budgets (80% or more used; threads.softUsd 8): t1 $21.00/$8!, t2 $9.47/$8!') // (t3 has budget 0 = none)
+  expect(totals.t1).toBe(530_000)
+  expect((totals.t2 ?? 0) + (totals.t3 ?? 0)).toBe(636_000) // the desk's 144k is in neither
+  expect(Object.values(totals).reduce((a, b) => a + b, 0)).toBe(1_166_000) // the three threads, not the 1.31M of the whole day
+  expect(await budgetOf(h.host, {})).toBeNull() // default: none
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 400_000 } }))
+  expect(await budgetOf(h.host, {})).toBe(400_000)
+  expect(await budgetOf(h.host, { budgetTokens: 0 })).toBeNull() // 0 = none for this thread
+  expect(await budgetOf(h.host, { budgetTokens: 125_000 })).toBe(125_000)
+  expect(budgetText(530_000, 400_000)).toBe('530k/400k tokens')
+  expect(budgetText(6400, 8000)).toBe('6.4k/8k tokens')
+  expect(budgetLevel(6400, 8000)).toBe('near')
+  expect(budgetLevel(6390, 8000)).toBe('ok')
+  expect(budgetLevel(8000, 8000)).toBe('over')
+  expect(await budgetLine(h.host)).toBe('thread budgets (80% or more used; threads.softTokens 400k): t1 530k/400k tokens!') // (t2 is at 79%: under 80%; t3 has budget 0 = none)
+})
+
+test('a thread\'s figure is ITS OWN: two threads and a desk in one store, a thread that just started shows about 0, a read-only thread started minutes ago cannot exceed its own usage', async () => {
+  const h = fakeHost(null)
+  const NOW = 10 * 86_400_000
+  h.clock.t = NOW
+  thread(h, 't1', { created: NOW - 3 * 86_400_000 }) // an old, busy thread
+  thread(h, 't2', { created: NOW - 600_000 }) // a read-only diagnosing thread started 10 minutes ago
+  thread(h, 't3', { created: NOW - 5_000 }) // started 5 seconds ago, has not made a request yet
+  const rows = [
+    ...Array.from({ length: 50 }, () => row({ ts: NOW - 86_400_000, role: 'desk', in: 1_000_000 })), // the desk used 50M today and yesterday
+    ...Array.from({ length: 30 }, () => row({ ts: NOW - 3_600_000, tN: 't1', in: 100_000 })), // t1: 3M
+    ...Array.from({ length: 5 }, () => row({ ts: NOW - 300_000, tN: 't2', agent: 'main', in: 4000, out: 200 })), // t2: 5 x (4000 + 5 x 200) = 25k
+    row({ ts: NOW - 200_000, tN: 't2', agentId: 'a1', agent: 'reader-haiku', in: 2000 }), // its subagent: counts for t2
+    row({ ts: NOW - 100_000, role: 'plain', in: 9_000_000 }), // a plain session
+    row({ ts: NOW - 90_000, role: 'desk', tN: 't2', in: 7_000_000 }), // a desk row that carries a thread id by mistake: still the desk's, never t2's
+    row({ ts: NOW - 80_000, role: 'plain', tN: 't1', in: 6_000_000 }),
+  ]
+  h.files.set(`${L}/ledger.jsonl`, rows.join('\n') + '\n')
+  const totals = await threadTotals(h.host)
+  expect(totals.t1).toBe(3_000_000) // never the desk's 50M, never t2's
+  expect(totals.t2).toBe(5 * (4000 + 1000) + 2000) // its own requests and its subagent's: 27k
+  expect(totals.t3).toBe(0) // just started: nothing
+  expect(totals.t2!).toBeLessThan(100_000) // a thread started minutes ago cannot exceed what it used
+  // the budgets read the same numbers: a 1M soft budget flags t1 only; t2 and t3 are far under, whatever the desk used
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 1_000_000, hardTokens: 2_000_000 } }))
+  const sent: { action: string; tN: string; text?: string }[] = []
+  const notes = await softBudgetTick(h.host, { thread: async (i: any) => (sent.push(i), { ok: true, text: 'queued' }) })
+  expect(notes.map(n => n.split(':')[0]).sort()).toEqual(['t1', 't1']) // t1 passed the soft budget (3M of 1M) and the hard cap: nobody else
+  expect(sent.every(s => s.tN === 't1')).toBe(true)
+  const list = (await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text
+  expect(list).toContain('3M/1M tokens!')
+  expect(list).toMatch(/t2[^\n]*· 27k\/1M tokens\n/) // t2's own 27k, not the desk's 50M
+  expect(list).toMatch(/t3[^\n]*· 0\/1M tokens/) // just started: 0
+})
+
+test('a thread number that was used before (a removed folder) does not bring the old thread\'s usage: only rows from its own creation count', async () => {
+  const h = fakeHost(null)
+  const NOW = 20 * 86_400_000
+  h.clock.t = NOW
+  thread(h, 't7', { created: NOW - 1_200_000 }) // created 20 minutes ago; an earlier t7 was removed
+  h.files.set(`${L}/ledger.jsonl`, [
+    ...Array.from({ length: 40 }, (_, i) => row({ ts: NOW - 5 * 86_400_000 + i, tN: 't7', in: 100_000 })), // the old t7, days ago: 4M
+    ...Array.from({ length: 3 }, (_, i) => row({ ts: NOW - 1_300_000 + i * 1000, tN: 't7', in: 100_000 })), // the old t7 again, minutes BEFORE the new one was created
+    row({ ts: NOW - 600_000, tN: 't7', in: 12_000 }), // the new t7
+  ].join('\n') + '\n')
+  expect((await threadTotals(h.host)).t7).toBe(12_000)
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 100_000, hardTokens: 200_000 } }))
+  const sent: unknown[] = []
+  expect(await softBudgetTick(h.host, { thread: async (i: any) => (sent.push(i), { ok: true, text: '' }) })).toEqual([]) // not "over budget a few minutes after it started"
+  expect(sent).toEqual([])
+  const run = (e: any) => decide(h.host, { role: { kind: 'thread', id: 't7' }, cwd: '/r/app', root: '/plug' }, e)
+  expect(await run({ tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' })).toBeNull()
 })
 
 test('softBudgetTick: ONE nudge at 80% and one desk notice; at 100% ONE desk notice (raise / park / continue) and the thread goes on, nothing is refused; once per budget value', async () => {
   const h = fakeHost(null)
   thread(h, 't1')
-  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', usd: 6.4 }) + '\n') // 80% of $8
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 8000 } }))
+  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', in: 6400 }) + '\n') // 80% of 8k
   const sent: { action: string; tN: string; text?: string }[] = []
   const deps = { thread: async (i: any) => (sent.push(i), { ok: true, text: 'queued' }) }
   const a = await softBudgetTick(h.host, deps)
-  expect(a).toEqual(['t1: 80% of its soft budget used ($6.40/$8): nudged to take the cheapest path and report at the next natural point; it goes on'])
+  expect(a).toEqual(['t1: 80% of its soft budget used (6.4k/8k tokens): nudged to take the cheapest path and report at the next natural point; it goes on'])
   expect(sent).toHaveLength(1)
   expect(sent[0]).toMatchObject({ action: 'send', tN: 't1' })
-  expect(sent[0]!.text).toContain('You have used 80% of your soft budget ($6.40/$8): this is a nudge, not a stop')
+  expect(sent[0]!.text).toContain('You have used 80% of your soft budget (6.4k/8k tokens): this is a nudge, not a stop')
   expect(await softBudgetTick(h.host, deps)).toEqual([]) // once
   const run = (e: any) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', root: '/plug' }, e)
   const agent = { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' }
   expect(await run(agent)).toBeNull() // not over yet
-  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 6.4 }), row({ tN: 't1', usd: 6, ts: 1_000_001 })].join('\n') + '\n') // $12.40 of $8 (a thread of the field report)
+  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', in: 6400 }), row({ tN: 't1', in: 6000, ts: 1_000_001 })].join('\n') + '\n') // 12.4k of 8k
   const b = await softBudgetTick(h.host, deps)
-  expect(b).toEqual(['t1: soft budget $12.40/$8 passed: the thread goes on. Raise it (budget t1 <usd>), park it (thread park t1), or leave it (config threads.hardUsd sets a real stop)'])
+  expect(b).toEqual(['t1: soft budget 12k/8k tokens passed: the thread goes on. Raise it (budget t1 <tokens>), park it (thread park t1), or leave it (config threads.hardTokens sets a real stop)'])
   expect(sent).toHaveLength(1) // the thread is NOT told to stop: only the desk is told
   expect(await softBudgetTick(h.host, deps)).toEqual([]) // once
   expect(await run(agent)).toBeNull() // over the soft budget: nothing is refused
   expect(await run({ tool: 'Edit', file_path: '/r/app/a.ts' })).not.toContain('budget')
   // the user raises the soft budget: the levels are announced again for the new value
-  const r = await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '14' })
-  expect(r.text).toContain('t1: soft budget $14, spent $12.40/$14')
-  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', usd: 11.3 })].join('\n') + '\n') // 80.7% of $14
-  expect((await softBudgetTick(h.host, deps))[0]).toContain('80% of its soft budget used ($11.30/$14)')
+  const r = await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '14k' })
+  expect(r.text).toContain('t1: soft budget 14k usage tokens, used 12k/14k tokens')
+  h.files.set(`${L}/ledger.jsonl`, [row({ tN: 't1', in: 11_300 })].join('\n') + '\n') // 80.7% of 14k
+  expect((await softBudgetTick(h.host, deps))[0]).toContain('80% of its soft budget used (11k/14k tokens)')
 })
 
-test('threads.hardUsd is the only real stop (none by default): told to report and stop once, new Agent calls refused, raised or removed ends it', async () => {
+test('threads.hardTokens is the only real stop (none by default): told to report and stop once, new Agent calls refused, raised or removed ends it', async () => {
   const h = fakeHost(null)
   thread(h, 't1')
-  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', usd: 12.4 }) + '\n')
+  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', in: 12_400 }) + '\n')
   const sent: { action: string; tN: string; text?: string }[] = []
   const deps = { thread: async (i: any) => (sent.push(i), { ok: true, text: 'queued' }) }
   const run = (e: any) => decide(h.host, { role: { kind: 'thread', id: 't1' }, cwd: '/r/app', root: '/plug' }, e)
   const agent = { tool: 'Agent', subagent_type: 'lean-agent:worker-haiku', model: 'haiku', prompt: 'x' }
   expect(await hardOf(h.host)).toBeNull() // default: none
-  await softBudgetTick(h.host, deps) // the soft notice only
+  await softBudgetTick(h.host, deps) // no budget, no cap: nothing
   expect(sent).toHaveLength(0)
   expect(await run(agent)).toBeNull()
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 12 } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardTokens: 12_000 } }))
   const a = await softBudgetTick(h.host, deps)
-  expect(a).toEqual(['t1: hard cap $12.40/$12 reached: told to report and stop; its new Agent calls are refused (raise threads.hardUsd, or remove it, to let it go on)'])
+  expect(a).toEqual(['t1: hard cap 12k/12k tokens reached: told to report and stop; its new Agent calls are refused (raise threads.hardTokens, or remove it, to let it go on)'])
   expect(sent).toHaveLength(1)
-  expect(sent[0]!.text).toContain('Your hard budget cap is reached ($12.40/$12, config threads.hardUsd): report now with lean_report')
+  expect(sent[0]!.text).toContain('Your hard budget cap is reached (12k/12k tokens, config threads.hardTokens): report now with lean_report')
   expect(await softBudgetTick(h.host, deps)).toEqual([])
-  expect(await run(agent)).toContain("this thread's hard cap of $12 (config threads.hardUsd) is used: no new Agent call")
+  expect(await run(agent)).toContain("this thread's hard cap of 12k usage tokens (config threads.hardTokens) is used: no new Agent call")
   expect(await run({ tool: 'Edit', file_path: '/r/app/a.ts' })).not.toContain('hard cap') // an edit in progress is never cut
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 20 } })) // raised: the refusal ends
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardTokens: 20_000 } })) // raised: the refusal ends
   await softBudgetTick(h.host, deps)
   expect(await run(agent)).toBeNull()
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 12 } })) // set again below the spend: announced again
-  expect((await softBudgetTick(h.host, deps))[0]).toContain('hard cap $12.40/$12 reached')
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardTokens: 12_000 } })) // set again below the usage: announced again
+  expect((await softBudgetTick(h.host, deps))[0]).toContain('hard cap 12k/12k tokens reached')
   expect(await run(agent)).toContain('hard cap')
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardUsd: 0 } })) // 0 = none: the refusal ends
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { hardTokens: 0 } })) // 0 = none: the refusal ends
   await softBudgetTick(h.host, deps)
+  expect(await run(agent)).toBeNull()
+  // a 1.0.33 budget.json with a USD cap is not enforced any more
+  h.files.set(`${T('t1')}/budget.json`, JSON.stringify({ budget: 8, hard: 1, hardUsd: 12 }))
   expect(await run(agent)).toBeNull()
 })
 
-test('lean_thread budget: parse, 0 = none, off = the shared one; the list shows spend and budget next to ctx; config threads.softUsd 0 turns it off', async () => {
-  expect(parseUsd('6.5')).toBe(6.5)
-  expect(parseUsd('$10')).toBe(10)
-  expect(parseUsd('0')).toBe(0)
-  expect(parseUsd('off')).toBeNull()
-  expect(parseUsd('lots')).toContain('not an amount in USD')
-  expect(parseUsd('')).toContain('needs the amount')
+test('lean_thread budget: parse (2m, 500k, 0 = none, off = the shared one); the list shows usage and budget next to ctx; config threads.softTokens 0 turns it off; the old budgetUsd is ignored', async () => {
+  expect(parseBudget('2m')).toBe(2_000_000)
+  expect(parseBudget('500k')).toBe(500_000)
+  expect(parseBudget('1.5M')).toBe(1_500_000)
+  expect(parseBudget('250000')).toBe(250_000)
+  expect(parseBudget('0')).toBe(0)
+  expect(parseBudget('off')).toBeNull()
+  expect(parseBudget('lots')).toContain('not an amount of usage tokens')
+  expect(parseBudget('')).toContain('needs the amount')
   const h = fakeHost(null)
-  thread(h, 't1')
-  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', usd: 6.4 }) + '\n')
+  thread(h, 't1', { budgetUsd: 1 }) // a 1.0.33 USD budget: not read
+  h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', in: 6400 }) + '\n')
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 8000 } }))
   h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 85_000, at: h.clock.t, sid: 's-t1' }))
-  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 85k/120k · soft limit 80k · $6.40/$8')
+  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 85k/120k · soft limit 80k · 6.4k/8k tokens')
   expect((await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '0' })).text).toContain('no soft budget')
-  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).not.toContain('$6.40/')
+  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).not.toContain('6.4k/8k')
   await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: 'off' })
-  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softUsd: 0 } }))
+  expect(JSON.parse(h.files.get(`${T('t1')}/thread.json`)!).budgetUsd).toBeUndefined() // the USD figure is dropped when the budget is set again
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 0 } }))
   expect(await budgetOf(h.host, {})).toBeNull()
   expect(await softBudgetTick(h.host, { thread: async () => ({ ok: true, text: '' }) })).toEqual([])
   expect(await budgetLine(h.host)).toBe('')
 })
 
-test('lean_doctor stats shows the thread budgets line on the sonnet-heavy day', async () => {
+test('lean_doctor stats shows the thread budgets line on the busy day', async () => {
   const h = fakeHost(null)
-  sonnetDay(h)
-  thread(h, 't1'); thread(h, 't2', { budgetUsd: 0 }); thread(h, 't3', { budgetUsd: 0 })
+  busyDay(h)
+  h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 400_000 } }))
+  thread(h, 't1'); thread(h, 't2', { budgetTokens: 0 }); thread(h, 't3', { budgetTokens: 0 })
   const text = await statsText(h.host, { days: 1 })
-  expect(text).toContain('thread budgets (80% or more used; threads.softUsd 8): t1 $21.00/$8!')
+  expect(text).toContain('thread budgets (80% or more used; threads.softTokens 400k): t1 530k/400k tokens!')
 })

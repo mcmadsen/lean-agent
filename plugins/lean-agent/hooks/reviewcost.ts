@@ -1,11 +1,13 @@
-// What a review is expected to cost, from the usage ledger: the median cost of the reviewer passes earlier threads of this project ran
+// What a review is expected to use, from the usage ledger: the median usage tokens (usage.ts: weighted) of the reviewer passes earlier threads of this project ran
 // (one pass = every request of one reviewer subagent), else a stated default. No model decides this; the text is for the thread and the user
-// to see BEFORE the reviewer agents are started (four reviewer passes at one checkpoint were $13.89 of one day).
+// to see BEFORE the reviewer agents are started (four reviewer passes at one checkpoint used a big share of one window).
 import { homeDir, leanDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { LEDGER, fileSize, readFrom } from './ledger'
+import { usageTokens, weightsOf } from './usage'
+import { fmtTokens } from './formatusage'
 
-export const DEFAULT_PASS_USD = 1.5 // a sonnet pass over a normal diff, when the project has no history
+export const DEFAULT_PASS_TOKENS = 500_000 // usage tokens of a sonnet pass over a normal diff, when the project has no history
 const TAIL_BYTES = 3_000_000 // the newest part of ledger.jsonl is enough for a median
 const MAX_PASSES = 40
 
@@ -17,10 +19,11 @@ export function median(xs: number[]): number {
 }
 
 // one reviewer pass of the ledger: ts0 = its first request, ts = its last
-export type Pass = { tN: string; ts0: number; ts: number; usd: number; requests: number }
+export type Pass = { tN: string; ts0: number; ts: number; tokens: number; requests: number }
 // every reviewer pass found in the ledger text for `project`, newest passes last (`project` of a row = its thread's project)
 export async function reviewerPasses(h: Host, project: string, text: string): Promise<Pass[]> {
   const home = await homeDir(h)
+  const w = await weightsOf(h)
   const passes = new Map<string, Pass>()
   const projectOf = new Map<string, string>()
   for (const line of text.split('\n')) {
@@ -41,8 +44,8 @@ export async function reviewerPasses(h: Host, project: string, text: string): Pr
     if (p !== project) continue
     if (typeof r.agentId !== 'string' || !r.agentId) continue // a row that names no subagent cannot be told apart as a pass: it would count as one each
     const key = `${r.tN}/${r.agentId}`
-    const cur = passes.get(key) ?? { tN: r.tN, ts0: r.ts, ts: r.ts, usd: 0, requests: 0 }
-    cur.usd += r.usd
+    const cur = passes.get(key) ?? { tN: r.tN, ts0: r.ts, ts: r.ts, tokens: 0, requests: 0 }
+    cur.tokens += usageTokens({ input: Number(r.in) || 0, output: Number(r.out) || 0, cacheRead: Number(r.cache_read) || 0, cacheWrite: Number(r.cache_write) || 0 }, w)
     cur.requests++
     cur.ts = Math.max(cur.ts, r.ts)
     cur.ts0 = Math.min(cur.ts0, r.ts)
@@ -50,8 +53,8 @@ export async function reviewerPasses(h: Host, project: string, text: string): Pr
   }
   return [...passes.values()].sort((a, b) => a.ts - b.ts).slice(-MAX_PASSES)
 }
-// the USD of each reviewer pass (kept for callers that only want the money)
-export const reviewerPassCosts = async (h: Host, project: string, text: string): Promise<number[]> => (await reviewerPasses(h, project, text)).map(p => p.usd)
+// the usage tokens of each reviewer pass
+export const reviewerPassCosts = async (h: Host, project: string, text: string): Promise<number[]> => (await reviewerPasses(h, project, text)).map(p => p.tokens)
 
 // What each prepare of a project asked for, in the mod's store (a session cannot write it): when, which sha, which level. The ledger rows carry no
 // sha and no level, so a pass belongs to the last prepare that was made before its first request.
@@ -80,18 +83,18 @@ export async function ledgerTail(h: Host): Promise<string> {
 
 // `level`: a light pass is cheaper than a full one, so the median is over the earlier passes of THAT level (known from the prepare notes) once at
 // least two are known; otherwise over all of them (a pass from before the notes has no level)
-export type Expected = { usd: number; passes: number; basis: string; samples: number }
+export type Expected = { tokens: number; passes: number; basis: string; samples: number }
 export async function expectedReviewCost(h: Host, project: string, passes: number, level?: string): Promise<Expected> {
-  const all = (await reviewerPasses(h, project, await ledgerTail(h)).catch(() => [])).filter(p => p.usd > 0)
+  const all = (await reviewerPasses(h, project, await ledgerTail(h)).catch(() => [])).filter(p => p.tokens > 0)
   const notes = level ? await readPrepNotes(h, project) : []
   const same = level ? all.filter(p => levelAt(p, notes) === level) : []
   const use = same.length >= 2 ? same : all
   const kind = use === same && level ? ` ${level}` : ''
-  const per = use.length ? median(use.map(p => p.usd)) : DEFAULT_PASS_USD
-  return { usd: per * passes, passes, samples: use.length, basis: use.length ? `median of ${use.length} earlier${kind} reviewer pass${use.length === 1 ? '' : 'es'} on this project` : `default $${DEFAULT_PASS_USD.toFixed(2)} a pass, no earlier reviewer pass on this project in the ledger` }
+  const per = use.length ? median(use.map(p => p.tokens)) : DEFAULT_PASS_TOKENS
+  return { tokens: Math.round(per * passes), passes, samples: use.length, basis: use.length ? `median of ${use.length} earlier${kind} reviewer pass${use.length === 1 ? '' : 'es'} on this project` : `default ${fmtTokens(DEFAULT_PASS_TOKENS)} tokens a pass, no earlier reviewer pass on this project in the ledger` }
 }
 
-// "review cost for 3f9c2ab41d02: $0.84 over 2 passes, 41 requests": the reviewer passes of `thread` that ran for this sha (from its first prepare
+// "review usage for 3f9c2ab41d02: 410k tokens over 2 passes, 41 requests": the reviewer passes of `thread` that ran for this sha (from its first prepare
 // until the prepare of another sha), or '' when none ran
 export async function reviewCostLine(h: Host, project: string, thread: string, sha: string): Promise<string> {
   const notes = await readPrepNotes(h, project)
@@ -102,14 +105,14 @@ export async function reviewCostLine(h: Host, project: string, thread: string, s
   const end = Math.min(Infinity, ...notes.filter(n => !same(n.sha) && n.ts > start).map(n => n.ts))
   const ps = (await reviewerPasses(h, project, await ledgerTail(h)).catch(() => [])).filter(p => (!thread || p.tN === thread) && p.ts0 >= start && p.ts0 < end)
   if (!ps.length) return ''
-  const usd = ps.reduce((s, p) => s + p.usd, 0)
+  const tokens = ps.reduce((s, p) => s + p.tokens, 0)
   const reqs = ps.reduce((s, p) => s + p.requests, 0)
-  return `review cost for ${sha.slice(0, 12)}: $${usd.toFixed(2)} over ${ps.length} pass${ps.length === 1 ? '' : 'es'}, ${reqs} request${reqs === 1 ? '' : 's'}`
+  return `review usage for ${sha.slice(0, 12)}: ${fmtTokens(tokens)} tokens over ${ps.length} pass${ps.length === 1 ? '' : 'es'}, ${reqs} request${reqs === 1 ? '' : 's'}`
 }
 
-// "3 areas x 1 pass ~ $4.50 (from your last 5 review runs)": the whole fan-out in one line, numbers from the ledger or the stated default
+// "3 areas x 1 pass ~ 1.5M usage tokens (from your last 5 review runs)": the whole fan-out in one line, numbers from the ledger or the stated default
 export const fanOutText = (e: Expected, areas: number): string =>
-  `${areas} area${areas === 1 ? '' : 's'} x ${e.passes} pass${e.passes === 1 ? '' : 'es'} ~ $${(e.usd * areas).toFixed(2)} (${e.samples ? `from your last ${e.samples} review run${e.samples === 1 ? '' : 's'}` : `default $${DEFAULT_PASS_USD.toFixed(2)} a pass: no earlier review run in your ledger`})`
+  `${areas} area${areas === 1 ? '' : 's'} x ${e.passes} pass${e.passes === 1 ? '' : 'es'} ~ ${fmtTokens(e.tokens * areas)} usage tokens (${e.samples ? `from your last ${e.samples} review run${e.samples === 1 ? '' : 's'}` : `default ${fmtTokens(DEFAULT_PASS_TOKENS)} tokens a pass: no earlier review run in your ledger`})`
 
-// "expected review cost ~$1.20 (2 passes, sonnet; median of 5 earlier reviewer passes on this project)"
-export const expectedText = (e: Expected, model: string): string => `expected review cost ~$${e.usd.toFixed(2)} (${e.passes} pass${e.passes === 1 ? '' : 'es'}, ${model}; ${e.basis})`
+// "expected review usage ~1.2M tokens (2 passes, sonnet; average of 5 earlier reviewer passes on this project)"
+export const expectedText = (e: Expected, model: string): string => `expected review usage ~${fmtTokens(e.tokens)} tokens (${e.passes} pass${e.passes === 1 ? '' : 'es'}, ${model}; ${e.basis})`

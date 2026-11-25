@@ -43,8 +43,8 @@ function world(on: any = null, o: { full?: boolean; rows?: any[] } = {}) {
     h.files.set(`${WT}/.git`, 'gitdir: /r/app/.git/worktrees/feat-one')
     const recs = Array.from({ length: 12 }, (_, i) => ({ ts: 1000 + i, from: 't1', kind: 'report', state: i === 11 ? 'done' : 'working', text: `report number ${i + 1}` }))
     f('desk/inbox.jsonl', [...recs, { ts: 5000, from: 't9', kind: 'report', text: 'other thread' }].map(r => JSON.stringify(r)).join('\n') + '\n')
-    // spend: today $1.25 and $0.75 two days ago for t1, $9 for another thread today
-    const row = (ts: number, tN: string, usd: number) => JSON.stringify({ ts, role: 'thread', tN, model: 'sonnet', usd })
+    // usage: 1250 tokens now and 750 two days ago for t1, 9000 for another thread now (a usd of N is N thousand input tokens)
+    const row = (ts: number, tN: string, usd: number) => JSON.stringify({ ts, role: 'thread', tN, model: 'sonnet', usd, in: usd * 1000 })
     f('ledger.jsonl', [row(h.clock.t - 10, 't1', 1.25), row(h.clock.t - 2 * DAY, 't1', 0.75), row(h.clock.t - 20, 't9', 9)].join('\n') + '\n')
   }
   h.git.handler = a => {
@@ -89,7 +89,7 @@ test('parseStat: files, the summary line, and a long list cut with "+N more"', (
   expect(parseStat('')).toEqual({ files: [], more: 0, summary: '' })
 })
 
-test('data, full: brief, goal, worktree, diff stat against the base, the signed review for HEAD, cost today and total, 10 newest reports, queued', async () => {
+test('data, full: brief, goal, worktree, diff stat against the base, the signed review for HEAD, usage tokens in the window and total, 10 newest reports, queued', async () => {
   const h = world()
   await writeReview(h.host, { project: 'app', sha: HEAD, green: true, passes: 2, findings: ['1. [minor] src/widget.ts:3 name the option -> rename'], base: 'main' })
   const d = (await loadThreadDetail(h.host, 't1'))!
@@ -103,7 +103,7 @@ test('data, full: brief, goal, worktree, diff stat against the base, the signed 
   // the worktree path comes from a file a thread can write: no fsmonitor, no hooks of that repo
   expect(h.calls.some(c => c.argv.join(' ') === `git -C ${WT} -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --stat --no-color --no-ext-diff ${BASE}...HEAD`)).toBe(true)
   expect(d.review).toMatchObject({ sha: HEAD, verdict: 'green', passes: 2, findings: ['1. [minor] src/widget.ts:3 name the option -> rename'] })
-  expect(d.cost).toEqual({ today: 1.25, total: 2 })
+  expect(d.cost).toEqual({ window: 1250, total: 2000 }) // its own rows only: not t9's 9000
   expect(d.reportsTotal).toBe(12)
   expect(d.reports.map(r => r.text)).toEqual(Array.from({ length: 10 }, (_, i) => `report number ${12 - i}`)) // newest first, only t1's
   expect(d.queued.map(q => q.text)).toEqual(['please also rename it', 'and add a test'])
@@ -158,7 +158,7 @@ test('data, empty: no worktree, no reports, no queue, no goal; closed and missin
   expect(d.errors).toEqual([])
   expect([d.worktree, d.diff, d.review, d.reports, d.queued, d.goal]).toEqual([undefined, undefined, undefined, [], [], ''])
   expect(d.diffNote).toContain('no worktree')
-  expect(d.cost).toEqual({ today: 0, total: 0 })
+  expect(d.cost).toEqual({ window: 0, total: 0 })
   expect(d.brief).toBe('empty one') // no brief.md: the title
   expect((await loadThreadDetail(h.host, 't3'))!.state).toBe('closed')
   expect(await loadThreadDetail(h.host, 't99')).toBeNull()
@@ -183,7 +183,7 @@ test('draw, full: every section, the buttons, and only the 10 newest reports (ol
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
   expect(await text(ui, /t1 · add the widget/)).toBe(true)
-  expect(await text(ui, /open · idle · sonnet\/high · today \$1\.25 \(main \$1\.25 · workers \$0\.00 · reviews \$0\.00\) · project: app/)).toBe(true) // the status line carries today's cost and where it went
+  expect(await text(ui, /open · idle · sonnet\/high · window 1\.3k tokens \(main 1\.3k · workers 0 · reviews 0\) · project: app/)).toBe(true) // the status line carries the window's usage tokens and where they went
   expect(await text(ui, /widget merged/)).toBe(true)
   expect(await text(ui, /Keep the old layout\./)).toBe(true)
   expect(await text(ui, /Line four/)).toBe(true)
@@ -192,7 +192,7 @@ test('draw, full: every section, the buttons, and only the 10 newest reports (ol
   expect(await text(ui, /diff against bbbbbbbbbbbb: 2 files changed, 42 insertions\(\+\)/)).toBe(true)
   expect(await text(ui, /src\/widget\.ts \| 30/)).toBe(true)
   expect(await text(ui, /no review recorded for HEAD aaaaaaaa/)).toBe(true)
-  expect(await text(ui, /today \$1\.25 · total \$2\.00/)).toBe(true)
+  expect(await text(ui, /window 1\.3k tokens · total 2k tokens/)).toBe(true)
   expect(await text(ui, /Reports \(10 of 12, newest first\)/)).toBe(true)
   expect(await text(ui, /Queued messages \(2\)/)).toBe(true)
   expect(await ui.find({ type: 'Button', text: /report number 12/ })).toBeTruthy()
@@ -229,7 +229,7 @@ test('draw, empty: a thread with nothing to show draws every section as a short 
   expect(await text(ui, /no worktree, so no review record/)).toBe(true)
   expect(await text(ui, /No reports yet\./)).toBe(true)
   expect(await text(ui, /None queued\./)).toBe(true)
-  expect(await text(ui, /today \$0\.00 · total \$0\.00/)).toBe(true)
+  expect(await text(ui, /window 0 tokens · total 0 tokens/)).toBe(true)
   expect(await ui.find({ type: 'Button', text: 'Refresh' })).toBeTruthy()
   await ui.unmount()
 })

@@ -15,7 +15,7 @@ export const CHASE_TEXT = 'Status check from the desk: where are you on your goa
 // `send` queues the message and wakes the thread once if it is idle (a running one only gets it queued)
 export async function chase(h: Host, send: (id: string, text: string) => Promise<unknown>): Promise<string[]> {
   const home = await homeDir(h)
-  await checkBudget(h) // the budget alerts ride on the same minute tick (budgetalert.ts): a desk notice and a toast at 50% / 80% and per expensive thread
+  await checkBudget(h) // the budget alerts ride on the same minute tick (budgetalert.ts): a desk notice and a toast at 80% / 100% of an optional token cap
   const file = `${leanDir(home)}/goals.json`
   const goals = await readJson<Record<string, Goal>>(h, file, {})
   const now = await h.clock.now()
@@ -29,7 +29,7 @@ export async function chase(h: Host, send: (id: string, text: string) => Promise
     if (t.finished || (await doneSession(h, home, t))) continue // a finished thread is not stuck: a message would start a whole new session
     g.chased = now
     chased.push(id)
-    await send(id, CHASE_TEXT + (await expensiveNote(h, id))) // a thread over its daily alert is also asked what the spend bought
+    await send(id, CHASE_TEXT + (await expensiveNote(h, id))) // a thread over its soft budget is also asked what the usage bought
   }
   if (chased.length) {
     // sends can be slow: re-read, so a goal updated meanwhile is not overwritten; only `chased` is set

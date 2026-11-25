@@ -3,7 +3,8 @@ import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { dayOf, rotateLedger, syncRollup } from './ledger'
 import { modelMismatches } from './stats'
-import { record, spentToday } from './budget'
+import { record } from './budget'
+import { allTimeUsage, windowUsage } from './usage'
 
 const L = '/h/.lean-agent'
 const NOON = Date.UTC(2026, 10, 18, 12)
@@ -59,26 +60,33 @@ test('a sync between the rename and the rollup write counts the moved file once 
   expect((await syncRollup(h.host)).rows).toBe(2)
 })
 
-test('the cap cache is dropped by a rotation: a regrown ledger.jsonl is never read from the old file\'s offset', async () => {
+test('a rotation loses and doubles no usage tokens: the all-time total is the same before and after, and a regrown ledger.jsonl is read from its start', async () => {
   const h = setup()
   h.files.set(`${L}/ledger.jsonl`, old('2026-11-10T08:00:00') + row(NOON, { role: 'desk', usd: 2 }))
-  expect(await spentToday(h.host, 'desk')).toBe(2) // the cache now holds an offset into the mixed file
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(1 + 1000) // the 0.45 row counts its input token
   expect((await rotateLedger(h.host)).length).toBe(1)
-  // the fresh file outgrows that offset before this session's next request
+  // the fresh file outgrows the old offset before the next read
   expect(h.files.get(`${L}/ledger.jsonl`)).toBe(row(NOON, { role: 'desk', usd: 2 })) // the 1.0 row stayed in ledger.jsonl (the split)
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(1 + 1000)
   h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + row(NOON, { role: 'desk', usd: 3 }) + row(NOON, { role: 'desk', usd: 4 }) + row(NOON, { role: 'desk', usd: 5 }) + row(NOON, { role: 'desk', usd: 6 }))
-  expect(await spentToday(h.host, 'desk')).toBe(2 + 3 + 4 + 5 + 6)
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(1 + 5 * 1000)
   await record(h.host, { role: 'desk' }, 'sonnet', { input_tokens: 1_000_000 })
-  expect(await spentToday(h.host, 'desk')).toBe(2 + 3 + 4 + 5 + 6 + 3)
+  const all = await allTimeUsage(h.host)
+  expect(all.total.tokens).toBe(1 + 5 * 1000 + 1_000_000)
+  expect(all.byRole.desk!.tokens).toBe(5 * 1000 + 1_000_000)
+  expect((await windowUsage(h.host)).total.tokens).toBe(5 * 1000 + 1_000_000) // the current window: the rolling 5 h
 })
 
-test('a role-less 1.0 row is uncapped on both cache paths', async () => {
+test('a role-less 1.0 row counts in the total and in no role and no thread', async () => {
   const h = setup()
-  h.files.set(`${L}/ledger.jsonl`, JSON.stringify({ ts: NOON, model: 'm', usd: 9 }) + '\n' + row(NOON, { role: 'desk', usd: 1 }))
-  expect(await spentToday(h.host, 'desk')).toBe(1) // rebuilt from the rollup
-  expect(await spentToday(h.host)).toBe(1)
-  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + JSON.stringify({ ts: NOON, model: 'm', usd: 9 }) + '\n') // appended by someone else
-  expect(await spentToday(h.host)).toBe(1) // topped up from the tail
+  h.files.set(`${L}/ledger.jsonl`, JSON.stringify({ ts: NOON, model: 'm', in: 9000, usd: 9 }) + '\n' + row(NOON, { role: 'desk', usd: 1 }))
+  const all = await allTimeUsage(h.host)
+  expect(all.total.tokens).toBe(10_000)
+  expect(all.byRole.desk!.tokens).toBe(1000)
+  expect(all.byRole.unknown!.tokens).toBe(9000)
+  expect(all.byThread).toEqual({})
+  h.files.set(`${L}/ledger.jsonl`, h.files.get(`${L}/ledger.jsonl`)! + JSON.stringify({ ts: NOON, model: 'm', in: 1, usd: 9 }) + '\n') // appended by someone else
+  expect((await allTimeUsage(h.host)).total.tokens).toBe(10_001) // topped up from the tail
 })
 
 test('a worker on another model is no mismatch; the session\'s own requests are compared', async () => {

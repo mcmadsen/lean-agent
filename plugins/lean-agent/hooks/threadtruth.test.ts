@@ -493,14 +493,15 @@ test('a fresh start regenerates the guide from thread.json: no stale model line 
 })
 
 // ---- 6. restart cost ----------------------------------------------------------------------------------------------------------
-test('the reply of a restart or fresh start says what the handover costs, as an estimate, and that the old conversation is not resumed', async () => {
-  expect(restartCost('x'.repeat(40_000), 'sonnet')).toBe("new session: handover about 10.0k tokens (~$0.03 first turn, estimate); the old session's conversation is not resumed")
-  expect(restartCost('x'.repeat(40_000), 'claude-haiku-5-5')).toContain('~$0.01 first turn')
-  expect(restartCost('x'.repeat(40_000), 'opus')).toContain('~$0.05 first turn')
-  expect(restartCost('short', 'sonnet')).toContain('handover about 2 tokens (~$0.01 first turn, estimate)') // never "$0.00"
+test('the reply of a restart or fresh start says what the handover uses, as an estimate, and that the old conversation is not resumed', async () => {
+  expect(restartCost('x'.repeat(40_000), 'sonnet')).toBe("new session: handover about 10.0k usage tokens (first turn, estimate); the old session's conversation is not resumed")
+  expect(restartCost('x'.repeat(40_000), 'claude-haiku-5-5')).toContain('handover about 10.0k usage tokens (first turn') // the same on every model
+  expect(restartCost('x'.repeat(40_000), 'opus')).toBe(restartCost('x'.repeat(40_000), 'sonnet'))
+  expect(restartCost('short', 'sonnet')).toContain('handover about 2 usage tokens (first turn, estimate)')
+  expect(restartCost('short')).not.toContain('$')
   const w = world({ rows: [row({ status: 'busy', state: 'working', pid: 42 })] })
   const r = await w.run({ action: 'restart', tN: 't1' })
-  expect(r.text).toMatch(/new session: handover about [\d.]+k? tokens \(~\$\d\.\d\d first turn, estimate\); the old session's conversation is not resumed/)
+  expect(r.text).toMatch(/new session: handover about [\d.]+k? usage tokens \(first turn, estimate\); the old session's conversation is not resumed/)
   // a brand-new thread has no old conversation: no such line
   const fresh = world({ rows: [] })
   for (const k of [...fresh.h.files.keys()]) if (k.startsWith(`${T1}/`)) fresh.h.files.delete(k)

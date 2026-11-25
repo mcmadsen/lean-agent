@@ -20,7 +20,7 @@ import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
 import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
 import { lookStep } from './look'
-import { overBudget, record } from './budget'
+import { record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
 import { capLine, checkStale, logRuleLoad, rulesUpdateCheck } from './rules'
 import { markNative, projectRule, resetContext, resetRuleLoader, ruleContext } from './ruleload'
@@ -130,7 +130,6 @@ export const resetModState = () => {
   notified = 0
   busySince = 0
   lastRelay = 0
-  spent.clear()
   shown.clear()
   stopTimers()
   role = { kind: 'plain' }
@@ -213,7 +212,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover', 'memory'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover', 'memory', 'budget-reset'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // settings (configtool.ts, the config skill): the desk's only way to change ~/.lean-agent/config.json; a thread or worker never has it
 const CONFIG = 'lean_config'
 const CONFIG_SPEC = { name: CONFIG, description: 'Settings (config skill): list [group], get, set, unset, validate. A safety-loosening key changes only on the user\'s typed words.', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'get', 'set', 'unset', 'validate'] }, group: { type: 'string', description: 'list: one group' }, key: { type: 'string', description: 'get, set, unset: dotted key' }, value: { type: ['string', 'number', 'boolean', 'array'], description: 'set: the new value' } }, required: ['action'] } }
@@ -304,8 +303,6 @@ async function agentType($: any, id?: string, ev?: any): Promise<string | undefi
   }
   return t
 }
-
-const spent = new Map<string, number>() // usd per subagent id, this session
 
 let inTurn = false // a main-thread turn is running: the snapshot and the restart checkpoint are written at its END only, never in the middle
 let turnStartedAt = 0
@@ -621,7 +618,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       } as any)
       await registerOnce($, {
         name: DOCTOR,
-        description: 'lean-agent doctor (the doctor skill): check (read-only), fix, migrate, stats (computed here, never read the ledger yourself), compare, export (one anonymised feedback file; never posts), mcp-env (a NON-secret variable of an MCP server), dismiss-old-desk, refusals, context, overhead, handover, memory (per scope: items, tokens, what the last sessions got, over budget).',
+        description: 'lean-agent doctor (the doctor skill): check (read-only), fix, migrate, stats (computed here, never read the ledger yourself), compare, export (one anonymised feedback file; never posts), mcp-env (a NON-secret variable of an MCP server), dismiss-old-desk, refusals, context, overhead, handover, memory (per scope: items, tokens, what the last sessions got, over budget), budget-reset (the all-time usage tokens start again now).',
         inputSchema: DOCTOR_SCHEMA,
         isDeferred: false,
       } as any)
@@ -1165,15 +1162,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // every model request: refuse past a cap, then price its usage into ledger.jsonl
+  // every model request: its usage goes into ledger.jsonl (no request is refused for a budget here: the optional token caps hold NEW work, throttle.ts)
   on('turn.step', async function* ($, e: any, next) {
     const host = hostOf($)
     const type = e.agentId ? await agentType($, e.agentId, e) : undefined
-    const why = await overBudget(host, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
-    if (why) {
-      if (!e.agentId && role.kind === 'thread') facts.error = `the mod refused the request: ${why}` // no model call, and the reason is ours (a daily cap): the turn record says so
-      return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
-    }
     if (!e.agentId && role.kind === 'desk' && typeof e.model === 'string') await deskModelCheck($, e.model) // the pin: once per session, then only a change is noted
     const carried = !e.agentId && role.kind === 'thread' ? wakeAt : null // the inbox lines this request carries (a wake prompt, a direct send): read once the model answered it
     const r: any = yield* next(e)
@@ -1187,8 +1179,7 @@ export const register: Register = on => {
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
       const fresh = role.kind === 'thread' && !e.agentId && !!lastSid && (await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '')) // the first request of the session: its real base, and its cost is the session's start (a restart's price)
-      const row = await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}), ...(fresh ? { fresh: true as const } : {}) }, r?.usage?.model ?? e.model, r?.usage)
-      if (row && e.agentId) spent.set(e.agentId, (spent.get(e.agentId) ?? 0) + row.usd)
+      await record(host, { role: role.kind, tN: role.kind === 'thread' ? role.id : undefined, agentId: e.agentId, agent: type, ...(role.kind === 'thread' ? { effort: started.effort, tmodel: started.model } : {}), ...(fresh ? { fresh: true as const } : {}) }, r?.usage?.model ?? e.model, r?.usage)
     } catch {
       /* a ledger write that fails never stops the turn */
     }
@@ -1450,7 +1441,11 @@ export const register: Register = on => {
         return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
       }
       if (e.action === 'refusals') return { result: await refusalsText(host, typeof e.days === 'number' ? e.days : undefined) } as any
-      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env, dismiss-old-desk or refusals', isError: true } as any
+      if (e.action === 'budget-reset') { // the all-time usage tokens start again from now (config budget.since; usage.ts): the same as lean_config set budget.since today
+        const o = await configTool(host, { action: 'set', key: 'budget.since', value: 'today' })
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+      }
+      return { result: 'doctor: action must be check, fix, migrate, stats, compare, export, mcp-env, dismiss-old-desk, refusals or budget-reset', isError: true } as any
     } catch (err) {
       return { result: `doctor failed: ${String((err as Error)?.message ?? err)}`, isError: true } as any
     }

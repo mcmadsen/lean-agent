@@ -22,13 +22,14 @@ test('sort: last active puts the newest first, open and closed threads in ONE li
   expect(ids(sortItems(itemsOf([t('t1', { recTs: 500 }), t('t2', { recTs: 900 })], []), 'active'))).toEqual(['t2', 't1']) // no activity recorded: the last report
 })
 
-test('sort: needs you first puts what waits for the user on top, each group by last activity; cost: dearest first; name: A to Z', () => {
+test('sort: needs you first puts what waits for the user on top, each group by last activity; usage: most usage tokens first ("cost" is its old name); name: A to Z', () => {
   const rows = [t('t1', { activity: 500 }), t('t2', { activity: 100, blocked: true }), t('t3', { activity: 300, asking: true, cost: 9 }), t('t4', { activity: 400, cost: 2 }), t('t5', { activity: 50, pending: 'waiting for your Approve: reply' }), t('t7', { activity: 10, title: 'alpha' })]
   const closed = [c('t6', { activity: 600, cost: 20, title: 'Zulu' })]
   const items = itemsOf(rows, closed, [{ thread: 't1' }])
   // t1 has a card with a need, t2 is blocked, t3 asks, t5 has a request waiting: all four on top (by activity), then the rest (the closed row among them)
   expect(ids(sortItems(items, 'needs'))).toEqual(['t1', 't3', 't2', 't5', 't6', 't4', 't7'])
-  expect(ids(sortItems(items, 'cost'))).toEqual(['t6', 't3', 't4', 't1', 't2', 't5', 't7']) // cost, then the last activity
+  expect(ids(sortItems(items, 'usage'))).toEqual(['t6', 't3', 't4', 't1', 't2', 't5', 't7']) // usage tokens, then the last activity
+  expect(ids(sortItems(items, 'cost' as never))).toEqual(ids(sortItems(items, 'usage'))) // the old name is an alias
   expect(ids(sortItems(items, 'name')).slice(0, 2)).toEqual(['t7', 't1']) // alpha, title t1 ...
   expect(ids(sortItems(items, 'name')).at(-1)).toBe('t6') // Zulu last, whatever the case
   expect(needsUser(t('t8', { working: true, run: 'running' }))).toBe(false)
@@ -61,8 +62,8 @@ test('Health summary: quiet "all good" when nothing needs a fix; amber with the 
 test('settings: pane.sort (config, else the mod store, else last active), pane.maxSessions (5 to 500, default 30), pane.healthOpen (true or "open")', async () => {
   const h = fakeHost(null)
   expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false, foldAll: true })
-  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'cost', maxSessions: 12, healthOpen: true } }))
-  expect(await paneConfig(h.host)).toEqual({ sort: 'cost', maxSessions: 12, healthOpen: true, foldAll: true })
+  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'cost', maxSessions: 12, healthOpen: true } })) // the old name
+  expect(await paneConfig(h.host)).toEqual({ sort: 'usage', maxSessions: 12, healthOpen: true, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ 'pane.sort': 'name', 'pane.maxSessions': 7, 'pane.healthOpen': 'open' })) // the flat spelling
   expect(await paneConfig(h.host)).toEqual({ sort: 'name', maxSessions: 7, healthOpen: true, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'newest', maxSessions: 2, healthOpen: 'yes' } })) // not valid: the defaults
@@ -76,8 +77,10 @@ test('settings: pane.sort (config, else the mod store, else last active), pane.m
   expect(JSON.parse(h.files.get(`${L}/config.json`)!)).toMatchObject({ pane: { sort: 'needs' } })
   expect((await paneConfig(h.host)).sort).toBe('needs')
   // the config key wins over the store (it is what the user wrote); a store with no config still remembers the press
+  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'usage' } }))
+  expect((await paneConfig(h.host)).sort).toBe('usage')
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'cost' } }))
-  expect((await paneConfig(h.host)).sort).toBe('cost')
+  expect((await paneConfig(h.host)).sort).toBe('usage') // the old name still reads
   h.files.delete(`${L}/config.json`)
   expect((await paneConfig(h.host)).sort).toBe('needs')
 })

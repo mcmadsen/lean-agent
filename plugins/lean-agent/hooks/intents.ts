@@ -12,7 +12,7 @@ export const INTENTS: Intent[] = [
   { id: 'handover', re: /\bhand[- ]?over\b|\bhand[- ]?off note\b|\bwrite (up )?(a )?handoff\b/i, command: '/lean-agent:handover', example: '/lean-agent:handover <tN>' },
   { id: 'goals', re: /\b(thread|everyone|everybody)'?s?\s+goals?\b|\bgoals? (of|for) (the )?threads?\b|\bwhat is everyone working on\b|\bset (the )?goal\b/i, command: '/lean-agent:goals', example: '/lean-agent:goals list | set <tN> <text>' },
   { id: 'list', re: /\b(list|show|which|what)\b[^.?!\n]{0,20}\bthreads?\b|\bthreads? (overview|list|status)\b/i, command: '/lean-agent:list', example: '/lean-agent:list' },
-  { id: 'budget', re: /\b(budget|daily cap|spend cap|remaining budget)\b/i, command: '/lean-agent:budget', example: '/lean-agent:budget [show | cap <usd>]' },
+  { id: 'budget', re: /\b(budget|daily cap|spend cap|remaining budget)\b/i, command: '/lean-agent:budget', example: '/lean-agent:budget [show | cap <tokens>]' },
   { id: 'stats', re: /\b(how much|what)\b[^.?!\n]{0,30}\b(spent|spend|cost|costs)\b|\bstats\b|\busage (so far|today|this week)\b/i, command: '/lean-agent:stats', example: '/lean-agent:stats [days] [project]' },
   { id: 'doctor', re: /\bdoctor\b|\bnot set up\b|\bdesk did not open\b|\bfix (the )?(install|setup)\b/i, command: '/lean-agent:doctor', example: '/lean-agent:doctor [check | fix | migrate]' },
   { id: 'feedback', re: /\b(send|file|write|draft)\s+(some\s+)?(feedback|a bug report|a bug|a feature request)\b|\bexport feedback\b/i, command: '/lean-agent:feedback', example: '/lean-agent:feedback <what happened>' },

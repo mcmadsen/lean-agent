@@ -106,7 +106,7 @@ test('view: no HOME gives an error row, not a throw', async () => {
 test('thread status line: id, budget, unread inbox', async () => {
   const h = setup()
   h.files.set('/h/.lean-agent/threads/t1/inbox.jsonl', '{"ts":1,"text":"hi"}\n')
-  expect(await threadStatus(h.host, 't1')).toBe('t1 · budget n/a · 1 unread')
+  expect(await threadStatus(h.host, 't1')).toBe('t1 · usage n/a · 1 unread')
 })
 
 test('pane renders on every surface; Resume presses one claude --bg --resume', { timeoutMs: 20_000 }, async ($, on) => {
@@ -145,10 +145,15 @@ test('view: the pane ack never moves the desk marker, and one row acks only itse
   expect(h.files.has('/h/.lean-agent/desk/inbox-read.json')).toBe(false)
 })
 
-test('view: the budget footer sums usd from ledger rows', async () => {
+test('view: the usage header sums the window\'s usage tokens from ledger rows: with the engine\'s snapshot "window 1.5k tokens (1%) · 7d 65%", without one the rolling 5 h; no dollar figure', async () => {
   const h = setup()
-  h.files.set('/h/.lean-agent/ledger.jsonl', JSON.stringify({ ts: h.clock.t, role: 'desk', model: 'x', in: 1, out: 1, cache_read: 0, cache_write: 0, usd: 1.5 }) + '\n')
-  expect((await loadView(h.host)).budget).toBe('$1.50 · 7d $1.50') // the pane prints it after "budget today:"
+  h.files.set('/h/.lean-agent/ledger.jsonl', JSON.stringify({ ts: h.clock.t, role: 'desk', model: 'x', in: 1000, out: 100, cache_read: 0, cache_write: 0, usd: 1.5 }) + '\n')
+  expect((await loadView(h.host)).budget).toBe('last 5h 1.5k tokens') // 1000 + 5 x 100: no window is known
+  resetViewCache()
+  h.files.set('/h/.lean-agent/desk/windows.json', JSON.stringify({ v: 1, at: h.clock.t, windows: [{ kind: 'five_hour', percentUsed: 1, resetsAt: h.clock.t + 3_600_000 }, { kind: 'seven_day', percentUsed: 65, resetsAt: 0 }] }))
+  const v = await loadView(h.host)
+  expect(v.budget).toBe('window 1.5k tokens (1%) · 7d 65%')
+  expect(v.budget).not.toContain('$')
 })
 
 test('view and pane: an open question shows until an answer row closes it', { timeoutMs: 20_000 }, async ($, on) => {
