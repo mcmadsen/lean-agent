@@ -87,7 +87,7 @@ export const runsText = (run: string, installed: string) => `running ${run}, ins
 // '' = same, or either one unknown
 export const threadSkew = (run: string, installed: string | null): string => (run && installed && compareVersions(run, installed) !== 0 ? runsText(run, installed) : '')
 
-// The not-closed threads whose current session runs another lean-agent version than the installed one (the doctor's rows).
+// The open threads (not parked, closing or closed) whose current session runs another lean-agent version than the installed one (the doctor's rows).
 export async function skewedThreads(h: Host, root: string): Promise<{ id: string; run: string; installed: string }[]> {
   const installed = await installedVersion(h, root)
   if (!installed) return []

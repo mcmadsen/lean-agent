@@ -909,4 +909,11 @@ test('a reader: a > in a shell comment or a quoted heredoc body is text, not a r
   expect(redirectTargets('echo "<<EOF"\n> /r/out.md\nEOF')).toEqual(['/r/out.md']) // a << inside quotes starts no heredoc
   expect(redirectTargets('cat <<< x\n> /r/out.md')).toEqual(['/r/out.md']) // a here-string is no heredoc
   expect(redirectTargets("cat <<'EOF'\nbody\nEOF\n> /r/out.md")).toEqual(['/r/out.md']) // after the terminator line the scan goes on
+  expect(redirectTargets("bash <<'EOF'\necho x > /r/out.md\nEOF")).toEqual(['/r/out.md']) // a heredoc fed to a shell is a script
+  expect(redirectTargets("rg '<<EOF' x\n> /r/out.md\nEOF")).toEqual(['/r/out.md']) // a << in single quotes
+  expect(redirectTargets('ls # <<EOF\n> /r/out.md\nEOF')).toEqual(['/r/out.md']) // a << in a comment
+  expect(redirectTargets('cat <<< x > /r/out.md')).toEqual(['/r/out.md']) // here-string, then a real redirect
+  expect(redirectTargets('echo \\# > /r/out.md')).toEqual(['/r/out.md']) // an escaped # is no comment
+  expect(redirectTargets('echo $# > /r/out.md')).toEqual(['/r/out.md']) // neither is $#
+  expect(redirectTargets("cat <<-'EOF'\n\tbody > x\n\tEOF\n> /r/out.md")).toEqual(['/r/out.md']) // <<- with an indented terminator
 })

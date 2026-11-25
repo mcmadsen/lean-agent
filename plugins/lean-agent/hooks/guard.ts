@@ -902,7 +902,9 @@ export function redirectTargets(c: string): string[] {
       if (m && nl >= 0) {
         const end = new RegExp(`\\n[ \\t]*${m[2]}[ \\t]*(?=\\n|$)`).exec(c.slice(nl))
         const to = end ? nl + end.index + end[0].length : c.length
-        if (m[1] || !/\$\(|`/.test(c.slice(nl, to))) body = { from: nl, to }
+        // (a body that is fed to a shell, `bash <<'EOF'` / `sh -s <<EOF`, is a script: its redirects count)
+        const feedsShell = /(^|[\s;&|(])(ba|z|da|k)?sh\b|\b(eval|source)\b/.test(c.slice(c.lastIndexOf('\n', i) + 1, i))
+        if (!feedsShell && (m[1] || !/\$\(|`/.test(c.slice(nl, to)))) body = { from: nl, to }
         i += m[0].length - 1
         continue
       }
