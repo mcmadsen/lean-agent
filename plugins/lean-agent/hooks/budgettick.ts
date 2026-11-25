@@ -16,7 +16,7 @@ import { isWorking } from './threads'
 import type { DeskRec } from './delivery'
 import type { AgentRow, Out, Thread } from './threads'
 
-export type TickDeps = { thread: (i: { action: string; tN: string; reason?: string; force?: boolean; text?: string }) => Promise<Out> }
+export type TickDeps = { thread: (i: { action: string; tN: string; reason?: string; force?: boolean; text?: string; internal?: boolean }) => Promise<Out> }
 const idsOf = async (h: Host, home: string): Promise<string[]> => (await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])).map(e => e.name).filter(n => /^t\d+$/.test(n)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
 const threadOf = (h: Host, home: string, id: string) => readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null).catch(() => null)
 
@@ -70,7 +70,7 @@ export async function softBudgetTick(h: Host, deps: TickDeps): Promise<string[]>
       totals ??= await threadTotals(h)
       const spent = totals[id] ?? 0
       const now = await h.clock.now()
-      const send = async (text: string) => deps.thread({ action: 'send', tN: id, text }).catch(() => null)
+      const send = async (text: string) => deps.thread({ action: 'send', tN: id, text, internal: true }).catch(() => null)
       const rec: BudgetRec = have && have.budget === (budget ?? 0) ? { ...have } : { budget: budget ?? 0 }
       if (rec.hardTokens !== undefined && rec.hardTokens !== hard) { delete rec.hard; delete rec.hardTokens } // the cap was changed or removed: the refusal ends, a new cap is announced again
       if ((rec as { hardUsd?: number }).hardUsd !== undefined) { delete rec.hard; delete (rec as { hardUsd?: number }).hardUsd } // a USD cap of 1.0.33: no longer enforced

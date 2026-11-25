@@ -256,7 +256,7 @@ test('sensitive: the user\'s Approve on the mod\'s own question changes it, boun
   expect(no[0]).toContain('stays as it is')
   expect(file(h)).toEqual({ actions: { ownPrDefault: false } })
   // an answer for an offer of a tampered check code is refused
-  const t = await call(h, { action: 'set', key: 'actions.holdSeconds', value: 0 })
+  const t = await call(h, { action: 'set', key: 'actions.holdSeconds', value: 60 })
   const forged = t.ask!.question.replace(/check [0-9a-f]{12}/, 'check 000000000000')
   expect((await bindConfigAnswers(h.host, [{ question: forged, options: t.ask!.options }], { [forged]: 'Approve' }))[0]).toContain('NOT recorded')
   expect(file(h).actions.holdSeconds).toBeUndefined()

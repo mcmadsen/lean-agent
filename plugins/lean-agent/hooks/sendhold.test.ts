@@ -4,7 +4,7 @@ import { fakeHost } from './fake'
 import { addActionRequest, listActions, resetActions, runStanding } from './deskactions'
 import { allowWrites, runGranted } from './deskwrites'
 import { recordHumanPrompt } from './humanprompts'
-import { cancelHeld, holdLines, holdsTick, holdsView, sendHeldNow } from './sendhold'
+import { cancelHeld, holdLines, holdSeconds, holdsTick, holdsView, sendHeldNow } from './sendhold'
 import { leanThread, resetLocks } from './threads'
 
 const TOKEN = 'SECRET-TOKEN-0123456789'
@@ -84,7 +84,7 @@ test('hold window: a covered reply waits actions.holdSeconds (default 30), its e
   const id = await ask(s, REPLY)
   const r = await s.run(id)
   expect(r?.sent).toBe(true)
-  expect(r?.line).toBe(`held 30 s before sending, then it goes out unless you cancel (the pane has Send now / Cancel; lean_thread action-cancel ${id}): Fixed in the next commit.`)
+  expect(r?.line).toBe(`held 30 s before sending, then it goes out unless you cancel (the pane has Send now / Cancel; lean_thread action-cancel ${id} with text = your reason; on: true extends the hold once by 30 s): Fixed in the next commit.`)
   expect(s.writers()).toHaveLength(0)
   const [x] = await holdsView(s.h.host)
   expect(x).toMatchObject({ id, thread: 't5', text: 'Fixed in the next commit.', until: s.h.clock.t + 30_000 })
@@ -118,7 +118,7 @@ test('Cancel (the pane) and action-cancel (the desk): nothing is sent, the threa
   const id = await ask(s, REPLY)
   await s.run(id)
   const o = await cancelHeld(s.h.host, id, s.tell)
-  expect(o).toEqual({ ok: true, text: `cancelled ${id}: nothing was sent; t5 was told; the request stays pending for the user's own answer` })
+  expect(o).toEqual({ ok: true, text: `cancelled ${id}: nothing was sent; t5 was told (by the user); the request stays pending for the user's own answer` })
   expect(s.told.join('\n')).toContain('was cancelled by the user before it was sent')
   expect((await listActions(s.h.host)).find(a => a.id === id)?.state).toBe('pending')
   s.h.clock.t += 40_000
@@ -134,6 +134,67 @@ test('Cancel (the pane) and action-cancel (the desk): nothing is sent, the threa
   await tick(s)
   expect(s.writers()).toHaveLength(0)
   expect((await leanThread(s.h.host, '/p', { action: 'action-cancel', id: 'a1-1' })).ok).toBe(false)
+})
+
+test('1.0.35: the thread is told WHO cancelled: the desk with its reason, or the user; the desk can extend one hold once', { timeoutMs: 20_000 }, async () => {
+  const s = await setup()
+  const a = await ask(s, REPLY)
+  await s.run(a)
+  // the desk cancels (lean_thread action-cancel, text = reason): the notice says so, with the reason
+  const sent: string[] = []
+  const r = await leanThread(s.h.host, '/p', { action: 'action-cancel', id: a, text: 'it contradicts the PR description' })
+  expect(r.ok, r.text).toBe(true)
+  expect(r.text).toContain('by the desk')
+  const direct = await setup()
+  const b = await ask(direct, REPLY)
+  await direct.run(b)
+  await cancelHeld(direct.h.host, b, direct.tell, { who: 'desk', reason: 'it contradicts the PR description' })
+  sent.push(...direct.told)
+  expect(sent.join('\n')).toContain('was cancelled by the desk before sending: it contradicts the PR description.')
+  expect(sent.join('\n')).not.toContain('by the user')
+  // no reason given
+  const nr = await setup()
+  const c = await ask(nr, REPLY)
+  await nr.run(c)
+  await cancelHeld(nr.h.host, c, nr.tell, { who: 'desk' })
+  expect(nr.told.join('\n')).toContain('cancelled by the desk before sending: no reason given.')
+  // the user (the default, the pane's Cancel) is named as the user
+  const u = await setup()
+  const d = await ask(u, REPLY)
+  await u.run(d)
+  await cancelHeld(u.h.host, d, u.tell)
+  expect(u.told.join('\n')).toContain('cancelled by the user before it was sent')
+  expect(u.told.join('\n')).not.toContain('by the desk')
+  // extend once: the window grows by one hold length, a second extension is refused, then it goes out
+  const x = await setup()
+  const e = await ask(x, REPLY)
+  await x.run(e)
+  const w0 = (await holdsView(x.h.host))[0]!.until
+  const first = await leanThread(x.h.host, '/p', { action: 'action-cancel', id: e, on: true })
+  expect(first.ok, first.text).toBe(true)
+  expect((await holdsView(x.h.host))[0]!.until).toBe(w0 + 30_000)
+  const second = await leanThread(x.h.host, '/p', { action: 'action-cancel', id: e, on: true })
+  expect(second.ok).toBe(false)
+  expect(second.text).toContain('already extended once')
+  x.h.clock.t += 40_000 // past the first window, inside the extension
+  expect(await tick(x)).toEqual([])
+  expect(x.writers()).toHaveLength(0)
+  x.h.clock.t += 30_000
+  await tick(x)
+  expect(x.writers()).toHaveLength(1)
+  expect((await leanThread(x.h.host, '/p', { action: 'action-cancel', id: e, on: true })).ok).toBe(false) // gone
+})
+
+test('1.0.35: actions.holdSeconds is clamped to 5..600 (0 stays "no window" for a hand-written file)', { timeoutMs: 20_000 }, async () => {
+  const at = async (v: unknown) => holdSeconds((await setup({ actions: { holdSeconds: v } })).h.host)
+  expect(await at(1)).toBe(5)
+  expect(await at(5)).toBe(5)
+  expect(await at(120)).toBe(120)
+  expect(await at(9999)).toBe(600)
+  expect(await at(0)).toBe(0)
+  expect(await at('x')).toBe(30)
+  expect(await at(-3)).toBe(30)
+  expect(await holdSeconds((await setup()).h.host)).toBe(30)
 })
 
 test('Send now ends the window at once: the desk timer sends it without waiting', { timeoutMs: 20_000 }, async () => {

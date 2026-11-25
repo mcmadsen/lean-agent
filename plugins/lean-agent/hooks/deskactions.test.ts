@@ -337,7 +337,7 @@ test('an answer is recorded only when the question the user saw named that reque
     ['two requests named', q => (q.question += ` (and ${other.id})`)],
     ['a label missing', q => (q.options = q.options.filter(o => o.label !== 'Edit first'))],
     ['the question reframed around the exact text', q => (q.question = `Housekeeping: pick Approve to dismiss this notice. ${q.question}`)],
-    ['an option described differently', q => (q.options[0]!.description = 'dismiss the notice')],
+    ['a label re-capitalised', q => (q.options[0]!.label = 'approve')],
     ['the options in another order', q => q.options.reverse()],
     ['multiSelect', q => ((q as { multiSelect?: boolean }).multiSelect = true)],
   ]
@@ -357,6 +357,23 @@ test('an answer is recorded only when the question the user saw named that reque
   // and the first answer wins: a Deny afterwards changes nothing
   expect(await human(s, v, 'Deny')).toEqual([`the answer to the question about ${v.id} was NOT recorded: request ${v.id} is not pending (already approved and waiting to be sent: lean_thread approve-action sends it): nothing was changed`])
   expect((await listActions(s.h.host)).map(x => `${x.id}:${x.state}`)).toEqual([`${v.id}:approved`, `${other.id}:pending`])
+})
+
+test('1.0.35: option DESCRIPTIONS never decide: re-worded or re-capitalised descriptions are recorded; a different label says "label mismatch"', async () => {
+  const s = setup()
+  const v = await ask(s, 'gh-pr-comment')
+  const w = await ask(s, 'gh-pr-comment', 't6', { body: 'second' })
+  // a label with another capital: not recorded, the reply names the label
+  const bad = asked(v, 'Approve', q => (q.options[1]!.label = 'deny'))
+  expect((await bindAnswers(s.h.host, bad.questions, bad.answers, s.tell)).join(' ')).toContain('label mismatch')
+  expect((await listActions(s.h.host)).find(x => x.id === v.id)!.state).toBe('pending')
+  // re-worded + re-capitalised descriptions, labels exact: recorded
+  const ok = asked(v, 'Approve', q => q.options.forEach((o, i) => (o.description = i === 0 ? o.description.toUpperCase() : `${o.description.toLowerCase()} (reworded)`)))
+  expect((await bindAnswers(s.h.host, ok.questions, ok.answers, s.tell)).join(' ')).toContain('approved')
+  // empty / missing descriptions as well
+  const none = asked(w, 'Deny', q => q.options.forEach(o => (o.description = '')))
+  expect((await bindAnswers(s.h.host, none.questions, none.answers, s.tell)).join(' ')).toContain('denied')
+  expect((await listActions(s.h.host)).map(x => `${x.id}:${x.state}`)).toEqual([`${v.id}:approved`])
 })
 
 test('another request\'s answer never approves this one, even for the same text; one thread\'s request is told only to that thread', async () => {

@@ -28,6 +28,8 @@ Read the project's origin URL, then pick the CLI:
 | `dev.azure.com`, `*.visualstudio.com` | `az repos pr ...` (extension `azure-devops`; `--organization https://dev.azure.com/{org} --project {project} --repository {repo}` unless `az devops configure -d` set them) | `az devops project list --top 1` (thread) |
 | anything else | none | say the host is not supported; give the branch name |
 
+Azure DevOps: a PR is `!<id>`, a work item is `#<id>` (GitHub uses `#<id>` for both); an `@name` mentions (and notifies) a person, a bare commit hash may or may not link: write them only when the user asked. The mod checks PR text, comments and commit messages for these (config `ado.textRules`: warn | convert | off).
+
 If the CLI is not installed or not logged in, say exactly that ("gh is not installed", "az is not logged in: az login or
 AZURE_DEVOPS_EXT_PAT") instead of passing on "command not found". With a PAT and no CLI, a thread may call the host's REST API
 (GitHub `/repos/{owner}/{repo}/pulls`, Azure `https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo}/pullrequests?api-version=7.1`

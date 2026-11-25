@@ -23,6 +23,7 @@ import type { Range } from './reviewprep'
 import { requiredRuns, wantSecondOpinion, wantedModel } from './reviewrisk'
 import { addDecline, declinesFor, declinesText, enforce, findingLine, normalize } from './reviewgate'
 import type { Context, Finding, Result } from './reviewgate'
+import { prefillText } from './reviewprefill'
 import { digestOf, mergeRuns, rememberMerged, sameBlocks, wasMerged } from './reviewmerge'
 import { addRequest, isExpensiveModel, modelAllowed } from './expensive'
 import { slugOk } from './rules'
@@ -543,8 +544,9 @@ async function doRecord(h: Host, project: string, i: any, thread: string): Promi
   const spent = await costNote(h, project, thread, sha)
   const left = area ? (await requiredAreas(h, thread, project, sha)).areas.filter(n => !(rec.areas ?? {})[n]) : [] // (the areas of the thread's LAST prepare)
   const areaLine = area ? `${replaced ? `\n${replaced}` : ''}\narea ${area.name} recorded (${Object.keys(rec.areas ?? {}).length} of ${areasAll.length} areas done${left.length ? `; still to review: ${left.join(', ')}` : '; all areas recorded: list each area\'s verdict in your final report'})` : ''
-  if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}\n${tail}${spent}` }
-  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${lessonsNote.startsWith('WARNING') ? ' [WARNING lessons: not offered]' : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}` : ''}\n${tail}${areaLine}${spent}` }
+  const prefill = prefillText(v.unlisted ?? [], v.uncovered ?? []) // the entry format and a prefilled JSON, so the thread only confirms it
+  if (wantGreen && !v.green) return { ok: false, text: `green refused, recorded NOT green in ${file}:\n${v.reasons.map(r => `- ${r}`).join('\n')}${prefill ? `\n${prefill}` : ''}\n${tail}${spent}` }
+  return { ok: true, text: `review recorded (${green ? 'green' : 'not green'}) in ${file}${extNote}${merged ? ` (${merged})` : ''}${lessonsNote.startsWith('WARNING') ? ' [WARNING lessons: not offered]' : ''}${!green && !area && v.reasons.length ? `\n${v.reasons.map(r => `- ${r}`).join('\n')}${prefill ? `\n${prefill}` : ''}` : ''}\n${tail}${areaLine}${spent}` }
 }
 
 async function doDecline(h: Host, project: string, i: any): Promise<Out> {

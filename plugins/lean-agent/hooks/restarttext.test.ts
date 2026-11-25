@@ -95,7 +95,7 @@ test('lean_thread refuses a field the action does not use, naming it and where i
   expect(u({ action: 'close', tN: 't1', text: 'hello' })).toContain('close does not use the field "text"')
   expect(u({ action: 'close', tN: 't1', text: 'hello' })).toContain('use send')
   expect(u({ action: 'restart', tN: 't1', title: 'x' })).toContain('title is used by new')
-  expect(u({ action: 'wake', tN: 't1', model: 'sonnet' })).toContain('model is used by new, reopen, resume, start, restart')
+  expect(u({ action: 'wake', tN: 't1', model: 'sonnet' })).toContain('model is used by new, set, reopen, resume, start, restart')
   expect(u({ action: 'send', tN: 't1', banana: 1 })).toContain('lean_thread has no field "banana"')
   expect(u({ action: 'send', tN: 't1', text: 'a', message: 'b' })).toContain('not both')
   // what is used passes; empty values are not fields

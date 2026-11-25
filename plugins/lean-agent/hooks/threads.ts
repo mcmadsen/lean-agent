@@ -13,8 +13,10 @@ import { actionListText, approveAction, dropActions, dropGrants, withdrawAction 
 import { allowWrites, askWrites, dropWriteGrants, revokeWrites, writesListText } from './deskwrites'
 import { noteBrief, ownFromGrant, recordPassedPr } from './ownpr'
 import { allowSelfEdit, dropSelfEditGrants, revokeSelfEdit, userWordsFor } from './selfedit'
-import { deliver } from './deliver'
-import { cancelHeld } from './sendhold'
+import { deliver, saveDraft } from './deliver'
+import { cancelHeld, extendHeld } from './sendhold'
+import { pendingChange } from './modelnext'
+import { waitLine } from './repeatreport'
 import { clearPendingMarkers } from './parkclear'
 import { denialRec } from './denial'
 import { agentsText } from './guard'
@@ -83,6 +85,8 @@ export type Thread = {
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
   lite?: boolean // started as haiku / low with a one-step brief (firstrequest.ts isLite): a lite first request while it still runs haiku / low (liteHolds)
+  nextModel?: string // 1.0.35: `set tN model` (stored): the model the NEXT session starts on; shown in the list as "model sonnet -> haiku at next restart"
+  nextEffort?: string // 1.0.35: the same for the effort
   effortSet?: boolean // a call named the effort (lean_thread new / start ... effort:); an effort that was only the default is recomputed at every start (models.ts)
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
   closedAt?: number // ms the thread was closed (the pane's closed rows carry "closed 3 h ago")
@@ -413,7 +417,10 @@ async function pickModel(h: Host, home: string, t: Thread, given: Given): Promis
   return { choice, note: '' }
 }
 
-async function startSession(h: Host, home: string, t: Thread, prompt: string, given: Given = {}, installed = '', root = ''): Promise<Out> {
+// 1.0.35: a model / effort stored by `set` is what the NEXT session starts on, unless the call names its own (cleared once a session starts)
+const withPending = (t: Thread, given: Given): Given => ({ ...given, ...(given.model === undefined && t.nextModel ? { model: t.nextModel } : {}), ...(given.effort === undefined && t.nextEffort ? { effort: t.nextEffort } : {}) })
+async function startSession(h: Host, home: string, t: Thread, prompt: string, given0: Given = {}, installed = '', root = ''): Promise<Out> {
+  const given = withPending(t, given0)
   const folder = tpath(home, t.id)
   const picked = await pickModel(h, home, t, given)
   if (typeof picked === 'string') return err(picked)
@@ -423,9 +430,13 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   t.model = choice.model
   t.effort = choice.effort
   if (given.effort !== undefined) t.effortSet = true
+  delete t.nextModel
+  delete t.nextEffort
   // before the session exists its mod reads model, effort and needs from thread.json (at its first request): only these three are saved now,
   // the rest of the record (state, sid) is saved when the start worked
   const disk = await load(h, home, t.id)
+  if (disk) delete disk.nextModel
+  if (disk) delete disk.nextEffort
   if (disk) await save(h, home, { ...disk, model: t.model, effort: t.effort, ...(t.effortSet ? { effortSet: true } : {}), ...(t.needs ? { needs: t.needs } : {}) })
   const hooks = await ensureGitHooks(h).then(() => true, () => false)
   // the project's profile (plus this thread's needs): plugins outside it are switched off in the thread's settings; its MCP servers
@@ -612,7 +623,8 @@ async function inFolder(h: Host, cwd: string, own: string): Promise<boolean> {
 // from the current template when lean-agent wrote it, so the fresh session also gets today's rules.
 // `restart`: the user asked for it in the pane (or the desk on request), so a working session is stopped too (its current step is lost);
 // otherwise a working session is never touched.
-async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given: Given, restart = false, limit = false): Promise<Out> {
+async function freshSession(h: Host, root: string, home: string, t: Thread, installed: string, why: string, given0: Given, restart = false, limit = false): Promise<Out> {
+  const given = withPending(t, given0)
   // an expensive model without the user's approval is held BEFORE anything is stopped: a restart never loses work for a session that cannot start
   const want = await pickModel(h, home, t, given)
   if (typeof want === 'string') return err(want) // a bad model or effort stops here, before anything is stopped
@@ -838,12 +850,12 @@ async function continuedCount(h: Host, home: string, id: string): Promise<number
   const n = Number((await readJson<{ total?: unknown } | null>(h, `${tpath(home, id)}/continue-state.json`, null))?.total)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; usage?: string; lastText?: string; stale?: boolean; ended?: boolean; why?: string; stuckEnded?: string; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean }): string {
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; usage?: string; lastText?: string; stale?: boolean; ended?: boolean; why?: string; stuckEnded?: string; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean; change?: string; waitRep?: string }): string {
   // an answer on its way replaces "waiting for your answer" (1.0.31: "answer queued, not read yet (4 min)"); a stuck session stays named
   const stuckWord = o.live === 'stuck' || o.live === 'stalled' ? `, ${o.live}` : ''
-  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.waitsFor ? o.waitsFor : o.live === 'waiting' ? 'waiting for your answer' : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.stuckEnded ? ` (${o.stuckEnded}${o.why ? `: ${o.why}` : ''})` : o.ended ? ` (ended at once${o.why ? `: ${o.why}` : ''})` : ''}`
+  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.waitsFor ? o.waitsFor : o.live === 'waiting' ? 'waiting for your answer' : o.waitRep ? o.waitRep : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.stuckEnded ? ` (${o.stuckEnded}${o.why ? `: ${o.why}` : ''})` : o.ended ? ` (ended at once${o.why ? `: ${o.why}` : ''})` : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"${o.synthesised ? ` (${SYNTH_MARK})` : ''}` : `(no report) ${(o.title ?? '').slice(0, 40)}`
-  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.continued ? `continued ${o.continued} x` : '', o.refs, o.unverified, o.ctx, o.soft, o.budget, o.usage?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
+  return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.continued ? `continued ${o.continued} x` : '', o.refs, o.change, o.unverified, o.ctx, o.soft, o.budget, o.usage?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
 // `list` shows the OPEN threads (working, waiting, needs you, idle, blocked, done and not closed) and ends with "N closed (list closed)" (1.0.33; field: 160+ closed threads printed every time);
 // the existing `text` field picks the rest ("closed": only closed ones, "all": both), no new tool parameter
@@ -912,9 +924,9 @@ async function list(h: Host, home: string, root = '', verbose = false, scope: Li
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
     // a turn that ended on a tool result with no text: a short script-made line, marked synthesised (synthline.ts); never a report, never silences the idle alert
     const synth = t.state === 'open' && t.sid ? await readSynth(h, home, t.id, { idle: truth?.word === 'idle', lastReportTs: lastRec?.ts ?? 0 }) : null
-    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), ...(why ? { why } : {}), ...(stuckRec ? { stuckEnded: stuckEnded(stuckRec.n) } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { usage: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(pendingChange(t) ? { change: pendingChange(t) } : {}), ...(t.state === 'open' ? await waitLine(h, home, t.id).then(w => (w ? { waitRep: w } : {})) : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), ...(why ? { why } : {}), ...(stuckRec ? { stuckEnded: stuckEnded(stuckRec.n) } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { usage: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.waitsFor && !o.answerQ ? `, ${o.waitsFor}` : o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.stuckEnded ? ` · ${o.stuckEnded}` : o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.why ? ` · why: ${o.why}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.soft ? ` · ${o.soft}` : ''}${o.budget ? ` · ${o.budget}` : ''}${o.priority ? ` · priority ${o.priority}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.continued ? ` · continued ${o.continued} x` : ''}${o.refs ? ` · ${o.refs}` : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.waitsFor && !o.answerQ ? `, ${o.waitsFor}` : o.waitRep ? `, ${o.waitRep}` : o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.stuckEnded ? ` · ${o.stuckEnded}` : o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.why ? ` · why: ${o.why}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.soft ? ` · ${o.soft}` : ''}${o.budget ? ` · ${o.budget}` : ''}${o.priority ? ` · priority ${o.priority}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.continued ? ` · continued ${o.continued} x` : ''}${o.refs ? ` · ${o.refs}` : ''}${o.change ? ` · ${o.change}` : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
@@ -961,7 +973,7 @@ const TEXTY = ['text', 'message']
 const USES: Record<string, string[]> = {
   new: [...TEXTY, 'title', 'project', 'model', 'effort', 'review', 'pr', 'keep', 'keepGoing', 'allowEdit', 'allowCmd', 'needs', 'reason', 'rules', 'inherit', 'workitem', 'continues', 'force', 'priority'],
   rule: [...TEXTY, 'on', 'trigger', 'output'], // a standing rule of one thread (threadrules.ts)
-  set: ['workitem', 'pr'], // the thread's work item / PR (workitems.ts): "none" clears one
+  set: ['workitem', 'pr', 'model', 'effort'], // the thread's work item / PR (workitems.ts): "none" clears one; model / effort (1.0.35): stored, applied at its next restart
   limit: ['text'], // limit tN <tokens>: text carries the number (no new field in the schema); "off" removes the override
   budget: ['text'], // budget tN <tokens>: the same
   send: TEXTY,
@@ -990,9 +1002,10 @@ const USES: Record<string, string[]> = {
   'allow-self-edit': [],
   'revoke-self-edit': ['id'],
   deliver: ['file', 'to', 'name'],
+  'save-draft': [...TEXTY, 'name'], // 1.0.35: text = the draft, name = a .md / .txt file name (deliver.ts saveDraft)
   keep: ['on'],
   'keep-going': ['on'],
-  'action-cancel': ['id'],
+  'action-cancel': ['id', ...TEXTY, 'on'], // text: the desk's reason (the thread is told "cancelled by the desk before sending: <reason>"); on: true extends the hold once
   'withdraw-action': ['id', 'text'],
   find: TEXTY,
   ask: TEXTY,
@@ -1137,7 +1150,11 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     }
     // a covered reply that waits in its hold window (sendhold.ts): the desk cancels it
     if (i.action === 'action-cancel') {
-      const o = await cancelHeld(h, (i.id ?? '').trim(), (thread, text) => leanThread(h, root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined))
+      if (i.on === true) {
+        const e = await extendHeld(h, (i.id ?? '').trim()) // 1.0.35: on: true extends the hold once instead of cancelling
+        return e.ok ? { ok: true, text: e.text } : err(e.text)
+      }
+      const o = await cancelHeld(h, (i.id ?? '').trim(), (thread, text) => leanThread(h, root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined), { who: 'desk', reason: i.text ?? i.message ?? '' })
       return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     // approval in advance (deskwrites.ts): the mod makes the grant only when the user's own recorded words name the target and ask for the work
@@ -1164,8 +1181,13 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
     }
     // a file for the user's Downloads / Desktop / Documents (deliver.ts): the mod copies it from the thread's scratch folder, on the user's words
     if (i.action === 'deliver') {
-      const o = await deliver(h, { tN: i.tN, file: i.file, to: i.to, name: i.name })
+      const o = await deliver(h, { tN: i.tN, file: i.file, to: i.to, name: i.name, root })
       return o.ok ? { ok: true, text: o.text } : { ok: false, text: o.text, ...(o.data ? { data: o.data } : {}) }
+    }
+    // 1.0.35: the desk writes a small draft (its own text) into feedback.folder, no thread (deliver.ts saveDraft)
+    if (i.action === 'save-draft') {
+      const o = await saveDraft(h, { text: i.text ?? i.message, name: i.name, to: i.to, root })
+      return o.ok ? { ok: true, text: o.text } : err(o.text)
     }
     if (i.action === 'revoke-writes') {
       const tn = (i.tN ?? '').trim()
@@ -1199,16 +1221,33 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           // a follow-up for the work item of a CLOSED thread reopens that thread by script (a new session with its handover and this text), never a replacement thread
           // (an open thread that reported done is restarted the same way by wake: the done rule). Only a send the user asked for: a chaser, a timer or any
           // other send of the mod itself (`internal`) never reopens a closed thread; its text stays in the inbox
-          if (t.state === 'closed' && (t.workItem || t.pr) && i.internal !== true) {
+          // 1.0.35 ONE continue path: the same for a closed thread without a work item or PR (closed by mistake) and for a PARKED one: the desk's send
+          // (never an internal one) reopens / wakes as needed in this one call and says what it did, instead of send, wake, resume, reopen + resume
+          if (t.state === 'closed' && i.internal !== true) {
             t.state = 'open'
-            const r = await freshSession(h, root, home, t, installed, `It was closed (${refsShort(t)}) and a follow-up for its task arrived: it is reopened with its handover.`, i)
+            const why = t.workItem || t.pr ? `It was closed (${refsShort(t)}) and a follow-up for its task arrived: it is reopened with its handover.` : 'It was closed and a message from the user arrived: it is reopened with its handover.'
+            const r = await freshSession(h, root, home, t, installed, why, i)
             if (!fresh(r)) {
               t.state = 'closed' // nothing was saved: it stays closed
               return r
             }
-            return { ...r, text: `${id} was closed: reopened as a new session with its handover and your text (old conversation kept read-only). ${r.text}` }
+            return { ...r, text: `${id} was closed: reopened as a new session with its handover and your text (old conversation kept read-only). ${r.text}`, data: { ...(r.data as object), continued: 'reopened' } }
           }
-          const out = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          let parkedNote = ''
+          if (t.state === 'parked' && i.internal !== true) {
+            t.state = 'open'
+            delete t.windowParked
+            await save(h, home, t)
+            parkedNote = `${id} was parked: reopened and woken with your text. `
+          }
+          const said = (o: Out): Out => (parkedNote ? { ...o, text: `${parkedNote}${o.text}`, data: { ...(o.data as object), continued: 'unparked' } } : o)
+          const woke = await wake(h, home, t, { root, current: installed }) // (a message wake does not stamp the version: only start and an explicit resume do)
+          if (parkedNote && !woke.ok) {
+            const cur = (await load(h, home, id)) ?? t
+            await save(h, home, { ...cur, state: 'parked' }) // nothing woke: it stays parked, the text stays queued
+            return err(`${woke.text} (${id} stays parked; the message is queued)`)
+          }
+          const out = said(woke)
           // the state of THIS message, said plainly (msgstate.ts): queued / delivered / consumed, and how a queued one reaches the thread
           const recs = await messageRecs(h, home, id)
           const mine = recs.at(-1)
@@ -1221,9 +1260,31 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
           return { ...out, text: `${sendLine(mine, { woken: (out.data as { resumed?: boolean } | undefined)?.resumed === true, answerWaitSeconds: wait })}\n${out.text}` }
         }
         case 'set': {
+          // `set tN model|effort <value>` (1.0.35): STORED, applied by one restart from the handover when the session next goes idle (modelnext.ts), or by `restart tN` at once
+          let mline = ''
+          if (i.model !== undefined || i.effort !== undefined) {
+            const chosen = await threadChoice(h, home, { model: i.model, effort: i.effort }, t)
+            if (typeof chosen === 'string') return err(`${chosen}. Nothing was changed`)
+            if (i.model !== undefined && isExpensiveModel(i.model)) return err(`${familyOf(i.model)} needs the user's approval and a reason, which set cannot ask: restart ${id} with model ${i.model} and reason. Nothing was changed`)
+            const set = <K extends 'model' | 'effort'>(key: K, v: string | undefined) => {
+              const next = key === 'model' ? 'nextModel' : 'nextEffort'
+              if (v === undefined) return
+              if (v === (t[key] ?? (key === 'model' ? 'sonnet' : 'high'))) delete t[next]
+              else t[next] = v
+            }
+            set('model', i.model)
+            set('effort', i.effort)
+            const disk = (await load(h, home, id)) ?? t
+            const { nextModel: _m, nextEffort: _e, ...rest } = disk
+            await save(h, home, { ...rest, ...(t.nextModel ? { nextModel: t.nextModel } : {}), ...(t.nextEffort ? { nextEffort: t.nextEffort } : {}) })
+            const pc = pendingChange(t)
+            mline = pc ? `${id}: ${pc} (applied by one restart from the handover when the session next goes idle; restart ${id} applies it now)` : `${id}: already on that model / effort; nothing is pending`
+            if (i.workitem === undefined && i.pr === undefined) return { ok: true, text: mline, data: { nextModel: t.nextModel ?? null, nextEffort: t.nextEffort ?? null } }
+          }
           // `set tN workitem|pr <value>`: what a script took from the brief or the user's prompt is corrected here ("none" clears it)
           const o = await setRefAction(h, home, id, i, x => save(h, home, x as Thread), t)
           if (!o.ok) return err(o.text)
+          if (mline) o.text = `${mline}\n${o.text}`
           // a PR reported with its full URL while the thread has a work item: the mod builds the one link + Reviewing request (own task only, workitemflow.ts)
           const rp = i.pr !== undefined && !isNone(i.pr) ? parsePr(i.pr) : null
           const after = rp && typeof rp !== 'string' && rp.host === 'azure' && rp.org && rp.project && rp.repo ? await afterPrOpened(h, id, { org: rp.org, project: rp.project, repo: rp.repo, number: rp.number }).catch(() => null) : null

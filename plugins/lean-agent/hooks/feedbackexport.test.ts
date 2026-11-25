@@ -17,6 +17,8 @@ const T0 = Date.UTC(2026, 10, 18, 14, 7)
 const EXP = '/h/.lean-agent/feedback-export'
 const PRIVATE = '/h/.lean-agent/.private/projects.map.json'
 const ROOT = '/p'
+// 1.0.35 (draftnote.ts): a draft without a "Plugin version" line shows its version as unknown and says it may be fixed already (the installed version here is 1.0.4)
+const NOTE = '> Plugin version: lean-agent unknown\n> written against an unknown version, installed 1.0.4: this may be fixed already, check README/CHANGELOG or the current skill before relying on it\n\n'
 
 function setup(home = '/h') {
   const h = fakeHost(null, { home })
@@ -408,7 +410,7 @@ test('drafts, core candidates and blocked reports go in once; the next export ha
     { ts: 3, from: 't3', kind: 'report', state: 'blocked', text: 'needs a decision about alpha' }, { ts: 4, from: 't4', kind: 'ask', state: 'blocked', text: 'a question' },
   ]))
   const first = read(h, await run(h))
-  expect(first).toContain('### draft a\n\nsteps in project-A') // titled by its first heading, which is not said twice
+  expect(first).toContain(`### draft a\n\n${NOTE}steps in project-A`) // titled by its first heading, which is not said twice
   expect(first).not.toContain('# draft a\nsteps')
   expect(first).toContain('## Script candidates for lean-agent core')
   expect(first).toContain('ledger-total: Total the cost ledger')
@@ -476,9 +478,9 @@ test('a draft is titled by its first heading; a long date-slug file name is neve
   h.files.set(lean(h, 'feedback-drafts/2026-11-20-plain-first-line.md'), 'no heading here, just a line\nmore\n')
   const t = read(h, await run(h))
   expect(t).not.toContain('<secret>')
-  expect(t).toContain('### Export file not openable in project-A\n\nSteps in project-A') // the first heading is the title, not said twice
-  expect(t).toContain('### the project-A opener failed after a restart of the app today\n\nnone') // the name rules (project) ran, the secret rule did not
-  expect(t).toContain('### no heading here, just a line\n\nmore')
+  expect(t).toContain(`### Export file not openable in project-A\n\n${NOTE}Steps in project-A`) // the first heading is the title, not said twice
+  expect(t).toContain(`### the project-A opener failed after a restart of the app today\n\n${NOTE}none`) // the name rules (project) ran, the secret rule did not
+  expect(t).toContain(`### no heading here, just a line\n\n${NOTE}more`)
   expect(t).not.toContain(slug)
   expect(JSON.parse(h.files.get(`${EXP}/state.json`)!).drafts).toContain(`${slug}.md`) // the raw name is remembered, so it is exported once
 })
@@ -488,7 +490,7 @@ test('a draft whose heading is not its first line keeps every other line; a long
   h.files.set(lean(h, 'feedback-drafts/a.md'), 'Steps in alpha\n## The real title\nmore\n')
   h.files.set(lean(h, 'feedback-drafts/b.md'), `# ${'word '.repeat(22)}mail ${EMAIL}\nbody\n`) // the address would straddle a cut at 120 characters
   const t = read(h, await run(h))
-  expect(t).toContain('### The real title\n\nSteps in project-A\nmore')
+  expect(t).toContain(`### The real title\n\n${NOTE}Steps in project-A\nmore`)
   expect(t).not.toContain('<emai\n') // a cut never leaves half a placeholder
   expect(t.match(/The real title/g)).toHaveLength(1)
   expect(t).not.toContain(EMAIL.slice(0, 6))

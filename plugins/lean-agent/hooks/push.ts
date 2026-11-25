@@ -302,6 +302,8 @@ export async function deskPush(h: Host, home: string, t: Thread, i: { sha?: stri
     const chk = await createChecks(h, { dir, project: t.project, thread: id, sha, remote, base: pr.base || deflt, title: pr.title, body: pr.body, draft: pr.draftSet ? pr.draft : undefined })
     if (!chk.ok) return err(`not pushed: ${chk.text}`)
     pr.draft = chk.draft
+    if (chk.title !== undefined) pr.title = chk.title // the Azure DevOps text rules (adotext.ts, ado.textRules convert) wrote a known PR "#id" as "!id"
+    if (chk.body !== undefined) pr.body = chk.body
     prNotes = chk.notes
   }
   if (adopt) {
