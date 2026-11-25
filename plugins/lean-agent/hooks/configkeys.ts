@@ -60,6 +60,7 @@ export const REGISTRY: readonly Entry[] = [
   mk('handoverTokens', 'number', 6000, 'desk', 'now', 'handover.ts', 'In full handover mode: the handover is cut to about this many tokens.', n(500, { int: true })),
   // ---- threads ----
   mk('threads.model', 'enum', 'sonnet', 'threads', 'next-session', 'models.ts', 'Which model new threads run on.', { values: MODELS }),
+  mk('threads.remoteControl', 'enum', 'auto', 'threads', 'next-session', 'threads.ts', 'auto: your own Claude Code setting decides. on: new threads start with --remote-control (documented for interactive sessions; unconfirmed for background ones, and nothing reports it).', { values: ['auto', 'on'], flat: true }),
   mk('threads.effort', 'enum', 'medium', 'threads', 'next-session', 'models.ts', 'How much effort new threads put in (medium; high when lean.orchestrate is off).', { values: EFFORTS }),
   mk('threads.autoRestart', 'boolean', true, 'threads', 'now', 'autorestart.ts', 'Restart a thread by itself when its context is full (off: it stops and asks).'),
   mk('threads.stopGraceMinutes', 'number', 3, 'threads', 'now', 'autorestart.ts', 'Minutes after the stop record before a still-working thread is restarted anyway.', n(0)),
@@ -124,6 +125,7 @@ export const REGISTRY: readonly Entry[] = [
   mk('review.askAboveUsd', 'number', 5, 'review', 'now', 'budgetcfg.ts', 'A review expected to cost more than this (USD) is not started until you said yes (0 = never ask).', { min: 0, max: 1000, flat: true, ...S }),
   mk('review.maxUsd', 'number', 25, 'review', 'now', 'budgetcfg.ts', 'A review expected to cost more than this (USD) is refused unless you say yes anyway (0 = no limit).', { min: 0, max: 10000, flat: true, ...S }),
   mk('review.preflight', 'boolean', true, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'Before any reviewer starts, compare the prepared file count with the forge\'s own count for the PR.', { flat: true, ...S }),
+  mk('review.holdWhenThrottled', 'boolean', true, 'review', 'now', 'throttle.ts', 'While the 5 h window is above window.throttleAbove, a full review whose diff one haiku pass cannot read is held (nothing runs, no record attempt is spent) until sonnet is available or you say go.', { flat: true, ...S }),
   mk('review.preflightMinFiles', 'number', 20, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'The forge count check never stops a review of at most this many prepared files.', { min: 1, max: 100000, int: true, flat: true }),
   mk('review.preflightRatio', 'number', 3, 'review', 'now', ['budgetcfg.ts', 'preflight-review.ts'], 'Prepared files above this many times the forge\'s count stop the review as a wrong range.', { min: 1, max: 100, flat: true }),
   mk('review.lessonsFallback', 'number', 2, 'review', 'now', 'reviewlessons.ts', 'General review lessons offered per topic when nothing else matches it (at most 6 in all; 0 = off).', { min: 0, max: 6, int: true, flat: true }),

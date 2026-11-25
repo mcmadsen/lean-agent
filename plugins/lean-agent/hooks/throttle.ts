@@ -7,7 +7,8 @@
 // A reading whose window has reset (resetsAt in the past) counts as nothing measured. No model decides any of this.
 import { homeDir, leanDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
-import { cfgNum } from './budgetcfg'
+import { cfgNum, cfgRaw } from './budgetcfg'
+import { kb, passBytes } from './reviewarea'
 import { fmtUntil } from './limits'
 
 export type WLevel = 'ok' | 'throttled' | 'blocked' | 'capped'
@@ -81,9 +82,18 @@ export async function newWorkGate(h: Host, priority: Priority): Promise<{ refuse
 
 // ---- lean_review prepare: the same window rules before any reviewer is started --------------------------------------------------------------------
 // { stop } refuses the prepare (blocked, capped); { note } is a line for the reply (throttled: the reviewer agents must run on haiku, the guard refuses sonnet).
-export async function reviewWindowGate(h: Host, thread: string): Promise<{ stop?: string; note?: string }> {
+// review.holdWhenThrottled (default true; 1.0.33): a FULL review the throttle would run on haiku, on a diff one haiku pass cannot read (passBytes, reviewarea.ts), is HELD instead of run: such a
+// pass reads a part of the diff, the record tool refuses green for it, and the attempt is spent. `confirm` is the user's word ("go": a weaker haiku review, never green); urgent threads are not held.
+const holdOn = async (h: Host): Promise<boolean> => {
+  const v = await cfgRaw(h, 'review.holdWhenThrottled').catch(() => undefined)
+  return !(v === false || v === 'false')
+}
+export const heldText = (pct: string, above: number, bytes: number, until: string): string =>
+  `prepare: HELD: 5h window at ${pct} (above window.throttleAbove ${above}%): only haiku may run now, and one haiku pass reads about ${kb(passBytes())} of this ${kb(bytes)} diff, so it could not reach a green record. The review is held until sonnet is available (the window drops below ${above}%, ${until}) or the user says go (then prepare again with confirm: true for a weaker haiku review that is never green; do NOT confirm on your own). Tell the desk now (lean_report state blocked, or lean_ask with the options "wait until sonnet is available" | "go on with haiku, weaker, never green"); config review.holdWhenThrottled false turns the hold off`
+export async function reviewWindowGate(h: Host, thread: string, o: { level?: string; bytes?: number; confirm?: boolean } = {}): Promise<{ stop?: string; note?: string }> {
   const s = await windowState(h)
   if (s.level === 'ok') return {}
+  if (s.level === 'throttled' && o.level === 'full' && o.confirm !== true && (o.bytes ?? 0) > passBytes() && (await holdOn(h)) && !(/^t\d+$/.test(thread) && (await threadPriority(h, thread)) === 'urgent')) return { stop: heldText(pctText(s), s.throttleAbove, o.bytes ?? 0, await resetText(h, s)) }
   const urgent = /^t\d+$/.test(thread) && (await threadPriority(h, thread)) === 'urgent'
   if (s.level === 'capped') return { stop: `prepare: NOT started: 5h window at ${pctText(s)}: your cap of ${s.cap}% (window.capFiveHourPct) is reached, all new work is held until the window resets (${await resetText(h, s)}). Tell the user; run the review after the reset` }
   if (s.level === 'blocked' && !urgent) return { stop: `prepare: NOT started: 5h window at ${pctText(s)}: above ${s.blockAbove}%, no reviewer fan-out starts until the window resets (${await resetText(h, s)}; only a thread with priority urgent may). Tell the user; run the review after the reset` }

@@ -1288,7 +1288,7 @@ export const register: Register = on => {
     try {
       const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
       // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
-      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
+      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
       notes.push(...(await bindConfigAnswers(host, e.questions, r?.result?.answers).catch(() => []))) // an Approve of lean_config's own question for a safety-loosening setting (configtool.ts)
       // and an Allow to a grant offer (deskwrites.ts bindOfferAnswers): the user's dialog answer is the written yes; the PR or work item it names becomes the thread's own
       const offer = await bindOfferAnswers(host, e.questions, r?.result?.answers).catch(() => ({ notes: [] as string[], granted: [] as { thread: string; target: undefined }[] }))

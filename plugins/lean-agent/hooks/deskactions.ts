@@ -35,6 +35,7 @@ import type { Anchor, AnchorInfo, Reader } from './anchor'
 import { checkOn, severityWord, withSeverity } from './prvote'
 import { checkMove } from './owntask'
 import { createCheck } from './workitemflow'
+import { FALLBACK_KINDS, fallbackText } from './actionfallback'
 
 export const ACTION_TTL_MS = 24 * 60 * 60 * 1000 // the default wait (config actions.pendingHours; was 2 h before 1.0.31)
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -588,7 +589,7 @@ export type ActionRequest = { id: string; thread: string; kind: ActionKind; para
 export type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string; via?: 'typed' }
 export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired' | 'withdrawn' | 'failed'
 // a request as the desk and the pane see it (never carries a signature)
-export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */ }
+export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */; fallback?: string /* this kind failed twice: a command for the user's own shell and why the thread cannot run it (actionfallback.ts) */ }
 
 // ---- standing approval: ONLY a status change carries it (never text) ------------------------------------------------------------------------
 // The kinds and statuses that can be covered: a thread status to fixed / closed / active, a GitHub review thread resolved. Never a reply, a comment, a
@@ -685,6 +686,7 @@ async function announceExit(h: Host, r: ActionRequest, tell?: Tell, toThread = t
   if (e.kind === 'executed') return
   const line = exitLine(r, e)
   await setNotice(h, `request-exit.${r.id}`, `${r.thread}: ${line}`)
+  if (e.kind === 'failed' && (await failuresOf(h, r.thread, r.kind)).n >= FALLBACK_AFTER && (await fallbackOf(h, r).catch(() => null))) await setNotice(h, `request-fallback.${r.thread}.${r.kind}`, `${r.thread}: ${r.kind} failed twice. A command to run in your own shell is in the desk's action list (lean_thread action-list) and on the next request card of that kind`)
   if (toThread && tell) await tell(r.thread, `Your ${line}.${e.kind === 'expired' || e.kind === 'withdrawn' ? ' Send it again as a NEW request if it is still needed, or continue without it.' : e.kind === 'failed' ? ' Nothing was written. If it is still needed make a NEW request (the reason above says what the server did not accept: fix that field first), or continue without it.' : ''}`).catch(() => undefined)
 }
 // the config key actions.pendingHours (default 24): how long a request waits for the user's decision, fixed when it is made
@@ -784,7 +786,31 @@ export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<Ac
   if (!plan) return null
   // an inline comment's line was read against the PR's diff before this request existed (addActionRequest): the card and the question say so
   const anchors = (plan.steps ?? [plan]).filter(s => s.anchor).length
-  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.then ? { then: plan.then } : {}), ...(plan.cont ? { cont: true } : {}) }
+  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.then ? { then: plan.then } : {}), ...(plan.cont ? { cont: true } : {}), ...(await fallbackOf(h, r).then(f => (f ? { fallback: f } : {}), () => ({}))) }
+}
+// A kind that failed twice for a thread (1.0.33, actionfallback.ts): the requests of that thread and kind that closed as failed in the last 24 h, plus the failed send attempts of an
+// approved request that is still open (its history says action-failed). The desk's own requests (gh-issue-create, thread t0) have no history folder: only their closed rows count.
+export const FALLBACK_AFTER = 2
+export async function failuresOf(h: Host, thread: string, kind: string): Promise<{ n: number; last?: ActionRequest }> {
+  if (!(FALLBACK_KINDS as readonly string[]).includes(kind)) return { n: 0 }
+  const now = await h.clock.now()
+  const mine = (await rows(h)).filter(r => r.thread === thread && r.kind === kind)
+  const hist = thread === DESK_THREAD ? [] : await readJsonl<{ kind?: string; id?: string }>(h, `${threadsDir(await homeDir(h))}/${thread}/history.jsonl`).catch(() => [] as { kind?: string; id?: string }[])
+  let n = 0
+  let last: ActionRequest | undefined
+  for (const r of mine) {
+    const k = r.exit ? (r.exit.kind === 'failed' && now - r.exit.ts <= 24 * 3_600_000 ? 1 : 0) : hist.filter(x => x && x.id === r.id && x.kind === 'action-failed').length
+    if (k) {
+      n += k
+      last = r
+    }
+  }
+  return { n, ...(last ? { last } : {}) }
+}
+// the fallback block for this request (null: the kind has none, it did not fail twice, or a value looks like a secret)
+export async function fallbackOf(h: Host, r: ActionRequest): Promise<string | null> {
+  const f = await failuresOf(h, r.thread, r.kind)
+  return f.n >= FALLBACK_AFTER ? fallbackText(r.kind, r.params as Record<string, unknown>, f.n) : null
 }
 // the requests that are not finished (the desk's list and the pane): pending, approved but not sent yet, and expired ones until they are told
 export async function listActions(h: Host, all = false): Promise<ActionView[]> {
@@ -1630,6 +1656,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   const exited = exit ? await exclusive(() => markExit(h, id, exit)).catch(() => null) : null
   if (exited) await announceExit(h, exited, tell, exit!.kind === 'executed') // (an executed one announces nothing; a refused one was told below in its own words)
   if (sent.ok || progress) await noteOwnItems(h, r, sent.text).catch(() => undefined)
+  const fb = !sent.ok && !sent.unknown && !progress && !sent.refused ? await fallbackOf(h, r).catch(() => null) : null // failed twice: the command for the user's own shell rides on the desk's answer (actionfallback.ts)
   if (sent.ok && tell) await tell(r.thread, `The user approved your request ${id} and the desk sent it (${r.kind}): ${sent.text}. Carry on.`).catch(() => undefined)
   if (sent.unknown && tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved and sent, but the outcome is unknown (${sent.text}). Check the target before asking again.`).catch(() => undefined)
   if (progress && !sent.ok && !sent.unknown) {
@@ -1649,11 +1676,11 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   if (httpFinal(sent.http) && !progress && !sent.ok && !sent.unknown) {
     // the server refused it (HTTP 4xx / 5xx): nothing was written; the request is closed as failed (one approval sends once: no duplicate); the thread is told here and asks again with a NEW request
     if (tell && r.thread !== DESK_THREAD) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but the server refused it (${httpText(sent.http!)}). Nothing was written. If it is still needed make a NEW request (the reason says what the server did not accept: fix that field first), or continue without it.`).catch(() => undefined)
-    return { ok: false, text: `failed (${httpText(sent.http!)}): ${plan.steps ? `${sent.text}; ` : ''}nothing was written. The request is closed as failed, not approved-and-waiting: ${r.thread === DESK_THREAD ? 'make it again' : `${r.thread} was told to send a NEW request`} if it is still needed` }
+    return { ok: false, text: `failed (${httpText(sent.http!)}): ${plan.steps ? `${sent.text}; ` : ''}nothing was written. The request is closed as failed, not approved-and-waiting: ${r.thread === DESK_THREAD ? 'make it again' : `${r.thread} was told to send a NEW request`} if it is still needed${fb ? `\n${fb}` : ''}` }
   }
   if (sent.ok && r.thread === DESK_THREAD) return { ok: true, text: `posted: ${sent.text}` }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
-  return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused until it expires (${hoursOf(r)} h after it was made): try again, or tell ${r.thread}` }
+  return { ok: false, text: sent.unknown ? `${sent.text}. The request is marked used (never sent twice); ${r.thread} was told` : `not sent: ${sent.text}. The request stays approved and unused until it expires (${hoursOf(r)} h after it was made): try again, or tell ${r.thread}${fb ? `\n${fb}` : ''}` }
 }
 
 // The work items a thread OWNS (thread.json `workItems`): the ones it created through `ado-workitem-create`, and the ones its own PR was linked to
@@ -1728,7 +1755,9 @@ export async function actionListText(h: Host, tell?: Tell): Promise<string> {
   const now = await h.clock.now()
   const swept = await sweepExpired(h, tell) // a request nobody decided in time leaves unsent, on the record, and the thread and the desk are told
   const left = (await rows(h)).filter(r => r.exit && now - r.exit.ts <= 24 * 3_600_000 && !swept.includes(exitLine(r, r.exit))).slice(-8)
-  const exits = `${swept.length ? `\njust left the list: ${swept.join('; ')}` : ''}${left.length ? `\nleft the list in the last 24 h (a request leaves only executed, denied, expired or withdrawn; the thread was told of each that was not sent):${left.map(r => `\n  ${r.id} · ${r.thread} · ${r.kind} · ${r.exit!.kind}: ${r.exit!.reason}`).join('')}` : ''}`
+  const fbOf = new Map<string, string>() // a closed request of a kind that failed twice: the command for the user's own shell (actionfallback.ts)
+  for (const r of left) if (r.exit!.kind === 'failed') fbOf.set(r.id, (await fallbackOf(h, r).catch(() => null)) ?? '')
+  const exits = `${swept.length ? `\njust left the list: ${swept.join('; ')}` : ''}${left.length ? `\nleft the list in the last 24 h (a request leaves only executed, denied, expired or withdrawn; the thread was told of each that was not sent):${left.map(r => `\n  ${r.id} · ${r.thread} · ${r.kind} · ${r.exit!.kind}: ${r.exit!.reason}${fbOf.get(r.id) ? `\n    ${fbOf.get(r.id)!.split('\n').join('\n    ')}` : ''}`).join('')}` : ''}`
   const list = await listActions(h)
   const st = await standingView(h).catch(() => null)
   const stand = st && (st.grants.length || st.rules) ? `\nstanding approvals (a request they cover is sent by the mod at once: do not ask the user again):${st.grants.map(g => `\n  ${g.id} · ${g.thread} · ${g.scope} · status changes (${g.statuses.join(', ') || 'resolve'}) · until ${new Date(g.exp).toISOString().slice(0, 16).replace('T', ' ')} UTC (or the thread closes); the user revokes it in the pane`).join('')}${st.rules ? `\n  ${st.rules} rule${st.rules === 1 ? '' : 's'} in config.json actions.standing (written by the user)` : ''}` : ''
@@ -1736,9 +1765,10 @@ export async function actionListText(h: Host, tell?: Tell): Promise<string> {
   return `${list
     .map(v => {
       const head = `${v.id} · ${v.thread} · ${v.kind} · ${v.state}${v.why ? ` · why: ${cut(v.why, 160)}` : ''}`
-      if (v.state === 'approved') return `${head}\n  the user approved it: call lean_thread approve-action ${v.id}`
+      const fb = v.fallback ? `\n  ${v.fallback.split('\n').join('\n  ')}` : ''
+      if (v.state === 'approved') return `${head}\n  the user approved it: call lean_thread approve-action ${v.id}${fb}`
       const q = questionOf(v)
-      return `${head}\n  AskUserQuestion, question (paste it exactly): ${JSON.stringify(q.question)}\n  options (exactly these labels): ${q.options.map(o => `${o.label}: ${o.description}`).join(' | ')}`
+      return `${head}\n  AskUserQuestion, question (paste it exactly): ${JSON.stringify(q.question)}\n  options (exactly these labels): ${q.options.map(o => `${o.label}: ${o.description}`).join(' | ')}${fb}`
     })
     .join('\n')}${exits}${stand}`
 }

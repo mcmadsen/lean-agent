@@ -7,10 +7,26 @@ import { perFileStats } from './reviewprep'
 import type { Prep } from './reviewprep'
 import { isTestPath } from './reviewprep'
 import type { Host } from './state'
+import { REVIEWER_STEPS } from './jobs'
 
 export const BIG_FILES = 300
 export const BIG_LINES = 20_000
 export const MAX_AREAS = 6
+// What one reviewer pass can READ (1.0.33). Field: a review of an 875 KB diff read about a tenth of it within the reviewer's 16 tool calls, then the tool refused green. About 5.5 KB a call
+// (the chunks a reviewer reads, with the lists and the checks it makes in between) is that measure. The areas are split FURTHER by script when the diff is bigger than MAX_AREAS passes can read.
+export const BYTES_PER_CALL = 5_500
+export const MAX_AREAS_HARD = 24
+export const passBytes = (steps = REVIEWER_STEPS): number => steps * BYTES_PER_CALL
+// how many areas the partition has: MAX_AREAS, more when the diff's bytes need more passes (at most MAX_AREAS_HARD). Prepare and record both use it, so they rebuild the same partition.
+export const areaCount = (diffBytes: number): number => Math.min(MAX_AREAS_HARD, Math.max(MAX_AREAS, Math.ceil(diffBytes / passBytes())))
+export const kb = (bytes: number): string => `${Math.max(1, Math.round(bytes / 1000))} KB`
+// the honest line about coverage: one pass reads about passBytes of a diff of `bytes`. null when it fits.
+export function coverageNote(bytes: number, what = 'this diff'): string | null {
+  const cap = passBytes()
+  if (bytes <= cap) return null
+  const share = Math.max(1, Math.floor((cap / bytes) * 100))
+  return `COVERAGE: ${what} is ${kb(bytes)}; one reviewer pass reads about ${kb(cap)} in its ${REVIEWER_STEPS} tool calls (${BYTES_PER_CALL / 1000} KB a call), that is about ${share}% of it, and the rest stays unread. ${Math.ceil(bytes / cap)} passes are needed to cover it`
+}
 export const TOP_RISKY = 10
 export type Stat = { path: string; add: number; del: number }
 export const tooLarge = (stats: Stat[]): boolean => stats.length > BIG_FILES || stats.reduce((n, s) => n + s.add + s.del, 0) > BIG_LINES
@@ -89,6 +105,15 @@ export function riskiest(stats: Stat[], prep: Pick<Prep, 'symbols' | 'exports'>,
 export function keepSections(diff: string, keep: (path: string) => boolean): string {
   const parts = diff.split(/^(?=diff --git )/m)
   return parts.filter(p => { const m = /^diff --git a\/.+? b\/(.+)$/m.exec(p); return !m || keep(m[1]!) }).join('')
+}
+// what the thread is told about each area's size against one pass (1.0.33): the areas are balanced by changed lines, so an area full of long lines can still be over a pass
+export function areasCoverage(diff: string, areas: Area[]): string {
+  const sizes = areas.map(a => ({ name: a.name, bytes: keepSections(diff, p => inArea(p, a, areas)).length }))
+  const over = sizes.filter(s => s.bytes > passBytes())
+  const head = `Reading budget: one reviewer pass reads about ${kb(passBytes())} (${REVIEWER_STEPS} tool calls); the diff is ${kb(diff.length)}, split by script into ${areas.length} areas (${sizes.map(s => `${s.name} ${kb(s.bytes)}`).join(', ')}), one pass each.`
+  return over.length
+    ? `${head} ${over.map(s => `${s.name} (${kb(s.bytes)}, a pass covers about ${Math.floor((passBytes() / s.bytes) * 100)}%)`).join(', ')} is still more than one pass reads and one folder cannot be split further by script: review its riskiest files first and say in its record which files stayed unread`
+    : head
 }
 export function scopedPrep(p: Prep, keep: (path: string) => boolean, diff: string): Prep {
   const hunks: Prep['hunks'] = {}
