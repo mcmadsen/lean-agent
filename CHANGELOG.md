@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.34
+
+### Fixed
+
+- A thread can no longer make a forge write by shell. `az repos pr work-item add` (and every other az / gh write) ran from a thread's own shell, because the thread's command check passed `gh` and `az` on as "judged by the other guards" and those only judge private projects. Now a thread (orchestration on or off, private project or not) and every subagent may only READ with az / gh / curl / wget: az under repos / boards / devops / pipelines / artifacts needs a read verb (`list`, `show`, `query`, `get`, `download`, `diff`, `list-*`, `show-*`), `az rest` and `az devops invoke` only as GET without a body; gh needs a read verb (`view`, `list`, `diff`, `checks`, `status`, ...), `gh api` only as GET without fields; curl / wget to a forge host with another method or a body is a write. Every other form is refused with the desk action kinds and, where one exists, the closest one (`closest kind: ado-pr-workitem-link`). It holds after `FOO=1`, after global flags, with a path to the program, in `bash -c`, `$(...)`, `xargs` and in the strings of `python3 -c` / `node -e`. What you tell a thread in its own session is not the desk's approval. Words that only mention a command (a commit message, `echo`, `grep`) are data and not refused.
+- A refused link of a PR to a work item that is not yours says what the link does: "linking this PR to WI 4210 changes a work item assigned to Ann Example, not you: not linking it (say 'link it anyway' in the chat to allow once)". A state change keeps "... not moving it".
+- A subagent was refused "never creates or deletes a tag or a release" up to ten times a day for commands that only read tags. The check now reads `git tag ...` as git does: `-l`, `--list`, `-n`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, `git describe`, `git show-ref --tags`, `git ls-remote --tags`, `git log --tags` and `gh release view|list` run; creating, deleting, `push --tags` and `gh release create|delete|edit|upload` stay refused.
+
+### Changed
+
+- Worker step budgets +25% (a cut-off worker costs a whole extra worker start; the runs that hit the caps needed about 2 more calls): `workers.stepsByJob.edit` 16 -> 20, `.lookup` 10 -> 12, `.check` 10 -> 12; `.run` stays 6. The reviewer keeps its 16.
+- A thread's own `gh pr create` and `az repos pr update` by shell are refused now (they go through the desk actions); local `az devops configure` and `az devops login` too. The `pr` skill says `ado-pr-update` through `lean_report`.
+
 ## 1.0.33
 
 ### Added
