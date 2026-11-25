@@ -101,7 +101,7 @@ test('the desk timer delivers the continue after threads.continueSeconds, and on
   expect(s3).toHaveLength(1)
 })
 
-test('at most 3 continues in a row without a tool call: then ONE notice and the halted state; a tool call lifts it', async () => {
+test('at most 2 continues in a row without a tool call (the one shared nudge counter, 1.0.33): then ONE stuck alert and the halted state; a tool call lifts it', async () => {
   const h = setup()
   const sent: string[] = []
   const notes: string[] = []
@@ -111,10 +111,11 @@ test('at most 3 continues in a row without a tool call: then ONE notice and the 
     h.clock.t += 25_000
     notes.push(...(await tick(h, sent)).map(n => n.text))
   }
-  expect(sent).toHaveLength(3)
-  expect(notes.filter(n => !n.includes('was continued by the mod'))).toEqual(["t1 keeps stopping after 'next:'"]) // once (the first continue's own notice is the desk-sees-it one)
+  expect(sent).toHaveLength(2)
+  expect(notes.filter(n => !n.includes('was continued by the mod'))).toHaveLength(1) // once (the first continue's own notice is the desk-sees-it one)
+  expect(notes.filter(n => n.includes('t1 is stuck: it ended its turn'))).toHaveLength(1)
   expect(cstate(h).halted).toBeGreaterThan(0)
-  expect(await peekNotice(h.host, 'continue-t1')).toBe("t1 keeps stopping after 'next:'")
+  expect(await peekNotice(h.host, 'continue-t1')).toContain('t1 is stuck')
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: h.clock.t + 1_000, kind: 'tool' }))
   h.clock.t += 5_000
   await tick(h, sent)
@@ -136,6 +137,7 @@ test('keep-going: every plain turn end is continued ("Continue with the next ste
   const notes: string[] = []
   for (let i = 0; i < 32; i++) {
     h.clock.t += 30_000
+    h.files.set(`${T1}/activity.json`, JSON.stringify({ at: h.clock.t, kind: 'tool' })) // (it works between the turn ends: the shared nudge counter, 1.0.33, counts nudges WITHOUT a tool call)
     await end(h, 'ok')
     h.clock.t += 25_000
     notes.push(...(await tick(h, sent)).map(n => n.text))

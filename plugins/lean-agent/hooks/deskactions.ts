@@ -22,7 +22,7 @@
 //
 // Never grantable this way: pushes, tags, releases (the push gate), merges, deletes, permission or settings changes, anything outside the
 // table. The token of Azure DevOps goes to curl on STDIN only (a curl config), never in an argument list, a log or an output.
-import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, threadsDir, writeJson } from './state'
+import { appendJsonl, atomicWrite, homeDir, leanDir, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { macOf } from './reviews'
 import { sha256 } from './sha'
@@ -581,11 +581,12 @@ export function reviewListing(items: ReviewItem[], cutAt?: number): string {
 
 // ---- the stored request ---------------------------------------------------------------------------------------------------------------
 // `exit` (1.0.31): how and why the request left the pending list (set once, never removed: the record stays as evidence)
-export type RequestExit = { kind: 'executed' | 'denied' | 'expired' | 'withdrawn' | 'edit'; reason: string; ts: number }
+// 1.0.33 'failed': the server answered the send with an error status (HTTP 400 ...) and nothing was written: "failed (HTTP 400): <short body>", never approved-and-waiting again; the thread asks with a NEW request
+export type RequestExit = { kind: 'executed' | 'denied' | 'expired' | 'withdrawn' | 'edit' | 'failed'; reason: string; ts: number }
 export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string; exit?: RequestExit }
 // `via` (1.0.31): where the answer came from when it was not the plain press of an option: the user's typed words in the dialog
 export type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string; via?: 'typed' }
-export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired' | 'withdrawn'
+export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired' | 'withdrawn' | 'failed'
 // a request as the desk and the pane see it (never carries a signature)
 export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */ }
 
@@ -670,7 +671,7 @@ const save = (h: Host, all: ActionRequest[]) => h.store.set(REQUESTS, pruned(all
 // ---- how a request leaves the pending list (1.0.31): executed, denied, expired or withdrawn, each written to its record with the reason and the time ----------------------------
 // A non-executed exit says so in one line to the thread AND to the desk (a notice: the pane lists it, the desk reads it); markExit runs inside the gate, announceExit after it.
 export const exitLine = (r: Pick<ActionRequest, 'id'>, e: Pick<RequestExit, 'kind' | 'reason'>): string =>
-  e.kind === 'executed' ? `request ${r.id} executed: ${e.reason}` : e.kind === 'denied' ? `request ${r.id} denied: nothing was sent` : e.kind === 'expired' ? `request ${r.id} expired unsent: ${e.reason}` : e.kind === 'edit' ? `request ${r.id} not sent: ${e.reason}` : `request ${r.id} withdrawn unsent: ${e.reason}`
+  e.kind === 'executed' ? `request ${r.id} executed: ${e.reason}` : e.kind === 'denied' ? `request ${r.id} denied: nothing was sent` : e.kind === 'expired' ? `request ${r.id} expired unsent: ${e.reason}` : e.kind === 'edit' ? `request ${r.id} not sent: ${e.reason}` : e.kind === 'failed' ? `request ${r.id} failed (${e.reason})` : `request ${r.id} withdrawn unsent: ${e.reason}`
 async function markExit(h: Host, id: string, exit: RequestExit): Promise<ActionRequest | null> {
   const all = await rows(h)
   const r = all.find(x => x.id === id)
@@ -684,7 +685,7 @@ async function announceExit(h: Host, r: ActionRequest, tell?: Tell, toThread = t
   if (e.kind === 'executed') return
   const line = exitLine(r, e)
   await setNotice(h, `request-exit.${r.id}`, `${r.thread}: ${line}`)
-  if (toThread && tell) await tell(r.thread, `Your ${line}.${e.kind === 'expired' || e.kind === 'withdrawn' ? ' Send it again as a NEW request if it is still needed, or continue without it.' : ''}`).catch(() => undefined)
+  if (toThread && tell) await tell(r.thread, `Your ${line}.${e.kind === 'expired' || e.kind === 'withdrawn' ? ' Send it again as a NEW request if it is still needed, or continue without it.' : e.kind === 'failed' ? ' Nothing was written. If it is still needed make a NEW request (the reason above says what the server did not accept: fix that field first), or continue without it.' : ''}`).catch(() => undefined)
 }
 // the config key actions.pendingHours (default 24): how long a request waits for the user's decision, fixed when it is made
 export async function pendingMsOf(h: Host): Promise<number> {
@@ -756,6 +757,7 @@ async function answerOf(h: Host, r: ActionRequest): Promise<Answer | null> {
 const usedOf = async (h: Host, id: string): Promise<boolean> => typeof (await h.store.get(usedKey(id)).catch(() => 1)) === 'number'
 
 export async function stateOf(h: Host, r: ActionRequest, now: number): Promise<ActionState> {
+  if (r.exit?.kind === 'failed') return 'failed'
   if (await usedOf(h, r.id)) return 'used'
   if (r.exit?.kind === 'withdrawn') return 'withdrawn'
   const a = await answerOf(h, r)
@@ -771,6 +773,7 @@ export const stateWhy = (r: ActionRequest, st: ActionState): string =>
   : st === 'denied' ? 'already resolved (denied)'
   : st === 'expired' ? `already resolved (expired after ${hoursOf(r)} h)`
   : st === 'withdrawn' ? `already resolved (withdrawn: ${r.exit?.reason ?? 'no reason given'})`
+  : st === 'failed' ? `already resolved (failed: ${r.exit?.reason ?? 'the send failed'}; the thread sends a NEW request)`
   : st === 'edit' ? 'already resolved (the user asked to edit it first: the thread sends a NEW request)'
   : st === 'approved' ? 'not pending (already approved and waiting to be sent: lean_thread approve-action sends it)'
   : st
@@ -785,6 +788,7 @@ export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<Ac
 }
 // the requests that are not finished (the desk's list and the pane): pending, approved but not sent yet, and expired ones until they are told
 export async function listActions(h: Host, all = false): Promise<ActionView[]> {
+  await reconcileFailed(h) // an approved request an older version left after an HTTP failure is shown (and closed) as failed
   const now = await h.clock.now()
   const out: ActionView[] = []
   for (const r of await rows(h)) {
@@ -1236,7 +1240,28 @@ export async function dropGrants(h: Host, thread: string): Promise<void> {
 
 // ---- the desk sends ---------------------------------------------------------------------------------------------------------------------------
 const UNKNOWN_EXIT = new Set([28, 52, 55, 56]) // curl: timeout, empty reply, send / receive failure: the request may have arrived
-type Sent = { ok: boolean; text: string; unknown?: boolean; id?: string; refused?: boolean /* an anchor that does not stand: nothing was written */ }
+type Sent = { ok: boolean; text: string; unknown?: boolean; id?: string; refused?: boolean /* an anchor that does not stand: nothing was written */; http?: { status: number; short: string } /* the server answered with an error status: "HTTP 400" and its message, cut */ }
+// An HTTP failure of a send (1.0.33; field: ado-workitem-create "fails with HTTP 400 on every send" and the text said only that: curl's stderr line hid the response body). The status is read from
+// curl's "returned error: 400" or gh's "HTTP 422"; the short body is the JSON message the service gave (Azure DevOps: {"message": "TF401320: Rule Error for field ..."}, GitHub: {"message": ...}), else its text.
+export function httpFailure(stderr: string, stdout: string): { status: number; short: string } | null {
+  const m = /returned error:\s*(\d{3})\b/.exec(stderr) ?? /\bHTTP\s*(\d{3})\b/i.exec(`${stderr}\n${stdout}`)
+  if (!m) return null
+  let msg = ''
+  const body = stdout.trim()
+  try {
+    const o = JSON.parse(body) as { message?: unknown; error?: unknown; errors?: unknown }
+    const e = o.error && typeof o.error === 'object' ? (o.error as { message?: unknown }).message : o.error
+    msg = [o.message, e].find(x => typeof x === 'string' && x.trim()) as string | undefined ?? ''
+    if (!msg && Array.isArray(o.errors)) msg = o.errors.map(x => (x && typeof x === 'object' ? String((x as { message?: unknown }).message ?? '') : String(x))).filter(Boolean).join('; ')
+  } catch {
+    msg = body.startsWith('<') ? '' : body // (an HTML error page says nothing useful)
+  }
+  return { status: Number(m[1]), short: oneLine(msg, 160) }
+}
+export const httpText = (f: { status: number; short: string }): string => `HTTP ${f.status}${f.short ? `: ${f.short}` : ''}`
+// a client error (4xx: the service refused THIS request: bad field, no right, a conflict) is final: the request is closed as failed and the thread asks again with a NEW one. A server
+// error (5xx), a timeout (408) or a rate limit (429) is transient: nothing was written, the request stays approved and can be sent again
+export const httpFinal = (f: { status: number } | undefined): boolean => !!f && f.status >= 400 && f.status < 500 && f.status !== 408 && f.status !== 429
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const idIn = (out: string): string | undefined => {
   try {
@@ -1288,7 +1313,11 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
       stdin = rb.body
     }
     const r = await h.process.run(['gh', 'api', '--method', 'POST', '-H', 'Accept: application/vnd.github+json', plan.url.replace('https://api.github.com/', ''), '--input', '-'], { stdin, timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
-    if (r.exitCode !== 0) return { ok: false, text: `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
+    if (r.exitCode !== 0) {
+      const http = httpFailure(r.stderr ?? '', r.stdout ?? '')
+      if (http) return { ok: false, http, text: http.short ? `GitHub refused it (${httpText(http)})` : `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
+      return { ok: false, text: `gh api failed: ${oneLine(r.stderr || r.stdout, 200) || `exit ${r.exitCode}`} (is gh installed and logged in: gh auth login)` }
+    }
     if (plan.url.endsWith('/graphql')) return /"isResolved"\s*:\s*true/.test(r.stdout) ? { ok: true, text: 'thread resolved' } : { ok: false, text: `GitHub answered but the thread is not reported resolved: ${oneLine(r.stdout, 200)}` }
     return { ok: true, text: resultOf(r.stdout, 'html_url') }
   }
@@ -1361,7 +1390,12 @@ async function send(h: Host, plan: Plan): Promise<Sent> {
   }
   const r = await call(plan.method, url, plan.contentType, body === '' ? null : body)
   if (r.exitCode !== 0) {
+    const http = httpFailure(r.stderr ?? '', r.stdout ?? '')
     const why = scrub(oneLine(r.stderr || r.stdout, 200)) || `curl exit ${r.exitCode}`
+    if (http) {
+      const f = { status: http.status, short: scrub(http.short) }
+      return { ok: false, http: f, text: f.short ? `Azure DevOps refused it (${httpText(f)})` : `Azure DevOps refused or could not be reached: ${why}` }
+    }
     return UNKNOWN_EXIT.has(r.exitCode) ? { ok: false, unknown: true, text: `the connection broke after the request may have been sent (${why}): outcome unknown, check the target before asking again` } : { ok: false, text: `Azure DevOps refused or could not be reached: ${why}` }
   }
   return { ok: true, text: scrub(resultOf(r.stdout, 'url')), id: idIn(r.stdout) }
@@ -1468,6 +1502,7 @@ async function runSteps(h: Host, thread: string, plan: Plan): Promise<Ran> {
   let unknown = false
   let failed = 0
   let refusals = 0
+  let firstHttp: { status: number; short: string } | undefined
   let made: string | undefined // the id of the work item a create step made: the link steps after it name it
   const anchored = steps.filter(s => s.anchor)
   const seen = anchored.length ? await verifyAnchors(readerOf(h), thread, anchored.map(s => s.anchor!)) : null
@@ -1501,6 +1536,7 @@ async function runSteps(h: Host, thread: string, plan: Plan): Promise<Ran> {
     } else {
       failed++
       if (one.refused) refusals++
+      if (one.http && !firstHttp) firstHttp = one.http // (the batch fails as a whole with it only when nothing before it was written)
       if (!plan.cont || one.unknown) stopped = true
       if (one.unknown) {
         progress = true
@@ -1509,7 +1545,7 @@ async function runSteps(h: Host, thread: string, plan: Plan): Promise<Ran> {
       parts.push(`${tag}: ${one.unknown ? 'outcome unknown' : 'failed'} (${one.text})`)
     }
   }
-  return { sent: { ok: failed === 0, ...(unknown ? { unknown: true } : {}), text: parts.join('; ') }, progress, ...(!progress && failed > 0 && refusals === failed ? { refused: true } : {}) }
+  return { sent: { ok: failed === 0, ...(unknown ? { unknown: true } : {}), ...(!progress && firstHttp ? { http: firstHttp } : {}), text: parts.join('; ') }, progress, ...(!progress && failed > 0 && refusals === failed ? { refused: true } : {}) }
 }
 // ONE inline comment: its anchor is checked against the PR diff right before it goes out; an anchor that does not stand writes nothing
 async function sendAnchored(h: Host, thread: string, plan: Plan): Promise<Sent> {
@@ -1540,6 +1576,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     const plan = await sound(h, r)
     if (!plan) return { ok: false as const, text: `request ${id} does not verify (not signed by this mod, or the text to send no longer matches its check code): refused, nothing was sent` }
     const st = await stateOf(h, r, now)
+    if (st === 'failed') return { ok: false as const, text: `request ${id} failed (${r.exit?.reason ?? 'the server refused it'}) and is closed: it is never sent again under this id; ${r.thread} sends a NEW request (the retry asks again)` }
     if (st === 'used') return { ok: false as const, text: `request ${id} was already used: one approval sends once` }
     if (st === 'expired') {
       const a = await answerOf(h, r)
@@ -1581,7 +1618,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     sent = { ok: false, unknown: true, text: `sending failed after it may have started: ${oneLine(String((e as Error)?.message ?? e), 200)}` }
   }
   try {
-    if (!sent.ok && !sent.unknown && !progress && !sent.refused) await h.store.set(usedKey(id), null) // a definite failure that sent nothing is the only retry (not an anchor that does not stand: it would fail again)
+    if (!sent.ok && !sent.unknown && !progress && !sent.refused && !httpFinal(sent.http)) await h.store.set(usedKey(id), null) // a definite failure that sent nothing (no token, no network, a 5xx) is the only retry; a 4xx answer is final (below) (not an anchor that does not stand: it would fail again)
   } finally {
     inflight.delete(id)
   }
@@ -1589,7 +1626,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   // the exit is on the record: sent (or sent with an unknown outcome, or partly done) = executed; an anchor that does not stand = withdrawn unsent (the thread is told below, in its own words)
   const now2 = await h.clock.now()
   // (a definite failure that sent nothing leaves it approved and unused for a retry: no exit yet)
-  const exit: RequestExit | null = sent.ok ? { kind: 'executed', reason: `sent at ${new Date(now2).toISOString().slice(0, 16).replace('T', ' ')} UTC`, ts: now2 } : sent.unknown ? { kind: 'executed', reason: 'sent, outcome unknown', ts: now2 } : progress ? { kind: 'executed', reason: 'partly done', ts: now2 } : sent.refused ? { kind: 'withdrawn', reason: 'its anchor does not stand: nothing was written', ts: now2 } : null
+  const exit: RequestExit | null = sent.ok ? { kind: 'executed', reason: `sent at ${new Date(now2).toISOString().slice(0, 16).replace('T', ' ')} UTC`, ts: now2 } : sent.unknown ? { kind: 'executed', reason: 'sent, outcome unknown', ts: now2 } : progress ? { kind: 'executed', reason: 'partly done', ts: now2 } : sent.refused ? { kind: 'withdrawn', reason: 'its anchor does not stand: nothing was written', ts: now2 } : httpFinal(sent.http) && !progress ? { kind: 'failed', reason: httpText(sent.http!), ts: now2 } : null
   const exited = exit ? await exclusive(() => markExit(h, id, exit)).catch(() => null) : null
   if (exited) await announceExit(h, exited, tell, exit!.kind === 'executed') // (an executed one announces nothing; a refused one was told below in its own words)
   if (sent.ok || progress) await noteOwnItems(h, r, sent.text).catch(() => undefined)
@@ -1608,6 +1645,11 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     // the PR's diff no longer has the line (a push since the request, or a wrong line): nothing was written; the request is closed and the thread corrects the anchor
     if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but NOT sent, nothing was written: ${sent.text}. Make a NEW request with an anchor on a line the PR changes.`).catch(() => undefined)
     return { ok: false, text: `not sent: ${sent.text}. Nothing was written; the request is closed because the anchor does not stand, ${r.thread} was told to send a new one` }
+  }
+  if (httpFinal(sent.http) && !progress && !sent.ok && !sent.unknown) {
+    // the server refused it (HTTP 4xx / 5xx): nothing was written; the request is closed as failed (one approval sends once: no duplicate); the thread is told here and asks again with a NEW request
+    if (tell && r.thread !== DESK_THREAD) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but the server refused it (${httpText(sent.http!)}). Nothing was written. If it is still needed make a NEW request (the reason says what the server did not accept: fix that field first), or continue without it.`).catch(() => undefined)
+    return { ok: false, text: `failed (${httpText(sent.http!)}): ${plan.steps ? `${sent.text}; ` : ''}nothing was written. The request is closed as failed, not approved-and-waiting: ${r.thread === DESK_THREAD ? 'make it again' : `${r.thread} was told to send a NEW request`} if it is still needed` }
   }
   if (sent.ok && r.thread === DESK_THREAD) return { ok: true, text: `posted: ${sent.text}` }
   if (sent.ok) return { ok: true, text: `sent ${r.kind} for ${r.thread}: ${sent.text}; ${r.thread} was told` }
@@ -1653,8 +1695,36 @@ export async function dropActions(h: Host, thread: string): Promise<void> {
   for (const r of gone) await announceExit(h, r, undefined, false)
 }
 
+// A request that an OLDER version (1.0.32 and before) left "approved, unused" after a send that failed with an HTTP error: its thread's history says "action-failed" with the
+// HTTP status. It is closed as failed now (the reason from that line), so the list stops offering it for approve-action (no second creation). Returns the ids closed. Never throws.
+export async function reconcileFailed(h: Host): Promise<string[]> {
+  const done: string[] = []
+  try {
+    const home = await homeDir(h)
+    const now = await h.clock.now()
+    for (const r of await rows(h)) {
+      if (r.exit || r.thread === DESK_THREAD || (await usedOf(h, r.id))) continue
+      if ((await stateOf(h, r, now)) !== 'approved') continue
+      const hist = await readJsonl<{ kind?: string; id?: string; result?: string }>(h, `${threadsDir(home)}/${r.thread}/history.jsonl`).catch(() => [] as { kind?: string; id?: string; result?: string }[])
+      const mine = hist.filter(x => x && x.id === r.id && (x.kind === 'action-failed' || x.kind === 'action-sent'))
+      const last = mine[mine.length - 1]
+      if (!last || last.kind !== 'action-failed') continue
+      const http = httpFailure(String(last.result ?? ''), '')
+      if (!http || !httpFinal(http)) continue // not an HTTP answer (no token, no network) or a transient one (5xx, 408, 429): it stays approved, to try again
+      const m = await exclusive(() => markExit(h, r.id, { kind: 'failed', reason: http.short ? httpText(http) : `HTTP ${http.status} (sent by an older version: the answer's message was not kept)`, ts: now }))
+      if (m) {
+        done.push(r.id)
+        await announceExit(h, m, undefined, false).catch(() => undefined) // the pane's notice line: "t5: request a1-1 failed (HTTP 400: ...)"
+      }
+    }
+  } catch {
+    /* the list is read anyway */
+  }
+  return done
+}
 // the desk's `action-list`: what waits, each with the question to ask the user, word for word (and the expired ones, told to their thread)
 export async function actionListText(h: Host, tell?: Tell): Promise<string> {
+  await reconcileFailed(h)
   const now = await h.clock.now()
   const swept = await sweepExpired(h, tell) // a request nobody decided in time leaves unsent, on the record, and the thread and the desk are told
   const left = (await rows(h)).filter(r => r.exit && now - r.exit.ts <= 24 * 3_600_000 && !swept.includes(exitLine(r, r.exit))).slice(-8)

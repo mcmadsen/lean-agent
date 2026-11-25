@@ -12,6 +12,7 @@ import type { Host } from './state'
 import { logHistory, threadOk } from './deskactions'
 import { recentPrompts } from './humanprompts'
 import { readRegistry } from './worktreereg'
+import { feedbackConfig, wantsFolder } from './feedbackdest'
 
 export const FOLDERS = ['Downloads', 'Desktop', 'Documents']
 const OK_KEY = (k: string) => `deliver.ok.${k}`
@@ -75,16 +76,69 @@ export const deliverQuestion = (thread: string, name: string, label: string): { 
 })
 const keyOf = (thread: string, file: string, folder: string) => hex(`${thread}\n${file}\n${folder}`)
 
+// ---- a FEEDBACK DRAFT for the configured feedback folder (1.0.33; field: "no way for the desk to copy feedback drafts to the user's folder when threads do not work") --------------------------------
+// No thread is needed: `deliver` {file} (tN left out, or any tN) copies ONE file the mod itself wrote (~/.lean-agent/feedback-drafts, ~/.lean-agent/feedback-export), or a thread's scratch file named as
+// a draft with `to` left out, into config feedback.folder, when feedback.destination includes folder (the user chose that folder once in the config: no question per copy). The same guards as every
+// delivery: one file a call, never overwritten (a taken name gets -2, -3 ...), the target inside feedback.folder only (a plain file name, real paths compared: no .. and no symlink out of it), the folder
+// under the user's home and not hidden or lean-agent's own state, and at most DRAFT_MAX bytes.
+export const DRAFT_MAX = 256 * 1024
+const mine = (home: string, real: string): boolean => under(real, `${leanDir(home)}/feedback-drafts`) || under(real, `${leanDir(home)}/feedback-export`)
+async function deliverDraft(h: Host, home: string, thread: string, real: string, i: DeliverIn): Promise<{ ok: boolean; text: string }> {
+  const c = await feedbackConfig(h, home)
+  if (!wantsFolder(c.dest)) return { ok: false, text: `feedback.destination is ${c.dest}: a feedback draft is copied only when it includes folder (lean_config set feedback.destination folder, and feedback.folder <path>). Nothing was copied` }
+  if (!c.folder) return { ok: false, text: 'feedback.folder is not set (lean_config set feedback.folder ~/Downloads). Nothing was copied' }
+  if (i.to && i.to.trim() && i.to.trim().toLowerCase() !== 'feedback') {
+    const asked = await destination(h, home, i.to)
+    const conf = await destination(h, home, c.folder)
+    if (!('folder' in asked) || !('folder' in conf) || asked.folder !== conf.folder) return { ok: false, text: `a feedback draft goes only to feedback.folder (${c.folder}); to: ${i.to.slice(0, 80)} is another folder: leave to out. Nothing was copied` }
+  }
+  const dest = await destination(h, home, c.folder)
+  if (!('folder' in dest)) return { ok: false, text: `feedback.folder ${c.folder} is refused: ${dest.text}. Nothing was copied` }
+  const folderReal = await realPath(h, dest.folder)
+  const homeReal = await realPath(h, home)
+  if (!under(folderReal, homeReal) || folderReal === homeReal || under(folderReal, await realPath(h, leanDir(home)))) return { ok: false, text: `feedback.folder ${c.folder} resolves outside the user's home or into lean-agent's own state (${folderReal}): refused. Nothing was copied` }
+  const fst = await h.fs.stat(folderReal).catch(() => null)
+  if (!fst) return { ok: false, text: `feedback.folder ${c.folder} does not exist. Nothing was copied` }
+  if (fst.kind !== 'dir' && fst.kind !== 'directory') return { ok: false, text: `feedback.folder ${c.folder} is not a folder. Nothing was copied` }
+  const st = await h.fs.stat(real).catch(() => null)
+  if (!st || st.kind !== 'file') return { ok: false, text: `${real} is not a file` }
+  if (typeof st.size === 'number' && st.size > DRAFT_MAX) return { ok: false, text: `${baseName(real)} is ${st.size} bytes: a feedback draft is at most ${DRAFT_MAX} bytes. Nothing was copied` }
+  const name = safeName(i.name ?? baseName(real))
+  if (!name) return { ok: false, text: 'name must be a plain file name (no slash, not hidden)' }
+  const final = await freeName(h, dest.folder, name)
+  if (!final) return { ok: false, text: `${c.folder} already holds ${name} and 98 numbered copies: refused` }
+  const target = `${folderReal}/${final}`
+  if (!under(target, folderReal) || dirName(target) !== folderReal) return { ok: false, text: 'the target is not inside feedback.folder: refused. Nothing was copied' }
+  const r = await h.process.run(['cp', '-n', '--', real, target], { timeoutMs: 60_000 }).catch((e: unknown) => ({ exitCode: 1, stdout: '', stderr: String((e as Error)?.message ?? e) }))
+  if (r.exitCode !== 0) {
+    const bad = String(r.stderr ?? '')
+    return { ok: false, text: /operation not permitted|permission denied|EPERM|EACCES/i.test(bad) ? eperm(c.folder) : `copy to ${c.folder} failed: ${bad.trim().slice(0, 160) || `exit ${r.exitCode}`}` }
+  }
+  await logHistory(h, thread || 't0', { kind: 'delivered', file: real, to: target, by: 'config feedback.folder' })
+  return { ok: true, text: `copied ${baseName(real)} to ${target}${final !== name ? ` (${name} existed: nothing was overwritten)` : ''}. Tell the user the full path in one line` }
+}
+const dirName = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
+
 export type DeliverIn = { tN?: string; file?: string; to?: string; name?: string }
 export async function deliver(h: Host, i: DeliverIn): Promise<{ ok: boolean; text: string; data?: unknown }> {
   const thread = (i.tN ?? '').trim()
-  if (!threadOk(thread)) return { ok: false, text: 'deliver needs tN (the thread that made the file)' }
   const home = await homeDir(h)
+  const file0 = (i.file ?? '').trim()
+  // no thread (or the desk's t0): only a feedback draft the mod itself wrote can be delivered, and it needs no working thread
+  if (!thread || thread === 't0') {
+    if (!file0.startsWith('/') || /[\n\r]/.test(file0)) return { ok: false, text: 'deliver needs file: ONE absolute path (a feedback draft under ~/.lean-agent/feedback-drafts or feedback-export when no tN is given)' }
+    const realFile = await realPath(h, norm(file0))
+    if (!mine(home, realFile) && !mine(await realPath(h, home), realFile)) return { ok: false, text: 'deliver needs tN (the thread that made the file); without one only a feedback draft (~/.lean-agent/feedback-drafts, feedback-export) is delivered' }
+    return deliverDraft(h, home, '', realFile, i)
+  }
+  if (!threadOk(thread)) return { ok: false, text: 'deliver needs tN (the thread that made the file)' }
   if (!(await h.fs.exists(`${threadsDir(home)}/${thread}/thread.json`).catch(() => false))) return { ok: false, text: `no thread ${thread}` }
-  const file = (i.file ?? '').trim()
+  const file = file0
   if (!file.startsWith('/')) return { ok: false, text: 'deliver needs file: an absolute path inside the thread\'s scratch folder, its worktree or the desk reports folder' }
   // the file: a real file, on its real path inside an allowed root
   const real = await realPath(h, norm(file))
+  // a feedback draft the mod wrote, or a scratch file of this thread named as a draft with `to` left out: the feedback folder (above)
+  if (mine(home, real) || (!(i.to ?? '').trim() && /draft/i.test(baseName(real)) && under(real, norm(`${threadsDir(home)}/${thread}/scratch`)))) return deliverDraft(h, home, thread, real, i)
   const st = await h.fs.stat(real).catch(() => null)
   if (!st || st.kind !== 'file') return { ok: false, text: `${file} is not a file` }
   const { reg } = await readRegistry(h, home).catch(() => ({ reg: {} as Record<string, { path?: unknown; thread?: unknown }> }))

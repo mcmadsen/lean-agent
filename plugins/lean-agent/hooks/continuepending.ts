@@ -28,7 +28,8 @@ import { NEXT_CONDITIONAL, NEXT_LINE, NEXT_PHRASE, NEXT_SENTENCE } from './nextw
 import { waitingOn } from './waitevent'
 import { announcesRestart, requestCheckpoint } from './checkpoint'
 import { markerOf } from './reviewkind'
-import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, noteEnded, requireReportOn } from './endnudge'
+import { HINT_KEY, MAX_NUDGES_PER_HOUR, NUDGE_TEXT, clearEnded, endNudgeOn, hasUnverifiedClaim, markEndAlerted, noteEnded, requireReportOn } from './endnudge'
+import { readTurn } from './turnreason'
 import { oneStepBrief } from './firstrequest'
 import { readSnapshot, tasksOf } from './snapshot'
 import type { SnapTask } from './snapshot'
@@ -40,6 +41,9 @@ export const MAX_PER_HOUR = 30 // keep-going continues per hour
 export const TEXT_MAX = 200
 export const NEXT_TEXT = (text: string) => `Do the next step now: ${text}. Do not report again before you have made progress.`
 export const KEEP_TEXT = 'Continue with the next step of your task.'
+export const MAX_NUDGES_RUN = 2 // nudges of any kind in a row with no tool call or report between: then stuck + ONE desk alert (field 1.0.32: 8 turn ends in 5 minutes, every 30 s, never told the desk)
+export const stuckAlertText = (id: string, n: number, line: string): string => `${id} is stuck: it ended its turn ${n} time${n === 1 ? '' : 's'} in a row without working (${line}); the mod stopped nudging it. Suggested: restart ${id} with its task (lean_thread restart ${id}), or ask the user`
+export const stuckWord = (n: number): string => `stuck: ended at once ${n} time${n === 1 ? '' : 's'}`
 export const MAX_TODO_CONSECUTIVE = 6 // 'todo' continues in a row with no tool call and no changed task list between them
 export const TODO_TEXT = (title: string) => `Continue: ${title}. Do it now; do not end your turn announcing the next step.`
 export const REMIND_MAX = 2 // reminders per thread
@@ -51,7 +55,9 @@ export const capText = (id: string) => `${id} (keep-going) was continued ${MAX_P
 
 export type Kind = 'next' | 'keep' | 'todo' | 'remind' | 'end'
 export type Pending = { at: number; sid: string; kind: Kind; text: string; sig?: string; req?: boolean /* 'end' of a single-action brief (threads.requireReport): sent at once, with the whole rule */ } // sig: the task list at the turn end ('todo'): a changed list lifts the loop guard
-export type CState = { endHour?: number[]; consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean }
+// nudgeRun / nudgeSid: nudges of ANY kind (end, keep, next, todo) sent to this session since its last tool call or report: ONE shared counter, at most MAX_NUDGES_RUN (1.0.33); stuck: the
+// cap was reached (the desk got its ONE alert, the mod stops nudging until a tool call or report, or a new session)
+export type CState = { endHour?: number[]; consec?: number; sentAt?: number; hour?: number[]; halted?: number; noticedHour?: number; todoRun?: number; todoSig?: string; keepRun?: number; total?: number; noticedFirst?: boolean; remindN?: number; remindNoticed?: boolean; nudgeRun?: number; nudgeSid?: string; stuck?: { at: number; n: number; sid: string; line: string } }
 export const logFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-log.jsonl`
 export const continuedLine = (kind: Kind, text: string): string => kind === 'end' ? 'nudged by the mod: its turn ended without a report' : kind === 'remind' ? 'reminded by the mod: nothing is pending that wakes it' : `continued by the mod: ${kind === 'todo' ? `open ${text}` : `announced "${text || 'the step it announced'}"`}`
 export const pendingFile = (home: string, id: string) => `${threadsDir(home)}/${id}/continue-pending.json`
@@ -144,6 +150,9 @@ export async function noteTurnEnd(h: Host, id: string, o: TurnEndIn): Promise<Ki
     const t = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
     if (!t || t.state !== 'open' || t.finished || !o.sid) return await drop(h, home, id)
     if (await readStop(h, home, id, o.sid)) return await drop(h, home, id) // hard-stopped at the context limit: the restart path's
+    // the turn ended because the login does not work (turnreason.ts auth): a nudge cannot help, the desk gets ONE alert for all such threads (authwatch.ts) and restarts them once the login works
+    const tr = await readTurn(h, home, id)
+    if (tr && tr.sid === o.sid && tr.auth) return await drop(h, home, id)
     const st = turnState(await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`), id, o.since)
     if (st !== 'work') return await drop(h, home, id) // done, blocked, a question, a request the user must answer
     // a thread that waits for an external event by RECORD (the desk's push result, an action result, an answer, a CI run: waitevent.ts) is never continued, whatever it said
@@ -222,9 +231,9 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await writeJson(h, stateFile(home, id), n).catch(() => undefined)
     }
     // a tool call (or a report) after the last continue ends the "in a row" count and the halt
-    if (act && TOOL_KINDS.has(act.kind) && act.at > (cs.sentAt ?? 0) && ((cs.consec ?? 0) > 0 || (cs.todoRun ?? 0) > 0 || (cs.keepRun ?? 0) > 0 || cs.halted)) {
+    if (act && TOOL_KINDS.has(act.kind) && act.at > (cs.sentAt ?? 0) && ((cs.consec ?? 0) > 0 || (cs.todoRun ?? 0) > 0 || (cs.keepRun ?? 0) > 0 || (cs.nudgeRun ?? 0) > 0 || cs.stuck || cs.halted)) {
       if (cs.halted) await setNotice(h, `continue-${id}`, null).catch(() => undefined)
-      await save({ ...cs, consec: 0, todoRun: 0, keepRun: 0, halted: undefined })
+      await save({ ...cs, consec: 0, todoRun: 0, keepRun: 0, nudgeRun: 0, stuck: undefined, halted: undefined })
     }
     const p = await readPending(h, home, id)
     if (!p) continue
@@ -238,7 +247,17 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       await clearPending(h, home, id) // it did something since: not stalled
       continue
     }
+    // another session now (a restart): the old session's nudge count and stuck mark are not its own
+    if ((cs.nudgeRun || cs.stuck) && cs.nudgeSid !== t.sid) {
+      if (cs.stuck && cs.halted) await setNotice(h, `continue-${id}`, null).catch(() => undefined)
+      await save({ ...cs, nudgeRun: 0, nudgeSid: undefined, stuck: undefined, ...(cs.stuck ? { halted: undefined } : {}) })
+    }
     if (!p.req && now - p.at < cfg.seconds * 1000) continue
+    const authTr = await readTurn(h, home, id)
+    if (authTr && authTr.sid === t.sid && authTr.auth) {
+      await clearPending(h, home, id) // not logged in: no nudge can help (authwatch.ts says it to the desk once)
+      continue
+    }
     // the report-rule nudge (kind 'end'): threads.endNudge decides, not autoContinue; at most MAX_NUDGES_PER_HOUR a thread an hour (then only the desk alert, stall.ts)
     if (p.kind === 'end' && (!(await endNudgeOn(h, home)) || (cs.endHour ?? []).filter(x => now - x < 3_600_000).length >= MAX_NUDGES_PER_HOUR)) {
       await clearPending(h, home, id)
@@ -304,7 +323,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
     const todoRun = p.kind === 'todo' && sameList ? (cs.todoRun ?? 0) : 0
     if (p.kind === 'todo' && !sameList && cs.halted) {
       await setNotice(h, `continue-${id}`, null).catch(() => undefined)
-      await save({ ...cs, halted: undefined, todoRun: 0 })
+      await save({ ...cs, halted: undefined, todoRun: 0, stuck: undefined })
     }
     if (p.kind === 'todo' && todoRun >= MAX_TODO_CONSECUTIVE) {
       await clearPending(h, home, id)
@@ -325,6 +344,23 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
       }
       continue
     }
+    // ONE shared counter (1.0.33): at most MAX_NUDGES_RUN nudges of any kind (end, keep, next, todo; a reminder has its own cap) with no tool call or report between. At the cap the thread is
+    // "stuck: ended at once N times": no more nudges, ONE alert to the desk with the turn's reason line and what to do. A changed task list ('todo') is progress and lifts the count.
+    const run = p.kind === 'todo' && !sameList ? 0 : cs.nudgeSid === t.sid ? (cs.nudgeRun ?? 0) : 0
+    if (p.kind !== 'remind' && run >= MAX_NUDGES_RUN) {
+      await clearPending(h, home, id)
+      if (!cs.stuck) {
+        const tr = await readTurn(h, home, id)
+        const line = tr && tr.sid === t.sid ? tr.line : 'no reason from the engine, no turn record'
+        const n = Math.max(run + 1, tr && tr.sid === t.sid ? tr.run : 0)
+        const text = stuckAlertText(id, n, line)
+        await save({ ...cs, nudgeRun: run, nudgeSid: t.sid, stuck: { at: now, n, sid: t.sid, line }, halted: cs.halted ?? now })
+        await setNotice(h, `continue-${id}`, text).catch(() => undefined)
+        await markEndAlerted(h, home, id, now) // the idle / end alert of stall.ts is this one: not a second alert
+        out.push({ id, text })
+      }
+      continue
+    }
     // the moment it acts: the thread file again (a park between the read above and here)
     const again = await readJson<Thread | null>(h, `${threadsDir(home)}/${id}/thread.json`, null)
     if (!again || again.state !== 'open') {
@@ -336,7 +372,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
     if (!r.ok) continue
     if (p.kind === 'end') {
       // one nudge per ended turn, counted per hour (the cap above); one line in the thread's record, never announced to the desk (the alert of stall.ts is the desk's word)
-      await save({ ...cs, sentAt: now, endHour: [...(cs.endHour ?? []).filter(x => now - x < 3_600_000), now] })
+      await save({ ...cs, sentAt: now, nudgeRun: run + 1, nudgeSid: t.sid, endHour: [...(cs.endHour ?? []).filter(x => now - x < 3_600_000), now] })
       await appendJsonl(h, logFile(home, id), { at: now, kind: 'end', text: continuedLine('end', '') }).catch(() => undefined)
       continue
     }
@@ -344,7 +380,7 @@ async function tickOnce(h: Host, deps: ContinueDeps): Promise<ContinueNotice[]> 
     // one of a thread is also said once in the desk, the rest are only counted. (A plain keep-going continue is the standing order's own: not counted.)
     const counted = p.kind !== 'keep'
     const first = counted && !cs.noticedFirst
-    await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}), ...(p.kind === 'remind' ? { remindN: (cs.remindN ?? 0) + 1 } : {}), ...(counted ? { total: (cs.total ?? 0) + 1, noticedFirst: true } : {}) })
+    await save({ ...cs, sentAt: now, hour: [...hour, now], ...(p.kind !== 'remind' ? { nudgeRun: run + 1, nudgeSid: t.sid } : {}), ...(p.kind === 'next' ? { consec: (cs.consec ?? 0) + 1 } : {}), ...(p.kind === 'todo' ? { todoRun: todoRun + 1, todoSig: p.sig } : {}), ...(p.kind === 'keep' ? { keepRun: (cs.keepRun ?? 0) + 1 } : {}), ...(p.kind === 'remind' ? { remindN: (cs.remindN ?? 0) + 1 } : {}), ...(counted ? { total: (cs.total ?? 0) + 1, noticedFirst: true } : {}) })
     if (counted) {
       const line = continuedLine(p.kind, p.text)
       await appendJsonl(h, logFile(home, id), { at: now, kind: p.kind, text: line }).catch(() => undefined)

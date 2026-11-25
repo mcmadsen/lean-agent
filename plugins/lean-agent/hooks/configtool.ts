@@ -11,7 +11,7 @@ import { macOf } from './reviews'
 import { destination } from './deliver'
 import { recentPrompts } from './humanprompts'
 import { typedApproval } from './writeinstr'
-import { APPLIES_TEXT, GROUPS, REGISTRY, allSpellings, checkValue, currentOf, defaultText, entriesOf, findEntry, nearestKey, parseValue, sameValue, show } from './configkeys'
+import { APPLIES_TEXT, GROUPS, REGISTRY, allSpellings, checkValue, currentOf, defaultText, entriesOf, findEntry, locate, nearestKey, parseValue, sameValue, show } from './configkeys'
 import type { Cfg, Entry } from './configkeys'
 
 export type Asked = { question: string; options: { label: string; description: string }[] }
@@ -101,7 +101,9 @@ export function reportOf(cfg: Cfg): Report {
     const e = findEntry(l.path)
     if (!e) {
       const near = nearestKey(l.path)
-      r.problems.push(`unknown setting "${l.path}"${near ? `: did you mean ${near}?` : ''} (it is kept, and nothing reads it)`)
+      // a group name (desk, threads, ...) written as a bare key with a value that is not an object ({}, a text, a number, null, a list): the group holds settings, it is not one
+      if (isContainer(l.path)) r.problems.push(`"${l.path}" is a group of settings (${l.path}.<name>) and must hold an object; ${l.value === null ? 'null' : Array.isArray(l.value) ? 'a list' : typeof l.value} is not read (it is kept: lean_config unset ${l.path} removes it)`)
+      else r.problems.push(`unknown setting "${l.path}"${near ? `: did you mean ${near}?` : ''} (not read by any 1.0.x version; it is kept: lean_config unset ${l.path} removes it)`)
       r.keys.push(l.path)
       continue
     }
@@ -295,6 +297,17 @@ export async function configTool(h: Host, a: ConfigArgs): Promise<ConfigResult> 
     return { ok: true, text: getText(ld.cfg, e) }
   }
   if (action !== 'set' && action !== 'unset') return { ok: false, text: 'lean_config: action must be list, get, set, unset or validate' }
+  // unset of a key nothing reads (validate named it: "not read by any 1.0.x version"): removed from the file on the user's word, never automatically; only a key validate flags
+  if (action === 'unset' && key && !findEntry(key)) {
+    const ld = await load(h, home)
+    if (ld.error) return { ok: false, text: `config.json ${ld.error}: not changed (fix the file first: lean_config validate)` }
+    if (!reportOf(ld.cfg).keys.includes(key)) return resolve() as ConfigResult // not in the file as a flagged key: the usual "unknown setting" answer
+    const before = locate(ld.cfg, key)?.value ?? null
+    removeSpelling(ld.cfg, key)
+    await save(h, home, ld.cfg, ld.raw)
+    await appendJsonl(h, HISTORY(home), { ts: await h.clock.now(), key, op: 'unset', was: before, via: 'tool (unknown key)' }).catch(() => undefined)
+    return { ok: true, text: `${key} removed from ${AT}: no version of lean-agent reads it` }
+  }
   const e = resolve()
   if (!('type' in e)) return e
   let value: unknown

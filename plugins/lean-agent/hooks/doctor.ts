@@ -27,6 +27,7 @@ import { configRow } from './configtool'
 import { retireMemory, staleMemoryCount } from './forgewrite'
 import { memoryRow } from './memorydoctor'
 import { doctorRow as reportRuleRow } from './endnudge'
+import { authRows } from './authwatch'
 
 export const OLD_LABEL = 'com.lean-agent.up'
 export const DESK_LABEL = 'com.lean-agent.desk'
@@ -242,7 +243,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   const mcp = await mcpRows(h, home).catch(() => [] as string[])
   if (mcp.length) out.push(...mcp)
   else out.push('ok   no MCP server config references an unset variable')
-  out.push(await reportRuleRow(h).catch(() => 'ok   report rule: injected (threads)')) // endnudge.ts: info only, the counters of the end-nudge
+  out.push(...(await authRows(h).catch(() => [] as string[]))) // threads that cannot run because the login does not work (authwatch.ts): the finding and its fix
+  out.push(...(await reportRuleRow(h).catch(() => 'ok   report rule: injected (threads)')).split('\n')) // endnudge.ts: the counters of the end-nudge, + one FIX row per thread that ended its turns at once, with the reason (turnreason.ts)
   const imp = await importNote(h, home).catch(() => null)
   if (imp) out.push(`ok   ${imp}`)
   out.push(`desk skill listing: ${skillStat()}`)

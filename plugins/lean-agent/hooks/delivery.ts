@@ -81,7 +81,14 @@ export async function takeBatch(h: Host, id: string): Promise<string | null> {
   })
 }
 
-// Thread side, a prompt: a wake prompt names its inbox position; those lines are already in the prompt.
+// The inbox position a wake / direct-send prompt names (its lines are in the prompt), or null. 1.0.33 (field: "consumed, read 0 s after sending" on threads whose turn then ended at once): the
+// thread's mod no longer marks them consumed when the prompt ARRIVES (the model may never see it: an error ended the turn), but when the model has answered the prompt's turn
+// (register.tsx turn.step with usage, or a tool call that takes a batch); until then they stay "delivered".
+export const wakeUpTo = (prompt: unknown): number | null => {
+  const m = typeof prompt === 'string' ? WAKE_MARK.exec(prompt) : null
+  return m ? Number(m[1]) : null
+}
+// Thread side, a prompt: a wake prompt names its inbox position; those lines are already in the prompt. (Kept for the specs and the old path; the mod uses wakeUpTo + markConsumed.)
 export async function consumeWake(h: Host, id: string, prompt: string): Promise<boolean> {
   const m = WAKE_MARK.exec(prompt)
   if (!m) return false

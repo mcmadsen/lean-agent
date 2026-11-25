@@ -35,7 +35,8 @@ import { disabledPlugins, fillProfile, loadedLine, loadedText, nameOk, names, pr
 import type { Loaded } from './profile'
 import { slugOk } from './rules'
 import { newOrReview } from './reviewkind'
-import { continueConfig, keepGoingOf } from './continuepending'
+import { continueConfig, keepGoingOf, readCState, stuckWord as stuckEnded } from './continuepending'
+import { readTurn } from './turnreason'
 import { waitingOn } from './waitevent'
 import { endDue, endedNote } from './endnudge'
 import { SYNTH_MARK, readSynth } from './synthline'
@@ -821,14 +822,18 @@ async function continuedCount(h: Host, home: string, id: string): Promise<number
   const n = Number((await readJson<{ total?: unknown } | null>(h, `${tpath(home, id)}/continue-state.json`, null))?.total)
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
 }
-export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean }): string {
+export function listLine(o: { id: string; title?: string; state: string; live?: string; ctx?: string; today?: string; lastText?: string; stale?: boolean; ended?: boolean; why?: string; stuckEnded?: string; keepGoing?: boolean; answerQ?: string; idleNote?: string; unverified?: string; rules?: number; continued?: number; waitsFor?: string; refs?: string; soft?: string; budget?: string; synthesised?: boolean }): string {
   // an answer on its way replaces "waiting for your answer" (1.0.31: "answer queued, not read yet (4 min)"); a stuck session stays named
   const stuckWord = o.live === 'stuck' || o.live === 'stalled' ? `, ${o.live}` : ''
-  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.waitsFor ? o.waitsFor : o.live === 'waiting' ? 'waiting for your answer' : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.ended ? ' (ended at once)' : ''}`
+  const word = `${o.state === 'open' ? (o.answerQ ? `${o.answerQ}${stuckWord}` : o.waitsFor ? o.waitsFor : o.live === 'waiting' ? 'waiting for your answer' : o.live === 'idle' && o.idleNote ? o.idleNote : o.live || 'open') : o.state}${o.stale ? ' (report stale)' : ''}${o.stuckEnded ? ` (${o.stuckEnded}${o.why ? `: ${o.why}` : ''})` : o.ended ? ` (ended at once${o.why ? `: ${o.why}` : ''})` : ''}`
   const last = o.lastText ? `"${o.lastText.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS)}"${o.synthesised ? ` (${SYNTH_MARK})` : ''}` : `(no report) ${(o.title ?? '').slice(0, 40)}`
   return [`${o.id} ${word}`, o.keepGoing ? 'keep-going' : '', o.rules ? `${o.rules} rule${o.rules > 1 ? 's' : ''}` : '', o.continued ? `continued ${o.continued} x` : '', o.refs, o.unverified, o.ctx, o.soft, o.budget, o.today?.replace(/ \(.*$/, ''), last].filter(Boolean).join(' · ')
 }
-async function list(h: Host, home: string, root = '', verbose = false): Promise<Out> {
+// `list` shows the OPEN threads (working, waiting, needs you, idle, blocked, done and not closed) and ends with "N closed (list closed)" (1.0.33; field: 160+ closed threads printed every time);
+// the existing `text` field picks the rest ("closed": only closed ones, "all": both), no new tool parameter
+export type ListScope = 'open' | 'closed' | 'all'
+export const listScope = (text: unknown): ListScope => (typeof text === 'string' && /^\s*(closed|all)\b/i.test(text) ? (text.trim().toLowerCase().startsWith('all') ? 'all' : 'closed') : 'open')
+async function list(h: Host, home: string, root = '', verbose = false, scope: ListScope = 'open'): Promise<Out> {
   const listed = await agents(h)
   const rows = listed ?? []
   const installed = await installedVersion(h, root)
@@ -839,6 +844,7 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
   const totals = await threadTotals(h).catch(() => ({}) as Record<string, number>) // each thread's lifetime spend, for "$6.40/$8" next to ctx (budgetthread.ts)
   const recs = await readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[]) // the last report of each thread (a [working] one can be stale)
   const out: unknown[] = []
+  let closedN = 0
   let ents: { name: string }[] = []
   try {
     ents = await h.fs.list(threadsDir(home))
@@ -848,6 +854,10 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
   for (const e of ents.filter(x => ID.test(x.name)).sort((a, b) => Number(a.name.slice(1)) - Number(b.name.slice(1)))) {
     const t = await load(h, home, e.name)
     if (!t) continue
+    if (t.state === 'closed') {
+      closedN++
+      if (scope === 'open') continue
+    } else if (scope === 'closed') continue
     const queued = await pending(h, home, t)
     const q = queued.length
     const row = rows.find(a => a.sid === t.sid)
@@ -865,6 +875,11 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const stale = !!truth && lastRec?.kind === 'report' && staleWorking(lastRec.state, truth.word)
     const finishing = !!truth && truth.word === 'running' && lastRec?.kind === 'report' && lastRec.state === 'done' && row?.status === 'idle' // reported done, only a background worker's notification is pending
     const ended = !!truth && !!t.sid && t.lastWake > 0 && endedAtOnce({ word: truth.word, req0: t.req0, req: typeof t.req0 === 'number' ? await requestsOf(h, t.id, now0) : null, reportsSince: mine.filter(r => r.ts >= t.lastWake).length })
+    // why the last turn ended, one line (turnreason.ts), shown for a thread that ended at once, ended without a report, or that the mod stopped nudging (continuepending.ts stuck)
+    const cst = t.state === 'open' && t.sid ? await readCState(h, home, t.id).catch(() => null) : null
+    const stuckRec = cst?.stuck && cst.stuck.sid === t.sid ? cst.stuck : null
+    const tr = t.state === 'open' && t.sid && (ended || endNo || stuckRec) ? await readTurn(h, home, t.id).catch(() => null) : null
+    const why = stuckRec?.line ?? (tr && tr.sid === t.sid ? tr.line : '')
     const lo = await readLoaded(h, home, t.id)
     // the code the thread's session runs (its own mod's report) when it differs from what is installed: "running X, installed Y"
     const ran = t.state === 'closed' ? '' : runningOf(t)
@@ -881,15 +896,16 @@ async function list(h: Host, home: string, root = '', verbose = false): Promise<
     const cv = cv0 && restarting ? { ...cv0, level: 'warn' as const } : cv0
     // a turn that ended on a tool result with no text: a short script-made line, marked synthesised (synthline.ts); never a report, never silences the idle alert
     const synth = t.state === 'open' && t.sid ? await readSynth(h, home, t.id, { idle: truth?.word === 'idle', lastReportTs: lastRec?.ts ?? 0 }) : null
-    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
+    out.push({ ...(synth ? { lastText: synth, synthesised: true } : lastRec && typeof lastRec.text === 'string' ? { lastText: lastRec.text.replace(/\s+/g, ' ').trim().slice(0, LAST_CHARS) } : {}), id: t.id, title: t.title, project: t.project, model: t.model, effort: t.effort, state: t.state, running: isRunning(row), ...(cv ? { ctx: cv.text, ctxLevel: cv.level, ...(cv.tokens !== undefined ? { ctxTokens: cv.tokens } : {}) } : {}), ...(soft ? { soft } : {}), ...(bt ? { budget: bt } : {}), ...(t.priority && t.priority !== 'normal' ? { priority: t.priority } : {}), ...(t.keep === true ? { keep: true } : {}), ...(t.keepGoing === true ? { keepGoing: true } : {}), ...((await ruleCount(h, home, t.id)) ? { rules: await ruleCount(h, home, t.id) } : {}), ...(refsShort(t) ? { refs: refsShort(t) } : {}), ...(await continuedCount(h, home, t.id).then(n => (n ? { continued: n } : {}))), ...(t.state === 'open' && t.sid && (!truth || ['idle', 'stalled', 'stuck'].includes(truth.word)) ? await waitingOn(h, home, t.id).then(w => (w ? { waitsFor: w.text } : {})) : {}), ...(truth ? { live: truth.word, unread: truth.unread, liveText: restarting ? `restarting: ${RESTARTING_TEXT}` : finishing ? 'done (finishing)' : answerQ ? (isStuck(truth.word) ? `${answerQ}; ${truth.text}` : answerQ) : idleNote ? `${idleNote}${truth.unread ? `, ${truth.unread} unread queued` : ''}` : truth.text } : {}), ...(answerQ ? { answerQ } : {}), ...(idleNote ? { idleNote } : {}), ...(unverified ? { unverified } : {}), ...(stale ? { stale: true } : {}), ...(ended ? { ended: true } : {}), ...(why ? { why } : {}), ...(stuckRec ? { stuckEnded: stuckEnded(stuckRec.n) } : {}), sid: t.sid, queued: q, ...(used ? { agents: used } : {}), ...(lo && restricted(lo) ? { loaded: loadedText(lo) } : {}), ...(await threadSpendLine(h, t.id).then(l => (l ? { today: l } : {}))), ...(ran ? { codeVersion: ran } : {}), ...(skew ? { skew } : {}), ...(unreported ? { skew: 'version unreported (an older session: ask it for nothing newer than it can do)' } : {}) })
   }
-  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.waitsFor && !o.answerQ ? `, ${o.waitsFor}` : o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.soft ? ` · ${o.soft}` : ''}${o.budget ? ` · ${o.budget}` : ''}${o.priority ? ` · priority ${o.priority}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.continued ? ` · continued ${o.continued} x` : ''}${o.refs ? ` · ${o.refs}` : ''}`).join('\n') : 'no threads'
+  const text = out.length && !verbose ? (out as any[]).map(listLine).join('\n') : out.length ? (out as any[]).map(o => `${o.id} · ${o.title}${o.project ? ` · ${o.project}` : ''} [${o.state}${o.waitsFor && !o.answerQ ? `, ${o.waitsFor}` : o.liveText ? `, ${o.liveText}` : o.queued ? `, ${o.queued} queued` : ''}]${o.model ? ` · ${o.model}/${o.effort}` : ''}${o.agents ? ` · ${o.agents}` : ''}${o.loaded ? ` · ${o.loaded}` : ''}${o.skew ? ` · ${o.skew}` : ''}${o.unverified ? ` · ${o.unverified}` : ''}${o.stale ? ' · its last report [working] is stale: the session is not running' : ''}${o.stuckEnded ? ` · ${o.stuckEnded}` : o.ended ? ` · ${ENDED_AT_ONCE}` : ''}${o.why ? ` · why: ${o.why}` : ''}${o.ctx ? ` · ${o.ctx}${o.ctxLevel === 'over' ? ' (over the limit: the next message starts a new session)' : ''}` : ''}${o.soft ? ` · ${o.soft}` : ''}${o.budget ? ` · ${o.budget}` : ''}${o.priority ? ` · priority ${o.priority}` : ''}${o.keep ? ' · keep' : ''}${o.keepGoing ? ' · keep-going' : ''}${o.rules ? ` · ${o.rules} rule${o.rules > 1 ? 's' : ''}` : ''}${o.continued ? ` · continued ${o.continued} x` : ''}${o.refs ? ` · ${o.refs}` : ''}`).join('\n') : 'no threads'
   // what waits for the user, as the pane counts it: a dismissed item is not counted (dismiss.ts), and its number is named
   const nv = out.length ? await loadView(h).catch(() => null) : null
   const nd = (nv?.dismissed.length ?? 0) + (nv?.dismissedNotices.length ?? 0)
   const need = nv && (nv.needs.length || nd) ? `\nNeeds you: ${nv.needs.length}${nd ? ` (${nd} dismissed, hidden until a newer one arrives)` : ''}` : ''
   const head = await throttleLine(h).catch(() => '') // "5h window 74%: throttled above 70%: ..." (throttle.ts); '' when the window is not measured
-  return { ok: true, text: (head ? `${head}\n` : '') + text + need, data: out }
+  const closedLine = scope === 'open' && closedN ? `\n${closedN} closed (list closed)` : ''
+  return { ok: true, text: (head ? `${head}\n` : '') + text + need + closedLine, data: out }
 }
 
 // the desk's `profile`: show a project's profile with what its threads used; mcp / plugins set the lists (a list left out stays as it is);
@@ -1087,7 +1103,7 @@ async function leanThreadCore(h: Host, root: string, i: Input): Promise<Out> {
   try {
     const home = await homeDir(h)
     await ensureGitHooks(h).catch(() => undefined) // every action (resume and wake too) refreshes the private registry
-    if (i.action === 'list') return await list(h, home, root, i.verbose === true)
+    if (i.action === 'list') return await list(h, home, root, i.verbose === true, listScope(i.text ?? i.message))
     if (i.action === 'rule') return await ruleAction(h, home, i).then(o => (o.ok ? { ok: true, text: o.text } : err(o.text))) // a standing rule of ONE thread: the one memory store (threadrules.ts)
     if (i.action === 'profile') return await profileAction(h, home, i)
     // typed remote writes a thread asked for with lean_report `action` (deskactions.ts): the desk lists them, asks the USER, and sends

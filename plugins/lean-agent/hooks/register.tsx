@@ -7,7 +7,7 @@ import { limitFromUsage, limitTick, readLimit, sameReset, writeLimit } from './l
 import { ensureGitHooks } from './githooks'
 import { atomicWrite, deskDir, homeDir } from './state'
 import type { Host } from './state'
-import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, consumeWake, markDelivered, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
+import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, markConsumed, markDelivered, wakeUpTo, recordDeskSid, relayReports, sweep, takeBatch, takeReports, threadTool, unreadReports } from './delivery'
 import { decide, workerBrief, workerJob } from './guard'
 import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { noteRun, runPrGuide } from './prchecks'
@@ -51,6 +51,9 @@ import { compare } from './compare'
 import { announceRotation, rotateLedger } from './ledger'
 import { takeNotice } from './notices'
 import { withReportRule } from './endnudge'
+import { authTick } from './authwatch'
+import { addTurnError, emptyFacts, factsOf, recordTurn, stopFailureText } from './turnreason'
+import type { TurnFacts } from './turnreason'
 import { noteSynthAtTurnEnd, noteToolResult } from './synthline'
 import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed, isAuditorCall, isLeanCall, markAuditStarted, doneQuestion, noteBash, noteUse, noteWrite, resetScripts, scriptTool, takeNudges } from './scripts'
 import { syncWithScripts } from './rulelines'
@@ -122,6 +125,8 @@ export const resetModState = () => {
   switchState = newSwitchState()
   promptSeen = false
   modSession = String(Date.now())
+  facts = emptyFacts()
+  stopError = ''
   notified = 0
   busySince = 0
   lastRelay = 0
@@ -163,6 +168,15 @@ export const resetModState = () => {
 }
 let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP servers outside it are deferred; null = nothing held back
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
+let facts: TurnFacts = emptyFacts() // what the main-loop turn that is running did so far (turnreason.ts): model requests, tool calls, refusals
+let wakeAt: number | null = null // the inbox position the prompt of the running turn named (delivery.ts wakeUpTo): marked consumed when the model answered, not before
+// the model answered a request that started with `carried` pending: those lines were in it (a position that arrived while the request ran stays pending)
+const takeWake = async (host: Host, id: string, carried: number | null): Promise<void> => {
+  if (carried === null) return
+  if (wakeAt !== null && wakeAt <= carried) wakeAt = null
+  await markConsumed(host, await homeDir(host), id, carried).catch(() => undefined)
+}
+let stopError = '' // the last classic.StopFailure's error word and details, for the turn record
 let humanTurn = false // the turn that is running (or just ended) was started or joined by the user's own typed words in this thread's pane
 let rulesSection: string | null = null // the thread's `_project.md`, a session section of prompt.compose (set at the role's setup)
 let projectOfThread: string | undefined // the thread's project (thread.json), read once per session; '' = none
@@ -215,7 +229,7 @@ const SCHEMA = {
     priority: { type: 'string', enum: ['low', 'normal', 'urgent'], description: 'new: low waits and is parked while the 5h window is hot; urgent starts even above the block line' },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
-    text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session this call starts (last part of its first prompt, they win over the handover; never a separate send); goal-set: the goal; find: words; ask: the question' },
+    text: { type: 'string', description: 'new: the brief; send: the message; restart / reopen / start / wake / resume: NEW instructions for the session it starts (last in its first prompt, wins over the handover; not a separate send); goal-set: the goal; list: closed | all; find: words; ask: the question' },
     title: { type: 'string', description: 'new: short title' },
     project: { type: 'string', description: 'new, project-*: a registered project' },
     id: { type: 'string', description: 'approve-action: the id from action-list, only after the USER chose Approve for exactly that request' },
@@ -226,7 +240,7 @@ const SCHEMA = {
     kinds: { type: 'array', items: { type: 'string' }, description: 'allow-writes: narrower list (PR: reply, status, comment, link; work item: comment, update; {workitem: "new"}: create)' },
     section: { type: 'string', description: 'report tN: one section of its last report (a heading or part of one), instead of the digest' },
     full: { type: 'boolean', description: 'report tN: the whole last report (reports reach you as a short digest)' },
-    verbose: { type: 'boolean', description: 'list: the long form (default: one short line per thread)' },
+    verbose: { type: 'boolean', description: 'list: long form (default: one line per open thread)' },
     sha: { type: 'string', description: 'approve-push, push: the full sha the user approved, naming this sha and branch' },
     reason: { type: 'string', description: 'approve-push: why. An expensive model (opus): why sonnet is not enough (required; the request waits for the user\'s Approve)' },
     review: { type: 'object', description: 'new: start a review thread: exactly one of pr, branch, sha (+ base); needs project', properties: { pr: { type: ['number', 'string'] }, branch: { type: 'string' }, sha: { type: 'string' }, base: { type: 'string' } } },
@@ -685,6 +699,14 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // a thread whose session is alive and working but made no tool call and no report for threads.stallMinutes (stall.ts): ONE notice + toast per
       // stall; threads.stallRestart restarts it by script
+      // threads that cannot run because the login does not work (turnreason.ts, authwatch.ts): ONE alert, the notice stays until a model call works again; then they are restarted once
+      every($, 15_000, 'desk', async host2 => {
+        const notes = await authTick(host2, { restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force: true }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: 'lean-auth-login' })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
       every($, 30_000, 'desk', async host2 => {
         const notes = await stallTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'stall-restart', tN: id, reason: why, force: true }) })
         for (const n of notes) {
@@ -1029,6 +1051,14 @@ export const register: Register = on => {
     await noteDenied($, role, cwd, deniedSeen, e, 'PermissionDenied', String(e?.reason ?? e?.message ?? '')).catch(() => undefined)
     return next(e) // never `retry`
   }).catch(($, e: any, next) => next(e))
+  // the API error that ended a turn (its word and details): the turn record's "error: ..." (turnreason.ts); it may arrive before or after turn.complete
+  on('classic.StopFailure', async ($, e: any, next) => {
+    if (role.kind === 'thread' && !e?.agentId) {
+      stopError = stopFailureText(e)
+      if (stopError && lastSid) await addTurnError(hostOf($), role.id, { sid: lastSid, error: stopError }).catch(() => undefined)
+    }
+    return next(e)
+  }).catch(($, e: any, next) => next(e))
   on('classic.PostToolUseFailure', async ($, e: any, next) => {
     const msg = String(e?.error ?? '')
     if (!e?.is_interrupt && classifierDenial(msg)) await noteDenied($, role, cwd, deniedSeen, e, 'failed Agent result', msg).catch(() => undefined) // our own refusals are never evidence (denial.ts)
@@ -1054,6 +1084,8 @@ export const register: Register = on => {
     if (!e.agentId) {
       inTurn = true
       turnStartedAt = busySince
+      facts = emptyFacts()
+      stopError = ''
       resetEdited()
     }
     await redetect($)
@@ -1069,6 +1101,8 @@ export const register: Register = on => {
     if (!e.agentId) inTurn = false
     if (role.kind === 'thread' && !e.agentId && lastSid) {
       const tid = role.id
+      // why this turn ended, as one line (turnreason.ts): the engine's reason, the error text, model requests, tool calls, seconds; written BEFORE the end is judged
+      await recordTurn(hostOf($), tid, { sid: lastSid, facts: factsOf(facts, e, stopError) })
       await threadEnd(hostOf($), tid, lastTokens, lastSid, () => noteParts($, hostOf($), tid, lastSid), () => lastTextOf($))
     }
     // a thread's turn that died on an API error: if a rate-limit window is spent, keep its reset for the desk's resume
@@ -1134,9 +1168,20 @@ export const register: Register = on => {
     const host = hostOf($)
     const type = e.agentId ? await agentType($, e.agentId, e) : undefined
     const why = await overBudget(host, role.kind, e.agentId ? { type, spent: spent.get(e.agentId) ?? 0 } : null).catch(() => null)
-    if (why) return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
+    if (why) {
+      if (!e.agentId && role.kind === 'thread') facts.error = `the mod refused the request: ${why}` // no model call, and the reason is ours (a daily cap): the turn record says so
+      return { turnId: e.turnId, index: e.index, answer: why, toolUses: [], stopReason: 'end_turn', usage: null } as any
+    }
     if (!e.agentId && role.kind === 'desk' && typeof e.model === 'string') await deskModelCheck($, e.model) // the pin: once per session, then only a change is noted
+    const carried = !e.agentId && role.kind === 'thread' ? wakeAt : null // the inbox lines this request carries (a wake prompt, a direct send): read once the model answered it
     const r: any = yield* next(e)
+    if (!e.agentId && role.kind === 'thread') {
+      facts.steps++ // a request the engine sent (a refusal above never gets here): "no model call" in the turn record means none did
+      if (r?.usage) {
+        facts.usage = true
+        await takeWake(host, role.id, carried)
+      }
+    }
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
     try {
       const fresh = role.kind === 'thread' && !e.agentId && !!lastSid && (await noteBase(host, role.id, lastSid, r?.usage, (await threadToolsArgv(host))[1] ?? '')) // the first request of the session: its real base, and its cost is the session's start (a restart's price)
@@ -1535,7 +1580,9 @@ export const register: Register = on => {
     // (the desk's check "did it start a turn?" reads activity.json)
     if (role.kind === 'thread' && typeof e?.text === 'string' && e.text.startsWith('[lean-agent] message from the desk')) {
       const host = hostOf($)
-      await consumeWake(host, role.id, e.text).catch(() => false)
+      // (1.0.33: it arrived, the model has not read it yet: it counts as consumed when a model request that STARTED after this answered, register.tsx turn.step)
+      const n = wakeUpTo(e.text)
+      if (n !== null) wakeAt = Math.max(wakeAt ?? 0, n)
       await touchActivity(host, await homeDir(host), role.id, 'prompt', true)
     }
     return next(e)
@@ -1545,13 +1592,24 @@ export const register: Register = on => {
   on('tool.call', async ($, e: any, next) => {
     const host = hostOf($)
     if (role.kind === 'thread') await touchActivity(host, await homeDir(host), role.id, e.agentId ? 'worker' : 'tool') // the stall watchdog's clock (stall.ts): the thread's or a worker's tool call
+    if (role.kind === 'thread' && !e.agentId) facts.calls++ // the turn record's tool-call count (turnreason.ts)
     const halted = await stopCheck($, e)
-    if (halted) return { deny: halted.deny } as any
+    if (halted) {
+      if (role.kind === 'thread' && !e.agentId) {
+        facts.denied++
+        facts.deniedText = String(halted.deny ?? '')
+      }
+      return { deny: halted.deny } as any
+    }
     const atype = await agentType($, e.agentId, e)
     const gctx = { role, cwd, agentType: atype, agentId: e.agentId, version: VERSION, root: String($.plugin.root ?? '') }
     const rname = atype || e.agentId ? 'worker' : role.kind // the role field of every refusal / missing-tool record
     const why = await decide(host, gctx, e)
     if (why) {
+      if (role.kind === 'thread' && !e.agentId) {
+        facts.denied++
+        facts.deniedText = why
+      }
       const rule = ruleOf(why, atype ?? '')
       // a step-budget refusal names the job, the run's tool-call count and budget and the brief's size, so an export can tell a budget that is too small for the job from a brief that is too big
       const over = rule === 'worker-step-budget' && e.agentId ? takeOver(String(e.agentId)) : null
@@ -1739,7 +1797,14 @@ export const register: Register = on => {
     try {
       let more: string | null = null
       if (role.kind === 'thread') await touchActivity(host, await homeDir(host), role.id, 'prompt', true)
-      if (role.kind === 'thread') more = (await consumeWake(host, role.id, e.text)) ? null : await takeBatch(host, role.id)
+      if (role.kind === 'thread') {
+        // a wake / direct-send prompt carries its lines: they count as read once the model answered this turn (below), never at arrival (delivery.ts wakeUpTo)
+        const upTo = e.agentId ? null : wakeUpTo(e.text)
+        if (upTo !== null) {
+          wakeAt = upTo
+          more = null
+        } else more = await takeBatch(host, role.id)
+      }
       else if (role.kind === 'desk') {
         more = await takeReports(host)
         const stalled = await stallLines(host).catch(() => null) // a thread that stalled: one reminder line per desk turn while it lasts

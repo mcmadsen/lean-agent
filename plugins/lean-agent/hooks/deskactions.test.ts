@@ -423,13 +423,13 @@ test('a request expires after 24 h (actions.pendingHours): no late answer, no se
 })
 
 // ---- the executor fails ---------------------------------------------------------------------------------------------------------------
-test('a failing executor leaves the request approved and unused, says why, never shows the token, and a retry works', async () => {
-  const s = setup({ curl: { exitCode: 22, stdout: '', stderr: `curl: (22) The requested URL returned error: 403 Forbidden (token ${TOKEN})` } })
+test('a failing executor (a server error: transient) leaves the request approved and unused, says why, never shows the token, and a retry works', async () => {
+  const s = setup({ curl: { exitCode: 22, stdout: '', stderr: `curl: (22) The requested URL returned error: 503 Service Unavailable (token ${TOKEN})` } })
   const v = await ask(s, 'ado-pr-reply')
   await human(s, v, 'Approve')
   const o = await approveAction(s.h.host, v.id, s.tell)
   expect(o.ok).toBe(false)
-  expect(o.text).toContain('403')
+  expect(o.text).toContain('503')
   expect(o.text).toContain('unused')
   expect(o.text).not.toContain(TOKEN)
   expect(s.told).toHaveLength(0)
@@ -510,8 +510,8 @@ test('the used mark is written BEFORE the send (a crash mid-send never allows a 
   const o = await approveAction(s.h.host, v.id, s.tell)
   expect(o.ok, o.text).toBe(true)
   expect(typeof during).toBe('number') // already marked while gh ran
-  // a definite failure (nothing sent) clears the mark: a retry is allowed
-  const s2 = setup({ gh: { exitCode: 1, stdout: '', stderr: 'HTTP 404' } })
+  // a definite failure (nothing sent, a transient server error) clears the mark: a retry is allowed (a 4xx answer is final: hotfix1033.test.ts)
+  const s2 = setup({ gh: { exitCode: 1, stdout: '', stderr: 'HTTP 502' } })
   const w = await ask(s2, 'gh-pr-comment')
   await human(s2, w, 'Approve')
   const bad = await approveAction(s2.h.host, w.id, s2.tell)

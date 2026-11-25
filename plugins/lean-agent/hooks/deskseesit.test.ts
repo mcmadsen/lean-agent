@@ -79,10 +79,9 @@ test('lean_thread list shows "continued N x" for a thread the mod continued, not
   const h = setup()
   expect((await leanThread(h.host, '/p', { action: 'list' })).text).not.toContain('continued')
   await cycle(h, 0, TASKS)
-  await cycle(h, 1, TASKS)
-  await cycle(h, 2, TASKS)
+  await cycle(h, 1, TASKS) // (a third one with no tool call between is the shared nudge cap's: 1.0.33, at most 2)
   const text = (await leanThread(h.host, '/p', { action: 'list' })).text
-  expect(text).toContain('continued 3 x')
+  expect(text).toContain('continued 2 x')
   const verbose = (await leanThread(h.host, '/p', { action: 'list', verbose: true })).text
-  expect(verbose).toContain('continued 3 x')
+  expect(verbose).toContain('continued 2 x')
 })

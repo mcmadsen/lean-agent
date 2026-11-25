@@ -107,15 +107,29 @@ test('ado-pr-reply with a status: ONE request, one approval, the rendering shows
   expect(o.text).toContain('status: done')
 })
 
-test('reply + status: the reply fails -> the status is NOT set, the result says so, nothing was written so the request stays retryable', async () => {
+test('reply + status: the reply fails with an HTTP error -> the status is NOT set, the request is FAILED (1.0.33): not approved-and-waiting, not sent again under the same id', async () => {
+  const s = setup(() => ({ exitCode: 22, stdout: '{"message":"TF401444: no access"}', stderr: 'curl: (22) The requested URL returned error: 403' }))
+  const v = await approved(s, { kind: 'ado-pr-reply', params: { ...REPLY.params, status: 'fixed' } })
+  const o = await approveAction(s.h.host, v.id, s.tell)
+  expect(o.ok).toBe(false)
+  expect(o.text).toContain('failed (HTTP 403: TF401444: no access)')
+  expect(s.writers()).toHaveLength(1) // the PATCH was never tried
+  expect((await listActions(s.h.host)).map(x => x.id)).not.toContain(v.id) // not offered for approve-action any more
+  const again = await approveAction(s.h.host, v.id, s.tell)
+  expect(again.ok).toBe(false)
+  expect(again.text).toContain('is closed')
+  expect(again.text).toContain('NEW request')
+  expect(s.writers()).toHaveLength(1) // nothing was sent a second time
+})
+
+test('reply + status: a failure that is NOT an HTTP answer (no network) leaves nothing written and the request retryable, as before', async () => {
   let ok = false
-  const s = setup((n, stdin) => (!ok ? { exitCode: 22, stdout: '', stderr: 'HTTP 403 forbidden' } : { exitCode: 0, stdout: JSON.stringify({ id: n }) }))
+  const s = setup((n, stdin) => (!ok ? { exitCode: 6, stdout: '', stderr: 'curl: (6) Could not resolve host' } : { exitCode: 0, stdout: JSON.stringify({ id: n }) }))
   const v = await approved(s, { kind: 'ado-pr-reply', params: { ...REPLY.params, status: 'fixed' } })
   const o = await approveAction(s.h.host, v.id, s.tell)
   expect(o.ok).toBe(false)
   expect(o.text).toContain('reply: failed')
   expect(o.text).toContain('status: not run')
-  expect(s.writers()).toHaveLength(1) // the PATCH was never tried
   expect(o.text).toContain('stays approved and unused')
   ok = true
   const again = await approveAction(s.h.host, v.id, s.tell)

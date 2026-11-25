@@ -6,7 +6,7 @@ import { resetActivity } from './threadstate'
 import { resetLocks, leanThread } from './threads'
 import { resetActions } from './deskactions'
 import { threadTool } from './delivery'
-import { continueTick, noteTurnEnd, MAX_TODO_CONSECUTIVE, KEEP_TEXT } from './continuepending'
+import { continueTick, noteTurnEnd, MAX_NUDGES_RUN, KEEP_TEXT } from './continuepending'
 
 const S1 = '11111111-2222-3333-4444-555555555555'
 const L = '/h/.lean-agent'
@@ -92,13 +92,16 @@ test('switched off after the record was written: the timer drops it; a default t
   expect(pend(h)).toEqual({})
   const g = setup()
   const sent: string[] = []
+  const alerts: string[] = []
   for (let i = 0; i < 10; i++) {
     g.clock.t = T0 + i * 100_000
     await end(g, 'ok')
     g.clock.t += 25_000
-    expect(await tick(g, sent)).toEqual([]) // silent: a finished thread that forgot to report is not an alarm
+    alerts.push(...(await tick(g, sent)).map(n => n.text))
   }
-  expect(sent).toHaveLength(MAX_TODO_CONSECUTIVE)
+  expect(sent).toHaveLength(MAX_NUDGES_RUN) // 1.0.33: the one shared counter stops it after 2 and the desk gets ONE alert (no longer silent: a thread that keeps ending at once is stuck)
+  expect(alerts).toHaveLength(1)
+  expect(alerts[0]).toContain('t1 is stuck')
   g.files.set(`${T1}/activity.json`, JSON.stringify({ at: g.clock.t + 1_000, kind: 'tool' }))
   g.clock.t += 5_000
   await tick(g, sent)
@@ -106,7 +109,7 @@ test('switched off after the record was written: the timer drops it; a default t
   await end(g, 'ok')
   g.clock.t += 25_000
   await tick(g, sent)
-  expect(sent).toHaveLength(MAX_TODO_CONSECUTIVE + 1) // a tool call lifted it
+  expect(sent).toHaveLength(MAX_NUDGES_RUN + 1) // a tool call lifted it
 })
 
 test('lean_thread keep-going off stores an explicit off, on stores on, new keepGoing false is kept; the list shows keep-going only for an explicit on', { timeoutMs: 20_000 }, async () => {

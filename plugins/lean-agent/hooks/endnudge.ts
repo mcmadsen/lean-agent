@@ -17,6 +17,7 @@ import type { DeskRec } from './delivery'
 import { turnState } from './autorestart'
 import { waitingOn } from './waitevent'
 import { idleNoReport } from './threadstate'
+import { readTurn } from './turnreason'
 
 // ---- the rule (A): one place ----------------------------------------------------------------------------------------------------
 export const REPORT_RULE_SENTENCE = 'Every turn of yours ends with lean_report (done, blocked or question) or, for a worker, with its answer to the thread.'
@@ -114,7 +115,23 @@ export async function endedCount(h: Host, days = 7): Promise<number> {
   }
   return n
 }
-export const doctorRow = async (h: Host): Promise<string> => `ok   report rule: injected (threads), ${await endedCount(h)} turns ended without a report in 7 days`
+// (1.0.33) open threads whose last turns ended with no tool call twice or more in a row, each with its reason line (turnreason.ts): a FIX row, the doctor says why
+export async function endedAtOnceRows(h: Host): Promise<string[]> {
+  const home = await homeDir(h)
+  const out: string[] = []
+  for (const e of await h.fs.list(threadsDir(home)).catch(() => [] as { name: string }[])) {
+    if (!/^t\d+$/.test(e.name)) continue
+    const t = await readJson<{ state?: string; sid?: string; finished?: unknown } | null>(h, `${threadsDir(home)}/${e.name}/thread.json`, null)
+    if (!t || t.state !== 'open' || !t.sid || t.finished) continue
+    const r = await readTurn(h, home, e.name)
+    if (r && r.sid === t.sid && r.run >= 2 && !r.auth) out.push(`FIX  thread ${e.name} ended its turn ${r.run} times in a row without a tool call: ${r.line}`)
+  }
+  return out
+}
+export const doctorRow = async (h: Host): Promise<string> => {
+  const stuck = await endedAtOnceRows(h).catch(() => [] as string[])
+  return [`ok   report rule: injected (threads), ${await endedCount(h)} turns ended without a report in 7 days`, ...stuck].join('\n')
+}
 
 // ---- desk side: is the alert due? -----------------------------------------------------------------------------------------------
 // idle for `minutes` since the turn end, still no final report since the first unreported end, waits for nothing (waitevent.ts), same session, open thread
@@ -137,5 +154,10 @@ export async function idleNoReportMs(h: Host, home: string, t: { id: string; kee
 export async function markAlerted(h: Host, home: string, id: string, rec: EndRec, now: number): Promise<void> {
   const cur = await readEnd(h, home, id)
   if (cur && cur.first === rec.first && cur.sid === rec.sid) await writeJson(h, endFile(home, id), { ...cur, alerted: now }).catch(() => undefined)
+}
+// the stuck alert of continuepending.ts is the spell's one alert: the end record (if any) is marked alerted so stall.ts says nothing more
+export async function markEndAlerted(h: Host, home: string, id: string, now: number): Promise<void> {
+  const cur = await readEnd(h, home, id)
+  if (cur) await markAlerted(h, home, id, cur, now)
 }
 export const deskInbox = async (h: Host, home: string): Promise<DeskRec[]> => readJsonl<DeskRec>(h, `${deskState(home)}/inbox.jsonl`).catch(() => [] as DeskRec[])

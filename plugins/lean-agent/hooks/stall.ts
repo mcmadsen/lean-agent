@@ -13,6 +13,7 @@ import type { DeskRec } from './delivery'
 import { setNotice } from './notices'
 import { idleNoReport, lastActivity, readWaiting, stallConfig, stallFor, threadsConfig, truthOf } from './threadstate'
 import { haltedSince } from './continuepending'
+import { readTurn } from './turnreason'
 import { waitingOn } from './waitevent'
 import { alertText, endDue, endNudgeOn, markAlerted, wasNudged } from './endnudge'
 import { kTokens, readContext, threadLimits } from './threadcontext'
@@ -81,10 +82,12 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     const ended = t && truth && (await endNudgeOn(h, home)) ? await endDue(h, home, t, { word: truth.word, now, minutes: cfg.idleAlertMinutes, recs: deskRecs }) : null
     if (ended && t && !ended.rec.alerted) {
       await markAlerted(h, home, id, ended.rec, now)
-      out.push({ id, text: `${alertText(id, ended.ms, t.title ?? '', await wasNudged(h, home, id, ended.rec.first))}${ended.rec.hint ? '; its last text handed over a result it did not verify itself' : ''}` })
+      const tr = await readTurn(h, home, id) // why the last turn ended (turnreason.ts): said in the alert
+      out.push({ id, text: `${alertText(id, ended.ms, t.title ?? '', await wasNudged(h, home, id, ended.rec.first))}${ended.rec.hint ? '; its last text handed over a result it did not verify itself' : ''}${tr && tr.sid === t.sid ? `; why: ${tr.line}` : ''}` })
     }
     // a thread that really waits (for the push result, an action, your answer, CI: waitevent.ts) is not idle without a report: no alert
-    const idle = ended || (idle0 && (await waitingOn(h, home, id))) ? null : idle0
+    const authTr = t ? await readTurn(h, home, id) : null // a thread that cannot run because of the login has its own one alert (authwatch.ts): not "idle with no report" on top
+    const idle = ended || (authTr && authTr.sid === t?.sid && authTr.auth) || (idle0 && (await waitingOn(h, home, id))) ? null : idle0
     if (idle && t) {
       if (idles[id] !== idle.since) {
         idles[id] = idle.since

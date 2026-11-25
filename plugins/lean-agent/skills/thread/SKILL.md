@@ -21,7 +21,7 @@ Threads are background sessions in `~/.lean-agent/threads/tN`. Touch them only t
 | `limit` | `tN`, `text` | `text` = tokens (`90k`, 40k-200k) or `off`: this thread's own hard context limit; its soft checkpoint moves with it |
 | `budget` | `tN`, `text` | `text` = USD (`6`; `0` = none, `off` = config `threads.softUsd`): at 80% the thread gets a nudge, at 100% the desk gets one notice (raise / park / continue) and the thread goes on; only `threads.hardUsd` (none by default) stops it. `new` also takes `priority: low` (waits and is parked while the 5 h window is above `window.throttleAbove`) or `urgent` |
 | `action-cancel` | `id` | cancels a covered reply that waits in its 30 s hold window (the pane has Send now / Cancel) |
-| `list` | none | state, running / idle / stuck, queued, model, `ctx` size, agents |
+| `list` | `text?` | the OPEN threads: state, running / idle / stuck, queued, model, `ctx` size, agents; a turn that ended at once or without a report carries its one-line reason ("why: no model call, error: ..."); last line "N closed (list closed)"; `text` `closed` or `all` shows those |
 | `messages` | `tN` | the last messages sent to it with id, state (`queued` / `delivered` / `consumed` / `failed`) and age, from the files, no model |
 | `find` / `ask` / `report` | `text` / `tN` + `text` / `tN` | answered from the store with no model turn (or a small fresh one), never by waking an old session |
 | `dismiss` | `tN` [`kind`] or `notice` | only after the user said so: hides tN's current Needs-you item (or `kind`: question, prompt, approval, blocked, stalled, restart, ready, model, action), or a top line (`notice`: its id or `all`) until a newer one arrives; nothing is answered |

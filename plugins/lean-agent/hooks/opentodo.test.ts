@@ -152,9 +152,10 @@ test('the loop guard: 6 continues in a row without a tool call or a changed task
     h.clock.t += 25_000
     notes.push(...(await tick(h, sent)).map(n => n.text))
   }
-  expect(sent).toHaveLength(6)
-  expect(notes.filter(n => !n.includes('was continued by the mod'))).toEqual(['t1 keeps ending its turns without doing the next item'])
-  expect(await peekNotice(h.host, 'continue-t1')).toBe('t1 keeps ending its turns without doing the next item')
+  expect(sent).toHaveLength(2) // (1.0.33: the one shared counter, at most 2 nudges of any kind with no tool call between: it comes before the old 6)
+  expect(notes.filter(n => !n.includes('was continued by the mod'))).toHaveLength(1)
+  expect(notes.filter(n => n.includes('t1 is stuck: it ended its turn'))).toHaveLength(1)
+  expect(await peekNotice(h.host, 'continue-t1')).toContain('t1 is stuck')
   expect(cstate(h).halted).toBeGreaterThan(0) // the stall state reads it (stall.ts)
   // a changed task list lifts the halt: the next turn end is continued again
   h.clock.t += 100_000
@@ -162,8 +163,9 @@ test('the loop guard: 6 continues in a row without a tool call or a changed task
   await end(h, 'Going on.', changed, h.clock.t - 60_000)
   h.clock.t += 25_000
   await tick(h, sent)
-  expect(sent).toHaveLength(7)
-  expect(sent[6]).toContain('Continue: TODO 3.')
+  expect(sent).toHaveLength(3)
+  expect(sent[2]).toContain('Continue: TODO 3.')
+  expect(cstate(h).stuck).toBeUndefined()
   expect(cstate(h).halted).toBeUndefined()
   expect(await peekNotice(h.host, 'continue-t1')).toBeFalsy()
   // a tool call between the continues also resets the count
