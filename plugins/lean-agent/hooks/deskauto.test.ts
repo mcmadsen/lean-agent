@@ -105,7 +105,7 @@ test('blocked: config off, a turn running, the desk not in the app, a thread que
   expect(await run({ tokens: 150_000 })).toBe('off')
   expect(seen.restarts).toBe(0)
   h.files.set(`${L}/config.json`, '{}')
-  expect(await run({ tokens: 120_000 })).toBe('restarted') // the handover carries the question: far over the limit it goes on
+  expect(await run({ tokens: 250_000 })).toBe('restarted') // the handover carries the question: over 120% of the limit (200k since 1.0.33) it goes on
   expect(seen.restarts).toBe(1)
 })
 

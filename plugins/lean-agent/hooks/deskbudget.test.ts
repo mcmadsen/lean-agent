@@ -6,10 +6,10 @@ import { DEFAULT_TOKENS, deskHandover, deskTokens } from './deskcompact'
 
 const L = '/h/.lean-agent'
 
-test('the desk limit: desk.contextLimit (nested or flat) wins over the older deskTokens, default 60000, a bad value is ignored', async () => {
+test('the desk limit: desk.contextLimit (nested or flat) wins over the older deskTokens, default 200000 (1.0.33), a bad value is ignored', async () => {
   const h = fakeHost(null)
-  expect(DEFAULT_TOKENS).toBe(60_000)
-  expect(await deskTokens(h.host)).toBe(60_000)
+  expect(DEFAULT_TOKENS).toBe(200_000)
+  expect(await deskTokens(h.host)).toBe(200_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 90_000 }))
   expect(await deskTokens(h.host)).toBe(90_000) // an explicit older key still counts
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 90_000, desk: { contextLimit: 50_000 } }))
@@ -17,9 +17,9 @@ test('the desk limit: desk.contextLimit (nested or flat) wins over the older des
   h.files.set(`${L}/config.json`, JSON.stringify({ 'desk.contextLimit': 70_000 }))
   expect(await deskTokens(h.host)).toBe(70_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 'lots' } }))
-  expect(await deskTokens(h.host)).toBe(60_000)
+  expect(await deskTokens(h.host)).toBe(200_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 5_000 } }))
-  expect(await deskTokens(h.host)).toBe(60_000)
+  expect(await deskTokens(h.host)).toBe(200_000)
 })
 
 function busyDesk() {

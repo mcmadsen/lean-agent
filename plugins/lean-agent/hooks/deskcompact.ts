@@ -1,4 +1,4 @@
-// The desk's own context. A desk session lives for days: at 80% of its limit (config.json `deskTokens`, default 100000) the handover is written and
+// The desk's own context. A desk session lives for days: at 80% of its limit (config.json `desk.contextLimit`, default 200000, never more than 90% of the model's real window) the handover is written and
 // the pane says "restart the desk soon" with the Restart desk button; at 95% of the limit the mod opens the new desk itself at the end of the turn
 // (config `desk.autoRestart`, default true since 1.0.28; also for an update, a pin that cannot be applied, lost tools: autoRestartDesk). When it is idle and
 // over its limit the mod also tries to compact it (`$.session.compact` with fixed instructions; the app's desk cannot, see below). Every compaction that was vetoed or failed is recorded with its
@@ -32,14 +32,15 @@ import { readSnapshot } from './snapshot'
 import { waitingScripts } from './scripts'
 import { setNotice } from './notices'
 import { dismissOldDesk, recordOldDesk, titleOf } from './olddesk'
-import { autoGuard, cancelAutoStart, lastAutoRun, noteAutoRun, resetAuto, retiredInfo, sayGuardOnce, writeAutoStart } from './deskauto'
+import { autoGuard, cancelAutoStart, lastAutoRun, noRestartNote, noteAutoRun, noteRestartAt, resetAuto, restartWaitMs, retiredInfo, sayGuardOnce, writeAutoStart } from './deskauto'
 import type { AutoKind } from './deskauto'
 import { readDeskModel } from './deskmodel'
 import { handoverMode } from './handover'
 import type { HandoverMode } from './handover'
 import type { Thread } from './threads'
 
-export const DEFAULT_TOKENS = 60_000 // (was 100k, 200k before 1.0.20: the desk only routes, a conversation that big is mostly old reports; the field's desk read 70k+ of context on every routing request)
+export const DEFAULT_TOKENS = 200_000 // (1.0.33: 200k again; 60k from 1.0.31 was passed at once by a desk that routes many threads. 100k before that, 200k before 1.0.20)
+export const WINDOW_PCT = 90 // the effective limit is never more than this share of the model's real context window (when the engine reports it)
 export const MIN_TOKENS = 10_000 // a smaller configured value is ignored (a compaction every few turns would be worse than none)
 export const DESK_RETRY_MS = 10 * 60_000 // after a vetoed or failed compaction, when no turn end comes sooner
 export const SOON_PCT = 80 // from here: the handover is written, the pane says "restart the desk soon" with the Restart desk button
@@ -47,13 +48,30 @@ export const soonAt = (limit: number): number => Math.floor((limit * SOON_PCT) /
 export const HANDOVER_MAX_CHARS = 12_000 // the desk handover: at most 3k tokens (characters / 4)
 const SOON_MS = 30_000
 
-// config.json `desk.contextLimit` (1.0.31, default 60000), else the older `deskTokens`, else the 1.0.6 key `checkpoint.deskTokens`: the context size the desk restarts at
+// config.json `desk.contextLimit` (default 200000), else the older `deskTokens`, else the 1.0.6 key `checkpoint.deskTokens`: the context size the desk restarts at
 // (the automatic restart does the restart, deskauto.ts). A value that is not a number of at least MIN_TOKENS is ignored.
-export async function deskTokens(h: Host): Promise<number> {
+export async function configuredDeskTokens(h: Host): Promise<number> {
   const c: any = await readConfig(h, await homeDir(h))
   const ok = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= MIN_TOKENS
   const v = [c?.desk?.contextLimit, c?.['desk.contextLimit'], c?.deskTokens, c?.checkpoint?.deskTokens].find(ok)
   return v !== undefined ? Math.floor(v) : DEFAULT_TOKENS
+}
+// the real context window of the desk's model, as the engine reports it (`$.session.usage().context.window`, noted by the desk's tick); 0 = not known yet
+let deskWindow = 0
+export const noteWindow = (n: unknown): void => {
+  if (typeof n === 'number' && Number.isFinite(n) && n > 0) deskWindow = Math.floor(n)
+}
+export const windowTokens = (): number => deskWindow
+// the limit the desk really restarts at: the configured one, but never beyond WINDOW_PCT of the window (a 200k setting on a 200k window is 180k)
+export const effectiveLimit = (configured: number, window: number): number => (window > 0 ? Math.min(configured, Math.floor((window * WINDOW_PCT) / 100)) : configured)
+export async function deskTokens(h: Host): Promise<number> {
+  return effectiveLimit(await configuredDeskTokens(h), deskWindow)
+}
+// "desk limit 200k" or, when the window caps it, "desk limit 200k (window 200k: effective 180k)"; the doctor row and the pane say the same
+export async function deskLimitText(h: Host): Promise<string> {
+  const conf = await configuredDeskTokens(h)
+  const eff = effectiveLimit(conf, deskWindow)
+  return eff < conf ? `desk limit ${kTokens(conf)} (window ${kTokens(deskWindow)}: effective ${kTokens(eff)})` : `desk limit ${kTokens(conf)}${deskWindow > 0 ? ` (window ${kTokens(deskWindow)})` : ''}`
 }
 
 export type Usage = { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null | undefined
@@ -99,6 +117,8 @@ const freshDesk = (): Desk => ({ retryAt: 0, fallback: 0, rejected: 0, again: fa
 export const MAX_VETOES = 3 // vetoes in a row before the handover file and the /compact line
 let ds: Desk = freshDesk()
 export const resetDeskCompact = (): void => {
+  restartBusy = false
+  deskWindow = 0
   ctxTokens = 0
   sawUsage = false
   ds = freshDesk()
@@ -486,7 +506,27 @@ export async function serveHandover(h: Host, sid = ''): Promise<string | null> {
 // "Restart desk": the handover is written now, then a new desk session is opened (`open` = setup.ts openDesk). The new session reads the
 // handover at its start (the desk's CLAUDE.md says so); the old one stays open until the user closes it.
 export const DESK_RESTARTED = 'New desk opened with the handover: close this one'
-export async function restartDesk(h: Host, o: { recent: () => Promise<string[]>; open: () => Promise<{ ok: boolean; text: string }>; sid?: () => Promise<string> }): Promise<{ ok: boolean; text: string }> {
+type RestartIn = { recent: () => Promise<string[]>; open: () => Promise<{ ok: boolean; text: string }>; sid?: () => Promise<string> }
+// a restart is in progress (the pane draws "restarting…" and no button; a second press does nothing)
+let restartBusy = false
+export const restartingNow = (): boolean => restartBusy
+// What the Restart desk button / command does for the USER (1.0.33): one tap, no second confirm; the automatic guards (30 min gap, per-day count) do not apply,
+// only "one at a time" and the 60 s floor.
+export async function userRestartDesk(h: Host, o: RestartIn): Promise<{ ok: boolean; text: string }> {
+  if (restartBusy) return { ok: false, text: 'a desk restart is already in progress' }
+  const wait = await restartWaitMs(h)
+  if (wait > 0) return { ok: false, text: noRestartNote(wait) }
+  return restartDesk(h, o)
+}
+export async function restartDesk(h: Host, o: RestartIn): Promise<{ ok: boolean; text: string }> {
+  restartBusy = true
+  try {
+    return await restartDeskNow(h, o)
+  } finally {
+    restartBusy = false
+  }
+}
+async function restartDeskNow(h: Host, o: RestartIn): Promise<{ ok: boolean; text: string }> {
   const home = await homeDir(h)
   try {
     await writeDeskHandover(h, contextSize(), await o.recent().catch(() => []), await o.sid?.().catch(() => '') || '')
@@ -496,6 +536,7 @@ export async function restartDesk(h: Host, o: { recent: () => Promise<string[]>;
   // this (old) desk's id and title go into the store BEFORE the new desk opens: its session start finds them (olddesk.ts)
   const oldSid = (await o.sid?.().catch(() => '')) || ''
   const recorded = oldSid ? await recordOldDesk(h, oldSid, await titleOf(h, oldSid)) : false
+  await noteRestartAt(h) // (the 60 s floor starts here, whoever asked)
   const r = await o.open()
   if (!r.ok) {
     if (recorded) await dismissOldDesk(h, 'the new desk did not open: nothing took over').catch(() => undefined) // nothing took over: there is no old desk to archive

@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { openHeader, openToolbar, toolbarTitle } from './panetools'
 import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import { deskClaudeMd, resetLocks } from './threads'
 import { hashText } from './recipe'
@@ -114,6 +115,8 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
     expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toContain('t1 one')
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /1\.0\.32/ })).toBeFalsy() // the version line is on the unfolded header card (the fold is kept across mounts)
+    await openHeader(ui)
     expect(await ui.find({ type: 'Text', text: /1\.0\.32/ })).toBeTruthy()
     await ui.unmount()
   }
@@ -205,8 +208,8 @@ test('1.0.32 the pane is ONE list of sessions (open and closed) with Health and 
   let ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: 1 finding/ })).toBeTruthy() // a missing setup is a finding and is never hidden
   await setUp(ui)
-  expect(await ui.find({ type: 'Text', text: 'Sessions (3)' })).toBeTruthy() // t1, t2 and the closed t3 in one list
-  expect(await ui.find({ type: 'Text', text: '2 unread' })).toBeTruthy() // the total; the messages are on the cards (t1, t2), there is no global inbox
+  expect(await toolbarTitle(ui)).toContain('Sessions (3)') // t1, t2 and the closed t3 in one list
+  expect(await toolbarTitle(ui)).toContain('2 unread') // the total; the messages are on the cards (t1, t2), there is no global inbox
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
   for (const old of [/▾ Threads/, /▸ Closed/, /▾ Goals/]) expect(await ui.find({ type: 'Button', text: old })).toBeFalsy() // no sections of their own
   expect(await ui.find({ type: 'Button', text: /▸ More \(2 goals, 0 projects, 0 scripts\)/ })).toBeTruthy()
@@ -231,7 +234,7 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   const rowsDrawn = async () => (await ui.findAll({ type: 'Button', text: /^[▸▾] (● )?(\? )?(report|x)/ })).length
-  expect(await ui.find({ type: 'Text', text: '12 unread' })).toBeTruthy() // the one total
+  expect(await toolbarTitle(ui)).toContain('12 unread') // the one total
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy() // every sender has a card: no global section
   expect(await ui.find({ type: 'Text', text: 'Nothing from the threads yet.' })).toBeFalsy()
   expect(await ui.findAll({ type: 'Button', text: '6 new' })).toHaveLength(2) // a chip on each collapsed card, nothing hidden silently
@@ -247,7 +250,7 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeTruthy() // the full report text
   await ui.press({ key: 'row-11' })
   await ui.press({ key: 'ack-11' }) // one row: only it
-  expect(await ui.find({ type: 'Text', text: '11 unread' })).toBeTruthy()
+  expect(await toolbarTitle(ui)).toContain('11 unread')
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: '6 new' })).toBeTruthy() // t2's chip is untouched
   expect(await ui.find({ type: 'Button', key: 'ack-11' })).toBeFalsy() // read: no ack button, dimmed, after the unread rows
@@ -259,7 +262,7 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   // ack per card: one press reads all of t2's rows, t1's stay
   await openMore(ui, 't2')
   await ui.press({ key: 'ack-card-t2' })
-  expect(await ui.find({ type: 'Text', text: '5 unread' })).toBeTruthy()
+  expect(await toolbarTitle(ui)).toContain('5 unread')
   expect(await ui.find({ type: 'Button', text: '6 new' })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   await ui.unmount()
@@ -319,7 +322,7 @@ test('1.0.32 messages: a message from an unknown sender is never lost: it is a f
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /Nothing from the threads yet|Nothing unread/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  expect(await toolbarTitle(ui)).toContain('1 unread')
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /Health: all good/ })).toBeTruthy()
   await ui.unmount()
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 'mod', kind: 'report', text: 'a note from the mod itself', state: 'working' }))
@@ -361,7 +364,7 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 11, ns: [] })) // the first 11 rows are read, "fresh" is not
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: '1 unread' })).toBeTruthy()
+  expect(await toolbarTitle(ui)).toContain('1 unread')
   expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy() // t1's chip: the 2 old read rows are archived, not even counted
   await ui.press({ key: 'new-t1' }) // the chip unfolds the card and its messages
   expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
@@ -457,8 +460,8 @@ test('a working thread has no Close (a busy label); needs-you shows for a sessio
   await openMore(ui, 't1')
   await openMore(ui, 't2')
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: /^waiting for you: open it in the app/ })).toBeTruthy() // on its card
-  expect(await ui.find({ type: 'Text', text: /t1 waits on a prompt in its own session/ })).toBeTruthy() // and in "Needs you"
+  expect(await ui.find({ type: 'Text', text: /t1 waits on a prompt in its own session/ })).toBeTruthy() // the need card on its unfolded card
+  expect(await ui.find({ type: 'Text', text: /^waiting for you: open it in the app/ })).toBeFalsy() // 1.0.33: the same fact is not said twice
   expect(await ui.find({ type: 'Text', text: /^busy$/ })).toBeFalsy() // no second word for "working"
   expect(await ui.find({ type: 'Button', key: 'close-t2' })).toBeTruthy() // an idle one still offers it
   void h
@@ -474,7 +477,7 @@ test('a session waiting on a prompt gets no Close; arming one Close then pressin
   const ui = await $.ui.mount(PANE as any)
   for (const id of ['t1', 't2', 't4']) await openMore(ui, id)
   expect(await ui.find({ type: 'Button', key: 'close-t1' })).toBeFalsy() // needs you: not offered
-  expect(await ui.find({ type: 'Text', text: /waiting for you/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /waits on a prompt|waiting for you/ })).toBeTruthy()
   const st = (id: string) => JSON.parse(h.files.get(`/h/.lean-agent/threads/${id}/thread.json`)!).state
   await ui.press({ key: 'close-t2' })
   await ui.press({ key: 'close-t4' }) // another button: arms t4, t2 is not closed
@@ -505,6 +508,8 @@ test('Close all done: 2+ done threads, two-step, closes only done ones that are 
   ].map(rec).join(''))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: /^Close all done/ })).toBeFalsy() // on the unfolded toolbar card
+  await openToolbar(ui)
   expect(await ui.find({ type: 'Button', text: /^Close all done \(2\)$/ })).toBeTruthy() // t5 and t6 (t4 is working)
   await ui.press({ key: 'close-done' })
   expect(await ui.find({ type: 'Button', text: /Confirm close all done \(2\)/ })).toBeTruthy()
@@ -604,27 +609,24 @@ function deskFeed(on: any) {
   }
 }
 
-test('Restart desk is two-step: the confirmed press writes the handover, opens a new desk and says so; a failed open names the handover file', { timeoutMs: 20_000 }, async ($, on) => {
+test('Restart desk (1.0.33): one tap, no second confirm; the handover is written, then the new desk opens and the notice says so; a failed open names the handover file', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 }, handover: { mode: 'full' } })) // (the default is 60k and the core handover since 1.0.31)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 }, handover: { mode: 'full' } })) // (the default is 200k since 1.0.33 and the core handover since 1.0.31)
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
-  await feed($, 85_000) // 85 % of the limit: the button is beside the bar
+  await feed($, 85_000) // 85 % of the limit
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
-  const ui = await $.ui.mount(DESKPANE as any)
+  let ui = await $.ui.mount(DESKPANE as any)
   await setUp(ui)
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // the restart prompt is in Health, folded on startup ...
-  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('restart desk') // ... and the header chip says what to do
-  await openHealth(ui)
-  await ui.press({ key: 'restart-desk' })
-  expect(await ui.find({ type: 'Button', text: /Confirm restart desk/ })).toBeTruthy()
-  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
+  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('1 fix') // the Health row (folded) says what to do; the header chip is the fix count, never "restart desk"
+  expect((await ui.find({ type: 'Button', key: 'restart-desk' }))?.text).toBe('Restart desk') // always on the header line, folded
+  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false)
   const opened = () => h.calls.filter((c: any) => c.argv[0] === 'open')
   expect(opened()).toHaveLength(0)
   let handoverWhenOpened = false
   h.opener.handler = () => { handoverWhenOpened = h.files.has('/h/.lean-agent/desk/handover.md'); return { exitCode: 0, stdout: '' } }
-  await ui.press({ key: 'restart-desk' })
+  await ui.press({ key: 'restart-desk' }) // ONE tap
   const md = h.files.get('/h/.lean-agent/desk/handover.md')!
   expect(md).toContain('# Desk handover')
   expect(md).toContain('ship it') // the goals
@@ -632,9 +634,13 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
   expect(handoverWhenOpened).toBe(true) // the handover first, then the link
   expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
   expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // the 60 s floor: a dim line instead of the button
+  expect(await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ })).toBeTruthy()
+  await ui.unmount()
   // the open fails: the handover is there and the notice says where
+  h.clock.t += 61_000
   h.opener.handler = () => ({ exitCode: 1, stdout: '', stderr: 'no app' })
-  await ui.press({ key: 'restart-desk' })
+  ui = await $.ui.mount(DESKPANE as any)
   await ui.press({ key: 'restart-desk' })
   expect(await ui.find({ type: 'Text', text: /handover\.md/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Could not open the Claude app: no app; start a new session in ~\/lean-agent-desk by hand/ })).toBeTruthy()
@@ -642,74 +648,95 @@ test('Restart desk is two-step: the confirmed press writes the handover, opens a
 })
 
 // (deskcompact.test.ts covers the compaction states; here the desk's context size comes from a request, as in a real session)
-test('header: a desk under 80 % of its limit has the bar and no Restart desk button beside it; from 80 % the button is beside the bar; over the limit it is also a need; the footer button is always there', { timeoutMs: 20_000 }, async ($, on) => {
+test('header card: the Restart desk button is always on its line (under the limit too), folded and unfolded; the bar and the figure follow the desk context; over the limit the Health row says so and the desk restarts itself', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 60k since 1.0.31)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 200k since 1.0.33)
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
   await inDesk($)
   const DESKPANE = { ...PANE, surface: 'desktop' } as const
   let ui = await $.ui.mount(DESKPANE as any)
   await setUp(ui)
-  expect(await ui.find({ type: 'Text', text: /desk context: known after the next request/ })).toBeTruthy() // nothing was asked yet
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // no context figure yet: still there
+  expect(String((await ui.find({ type: 'Button', key: 'sec-header' }))?.text)).not.toMatch(/desk \d/) // nothing was asked yet: no context figure on the folded line
+  expect((await ui.find({ type: 'Button', key: 'restart-desk' }))?.text).toBe('Restart desk') // no context figure yet: still there
+  await openHeader(ui)
+  expect(await ui.find({ type: 'Text', text: /desk context: known after the next request/ })).toBeTruthy()
+  expect((await ui.find({ type: 'Button', key: 'restart-desk' }))?.text).toBe('Restart desk') // unfolded: a normal button
   await ui.unmount()
   await feed($, 40_000)
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: /40k of 100k/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: 'Restart desk' })).toBeTruthy() // under 80 %: the footer button, not the header's
+  expect(await ui.find({ type: 'Text', text: /40k of 100k/ })).toBeTruthy() // (the header is still unfolded from above: the fold is kept across mounts) the bar is on the unfolded card
+  await ui.press({ key: 'sec-header' }) // fold it
+  expect((await ui.find({ type: 'Button', key: 'sec-header' }))?.text).toMatch(/desk 40k\/100k$/) // the folded line
+  expect(await ui.find({ type: 'Text', text: /40k of 100k/ })).toBeFalsy()
+  await openHeader(ui)
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy() // under 80 %: still the button
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
   await ui.unmount()
   await feed($, 85_000)
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: /85k of 100k/ })).toBeTruthy()
-  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('restart desk') // the header chip
+  await ui.press({ key: 'sec-header' }) // fold it again
+  expect((await ui.find({ type: 'Button', key: 'sec-header' }))?.text).toMatch(/desk 85k\/100k$/)
+  expect((await ui.find({ type: 'Button', key: 'health-chip' }))?.text).toBe('1 fix')
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 1 finding/ })).toBeTruthy() // highlighted, folded
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /restart the desk \(context 85k of 100k/ })).toBeFalsy()
   await ui.press({ key: 'health-chip' }) // a tap on the chip opens Health
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready)' })).toBeTruthy() // ONE line, with the button next to it
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready): press Restart desk in the header' })).toBeTruthy() // ONE line, no button of its own
+  expect(await ui.findAll({ type: 'Button', key: 'restart-desk' })).toHaveLength(1)
   await ui.unmount()
-  // 1.0.30: over the limit it is the same ONE row (no card, no second line, no "type /compact"); the desk restarts itself, so the row says "restarting" and has no button
+  // over the limit: the same ONE row says "restarting" (the desk restarts itself); the button stays
   await feed($, 105_000)
   ui = await $.ui.mount(DESKPANE as any)
+  await openHealth(ui)
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: 'restarting the desk (context 105k of 100k): a new session opens by itself' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /over its limit|\/compact|restart the desk/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-top' })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer' })).toBeTruthy() // the footer button is permanent
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
   await ui.unmount()
-  // the guard holds the automatic restart back (one ran 5 min ago): "restart the desk" with the button, still one row
+  // the guard holds the automatic restart back (one ran 5 min ago): "restart the desk", and a USER tap still restarts at once (the guard is for automatic restarts)
   h.files.set('/h/.lean-agent/desk/auto-restarts.json', JSON.stringify({ runs: [{ at: h.clock.t - 300_000, kind: 'context', text: 'context 100k' }] }))
   resetViewCache()
   ui = await $.ui.mount(DESKPANE as any)
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 105k of 100k, the handover is ready)' })).toBeTruthy()
+  await openHealth(ui)
+  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 105k of 100k, the handover is ready): press Restart desk in the header' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
   await ui.press({ key: 'restart-desk' })
-  expect(await ui.findAll({ type: 'Button', text: /Confirm restart desk/ })).toHaveLength(2) // beside the row, the footer
+  expect(h.files.get('/h/.lean-agent/desk/handover.md')).toContain('# Desk handover')
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
   await ui.unmount()
 })
 
-test('the footer Restart desk button works under 80 %: the first press arms it, the second writes the handover and opens a new desk', { timeoutMs: 20_000 }, async ($, on) => {
+test('a USER restart ignores the automatic guards (the 30 min gap, the per-day count) and keeps one floor: no restart within 60 s of the last one, with a dim "next restart possible in N s" instead of the button; the command obeys the same floor', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
+  on('command.run', () => ({}))
   h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  // 12 automatic restarts in the last 24 h, the last one 5 min ago: an automatic one is refused by both guards
+  h.files.set('/h/.lean-agent/desk/auto-restarts.json', JSON.stringify({ runs: Array.from({ length: 12 }, (_, n) => ({ at: h.clock.t - 300_000 - n * 60_000, kind: 'context', text: 'context' })) }))
   await inDesk($)
   await feed($, 40_000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' } as any)
-  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // nothing beside the bar
-  await ui.press({ key: 'restart-desk-footer' })
-  expect(await ui.find({ type: 'Button', key: 'restart-desk-footer', text: /Confirm restart desk/ })).toBeTruthy()
-  expect(h.files.has('/h/.lean-agent/desk/handover.md')).toBe(false) // armed only
-  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(0)
-  await ui.press({ key: 'restart-desk-footer' })
+  const DESKPANE = { ...PANE, surface: 'desktop' } as const
+  let ui = await $.ui.mount(DESKPANE as any)
+  await ui.press({ key: 'restart-desk' }) // ONE tap: the handover and the new desk, whatever the automatic guards say
   expect(h.files.get('/h/.lean-agent/desk/handover.md')).toContain('# Desk handover')
   expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
-  expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
+  expect(JSON.parse(h.files.get('/h/.lean-agent/desk/auto-restarts.json')!).runs).toHaveLength(12) // a user restart is not counted against the automatic ones
+  // the floor: the button is a dim line now, the command refuses with the same words, nothing more opens
+  expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
+  expect((await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ }))?.text).toBe('next restart possible in 60 s')
+  const r: any = await $.command.run({ command: 'lean-agent-restart-desk', surface: 'desktop' } as any)
+  expect(JSON.stringify(r)).toContain('next restart possible in')
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
+  await ui.unmount()
+  h.clock.t += 30_000
+  ui = await $.ui.mount(DESKPANE as any)
+  expect((await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ }))?.text).toBe('next restart possible in 30 s') // the countdown
+  await ui.unmount()
+  h.clock.t += 31_000 // 61 s: the floor is over
+  ui = await $.ui.mount(DESKPANE as any)
+  expect((await ui.find({ type: 'Button', key: 'restart-desk' }))?.text).toBe('Restart desk')
+  await ui.press({ key: 'restart-desk' })
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(2)
   await ui.unmount()
 })
 

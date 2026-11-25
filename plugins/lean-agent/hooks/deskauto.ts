@@ -17,6 +17,21 @@ async function autoMax(h: Host): Promise<number> {
   return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 100 ? v : AUTO_MAX
 }
 export const AUTO_WINDOW_MS = 24 * 3_600_000
+// A restart the USER asks for (the pane's Restart desk button, /lean-agent-restart-desk) ignores the two guards above (the gap and the per-day count are for AUTOMATIC
+// restarts); its one limit is a hard floor: no desk restart of any kind within 60 s of the last one (desk/last-restart.json, written by restartDesk).
+export const RESTART_FLOOR_MS = 60_000
+export const noRestartNote = (ms: number): string => `next restart possible in ${Math.max(1, Math.ceil(ms / 1000))} s`
+const floorFile = (home: string) => `${deskState(home)}/last-restart.json`
+export async function noteRestartAt(h: Host): Promise<void> {
+  await writeJson(h, floorFile(await homeDir(h)), { at: await h.clock.now() }).catch(() => undefined)
+}
+// ms until a restart is allowed again (0 = now)
+export async function restartWaitMs(h: Host): Promise<number> {
+  const v = await readJson<{ at?: unknown } | null>(h, floorFile(await homeDir(h)), null).catch(() => null)
+  const at = typeof v?.at === 'number' ? v.at : 0
+  const now = await h.clock.now()
+  return at > 0 && now >= at ? Math.max(0, RESTART_FLOOR_MS - (now - at)) : 0
+}
 export const AUTO_FRESH_MS = 15 * 60_000 // the new desk's start finds its record this long
 export const GUARD_NOTICE = 'desk-autorestart-guard'
 

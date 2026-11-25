@@ -2,6 +2,7 @@
 // AskUserQuestion hook that reads the user's answer from the tool's result. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { openCard } from './panetools'
 import { addActionRequest, listActions, questionOf } from './deskactions'
 import { resetLocks } from './threads'
 import { resetViewCache } from './view'
@@ -41,7 +42,9 @@ test('a request is a Needs-you card with the exact text; Approve and Deny press 
   const v = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▾ t5/) // a decision to take is unfolded on its thread card (1.0.32: no Needs-you section)
+  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
+  expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
+  await openCard(ui, "t5")
   expect(await has(ui, new RegExp(`t5 wants to reply to PR thread 7 on PR 42 \\(acme/Shop/shop-api\\): ${BODY.replace('.', '\\.')}`))).toBe(true)
   for (const k of [`action-approve-${v.id}`, `action-deny-${v.id}`, 'pane-t5']) expect([k, !!(await ui.find({ type: 'Button', key: k }))]).toEqual([k, true])
   await ui.press({ key: `action-approve-${v.id}` })
@@ -63,6 +66,7 @@ test('Deny on the card tells the thread and sends nothing; the thread\'s own blo
   const v = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openCard(ui, 't5') // folded on startup
   expect(await has(ui, /t5 is blocked/)).toBe(false)
   await ui.press({ key: `action-deny-${v.id}` })
   expect(await ui.find({ type: 'Button', key: `action-deny-${v.id}`, text: 'Confirm deny for t5' })).toBeTruthy()
@@ -158,7 +162,9 @@ test('a text the card cannot show in full has no Approve in the pane (the desk q
   const v = long.request!
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▾ t5/) // a decision to take is unfolded on its thread card (1.0.32: no Needs-you section)
+  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
+  expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
+  await openCard(ui, "t5")
   expect(!!(await ui.find({ type: 'Button', key: `action-approve-${v.id}` }))).toBe(false)
   expect(!!(await ui.find({ type: 'Button', key: `action-deny-${v.id}` }))).toBe(true)
   // 1.0.30: the card says where it IS approved, and the full text is one tap away
@@ -181,7 +187,9 @@ test('a review batch is numbered one-liners grouped by file (anchor + the first 
   const v = r.request!
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▾ t5/) // a decision to take is unfolded on its thread card (1.0.32: no Needs-you section)
+  expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
+  expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
+  await openCard(ui, "t5")
   expect(await has(ui, /General comments \(no file\) \(12\)/)).toBe(true)
   expect(await has(ui, /^ {2}1\. PR comment: Point 1 is wrong\.$/)).toBe(true)
   const four = (await texts(ui)).find(t => /^ {2}4\. /.test(t))!

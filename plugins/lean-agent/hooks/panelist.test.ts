@@ -60,13 +60,13 @@ test('Health summary: quiet "all good" when nothing needs a fix; amber with the 
 
 test('settings: pane.sort (config, else the mod store, else last active), pane.maxSessions (5 to 500, default 30), pane.healthOpen (true or "open")', async () => {
   const h = fakeHost(null)
-  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'cost', maxSessions: 12, healthOpen: true } }))
-  expect(await paneConfig(h.host)).toEqual({ sort: 'cost', maxSessions: 12, healthOpen: true })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'cost', maxSessions: 12, healthOpen: true, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ 'pane.sort': 'name', 'pane.maxSessions': 7, 'pane.healthOpen': 'open' })) // the flat spelling
-  expect(await paneConfig(h.host)).toEqual({ sort: 'name', maxSessions: 7, healthOpen: true })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'name', maxSessions: 7, healthOpen: true, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'newest', maxSessions: 2, healthOpen: 'yes' } })) // not valid: the defaults
-  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { maxSessions: 9999 } }))
   expect((await paneConfig(h.host)).maxSessions).toBe(30)
   // the press that changes the order writes the mod's store AND config pane.sort

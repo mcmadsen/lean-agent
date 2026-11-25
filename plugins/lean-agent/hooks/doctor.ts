@@ -15,7 +15,7 @@ import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
 import { closedOwnerRows, pruneStale, staleEntries } from './worktreereg'
 import { removeStaleSessions, threadSessionRows } from './threadsessions'
 import { importMcpEnv, importNote, mcpRows } from './mcpenv'
-import { kTokens, lastCompaction, manualNote } from './deskcompact'
+import { deskLimitText, kTokens, lastCompaction, manualNote } from './deskcompact'
 import { oldDeskRows } from './olddesk'
 import { lookRows } from './look'
 import { reportFailures } from './delivery'
@@ -185,6 +185,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   if (live) row(!live.bad, `desk session model: ${live.text}${live.bad ? '; lean_doctor fix tries the pin again' : ''}`)
   const access = await hasAdditionalDirectory(h, `${deskDir(home)}/.claude/settings.json`, leanDir(home))
   row(access, access ? 'desk can open files in ~/.lean-agent' : 'desk cannot open files in ~/.lean-agent (the app says "outside this session\'s folders"): ~/.lean-agent is missing from the desk settings permissions.additionalDirectories')
+  // the desk's restart limit (1.0.33): the configured one, and what the model's real window makes of it (never more than 90% of the window)
+  row(true, await deskLimitText(h))
   // the desk's last compaction (deskcompact.ts): a veto or a failure is shown with its reason
   const cmp = await lastCompaction(h).catch(() => null)
   // (a headless session cannot compact: nothing is broken, so a `note` row with the advice, never FIX)

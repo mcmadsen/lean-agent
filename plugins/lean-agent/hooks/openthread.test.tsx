@@ -186,6 +186,7 @@ test('no prompt is open (an idle session, a classifier denial): the card says so
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await ui.press({ key: 'card-t1' }) // 1.0.33: folded on startup; the decision is on the unfolded card
   expect(await ui.find({ type: 'Text', text: /no permission prompt exists for t1: the auto-mode classifier denied a worker call/ }), 'truth').toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /There is nothing to press in the session\./ }), 'nothing to press').toBeTruthy()
   expect(await ui.find({ type: 'Button', text: 'Let t1 edit its worktree itself' }), 'self edit').toBeTruthy()

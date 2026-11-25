@@ -17,7 +17,7 @@ export const KEYS = {
   'threads.softUsd': { type: 'number', dflt: 8, min: 0, max: 10000, what: 'per-thread soft budget in USD from the ledger: 80% one nudge, 100% a desk notice (raise / park / continue); the thread goes on (0 = off)' },
   'tasks.splitHintTokens': { type: 'number', dflt: 60000, min: 0, max: 10000000, what: 'the split hint for a big brief needs the named files to add up to at least this many tokens (bytes / 4); none when it names no files (0 = no floor)' },
   'threads.hardUsd': { type: 'number', dflt: null, min: 0, max: 10000, what: 'per-thread hard cap in USD from the ledger: at it the thread is told to report and stop and its new Agent calls are refused (default none; 0 = none)' },
-  'desk.contextLimit': { type: 'number', dflt: 60000, min: 20000, max: 400000, what: 'the desk restarts (automatic restart) at this many context tokens' },
+  'desk.contextLimit': { type: 'number', dflt: 200000, min: 20000, max: 1000000, what: 'the desk restarts (automatic restart) at this many context tokens (never beyond 90% of the model window)' },
 } as const
 export type Key = keyof typeof KEYS
 
