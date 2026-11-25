@@ -881,13 +881,19 @@ const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr
 // `scratch`: the calling thread's own `<thread folder>/scratch` (the one place under the lean home a subagent may write notes and drafts)
 const tempFile = (w: string, scratch?: string): boolean => (TEMP_OK.test(w) || (!!scratch && w.startsWith(`${scratch}/`))) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
 // the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
-export function redirectTargets(c: string): string[] {
+// A heredoc body and a `# comment` are text, not commands: a `>` in them ("# result > no-passkey", "if v > 3.4.0" in a python heredoc)
+// is no redirect (1.0.33: readers were refused with "redirect to ON" / "redirect to 3.4.0"). The `<<WORD` line itself stays (`cat > f <<EOF`).
+const HEREDOC_BODY = /(?<!<)<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g
+export function redirectTargets(c0: string): string[] {
+  // (an UNQUOTED heredoc whose body has a substitution still runs that command: it stays in the scan)
+  const c = c0.replace(HEREDOC_BODY, (m, qt: string) => (!qt && /\$\(|`/.test(m) ? m : m.slice(0, m.indexOf('\n')) + '\n'))
   const out: string[] = []
   let q = ''
   for (let i = 0; i < c.length; i++) {
     const ch = c[i]!
     if (q) { if (ch === q) q = ''; else if (ch === '\\' && q === '"') i++; continue }
     if (ch === '\\') { i++; continue }
+    if (ch === '#' && (i === 0 || /[\s;&|(]/.test(c[i - 1]!))) { while (i + 1 < c.length && c[i + 1] !== '\n') i++; continue }
     if (ch === "'" || ch === '"') { q = ch; continue }
     if (ch !== '>') continue
     let j = i + 1

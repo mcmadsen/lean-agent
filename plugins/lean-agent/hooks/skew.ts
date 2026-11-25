@@ -96,7 +96,9 @@ export async function skewedThreads(h: Host, root: string): Promise<{ id: string
   for (const e of await h.fs.list(dir).catch(() => [] as { name: string }[])) {
     if (!/^t\d+$/.test(e.name)) continue
     const t = await readJson<{ state?: string; sid?: string; running?: unknown } | null>(h, `${dir}/${e.name}/thread.json`, null)
-    if (!t || t.state === 'closed') continue
+    // only a thread with a session that can still run: a closed one is never reopened for this, and a parked one has no session (its record is
+    // the ended one's; the session it gets at its next wake loads whatever is installed then)
+    if (!t || t.state !== 'open') continue
     const run = runningOf(t)
     if (threadSkew(run, installed)) out.push({ id: e.name, run, installed })
   }
@@ -110,6 +112,20 @@ export async function skewedThreads(h: Host, root: string): Promise<{ id: string
 export const SKEW_CAUSE =
   'cause: lean-agent pins no version (a thread\'s settings only switch other plugins off); the Claude background service that starts `claude --bg` sessions keeps the plugin it loaded when it started, and the plugin cache still holds the older version. ' +
   'What you can do: when no thread is working, quit and reopen the Claude app (that restarts the service), then restart the thread from the pane. lean-agent never restarts services itself'
+
+// The doctor's ONE row for the threads whose session loaded an older plugin than the installed one (1.0.33; field: five identical rows of
+// 600 characters, one per thread). One thread: its own row. Several: one row naming each with the version it runs, the restart step for every
+// one of them (lean_thread restart <id>: a new session with its handover; only open threads are listed, a closed one is never reopened and a
+// parked one has no session), and the one thing that makes the restart useless (the service still holds the old plugin).
+export function skewRow(older: { id: string; run: string; installed: string }[]): string {
+  if (!older.length) return ''
+  const first = older[0]!
+  if (older.length === 1) return `thread ${first.id} ${runsText(first.run, first.installed)}: its session loaded the older plugin; do not ask it for what ${first.installed} added. ${SKEW_CAUSE}`
+  const names = older.map(s => `${s.id} (${s.run})`).join(', ')
+  const ids = older.map(s => s.id).join(' ')
+  const latest = older.map(s => s.installed).sort(compareVersions).pop()!
+  return `${older.length} threads run an older plugin than the installed ${latest}: ${names}; their sessions loaded the older plugin: do not ask them for what ${latest} added. ${SKEW_CAUSE.replace('restart the thread from the pane', `restart each one (lean_thread restart <id> for ${ids}: a new session with its handover; if it still runs the older version after that, the service was not restarted)`)}`
+}
 
 export const skewText = (run: string, installed: string) =>
   `lean-agent code ${run} is running but ${installed} is installed: start a new session (threads: close and Start)`

@@ -1564,7 +1564,14 @@ What every session does get is the `env` block of `~/.claude/settings.json`. lea
   (not reproduced: it needs a service started before an update). *What you can do:* when no thread is working, quit and reopen the Claude
   app (that restarts the service; `claude respawn <id>` restarts one session onto the current binary, whether it also reloads plugins
   was not verified), then restart the thread from the pane; the start reply shows the version it now runs. The doctor shows a
-  `FIX thread tN running X, installed Y` row with this advice. lean-agent never restarts a service itself and never tells the desk to.
+  `FIX thread tN running X, installed Y` row with this advice; with several such threads it is ONE row (`FIX N threads run an older plugin
+  than the installed Y: t3 (X), t5 (X)`) that names each one and the restart step (`lean_thread restart <id>`), and lists only open
+  threads: a closed thread is never reopened for this, and a parked one has no session (its next start loads what is installed then).
+  lean-agent never restarts a service itself and never tells the desk to.
+- **A reader was refused with "a reader writes no file (redirect to ON)" (or `3.4.0`, `no-passkey`)** (1.0.32 exports). The guard's
+  redirect scan counted a `>` inside a shell `# comment` or a heredoc body (a python or jq script given on stdin) as a redirect. Fixed
+  in 1.0.33: both are text now; the `cat > f <<EOF` line itself, a redirect after a newline and an unquoted heredoc whose body runs a
+  `$( )` substitution are still checked.
   Until it is fixed, do not ask that thread for anything its version lacks.
 - **"Open tN" opened a new desk (or a new empty session) instead of the thread** (reported on a Mac with 1.0.12). *Not verified:* whether the
   app resolves the id of a `claude --bg` session with `claude://resume?session=<id>`; the mod only hands the link to `open` and cannot see

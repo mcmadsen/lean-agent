@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { REVIEW_EXEMPT, capKind, decide, forgeTried, isWorker, parseGrants, readerWrite, recordGrant, releaseGrant, statePattern } from './guard'
+import { REVIEW_EXEMPT, capKind, decide, forgeTried, isWorker, parseGrants, readerWrite, recordGrant, redirectTargets, releaseGrant, statePattern } from './guard'
 import { writeReview, writeApproval, APPROVAL_TTL_MS } from './reviews'
 import { leanThread } from './threads'
 
@@ -895,4 +895,14 @@ test('1.0.22: a worker and a reader write under <thread folder>/scratch (and tem
   expect(await reader(`rg x /r/app > ${T}/notes.md`)).toContain('only a temp folder or /h/.lean-agent/threads/t1/scratch may be written')
   expect(readerWrite('rg x > /tmp/a', T + '/scratch')).toBeNull()
   expect(readerWrite(`rg x > ${T}/scratch/a`)).toContain('writes no file') // no scratch known: only temp
+})
+
+test('a reader: a > in a shell comment or a quoted heredoc body is text, not a redirect; the heredoc line itself and a body substitution still count', async () => {
+  // field (1.0.32 export): "a reader writes no file (redirect to ON / 3.4.0 / no-passkey)" for comments and python heredoc text
+  for (const c of ['rg x /r/app # result -> ON', 'rg x /r/app\n# the answer > no-passkey\nls /r', "python3 - <<'PY'\nif v > 3.4.0: pass\nPY", 'python3 - <<EOF\nprint(1 > 0)\nEOF', 'rg "a#b" /r/app', 'rg x /r/app > /tmp/o # copy > ON'])
+    expect([c, redirectTargets(c).filter(w => !/^\/tmp\//.test(w))]).toEqual([c, []])
+  expect(redirectTargets("cat > /r/out.md <<'EOF'\nhello\nEOF")).toEqual(['/r/out.md']) // the command line before the body is scanned
+  expect(redirectTargets('cat <<EOF\n$(echo x > /r/out.md)\nEOF')).toEqual(['/r/out.md']) // an unquoted body that runs a substitution
+  expect(redirectTargets('rg x /r/app\n> /r/out.md')).toEqual(['/r/out.md']) // a comment ends at the newline
+  expect(redirectTargets('echo a#b > /r/out.md')).toEqual(['/r/out.md']) // # inside a word is no comment
 })

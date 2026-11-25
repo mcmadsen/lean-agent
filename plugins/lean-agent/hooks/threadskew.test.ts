@@ -175,3 +175,27 @@ test('the doctor names a thread that runs an older plugin than installed, the ca
   expect(clean).not.toContain('thread t2')
   expect(clean).not.toContain('pins no version')
 })
+
+test('the doctor gives ONE row for several threads on an older plugin: each id with its version, the restart step, never a parked or closed thread', async () => {
+  const { h, call } = setup('1.0.32')
+  for (const n of ['a', 'b', 'c', 'd']) await call({ action: 'new', title: n, text: 'brief' })
+  const put = (id: string, patch: object) => h.files.set(`/h/.lean-agent/threads/${id}/thread.json`, JSON.stringify({ ...JSON.parse(String(h.files.get(`/h/.lean-agent/threads/${id}/thread.json`))), ...patch }))
+  const old = (sid: string) => ({ sid, running: { version: '1.0.31', sid, at: 1 } })
+  put('t1', old(S1))
+  put('t2', old(S2))
+  put('t3', { ...old('33333333-2222-3333-4444-555555555555'), state: 'parked' }) // no session: its record is the ended one's
+  put('t4', { ...old('44444444-2222-3333-4444-555555555555'), state: 'closed' })
+  expect((await skewedThreads(h.host, ROOT)).map(s => s.id)).toEqual(['t1', 't2'])
+  const lines = await check(h.host, ROOT)
+  const rows = lines.filter(l => l.includes('pins no version'))
+  expect(rows.length).toBe(1) // one cause, said once
+  expect(rows[0]).toMatch(/^FIX {2}2 threads run an older plugin than the installed 1\.0\.32: t1 \(1\.0\.31\), t2 \(1\.0\.31\); /)
+  expect(rows[0]).toContain('lean_thread restart <id> for t1 t2')
+  expect(rows[0]).toContain('quit and reopen the Claude app')
+  expect(rows[0]).toContain('the service was not restarted')
+  expect(rows[0]).not.toMatch(/t3|t4/)
+  expect(lines.filter(l => /thread t\d running/.test(l)).length).toBe(0) // no per-thread rows next to it
+  // one thread keeps its own row
+  put('t2', { state: 'closed' })
+  expect((await check(h.host, ROOT)).some(l => l.startsWith('FIX  thread t1 running 1.0.31, installed 1.0.32: its session loaded the older plugin'))).toBe(true)
+})
