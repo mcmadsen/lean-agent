@@ -7,6 +7,7 @@ import { hostOf } from './host'
 import { writeReview } from './reviews'
 import { loadThreadDetail, parseStat, resetThreadCache } from './threaddetail'
 import { openThreadPane, resetThreadPanes, threadOfPane, threadPaneId } from './threadpane'
+import { openKey } from './panetools'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const HEAD = 'a'.repeat(40)
@@ -178,13 +179,22 @@ test('data: a worktree that is gone is said, not diffed; an unreadable session l
   expect([u.run, u.working]).toEqual(['unknown', true])
 })
 
-test('draw, full: every section, the buttons, and only the 10 newest reports (older ones are counted)', { timeoutMs: 20_000 }, async ($, on) => {
+// 1.0.33: the pane is cards, all folded on the first draw; a spec that reads a card's content taps it open first (one tap each, a card that is open stays)
+const CARDS = ['status', 'report', 'decide', 'messages', 'task', 'rules', 'files', 'health']
+const openAll = async (ui: any) => {
+  for (const c of CARDS) await openKey(ui, `sec-${c}`)
+}
+const click = (ui: any, key: string) => ui.press({ key })
+
+test('draw, full: every card has its content, and only the 10 newest reports (older ones are counted)', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
-  expect(await text(ui, /t1 · add the widget/)).toBe(true)
-  expect(await text(ui, /open · idle · sonnet\/high · today \$1\.25 \(main \$1\.25 · workers \$0\.00 · reviews \$0\.00\) · project: app/)).toBe(true) // the status line carries today's cost and where it went
-  expect(await text(ui, /widget merged/)).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'sec-status' }))?.text).toMatch(/^▸ t1 add the widget/)
+  await openAll(ui)
+  expect(await text(ui, /open · idle · sonnet\/high · project: app/)).toBe(true)
+  expect(await text(ui, /today \$1\.25 \(main \$1\.25 · workers \$0\.00 · reviews \$0\.00\) · total \$2\.00/)).toBe(true) // today's cost and where it went, once
+  expect(await text(ui, /goal: widget merged/)).toBe(true)
   expect(await text(ui, /Keep the old layout\./)).toBe(true)
   expect(await text(ui, /Line four/)).toBe(true)
   expect(await text(ui, /Line five tail/)).toBe(false) // the brief shows its first 4 lines until expanded
@@ -192,13 +202,16 @@ test('draw, full: every section, the buttons, and only the 10 newest reports (ol
   expect(await text(ui, /diff against bbbbbbbbbbbb: 2 files changed, 42 insertions\(\+\)/)).toBe(true)
   expect(await text(ui, /src\/widget\.ts \| 30/)).toBe(true)
   expect(await text(ui, /no review recorded for HEAD aaaaaaaa/)).toBe(true)
-  expect(await text(ui, /today \$1\.25 · total \$2\.00/)).toBe(true)
-  expect(await text(ui, /Reports \(10 of 12, newest first\)/)).toBe(true)
-  expect(await text(ui, /Queued messages \(2\)/)).toBe(true)
-  expect(await ui.find({ type: 'Button', text: /report number 12/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /report number 3$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /report number 2$/ })).toBeFalsy()
-  for (const t of ['Open session', 'Restart', 'Close', 'Refresh']) expect(await ui.find({ type: 'Button', text: t })).toBeTruthy()
+  expect(await text(ui, /^report number 12$/)).toBe(true) // the newest report is the card's text
+  expect(await text(ui, /Earlier reports \(9 of 11, newest first\)/)).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'btn-r10' }))?.text).toMatch(/report number 11$/) // (the reports' own rows; the Messages card has the same texts as unread rows with ack)
+  expect((await ui.find({ type: 'Button', key: 'btn-r2' }))?.text).toMatch(/report number 3$/)
+  expect(await ui.find({ type: 'Button', key: 'btn-r1' })).toBeFalsy() // the 11th report is not drawn (10 newest)
+  expect(await ui.find({ type: 'Button', key: 'btn-r11' })).toBeFalsy() // the newest is the card's text, not a row twice
+  expect((await ui.find({ type: 'Button', key: 'sec-messages' }))?.text).toMatch(/^▾ Messages \(/)
+  expect(await ui.find({ type: 'Button', text: /\[queued\] please also rename it/ })).toBeTruthy() // to the thread: its delivery state
+  expect(await ui.find({ type: 'Button', text: /\[queued\] and add a test/ })).toBeTruthy()
+  for (const t of ['Open session', 'Restart from handover', 'Close', 'Refresh']) expect(await ui.find({ type: 'Button', text: t })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -207,28 +220,31 @@ test('draw: a report row and the brief expand and fold; the review shows green w
   await writeReview(h.host, { project: 'app', sha: HEAD, green: true, passes: 3, findings: ['1. [minor] src/widget.ts:3 name the option'], base: 'main' })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
+  await openAll(ui)
   expect(await text(ui, new RegExp(`HEAD aaaaaaaa: green · 3 pass\\(es\\)`))).toBe(true)
   expect(await text(ui, /1\. \[minor\] src\/widget\.ts:3 name the option/)).toBe(true)
   await ui.press({ key: 'brief-more' })
   expect(await text(ui, /Line five tail/)).toBe(true)
   await ui.press({ key: 'brief-more' })
   expect(await text(ui, /Line five tail/)).toBe(false)
-  expect(await text(ui, /^report number 12$/)).toBe(false)
-  await ui.press({ key: 'btn-r11' })
-  expect(await text(ui, /^report number 12$/)).toBe(true)
+  expect(await text(ui, /^report number 11$/)).toBe(false)
+  await ui.press({ key: 'btn-r10' })
+  expect(await text(ui, /^report number 11$/)).toBe(true)
   await ui.unmount()
 })
 
-test('draw, empty: a thread with nothing to show draws every section as a short line, never blank', { timeoutMs: 20_000 }, async ($, on) => {
+test('draw, empty: a thread with nothing to show draws every card as a short line, never blank', { timeoutMs: 20_000 }, async ($, on) => {
   world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t2'))
-  expect(await text(ui, /t2 · empty one/)).toBe(true)
+  expect(await text(ui, /^\[idle\]$/)).toBe(true)
+  await openAll(ui)
   expect(await text(ui, /no goal set/)).toBe(true)
   expect(await text(ui, /no worktree registered/)).toBe(true)
   expect(await text(ui, /no worktree, so no review record/)).toBe(true)
   expect(await text(ui, /No reports yet\./)).toBe(true)
-  expect(await text(ui, /None queued\./)).toBe(true)
+  expect(await text(ui, /No messages\./)).toBe(true)
+  expect(await text(ui, /Nothing waits for you on t2\./)).toBe(true)
   expect(await text(ui, /today \$0\.00 · total \$0\.00/)).toBe(true)
   expect(await ui.find({ type: 'Button', text: 'Refresh' })).toBeTruthy()
   await ui.unmount()
@@ -261,12 +277,14 @@ test('Restart and Close need two presses; Refresh drops the notice; the first pr
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
   const bg = () => h.claudeCalls().filter(a => a[0] === '--bg').length
+  await openKey(ui, 'sec-status')
   await ui.press({ key: 'restart' })
   expect(await ui.find({ type: 'Button', text: 'Confirm restart t1' })).toBeTruthy()
   expect(bg()).toBe(0)
   await ui.press({ key: 'restart' })
   expect(bg()).toBe(1)
-  expect(await text(ui, /t1 started/)).toBe(true)
+  expect(await text(ui, /t1 started/)).toBe(true) // the answer is a notice card
+  expect(await ui.find({ type: 'Button', key: 'notice-dismiss' })).toBeTruthy()
   await ui.press({ key: 'refresh' })
   expect(await text(ui, /t1 started/)).toBe(false)
   await ui.press({ key: 'close' })
@@ -282,6 +300,7 @@ test('Close: armed while the thread was idle, then it starts working: the second
   const h = world(on, { rows })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
+  await openKey(ui, 'sec-status')
   await ui.press({ key: 'close' })
   expect(await ui.find({ type: 'Button', text: 'Confirm close t1' })).toBeTruthy()
   rows[0] = idleRow({ status: 'busy', state: 'working', pid: 42 })
@@ -296,7 +315,10 @@ test('a thread that waits for the user says so and cannot be closed from the pan
   const h = world(on, { rows: [idleRow({ status: 'idle', state: 'blocked', waitingFor: 'a permission prompt', pid: 42 })] })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
-  expect(await text(ui, /waits for you in its own session/)).toBe(true)
+  await openKey(ui, 'sec-status')
+  await openKey(ui, 'sec-decide')
+  expect(await text(ui, /waits for you in its own session|waiting for your yes|needs you/)).toBe(true) // it is in TO DECIDE, once
+  expect((await ui.find({ type: 'Button', key: 'sec-decide' }))?.text).toMatch(/^▾ To decide/)
   expect(await text(ui, /^waiting for you$/)).toBe(true)
   expect(await ui.find({ type: 'Button', text: 'Close' })).toBeFalsy()
   h.claude.handler = () => ({ exitCode: 1, stdout: '' })
@@ -311,13 +333,16 @@ test('an expanded report stays on the same report when a newer one arrives', { t
   const h = world(on)
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
-  await ui.press({ key: 'btn-r11' }) // the newest, "report number 12"
-  expect(await text(ui, /^report number 12$/)).toBe(true)
+  await openKey(ui, 'sec-status')
+  await openKey(ui, 'sec-report')
+  await ui.press({ key: 'btn-r10' }) // the second newest, "report number 11" (the newest is the card's own text)
+  expect(await text(ui, /^report number 11$/)).toBe(true)
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', (h.files.get('/h/.lean-agent/desk/inbox.jsonl') ?? '') + JSON.stringify({ ts: 9000, from: 't1', kind: 'report', state: 'working', text: 'arrived later' }) + '\n')
   await ui.press({ key: 'refresh' })
-  expect(await text(ui, /^report number 12$/)).toBe(true) // still open
-  expect(await text(ui, /^arrived later$/)).toBe(false) // the new one is folded
-  expect(await ui.find({ type: 'Button', text: /arrived later/ })).toBeTruthy()
+  expect(await text(ui, /^report number 11$/)).toBe(true) // still open
+  expect(await text(ui, /^report number 12$/)).toBe(false) // (it moved down one place, folded)
+  expect(await text(ui, /^arrived later$/)).toBe(true) // the newest is the card's text now
+  expect(await ui.find({ type: 'Button', text: /report number 12/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -325,6 +350,7 @@ test('a working thread has no Close button and its Restart says the current step
   const h = world(on, { rows: [idleRow({ status: 'busy', state: 'working', pid: 42 })] })
   await inDesk($)
   const ui = await $.ui.mount(pane('t1'))
+  await openKey(ui, 'sec-status')
   expect(await ui.find({ type: 'Button', text: 'Close' })).toBeFalsy()
   expect(await text(ui, /^busy$/)).toBe(true)
   await ui.press({ key: 'restart' })
@@ -349,6 +375,7 @@ test('Open session: the idle process is stopped, then the resume link goes to th
   h.opener.handler = (a: string[]) => { order.push(`open ${a[a.length - 1]}`); return ok() }
   await inDesk($)
   const ui = await $.ui.mount(pane('t1', 'desktop'))
+  await openKey(ui, 'sec-status')
   await ui.press({ key: 'open-session' })
   expect(order).toEqual(['stop', `open claude://resume?session=${SID}`])
   expect(await text(ui, /t1 opened in the Claude app/)).toBe(true)
@@ -360,14 +387,17 @@ test('several panes at once: each draws its own thread and its own two-press', {
   await inDesk($)
   const a = await $.ui.mount(pane('t1'))
   const b = await $.ui.mount(pane('t2'))
-  expect(await text(a, /t1 · add the widget/)).toBe(true)
-  expect(await text(b, /t2 · empty one/)).toBe(true)
-  expect(await text(a, /t2 · empty one/)).toBe(false)
+  expect((await a.find({ type: 'Button', key: 'sec-status' }))?.text).toMatch(/t1 add the widget/)
+  expect((await b.find({ type: 'Button', key: 'sec-status' }))?.text).toMatch(/t2 empty one/)
+  expect(await a.find({ type: 'Button', text: /t2 empty one/ })).toBeFalsy()
   expect(await text(b, /widget merged/)).toBe(false)
+  await openKey(a, 'sec-status')
+  await openKey(b, 'sec-status')
+  expect((await b.find({ type: 'Button', key: 'sec-task' }))?.text).toMatch(/^▸ Task/) // a fold is per thread: t1's tap did not open t2's cards
   await a.press({ key: 'restart' })
   expect(await a.find({ type: 'Button', text: 'Confirm restart t1' })).toBeTruthy()
   expect(await b.find({ type: 'Button', text: /Confirm restart/ })).toBeFalsy() // t2's button is not armed by t1's press
-  expect(await b.find({ type: 'Button', text: 'Restart' })).toBeTruthy()
+  expect(await b.find({ type: 'Button', text: 'Restart from handover' })).toBeTruthy()
   await a.unmount()
   await b.unmount()
 })

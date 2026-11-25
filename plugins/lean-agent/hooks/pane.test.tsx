@@ -648,7 +648,7 @@ test('Restart desk (1.0.33): one tap, no second confirm; the handover is written
 })
 
 // (deskcompact.test.ts covers the compaction states; here the desk's context size comes from a request, as in a real session)
-test('header card: the Restart desk button is always on its line (under the limit too), folded and unfolded; the bar and the figure follow the desk context; over the limit the Health row says so and the desk restarts itself', { timeoutMs: 20_000 }, async ($, on) => {
+test('header card: the Restart desk button is always on its line (under the limit too), folded and unfolded; the bar and the figure follow the desk context; over the limit the Health row and a quiet header chip say so and the desk goes on (it never restarts by itself), and the click works', { timeoutMs: 20_000 }, async ($, on) => {
   const feed = deskFeed(on)
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 200k since 1.0.33)
@@ -681,28 +681,46 @@ test('header card: the Restart desk button is always on its line (under the limi
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 1 finding/ })).toBeTruthy() // highlighted, folded
   expect(await ui.find({ type: 'Text', text: /restart the desk \(context 85k of 100k/ })).toBeFalsy()
   await ui.press({ key: 'health-chip' }) // a tap on the chip opens Health
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 85k of 100k, the handover is ready): press Restart desk in the header' })).toBeTruthy() // ONE line, no button of its own
+  expect(await ui.find({ type: 'Text', text: 'desk context 85k of 100k: press Restart desk when it suits you (the handover is ready)' })).toBeTruthy() // ONE line, no button of its own
   expect(await ui.findAll({ type: 'Button', key: 'restart-desk' })).toHaveLength(1)
   await ui.unmount()
-  // over the limit: the same ONE row says "restarting" (the desk restarts itself); the button stays
+  // over the limit (1.0.33: a warning level only, the desk goes on): the same ONE amber finding in its own words, a quiet chip in the header line, nothing red, no "restarting"; the button stays
   await feed($, 105_000)
   ui = await $.ui.mount(DESKPANE as any)
+  expect((await ui.find({ type: 'Button', key: 'sec-header' }))?.text).toMatch(/^▸ lean-agent · desk 105k of 100k - Restart desk/)
   await openHealth(ui)
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Text', text: 'restarting the desk (context 105k of 100k): a new session opens by itself' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /over its limit|\/compact|restart the desk/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: 'above its limit (105k of 100k): press Restart desk when it suits you (the handover is ready)' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /restarting the desk|opens by itself|over its limit|\/compact/ })).toBeFalsy()
+  expect((await ui.findAll({ type: 'Text' })).some((t: any) => t.props?.color === 'error' || t.props?.color === 'red')).toBe(false)
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeTruthy()
+  // the user's click above the limit works exactly as built: the handover is written and a new desk is opened
+  await ui.press({ key: 'restart-desk' })
+  expect(h.files.get('/h/.lean-agent/desk/handover.md')).toContain('# Desk handover')
+  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
   await ui.unmount()
-  // the guard holds the automatic restart back (one ran 5 min ago): "restart the desk", and a USER tap still restarts at once (the guard is for automatic restarts)
+})
+
+test('desk.autoRestart true brings the old pane rows back: over the limit the ONE row says "restarting the desk" (a new session opens by itself); the guard holds it back with the plain finding and the button still restarts at once', { timeoutMs: 20_000 }, async ($, on) => {
+  const feed = deskFeed(on)
+  const h = setup(on, [])
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true } }))
+  h.files.set('/h/lean-agent-desk/CLAUDE.md', 'desk')
+  await inDesk($)
+  const DESKPANE = { ...PANE, surface: 'desktop' } as const
+  await feed($, 105_000)
+  let ui = await $.ui.mount(DESKPANE as any)
+  await setUp(ui)
+  await openHealth(ui)
+  expect(await ui.find({ type: 'Text', text: 'restarting the desk (context 105k of 100k): a new session opens by itself' })).toBeTruthy()
+  await ui.unmount()
   h.files.set('/h/.lean-agent/desk/auto-restarts.json', JSON.stringify({ runs: [{ at: h.clock.t - 300_000, kind: 'context', text: 'context 100k' }] }))
   resetViewCache()
   ui = await $.ui.mount(DESKPANE as any)
   await openHealth(ui)
-  expect(await ui.find({ type: 'Text', text: 'restart the desk (context 105k of 100k, the handover is ready): press Restart desk in the header' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: 'above its limit (105k of 100k): press Restart desk when it suits you (the handover is ready)' })).toBeTruthy()
   await ui.press({ key: 'restart-desk' })
   expect(h.files.get('/h/.lean-agent/desk/handover.md')).toContain('# Desk handover')
-  expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
   await ui.unmount()
 })
 

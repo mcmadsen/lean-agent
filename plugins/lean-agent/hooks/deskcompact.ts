@@ -1,6 +1,7 @@
 // The desk's own context. A desk session lives for days: at 80% of its limit (config.json `desk.contextLimit`, default 200000, never more than 90% of the model's real window) the handover is written and
-// the pane says "restart the desk soon" with the Restart desk button; at 95% of the limit the mod opens the new desk itself at the end of the turn
-// (config `desk.autoRestart`, default true since 1.0.28; also for an update, a pin that cannot be applied, lost tools: autoRestartDesk). When it is idle and
+// the pane says "restart the desk soon" with the Restart desk button. 1.0.33: the limit is a WARNING level only (the header chip, one Health finding, one toast at the first crossing): the desk
+// goes on above it until the user presses Restart desk, and nothing below acts by itself unless the user opted in with `desk.autoRestart: true` (deskAutoOn). With it on (the 1.0.28-1.0.32 behaviour):
+// at 95% of the limit the mod opens the new desk itself at the end of the turn (also for an update, a pin that cannot be applied, lost tools: autoRestartDesk). When it is idle and
 // over its limit the mod also tries to compact it (`$.session.compact` with fixed instructions; the app's desk cannot, see below). Every compaction that was vetoed or failed is recorded with its
 // reason (desk/compact.json, a notice, the doctor check) and tried again when the desk's turn ends. When compaction is not possible
 // the mod writes desk/handover.md and the status line asks the user to type /compact or start a new desk session, which reads it.
@@ -98,7 +99,18 @@ export const forgetContext = (): void => {
 export const DESK_COMPACT_INSTRUCTIONS =
   "lean-agent desk compaction. KEEP: the user's goals; the open threads table (id, title, project, state, last report line); every unanswered thread question; the user's stated preferences and decisions of this session; pending approvals. DROP: tool outputs and old report texts (they are in the desk inbox, ~/.lean-agent/desk/inbox.jsonl)."
 
+// config desk.autoRestart (1.0.33: default FALSE, opt-in): with it off NOTHING restarts, compacts or stops the desk by itself, however far over its limit it is. The limit is a warning
+// level only: the handover is written in the background (script only) so the click on Restart desk is instant, the pane says so (a quiet chip in the header line and one amber
+// Health finding) and ONE toast says it when the context first crosses the limit. Everything below that acts on the limit (deskTick's compaction, the automatic restart, the
+// "reached its limit" line in the desk's prompt) runs only with desk.autoRestart true: the old behaviour, unchanged.
+export async function deskAutoOn(h: Host): Promise<boolean> {
+  const c: any = await readConfig(h, await homeDir(h))
+  return (c?.desk?.autoRestart ?? c?.['desk.autoRestart']) === true
+}
+export const overLimitText = (tokens: number, limit: number): string => `desk ${kTokens(tokens)} of ${kTokens(limit)}: above its limit, press Restart desk when it suits you`
+
 export type DeskDeps = {
+  notify?: (text: string) => void // the one toast when the context first crosses the limit (warn mode)
   tokens: () => Promise<number> // the desk's current context size
   busy: () => boolean // a desk turn is running
   compact: (instructions: string) => Promise<unknown> // $.session.compact; a rejection or a missing function = not possible
@@ -171,10 +183,35 @@ async function ensureHandover(h: Host, d: DeskDeps, tokens: number, stage: 'writ
   }
 }
 
+// warn mode (desk.autoRestart not true): the handover is kept ready from 80% of the limit and again from the limit (once each, until the size is below it again); no compaction, no status
+// line, no line in the desk's prompt, no restart. The first crossing of the limit is ONE toast; nothing repeats it every turn.
+async function warnTick(h: Host, d: DeskDeps, tokens: number, limit: number): Promise<'quiet' | 'soon'> {
+  if (tokens < soonAt(limit)) {
+    ds.written = false
+    ds.limitWritten = false
+    ds.limitSaid = false
+    return 'quiet'
+  }
+  if (tokens < limit) {
+    ds.limitWritten = false
+    ds.limitSaid = false
+    await ensureHandover(h, d, tokens, 'written')
+    return 'soon'
+  }
+  ds.written = true // (one handover for the climb past the limit: the one written at the limit)
+  await ensureHandover(h, d, tokens, 'limitWritten')
+  if (!ds.limitSaid) {
+    ds.limitSaid = true
+    d.notify?.(overLimitText(tokens, limit))
+  }
+  return 'soon'
+}
+
 export async function deskTick(h: Host, d: DeskDeps): Promise<'compacted' | 'skipped' | 'fallback' | 'busy' | 'quiet' | 'soon'> {
   const limit = await deskTokens(h)
   const tokens = await d.tokens().catch(() => 0)
   ds.at = { tokens, limit }
+  if (!(await deskAutoOn(h))) return warnTick(h, d, tokens, limit)
   if (tokens < soonAt(limit)) ds.written = false
   if (tokens < limit) {
     ds.limitWritten = false
@@ -291,7 +328,7 @@ export const limitLineOnce = (): string | null => {
   return `[lean-agent] The desk context reached its limit (${n}). Start your next reply with this one line, once, then carry on: "Desk context ${n}: press Restart desk in the pane (the handover is written)."`
 }
 
-// config desk.autoRestart (default TRUE since 1.0.28; false = the Restart desk button only): at the end of a desk turn the mod opens the new desk itself
+// config desk.autoRestart (default FALSE since 1.0.33, it was true from 1.0.28; false = the Restart desk button only): at the end of a desk turn the mod opens the new desk itself
 // (restartDesk: the handover is written first, the link is opened without taking the focus) for one of four reasons, in this order:
 //   context  the desk's context is at 95% of its limit or over (deskTokens)
 //   version  lean-agent was updated and this desk still runs the older code (skew.ts: the same comparison as the status line and the doctor)
@@ -317,7 +354,7 @@ export type AutoOut = 'off' | 'none' | 'retired' | 'busy' | 'app' | 'already' | 
 export const QUESTION_OVER_PCT = 120
 export async function autoRestartDesk(h: Host, o: AutoIn): Promise<AutoOut> {
   const home = await homeDir(h)
-  if (((await readConfig(h, home)) as any)?.desk?.autoRestart === false) return 'off'
+  if (!(await deskAutoOn(h))) return 'off' // (1.0.33: opt-in; the default is the Restart desk button only)
   if (o.sid && (await retiredInfo(h, o.sid))) return 'retired' // a newer desk took over: this one never starts another
   const limit = await deskTokens(h)
   const now = await h.clock.now()

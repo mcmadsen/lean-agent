@@ -31,7 +31,7 @@ import type { Held } from './sendhold'
 import type { ActionView, StandingView } from './deskactions'
 import { writesView } from './deskwrites'
 import type { WritesView } from './deskwrites'
-import { contextSize, deskNote, deskTokens } from './deskcompact'
+import { contextSize, deskAutoOn, deskNote, deskTokens } from './deskcompact'
 import { autoGuard } from './deskauto'
 import { greenReview, reviewFile } from './reviews'
 import type { Review } from './reviews'
@@ -468,7 +468,7 @@ export async function loadView(h: Host): Promise<View> {
   await guard('desk', async () => {
     const ctx = contextSize()
     const limit = await deskTokens(h)
-    const restarting = limit > 0 && ctx >= Math.floor((limit * 95) / 100) && (await autoGuard(h)) === null
+    const restarting = limit > 0 && ctx >= Math.floor((limit * 95) / 100) && (await deskAutoOn(h)) && (await autoGuard(h)) === null // (only with desk.autoRestart true: by default the desk goes on above its limit until Restart desk is pressed)
     v.desk = { context: ctx, limit, model: deskRuns || pin.model, effort: deskRuns ? '' : pin.effort, note: deskNote(), ...(restarting ? { restarting } : {}) }
   })
   // what the mod set is information, not an error: a dim line at the top, not a red one (and not counted in a thread's status line)

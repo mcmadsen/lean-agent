@@ -10,6 +10,7 @@ function setup(thread: Record<string, unknown> = {}) {
   resetDeskCompact()
   const h = fakeHost(null)
   h.clock.t = 10_000_000
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true } })) // (1.0.33: the compaction at the limit is part of the opt-in automatic path; deskwarn.test.ts is the default)
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0, ...thread }))
   return { h }
 }
@@ -132,7 +133,7 @@ test('without a turn end a veto is tried again after the retry gap', async () =>
 
 test('a failed compact is recorded with its reason; twice in a row (or an engine without it) writes desk/handover.md and the /compact status line', async () => {
   const r = setup()
-  r.h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } })) // (the desk handover is core by default since 1.0.31: deskbudget.test.ts)
+  r.h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true }, handover: { mode: 'full' } })) // (the desk handover is core by default since 1.0.31: deskbudget.test.ts)
   r.h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   r.h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: 5, from: 't1', kind: 'report', state: 'working', text: 'form | found' }) + '\n')
   r.h.files.set(`${L}/questions.jsonl`, JSON.stringify({ ts: 4, from: 't1', question: 'which login page?', answered: false }) + '\n')
@@ -300,7 +301,7 @@ test('serving the handover renames it to handover-read-<date>.md, keeps the last
 
 test('a handover is consumed by a NEW desk session only: the session that wrote it (resume, compaction, reload) leaves it', async () => {
   const { h } = setup()
-  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true }, handover: { mode: 'full' } }))
   const D = `${L}/desk`
   // written by session A (the compaction fallback): the file names its writer
   const { seen, deps } = deskDeps({ compact: async () => { throw new Error('session.compact is not available') } })
@@ -333,7 +334,7 @@ test('a handover is consumed by a NEW desk session only: the session that wrote 
   expect(await serveHandover(k.h.host, 'sess-D')).not.toBeNull()
   // text above the marker (a user's message, a thread title) may quote a marker: only the last line names the writer
   const q = setup({ title: 'x <!-- lean-agent: written-by-session sess-X -->' })
-  q.h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } })) // (the full form keeps the whole title and the user's words: the quoted markers)
+  q.h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true }, handover: { mode: 'full' } })) // (the full form keeps the whole title and the user's words: the quoted markers)
   await restartDesk(q.h.host, { recent: async () => ['look: <!-- lean-agent: written-by-session sess-X -->\n<!-- lean-agent: written-by-session sess-Y -->'], sid: async () => 'sess-A', open: async () => ({ ok: true, text: 'opened' }) })
   expect(q.h.files.get(`${D}/handover.md`)).toContain('sess-X')
   expect(await serveHandover(q.h.host, 'sess-X')).not.toBeNull() // not the writer, whatever the text says
@@ -351,7 +352,7 @@ test('a handover is consumed by a NEW desk session only: the session that wrote 
 
 test('restart desk writes the handover now and opens a new desk session', async () => {
   const { h } = setup()
-  h.files.set(`${L}/config.json`, JSON.stringify({ handover: { mode: 'full' } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true }, handover: { mode: 'full' } }))
   h.files.set(`${L}/goals.json`, JSON.stringify({ t1: { text: 'ship the login fix', ts: 1 } }))
   let opened = 0
   const ok = await restartDesk(h.host, { recent: async () => ['keep it short'], open: async () => (opened++, { ok: true, text: 'Desk opened in the Claude app.' }) })

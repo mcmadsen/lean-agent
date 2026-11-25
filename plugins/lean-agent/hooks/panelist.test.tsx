@@ -48,7 +48,7 @@ const openHealth = async (ui: any) => {
   if (b && String(b.text).startsWith('▸')) await ui.press({ key: 'sec-health' })
 }
 
-test('the list is ordered by last activity, newest first, open and closed threads together; the chip "last active" is the one that is on', { timeoutMs: 20_000 }, async ($, on) => {
+test('the list is ordered by thread number (the highest first) by default; the chip "last active" puts the newest first, open and closed threads together', { timeoutMs: 20_000 }, async ($, on) => {
   const { h, thr } = world(on)
   const now = h.clock.t
   thr('t1', { lastWake: now - 3 * HOUR })
@@ -60,11 +60,14 @@ test('the list is ordered by last activity, newest first, open and closed thread
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
-  expect(await order(ui)).toEqual(['t5', 't4', 't2', 't3', 't1'])
-  expect(await toolbarTitle(ui)).toContain('sorted by last active') // the sort is named in the folded title; the chips are on the unfolded toolbar
+  expect(await order(ui)).toEqual(['t5', 't4', 't3', 't2', 't1']) // the default: thread, t5 before t4
+  expect(await toolbarTitle(ui)).toContain('sorted by thread ↓') // the sort and its direction are named in the folded title; the chips are on the unfolded toolbar
   expect(await ui.find({ type: 'Button', key: 'sort-active' })).toBeFalsy()
   await openToolbar(ui)
-  expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active')
+  expect((await ui.find({ type: 'Button', key: 'sort-thread' }))?.text).toBe('● thread ↓')
+  await ui.press({ key: 'sort-active' })
+  expect(await order(ui)).toEqual(['t5', 't4', 't2', 't3', 't1'])
+  expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active ↓')
   expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('name')
   expect(await texts(ui)).toContain('closed 30 min ago') // the closed row carries the age of its last activity
   expect(await texts(ui)).toContain('2 h ago') // t3
@@ -111,12 +114,14 @@ test('the sort control: one tap changes the order, keeps it across a remount and
   await inDesk($)
   let ui = await $.ui.mount(PANE as any)
   await setUp(ui)
-  expect(await order(ui)).toEqual(['t1', 't4', 't3', 't2']) // last active (the default)
+  expect(await order(ui)).toEqual(['t4', 't3', 't2', 't1']) // thread (the default)
   await openToolbar(ui)
+  await ui.press({ key: 'sort-active' })
+  expect(await order(ui)).toEqual(['t1', 't4', 't3', 't2']) // last active
   await ui.press({ key: 'sort-name' })
-  expect(await toolbarTitle(ui)).toContain('sorted by name')
+  expect(await toolbarTitle(ui)).toContain('sorted by name ↑')
   expect(await order(ui)).toEqual(['t2', 't4', 't1', 't3'])
-  expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('● name')
+  expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('● name ↑')
   expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('last active')
   await ui.press({ key: 'sort-cost' })
   expect(await order(ui)).toEqual(['t3', 't4', 't1', 't2']) // dearest first, then the last activity
@@ -161,7 +166,7 @@ test('a card is two lines collapsed: title, state chip, cost, age (the report li
 test('pane.maxSessions: the list stops at the cap with ONE "show more" row; a row with an unread message is always listed; show more / show fewer', { timeoutMs: 20_000 }, async ($, on) => {
   const { h, thr } = world(on)
   const now = h.clock.t
-  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { maxSessions: 5 } }))
+  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'active', maxSessions: 5 } }))
   for (let n = 1; n <= 12; n++) thr(`t${n}`, { lastWake: now - n * HOUR }) // t1 is the newest, t12 the oldest
   h.files.set(`${L}/desk/inbox.jsonl`, line({ ts: now - 20 * HOUR, from: 't12', kind: 'report', text: 'an old unread report', state: 'working' }))
   await inDesk($)

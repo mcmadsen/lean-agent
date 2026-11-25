@@ -444,7 +444,7 @@ test('1.0.32 every part full: cards, closed rows, messages (on their cards and i
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
-  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · 3 unread · sorted by last active$/)
+  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · 3 unread · sorted by thread ↓$/)
   for (const re of [/^1 new$/, /^\[closed\]$/, /^▸ Health: 1 finding$/, /▸ More \(1 goals, 1 projects, 0 scripts\)/]) expect(await ui.find({ type: 'Button', text: re }) ?? (await ui.find({ type: 'Text', text: re }))).toBeTruthy()
   expect(await ui.findAll({ type: 'Button', text: /^1 new$/ })).toHaveLength(2) // t1 and t2; the desk's message has no card: it is the one finding in Health
   expect(await ui.find({ type: 'Button', key: 'reopen-t3' })).toBeFalsy() // folded

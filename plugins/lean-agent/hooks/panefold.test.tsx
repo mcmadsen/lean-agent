@@ -66,7 +66,7 @@ function everything(w: ReturnType<typeof world>) {
   w.rows.push({ sessionId: SID(2), name: 'x', cwd: '/x', status: 'busy', state: 'working', startedAt: 1 }, { sessionId: SID(3), name: 'y', cwd: '/y', status: 'idle', state: 'done', startedAt: 1 })
   w.report({ ts: w.h.clock.t - 60_000, from: 't2', kind: 'report', text: 'Halfway through the synthetic job', state: 'working' }, { ts: w.h.clock.t - 2 * HOUR, from: 't3', kind: 'report', text: 'Done and merged', state: 'done' })
   w.report({ ts: w.h.clock.t - 3 * HOUR, from: 't1', kind: 'ask', text: 'which cache?' })
-  w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { maxSessions: 5 } }))
+  w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'active', maxSessions: 5 } }))
 }
 
 test('1.0.33 everything is folded on the first render (a needs-you thread and a thread with a pending approval too), and no element is outside a card', { timeoutMs: 20_000 }, async ($, on) => {
@@ -134,7 +134,7 @@ test('1.0.33 pane.foldAll false brings the old auto-unfold of a card with a deci
 test('1.0.33 pane.foldAll false: the card with a pending approval is unfolded by itself, the others stay folded', { timeoutMs: 20_000 }, async ($, on) => {
   const w = world(on, [])
   everything(w)
-  w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { maxSessions: 5, foldAll: false } }))
+  w.h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'active', maxSessions: 5, foldAll: false } }))
   await addActionRequest(w.host, 't5', REPLY)
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
@@ -241,13 +241,13 @@ test('1.0.33 the Sessions toolbar card: folded it is its title (the sort is name
   await setUp(ui)
   const card = (await cardWith(ui, 'sec-toolbar'))!
   expect(lines(card)).toHaveLength(1)
-  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(9\) · \d+ unread · sorted by last active$/)
+  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(9\) · \d+ unread · sorted by last active ↓$/)
   expect(has(lines(card)[0]!, x => keyOf(x) === 'ack-all')).toBe(true) // ack all stays on the folded line
   for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeFalsy()
   await openToolbar(ui)
   expect((await toolbarTitle(ui)).startsWith('▾')).toBe(true)
   for (const k of ['sort-active', 'sort-needs', 'sort-cost', 'sort-name']) expect(await ui.find({ type: 'Button', key: k }), k).toBeTruthy()
-  expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active')
+  expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active ↓')
   await ui.press({ key: 'sort-cost' })
   expect(await toolbarTitle(ui)).toContain('sorted by cost') // the title names the current sort
   await ui.unmount()

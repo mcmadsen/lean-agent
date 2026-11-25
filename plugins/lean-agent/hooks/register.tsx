@@ -18,7 +18,7 @@ import { ownFromGrant } from './ownpr'
 import { bindConfigAnswers, configTool } from './configtool'
 import { missingWhat, refusalsText, ruleOf, workerLines } from './refusals'
 import { noteCall, resetApprovals } from './approvals'
-import { VERSION, dropSetupCheck, paneRole, registerPane, resetPaneState } from './pane'
+import { VERSION, dropSetupCheck, makeDecisions, paneRole, registerPane, resetPaneState } from './pane'
 import { lookStep } from './look'
 import { overBudget, record } from './budget'
 import { applyFeedback, parseFeedback } from './feedback'
@@ -445,6 +445,7 @@ async function compactDesk($: any, host2: Host): Promise<string> {
   // the model's real window (the engine's own figure, free): the desk's limit is never more than 90% of it (deskcompact.ts effectiveLimit)
   noteWindow((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.window)
   const out = await deskTick(host2, {
+    notify: text => $.ui.notify(text, { key: 'lean-desk-over-limit' }), // (warn mode: ONE toast when the context first crosses the limit)
     // (the engine's own figure only before this session's first request: right after a compaction it may still be the old one)
     tokens: async () => contextSize() || (hasUsage() ? 0 : Number((await $.session.usage())?.context?.tokens) || 0),
     busy: () => busySince > 0 && now - busySince < BUSY_MAX_MS,
@@ -1156,7 +1157,7 @@ export const register: Register = on => {
   // any other pane id goes on to the hook that draws it
   on('ui.render', { component: 'Pane' }, async ($, e: any, next) => {
     const tid = threadOfPane(e?.requestId)
-    if (tid) return drawThreadPane($, e, tid, () => role)
+    if (tid) return drawThreadPane($, e, tid, () => role, makeDecisions) // (the decision buttons of a thread's own pane run the desk pane's presses: pane.tsx makeDecisions)
     if (e?.requestId === NEW_THREAD_PANE) return drawNewThread($, e, () => role)
     return next(e)
   })
