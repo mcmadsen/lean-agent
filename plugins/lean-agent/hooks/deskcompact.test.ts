@@ -33,16 +33,16 @@ function deskDeps(o: { tokens?: number; busy?: boolean; compact?: (i: string) =>
   }
 }
 
-test('context size is input + cache read + cache write; the desk limit defaults to 60k (1.0.31), config deskTokens overrides it, bad values are ignored', async () => {
+test('context size is input + cache read + cache write; the desk limit defaults to 200k (1.0.33), config deskTokens overrides it, bad values are ignored', async () => {
   expect(contextTokens({ input_tokens: 1, cache_read_input_tokens: 20, cache_creation_input_tokens: 300 })).toBe(321)
   expect(contextTokens(null)).toBe(0)
-  expect(DEFAULT_TOKENS).toBe(60_000)
+  expect(DEFAULT_TOKENS).toBe(200_000)
   const { h } = setup()
-  expect(await deskTokens(h.host)).toBe(60_000)
+  expect(await deskTokens(h.host)).toBe(200_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 150_000 }))
   expect(await deskTokens(h.host)).toBe(150_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 5 }))
-  expect(await deskTokens(h.host)).toBe(60_000) // too small a value is ignored
+  expect(await deskTokens(h.host)).toBe(200_000) // too small a value is ignored
   h.files.set(`${L}/config.json`, JSON.stringify({ checkpoint: { deskTokens: 120_000 } })) // the 1.0.6 key is still read
   expect(await deskTokens(h.host)).toBe(120_000)
   h.files.set(`${L}/config.json`, JSON.stringify({ deskTokens: 90_000, checkpoint: { deskTokens: 120_000 } }))

@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { openHeader, openToolbar, toolbarTitle } from './panetools'
 import { resetViewCache } from './view'
 import { resetLocks } from './threads'
 import { newSessionLink, openDesk, openerArgv, platformOf } from './setup'
@@ -115,7 +116,7 @@ test('the desk pane shows the Setup / repair button and the fix lines after pres
   await start($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', text: /Setup \/ repair/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'Sessions (0)' })).toBeTruthy() // the list of sessions (1.0.32)
+  expect(await toolbarTitle(ui)).toContain('Sessions (0)') // the list of sessions (1.0.32)
   await ui.press({ key: 'repair' })
   expect(await ui.find({ type: 'Text', text: /desk folder ready/ })).toBeFalsy() // the fix lines are in Health, folded once the setup is complete
   await ui.press({ key: 'sec-health' })

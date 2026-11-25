@@ -56,7 +56,7 @@ import { AUDIT_ASYNC_NOTE, SCRIPT_SPEC, SCRIPT_TOOL, auditFromReply, bashFailed,
 import { syncWithScripts } from './rulelines'
 import { exportFeedback } from './feedbackexport'
 import { logMissingTool, logRefusal } from './feedback'
-import { autoRestartDesk, contextSize, deskTick, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, servedBody, sessionId } from './deskcompact'
+import { autoRestartDesk, contextSize, deskTick, noteWindow, deskTurnEnded, forgetContext, hasUsage, limitLineOnce, noteUsage, recentUser, resetDeskCompact, restartDesk, serveHandover, servedBody, sessionId } from './deskcompact'
 import { deskStartLines, retiredInfo, retiredLine } from './deskauto'
 import { dismissOldDesk, oldDeskStep, resetOldDesk } from './olddesk'
 import { reviewReport } from './reviewevidence'
@@ -442,6 +442,8 @@ export async function deskSweep($: any, host2: Host): Promise<void> {
 // one desk compaction attempt (the 30 s timer, and the end of a desk turn after a veto or failure)
 async function compactDesk($: any, host2: Host): Promise<string> {
   const now = await host2.clock.now()
+  // the model's real window (the engine's own figure, free): the desk's limit is never more than 90% of it (deskcompact.ts effectiveLimit)
+  noteWindow((await bounded($, Promise.resolve($.session.usage()), 'session.usage').catch(() => null))?.context?.window)
   const out = await deskTick(host2, {
     // (the engine's own figure only before this session's first request: right after a compaction it may still be the old one)
     tokens: async () => contextSize() || (hasUsage() ? 0 : Number((await $.session.usage())?.context?.tokens) || 0),
@@ -655,7 +657,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         })
         for (const line of did) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
       })
-      // the desk's own context: idle and over config deskTokens (default 100000; the handover is written from 80%) it compacts itself (fixed instructions); a veto or a
+      // the desk's own context: idle and over config desk.contextLimit (default 200000, at most 90% of the model window; the handover is written from 80%) it compacts itself (fixed instructions); a veto or a
       // failure is recorded with its reason and tried again when the turn ends; when it is not possible the mod writes desk/handover.md
       // and says so in the status line (deskcompact.ts)
       every($, 30_000, 'desk', async host2 => void (await compactDesk($, host2)))

@@ -2,6 +2,7 @@
 // cards, the cap with "show more", Health folded / highlighted / quiet, the own-PR notice under Standing approvals. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { openHeader, openToolbar, toolbarTitle } from './panetools'
 import { ownRevoked } from './deskwrites'
 import { ownLine } from './ownpr'
 import { paneConfig } from './panelist'
@@ -60,6 +61,9 @@ test('the list is ordered by last activity, newest first, open and closed thread
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
   expect(await order(ui)).toEqual(['t5', 't4', 't2', 't3', 't1'])
+  expect(await toolbarTitle(ui)).toContain('sorted by last active') // the sort is named in the folded title; the chips are on the unfolded toolbar
+  expect(await ui.find({ type: 'Button', key: 'sort-active' })).toBeFalsy()
+  await openToolbar(ui)
   expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('● last active')
   expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('name')
   expect(await texts(ui)).toContain('closed 30 min ago') // the closed row carries the age of its last activity
@@ -108,7 +112,9 @@ test('the sort control: one tap changes the order, keeps it across a remount and
   let ui = await $.ui.mount(PANE as any)
   await setUp(ui)
   expect(await order(ui)).toEqual(['t1', 't4', 't3', 't2']) // last active (the default)
+  await openToolbar(ui)
   await ui.press({ key: 'sort-name' })
+  expect(await toolbarTitle(ui)).toContain('sorted by name')
   expect(await order(ui)).toEqual(['t2', 't4', 't1', 't3'])
   expect((await ui.find({ type: 'Button', key: 'sort-name' }))?.text).toBe('● name')
   expect((await ui.find({ type: 'Button', key: 'sort-active' }))?.text).toBe('last active')
@@ -141,12 +147,14 @@ test('a card is two lines collapsed: title, state chip, cost, age (the report li
   expect(all).toContain('1 min ago')
   expect(all).not.toContain('Halfway through the synthetic job') // folded
   expect(await ui.find({ type: 'Button', key: 'new-t1' })).toBeTruthy() // the "N new" chip stays on the collapsed card
-  for (const k of ['view-t1', 'restart-t1', 'inbox-toggle-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // a working thread: no primary button
+  for (const k of ['restart-t1', 'inbox-toggle-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy() // 1.0.33: Open is at the right end of line 2 of every card, folded
   expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toBe('▸ t1 title t1')
   await ui.press({ key: 'card-t1' })
   expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toBe('▾ t1 title t1')
   expect(await texts(ui)).toContain('Halfway through the synthetic job')
   for (const k of ['view-t1', 'restart-t1', 'inbox-toggle-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
+  expect(await ui.findAll({ type: 'Button', key: 'view-t1' })).toHaveLength(1) // (one Open, not one on the line and one in the buttons)
   await ui.unmount()
 })
 
@@ -162,7 +170,7 @@ test('pane.maxSessions: the list stops at the cap with ONE "show more" row; a ro
   expect(await order(ui)).toEqual(['t1', 't2', 't3', 't4', 't5', 't12']) // the cap, and t12 because it has an unread message
   expect(await ui.findAll({ type: 'Button', text: /^show more/ })).toHaveLength(1)
   expect((await ui.find({ type: 'Button', key: 'sessions-more' }))?.text).toBe('show more (6 older)')
-  expect(await texts(ui)).toContain('Sessions (12)')
+  expect(await toolbarTitle(ui)).toContain('Sessions (12)')
   await ui.press({ key: 'sessions-more' })
   expect(await order(ui)).toHaveLength(12)
   expect(await ui.find({ type: 'Button', key: 'sessions-more' })).toBeFalsy()
@@ -257,7 +265,7 @@ test('"ack N" on a card reads only the rows the card shows (20 at most): an unre
   await setUp(ui)
   await ui.press({ key: 'card-t1' })
   await ui.press({ key: 'ack-card-t1' })
-  expect(await ui.find({ type: 'Text', text: '5 unread' })).toBeTruthy()
+  expect(await toolbarTitle(ui)).toContain('5 unread')
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   await ui.unmount()
 })

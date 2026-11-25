@@ -1,7 +1,8 @@
-// The desk pane (1.0.32: sessions first). Top to bottom: the header (model chip, budget, 5 h window, desk context, version), the Health card
-// (folded; findings, fixes, standing approvals, messages from senders without a thread: highlighted when something needs a fix), ONE list of
-// thread sessions (open, done and closed) ordered by last activity (sort chips), each a two-line card that unfolds on a tap (a decision card:
-// Approve / Deny, is unfolded), the messages of a thread on its own card, More (goals, projects, scripts), the footer actions.
+// The desk pane (1.0.33: cards only, everything folded). EVERY block is a card (one border, one padding, the same fold) and nothing sits outside one: the header card
+// (folded: ONE line "lean-agent · today $0.00 · 5h 1% · desk 37k/60k" with the fix chip and Restart desk), the Health card (findings, fixes, standing approvals, messages from
+// senders without a thread), a notice card (the result of a press), the Sessions toolbar card (title, ack all; unfolded: the sort chips), ONE card per thread session (open, done
+// or closed; folded = exactly two lines: title + state chip, then "N new", "N to decide", cost, context bar, age, Open), the "show more" card, More (goals, projects, scripts)
+// and the actions card. Everything starts folded, a session that needs you too: only the user's tap unfolds (pane.foldAll false brings the old auto-unfold of a decision back).
 // In the minimized widget form (e.props.placement 'widget') only a glance is drawn, with no button: clicks may not reach it.
 // Opens by itself only in the desk and through /lean-agent anywhere. Never blank: a failure is drawn as a red line.
 // Resume/Start/Restart/Close go through leanThread (the lean_thread tool), so the logic exists once.
@@ -20,7 +21,8 @@ import { exportFeedback } from './feedbackexport'
 import { destText, feedbackConfig } from './feedbackdest'
 import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
-import { kTokens, recentUser, restartDesk, sessionId } from './deskcompact'
+import { kTokens, recentUser, restartingNow, sessionId, userRestartDesk } from './deskcompact'
+import { noRestartNote, restartWaitMs } from './deskauto'
 import { openNewThread, openThreadPane } from './panelinks'
 import { notifyTick } from './notify'
 // grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
@@ -91,7 +93,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     if (roleOf().kind !== 'desk') return { text: 'This is not the desk: run /lean-agent-restart-desk in the desk session.' }
     try {
       const host = hostOf($)
-      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e?.surface) }), 'restart desk', 45_000)
+      const r = await bounded($, userRestartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e?.surface) }), 'restart desk', 45_000)
       return { text: r.text }
     } catch (err) {
       return { text: `Restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 200)}` }
@@ -121,6 +123,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($: any, e: any) => {
     const { Box, Text, Button, Progress } = $.ui.resolve(e)
+    // every block of the pane is a card (1.0.33): the same border and padding; `color` is the amber / red border, `dim` the quiet one (the default without a color)
+    const cardProps = (o: { color?: string; dim?: boolean } = {}) => ({ flexDirection: 'column' as const, borderStyle: 'round' as const, borderColor: o.color, borderDimColor: o.dim ?? !o.color, paddingX: 1 })
+    const card = (key: string, children: any, o: { color?: string; dim?: boolean } = {}) => (
+      <Box key={key} {...cardProps(o)}>
+        {children}
+      </Box>
+    )
     const host = hostOf($)
     let v: View | null = null
     let fatal = ''
@@ -320,25 +329,26 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       ) : null
     if (kind !== 'desk') {
       // a session that is not the desk: setup first (or the way to the desk), the desk's own view only in the desk
+      // (1.0.33: every block is a card here too)
       return (
         <Box flexDirection="column">
-          {missing.length > 0 ? (
-            problemRows
-          ) : (
-            <Box flexDirection="column">
-              <Text bold>This is not the desk</Text>
-              {doctorRows}
-              <Text>{NEXT_STEP}</Text>
-              <Box>
-                <Button key="open-desk" label="Open desk" onPress={openIt} />
-                <Button key="rerun-setup" label="Re-run setup" onPress={runSetup} />
-              </Box>
-            </Box>
-          )}
-          {mcpBlock}
-          {setupRows}
-          {!!notice && <Text color="yellow">{notice}</Text>}
-          {footer}
+          {missing.length > 0
+            ? card('setup', problemRows, { color: 'warning' })
+            : (
+                <Box key="not-desk" {...cardProps()}>
+                  <Text bold>This is not the desk</Text>
+                  {doctorRows}
+                  <Text>{NEXT_STEP}</Text>
+                  <Box>
+                    <Button key="open-desk" label="Open desk" onPress={openIt} />
+                    <Button key="rerun-setup" label="Re-run setup" onPress={runSetup} />
+                  </Box>
+                </Box>
+              )}
+          {mcp.length > 0 ? card('mcp', mcpBlock, { color: 'warning' }) : null}
+          {setupRows.length > 0 ? card('setup-rows', setupRows) : null}
+          {!!notice ? card('notice', <Text color="yellow">{notice}</Text>, { color: 'warning' }) : null}
+          {card('footer', footer)}
         </Box>
       )
     }
@@ -393,8 +403,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       }
       tell()
     }
-    const section = (name: string, label: string, dflt: boolean) => (
-      <Button key={`sec-${name}`} plain label={`${isOpen(ui, name, dflt) ? '▾' : '▸'} ${label}`} onPress={toggleSection(name, dflt)} />
+    // the title button of a foldable card: one line, cut with an ellipsis so the chips beside it stay on the line (`beside` = cells the rest of the line needs)
+    const foldTitle = (name: string, label: string, dflt: boolean, beside = 0, dim = false) => (
+      <Button key={`sec-${name}`} plain dimColor={dim} label={short(`${isOpen(ui, name, dflt) ? '▾' : '▸'} ${label}`, Math.max(14, cols - 4 - beside))} onPress={toggleSection(name, dflt)} />
     )
 
     // ---- two-step confirm: the first press arms the button for CONFIRM_MS, the second does it ----
@@ -466,13 +477,16 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       tell()
     }
     // Restart desk: the handover is written now, then a new desk session is opened; this one stays until the user closes it
-    const restartDeskPress = twoStep('restart:desk', async () => {
+    // (1.0.33: one tap, no second confirm; the answer is a notice card. The 30 min gap and the per-day count are for automatic restarts only: userRestartDesk keeps the 60 s floor)
+    const restartDeskPress = async () => {
       resetViewCache()
-      const r = await bounded($, restartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e.surface) }), 'restart desk', 45_000).catch(err => ({ ok: false, text: `restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
+      const run = bounded($, userRestartDesk(host, { recent: () => recentUser($), sid: () => sessionId($), open: () => openDesk(host, e.surface) }), 'restart desk', 45_000).catch(err => ({ ok: false, text: `restart desk failed: ${String((err as Error)?.message ?? err).slice(0, 160)}` }))
+      tell() // (the pane draws "restarting…" while it runs)
+      const r = await run
       notice = short(r.text, 200)
       if (!r.ok) lastError = notice
       tell()
-    })
+    }
     const closeDone = twoStep('close:done', () => closeIds('done'))
     // ---- a request for an expensive model (expensive.ts): Approve / Deny press twice; Start on sonnet instead starts it on the default ----
     const sayModel = (text: string, bad: boolean) => {
@@ -690,7 +704,6 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // the footer action names where the export goes (config.json feedback.destination); the default (local) keeps the plain label
     const fbCfg = await feedbackConfig(host, homeP).catch(() => null)
     const feedbackLabel = fbCfg && fbCfg.dest !== 'local' ? `Feedback export (${destText(fbCfg)})` : 'Feedback export'
-    const restartLabel = confirming(ui, 'restart:desk', now2) ? 'Confirm restart desk (a new desk session opens, this one stays)' : 'Restart desk'
     // "N dismissed" and its "show" toggle: the dismissed items are not counted above; show brings them back into this view (dim, no buttons)
     const dismissedRows = v?.dismissed ?? []
     const dismissedN = dismissedRows.length + (v?.dismissedNotices.length ?? 0) + localHidden
@@ -701,7 +714,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Button key="dismissed-toggle" plain label={showHidden ? 'hide' : 'show'} onPress={toggleRow('dismissed')} />
         </Box>
       ) : null
-    const needCard = (n: NeedRow, hidden = false) => {
+    // `nested`: drawn inside its thread's unfolded card, whose line 2 already has Open tN (one button of that key)
+    const needCard = (n: NeedRow, hidden = false, nested = false) => {
       if (hidden)
         return (
           <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
@@ -719,7 +733,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         <Box key={`need-${n.key}`} flexDirection="column" borderStyle="round" borderColor={tone} borderDimColor paddingX={1}>
           <Box flexWrap="wrap" columnGap={1}>
             <Text bold color={tone}>{`[${chipText}]`}</Text>
-            {n.kind === 'approval' && !!n.thread && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
+            {n.kind === 'approval' && !!n.thread && !nested && (t?.working ? <Text dimColor>(it is working: wait until it stops)</Text> : <Button key={`open-${n.thread}`} label={`Open ${n.thread}`} onPress={openOne(n.thread)} />)}
             {n.kind === 'denial' && !!n.thread && <Button key={`denial-self-${n.thread}`} label={selfEditLabel(n.thread)} onPress={selfEditPress(n.thread)} />}
             {n.kind === 'denial' && !!n.thread && <Button key={`denial-retry-${n.thread}`} label={RETRY_LABEL} onPress={retryPress(n.thread)} />}
             {(n.kind === 'question' || n.kind === 'push' || n.kind === 'blocked') && !!n.thread && <Button key={`pane-${n.thread}`} label="Open" onPress={openPaneOne(n.thread)} />}
@@ -823,10 +837,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
       ) : null
 
-    // ---- the session list (1.0.32): one row per thread, open, done or closed, ordered by pane.sort (last activity by default) ----
-    // A working / waiting / needs-you / blocked thread is a two-line card (title, state chip, "N new" / cost, a small context bar, the age of its last activity);
-    // a done, idle or closed thread is ONE row. A tap on the title unfolds the rest (a second tap folds it); a card with a decision to take (Approve / Deny,
-    // a held send) is unfolded while it lasts. The messages of a thread are folded on its own card.
+    // ---- the session list (1.0.33): EVERY session is a card (open, done or closed), all folded on startup; only the user's tap unfolds one ----
+    // A folded card is exactly two lines, the same for every state: line 1 = title (cut with an ellipsis, one line) + the state chip; line 2 = "N new", "N to decide",
+    // cost, a small context bar (a working / waiting thread), the age of its last activity, and Open at the right end. Unfolded: the rest (last report, the decisions as
+    // nested cards, buttons, messages). A decision to take (Approve / Deny, a held send) does NOT unfold its card: the "N to decide" chip says it (pane.foldAll false
+    // brings the old auto-unfold back).
     const expanded = (id: string) => ui.rows[`x${id}`] === true
     const toggleCard = (id: string) => toggleRow(`x${id}`)
     const showMessages = (id: string) => async () => {
@@ -872,24 +887,42 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     }
     const goalOf = (id: string) => v?.goals.find(g => g.id === id)
     const DECIDE: string[] = ['action', 'model', 'denial']
+    // the one shape of a session card, whatever the thread's state: two lines, then (unfolded) the details
+    const sessionCard = (o: { id: string; title: string; open: boolean; chips: any[]; chipLen: number; line2: any[]; primary: any; color?: string; dim: boolean; details: any }) =>
+      (
+        <Box key={`t-${o.id}`} {...cardProps({ color: o.color, dim: o.dim })}>
+          <Box key="line1" flexWrap="nowrap" columnGap={1}>
+            <Button key={`card-${o.id}`} plain label={short(`${o.open ? '▾' : '▸'} ${o.id} ${o.title}`, Math.max(14, cols - 4 - o.chipLen - 1))} onPress={toggleCard(o.id)} />
+            {o.chips}
+          </Box>
+          <Box key="line2" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
+            <Box flexWrap="nowrap" columnGap={1} flexShrink={1}>
+              {o.line2}
+            </Box>
+            {o.primary}
+          </Box>
+          {o.open && `▾ ${o.id} ${o.title}`.length > Math.max(14, cols - 4 - o.chipLen - 1) ? <Text key="full-title" wrap="wrap">{o.title}</Text> : null}
+          {o.details}
+        </Box>
+      )
     const threadRow = (t: ThreadRow) => {
       const sc = stateOf(t)
       const myNeeds = needs.filter(n => n.thread === t.id)
-      // a done or idle thread with something waiting for the user (a report ready to push, a question) is a card, not a quiet row
-      const quiet = ['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) && !t.liveNote && !t.pending && !t.noReport && myNeeds.length === 0
       const held = holdsOf(t.id)
-      const open = expanded(t.id) || myNeeds.some(n => DECIDE.includes(n.kind)) || held.length > 0
+      const decideN = Math.max(myNeeds.filter(n => DECIDE.includes(n.kind)).length + held.length, t.pending ? 1 : 0)
+      const open = expanded(t.id) || (!cfgPane.foldAll && decideN > 0)
       const blockedWord = ['blocked', 'stuck', 'stalled'].includes(sc.word)
       // the status chip: working / needs you / done / restarting (amber is the chip, never the body)
       const chipWord = ['waiting', 'approval', 'asking'].includes(sc.word) ? 'needs you' : sc.word
+      const live = !['done', 'done (finishing)', 'idle', 'parked'].includes(sc.word) // (a context bar only for a thread that is working or waiting)
       const chip = (
-        <Text bold color={sc.color}>
+        <Text key="state" bold color={sc.color}>
           {`[${chipWord}]`}
         </Text>
       )
       // "idle, no report N min" (endnudge.ts): a second chip beside the status chip
       const noRepChip = t.noReport ? (
-        <Text bold color="warning">
+        <Text key="norep" bold color="warning">
           {`[${t.noReport}]`}
         </Text>
       ) : null
@@ -908,15 +941,18 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const closeBtn = !t.working && !t.needsYou && <Button key={`close-${t.id}`} label={confirming(ui, `close:${t.id}`, now2) ? `Confirm close ${t.id}` : 'Close'} onPress={closeOne(t.id)} />
       const startBtn = t.resumable && <Button key={`start-${t.id}`} label="Start new session" onPress={thread('start', t.id)} />
       const msg = messagePieces(t.id)
-      // ONE primary button, only when it matters: a thread that needs you: Open (the session for an approval); blocked: Restart; a quiet row: Open
+      // Open at the right end of line 2, always; a thread blocked on an `approval` that is not working: Open tN (the idle process is released, then its own session opens)
       const approvalOpen = !!t.approval && !t.working
-      const primary = quiet ? openBtn : blockedWord ? restartBtn : chipWord === 'needs you' || sc.word === 'waiting for answer' || myNeeds.length > 0 ? (approvalOpen ? <Button key={`open-${t.id}`} label={`Open ${t.id}`} onPress={openOne(t.id)} /> : openBtn) : null
-      const title = (
-        <Button key={`card-${t.id}`} plain label={`${open ? '▾' : '▸'} ${t.id} ${t.title}`} onPress={toggleCard(t.id)} />
-      )
+      const primary = approvalOpen ? <Button key={`open-${t.id}`} label={`Open ${t.id}`} onPress={openOne(t.id)} /> : openBtn
       const goal = goalOf(t.id)
+      // ONE line for "what is wrong with this session": the stale / live note, else the waiting-for-you line (the decision cards below say it themselves)
+      const statusLine = t.liveNote ? (
+        <Text color={sc.word === 'stuck' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text>
+      ) : t.needsYou && myNeeds.length === 0 ? (
+        <Text color="warning">waiting for you: open it in the app</Text>
+      ) : null
       const details = open ? (
-        <Box flexDirection="column">
+        <Box key="details" flexDirection="column">
           <Box flexWrap="wrap" columnGap={1}>
             {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''}`}</Text> : null}
             {t.keepGoing ? <Text color="cyan">keep-going</Text> : null}
@@ -926,86 +962,64 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             <Text color={review.color} dimColor={!review.color}>{review.text}</Text>
           </Box>
           {t.finished ? <Text dimColor>finished: the next message starts a new session</Text> : null}
-          {t.liveNote ? <Text color={sc.word === 'stuck' ? 'error' : 'warning'} wrap="wrap">{t.liveNote}</Text> : null}
-          {t.needsYou ? <Text color="warning">waiting for you: open it in the app</Text> : null}
+          {statusLine}
+          {t.pending && myNeeds.length === 0 ? <Text color="warning" wrap="wrap">{t.pending}</Text> : null}
           {t.pausedUntil ? <Text color="warning">{`paused until ${fmtUntil(t.pausedUntil, now2)}`}</Text> : null}
           {goal ? <Text dimColor wrap="wrap">{`goal (${goal.tone}): ${short(goal.text, 160)}`}</Text> : null}
           <Text dimColor wrap="wrap">
             {short(t.lastReport, 200) || 'no report yet'}
           </Text>
-          {myNeeds.map(n => needCard(n))}
+          {myNeeds.map(n => needCard(n, false, true))}
           {holdRows(t.id)}
           <Box flexWrap="wrap" columnGap={1}>
-            {blockedWord ? [restartBtn, openBtn, resumeBtn, startBtn, closeBtn] : [openBtn, resumeBtn, startBtn, restartBtn, closeBtn]}
+            {blockedWord ? [restartBtn, resumeBtn, startBtn, closeBtn] : [resumeBtn, startBtn, restartBtn, closeBtn]}
             {msg.buttons}
           </Box>
           {msg.body}
         </Box>
       ) : null
       const attention = chipWord === 'needs you' || blockedWord || myNeeds.length > 0 || !!t.pending || !!t.noReport
-      if (quiet) {
-        return (
-          <Box key={`t-${t.id}`} flexDirection="column" {...(open ? { borderStyle: 'round' as const, borderDimColor: true, paddingX: 1 } : {})}>
-            <Box flexWrap="wrap" columnGap={1}>
-              {title}
-              {chip}
-              {noRepChip}
-              {msg.newChip}
-              {costNode}
-              {age}
-              {primary}
-            </Box>
-            {details}
-          </Box>
-        )
-      }
-      return (
-        <Box key={`t-${t.id}`} flexDirection="column" borderStyle="round" borderColor={blockedWord ? sc.color : attention ? 'warning' : undefined} borderDimColor={!blockedWord} paddingX={1}>
-          <Box flexWrap="wrap" columnGap={1}>
-            {title}
-            {chip}
-            {noRepChip}
-            {msg.newChip}
-            {!open && primary}
-          </Box>
-          <Box flexWrap="wrap" columnGap={1}>
-            {costNode}
-            {ctxBar(t)}
-            {t.pending ? <Text color="warning">{t.pending}</Text> : null}
-            {age}
-          </Box>
-          {details}
-        </Box>
-      )
+      return sessionCard({
+        id: t.id,
+        title: t.title,
+        open,
+        chips: [chip, noRepChip],
+        chipLen: chipWord.length + 2 + (t.noReport ? t.noReport.length + 3 : 0),
+        line2: [msg.newChip, decideN > 0 ? <Text key={`decide-${t.id}`} bold color="warning">{`${decideN} to decide`}</Text> : null, costNode, live ? ctxBar(t) : null, age],
+        primary,
+        color: blockedWord ? sc.color : attention ? 'warning' : undefined,
+        dim: !blockedWord,
+        details,
+      })
     }
-    // a closed thread: ONE row (title, chip, cost, "closed 3 h ago", Open); a tap unfolds Reopen, its last line and its messages
+    // a closed thread: the same card (title, [closed], "N new", cost, "closed 3 h ago", Open); a tap unfolds Reopen, its last line and its messages
     const closedRow = (c: ClosedRow) => {
       const open = expanded(c.id)
       const msg = messagePieces(c.id)
-      return (
-        <Box key={`c-${c.id}`} flexDirection="column" {...(open ? { borderStyle: 'round' as const, borderDimColor: true, paddingX: 1 } : {})}>
-          <Box flexWrap="wrap" columnGap={1}>
-            <Button key={`card-${c.id}`} plain label={`${open ? '▾' : '▸'} ${c.id} ${c.title}`} onPress={toggleCard(c.id)} />
-            <Text bold color="inactive">
-              [closed]
-            </Text>
-            {msg.newChip}
-            {c.cost > 0 ? <Text dimColor>{`$${c.cost.toFixed(2)} today`}</Text> : null}
-            <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>
-            <Button key={`view-${c.id}`} label="Open" onPress={openPaneOne(c.id)} />
-          </Box>
-          {open && (
-            <Box flexDirection="column">
-              {c.last ? <Text dimColor wrap="wrap">{short(c.last, 300)}</Text> : null}
-              <Box flexWrap="wrap" columnGap={1}>
-                <Button key={`reopen-${c.id}`} label="Reopen" onPress={reopen(c.id)} />
-                {msg.buttons}
-              </Box>
-              {msg.body}
+      return sessionCard({
+        id: c.id,
+        title: c.title,
+        open,
+        chips: [
+          <Text key="state" bold color="inactive">
+            [closed]
+          </Text>,
+        ],
+        chipLen: 'closed'.length + 2,
+        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{`$${c.cost.toFixed(2)} today`}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
+        primary: <Button key={`view-${c.id}`} label="Open" onPress={openPaneOne(c.id)} />,
+        dim: true,
+        details: open ? (
+          <Box key="details" flexDirection="column">
+            {c.last ? <Text dimColor wrap="wrap">{short(c.last, 300)}</Text> : null}
+            <Box flexWrap="wrap" columnGap={1}>
+              <Button key={`reopen-${c.id}`} label="Reopen" onPress={reopen(c.id)} />
+              {msg.buttons}
             </Box>
-          )}
-        </Box>
-      )
+            {msg.body}
+          </Box>
+        ) : null,
+      })
     }
     const allItems = sortItems(itemsOf(v?.threads ?? [], v?.closed ?? [], needs), cfgPane.sort)
     const unreadIds = new Set(inbox.filter(g => g.unread.length > 0).map(g => g.from))
@@ -1086,7 +1100,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>,
       )
     }
-    if (overDesk && !desk?.restarting) fixItems.push(row('h-restart', 'restart desk', 'warning', `restart the desk (context ${kTokens(ctx)} of ${kTokens(limit)}, the handover is ready)`, [<Button key="restart-desk" label={restartLabel} onPress={restartDeskPress} />]))
+    if (overDesk && !desk?.restarting) fixItems.push(row('h-restart', 'restart desk', 'warning', `restart the desk (context ${kTokens(ctx)} of ${kTokens(limit)}, the handover is ready): press Restart desk in the header`))
     // the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick
     if (v?.deskModel && !v.deskModelRed) fixItems.push(row('h-deskmodel', 'desk model', 'warning', v.deskModel))
     for (const [i, m] of fixes.entries()) fixItems.push(row(`df-${i}`, 'fix', 'warning', short(m, 160), [<Button key={`doctor-dismiss-fix-${i}`} label="Dismiss" onPress={dismissLine([docId(m)])} />]))
@@ -1133,13 +1147,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>
       ) : null
     const healthCard = (
-      <Box key="health" flexDirection="column" borderStyle="round" borderColor={hs.tone === 'error' ? 'error' : hs.tone === 'warning' ? 'warning' : undefined} borderDimColor={hs.tone === 'quiet'} paddingX={1}>
-        <Box flexWrap="wrap" columnGap={1}>
-          <Button key="sec-health" plain dimColor={hs.tone === 'quiet'} label={`${healthUnfolded ? '▾' : '▸'} ${hs.label}`} onPress={toggleSection('health', healthDflt)} />
+      <Box key="health" {...cardProps({ color: hs.tone === 'error' ? 'error' : hs.tone === 'warning' ? 'warning' : undefined, dim: hs.tone === 'quiet' })}>
+        <Box key="health-line" flexWrap="nowrap" columnGap={1}>
+          {foldTitle('health', hs.label, healthDflt, hs.extra ? hs.extra.length + 1 : 0, hs.tone === 'quiet')}
           {!!hs.extra && <Text dimColor>{hs.extra}</Text>}
         </Box>
         {healthUnfolded && (
-          <Box flexDirection="column">
+          <Box key="health-body" flexDirection="column">
             {group('g-fix', 'Needs a fix', fixItems, fixes.length > 0 ? [<Button key="doctor-fix" label="Run fix" onPress={runSetup} />] : [])}
             {group('g-standing', 'Standing approvals', standItems)}
             {group('g-info', 'Info', infoItems)}
@@ -1149,75 +1163,124 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         )}
       </Box>
     )
+    // ---- the header card (1.0.33): folded it is ONE line (name, today's cost, the 5 h window, the desk's context) with the fix chip and the Restart desk button at its right end;
+    // unfolded: the model chip, 7 d, the window bar with its reset time and snapshot age, the desk context bar, the version line ----
     const lastErrorShown = !!lastError && !errors.includes(lastError) && notice !== lastError
-    const header = (
-      <Box flexDirection="column">
-        <Box flexWrap="wrap" columnGap={1}>
-          <Text bold>lean-agent</Text>
-          {!!chip && (
-            <Text key="chip" bold color={v?.deskModel ? 'warning' : 'claude'}>
-              {`[${chip}]`}
-            </Text>
+    const headerOpen = isOpen(ui, 'header', false)
+    const winShown = !!v?.window && (!winGone || showHidden)
+    const foldedBits = ['lean-agent', v?.spend ? `today $${v.spend.today.toFixed(2)}` : 'budget n/a', winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '', ctx > 0 && limit > 0 ? `desk ${kTokens(ctx)}/${kTokens(limit)}` : ''].filter(Boolean)
+    // Restart desk: always here (1.0.33), one tap (no second confirm), the same restart path as the automatic one (handover first, then the new desk). While a restart runs, or
+    // for 60 s after the last one, a dim line says so instead of the button (the 30 min gap and the per-day count are for AUTOMATIC restarts only).
+    const restarting = restartingNow()
+    const restartWait = restarting ? 0 : await restartWaitMs(host)
+    const restartText = restarting ? 'restarting…' : restartWait > 0 ? noRestartNote(restartWait) : ''
+    const restartCtl = restartText ? (
+      <Text key="restart-desk-state" dimColor>
+        {restartText}
+      </Text>
+    ) : (
+      <Button key="restart-desk" label="Restart desk" variant={overDesk ? 'primary' : undefined} onPress={restartDeskPress} />
+    )
+    const fixLabel = `${fixItems.length} ${fixItems.length === 1 ? 'fix' : 'fixes'}`
+    const fixChip = fixItems.length > 0 ? <Button key="health-chip" label={fixLabel} onPress={openHealth} /> : null
+    const rightLen = (fixItems.length > 0 ? fixLabel.length + 3 : 0) + (restartText ? restartText.length : 'Restart desk'.length + 2) + 2
+    const headerCard = headerOpen ? (
+        <Box key="header" {...cardProps({ color: lastErrorShown ? 'error' : undefined })}>
+          <Box key="h-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
+            <Box flexWrap="wrap" columnGap={1} flexShrink={1}>
+              <Button key="sec-header" plain label="▾ lean-agent" onPress={toggleSection('header', false)} />
+              {!!chip && (
+                <Text key="chip" bold color={v?.deskModel ? 'warning' : 'claude'}>
+                  {`[${chip}]`}
+                </Text>
+              )}
+              <Text key="budget" dimColor>
+                {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
+              </Text>
+            </Box>
+            {restartCtl}
+          </Box>
+          {winShown && (
+            <Box key="h-window" flexWrap="wrap" columnGap={1}>
+              {winPct !== undefined ? (
+                <>
+                  <Progress key="win" label={winLabel} value={winPct} max={100} valueText={`${winPct}%`} color={winPct >= 100 ? 'error' : winPct >= 90 ? 'warning' : 'success'} />
+                  <Text dimColor>{winRest}</Text>
+                </>
+              ) : (
+                <Text dimColor>{v!.window}</Text>
+              )}
+              {winAlert && !winGone && <Button key="window-dismiss" label="Dismiss" onPress={dismissLine([winId])} />}
+            </Box>
           )}
-          <Text key="budget" dimColor>
-            {v?.spend ? `today $${v.spend.today.toFixed(2)} · 7d $${v.spend.week.toFixed(2)}` : 'budget n/a'}
+          <Box key="h-ctx" flexWrap="wrap" columnGap={1}>
+            {ctx > 0 && limit > 0 ? <Progress key="ctx" label="desk context" value={ctx} max={limit} valueText={`${kTokens(ctx)} of ${kTokens(limit)}`} color={barColor} /> : <Text dimColor>desk context: known after the next request</Text>}
+            {fixChip}
+          </Box>
+          <Text key="h-version" dimColor size="caption">
+            lean-agent {VERSION} · refreshed {lastRefresh || 'never'}
+            {lastErrorShown ? ` · last error: ${lastError}` : ''}
           </Text>
         </Box>
-        {!!v?.window && (!winGone || showHidden) && (
-          <Box flexWrap="wrap" columnGap={1}>
-            {winPct !== undefined ? (
-              <>
-                <Progress key="win" label={winLabel} value={winPct} max={100} valueText={`${winPct}%`} color={winPct >= 100 ? 'error' : winPct >= 90 ? 'warning' : 'success'} />
-                <Text dimColor>{winRest}</Text>
-              </>
-            ) : (
-              <Text dimColor>{v.window}</Text>
+      ) : (
+        <Box key="header" {...cardProps({ color: lastErrorShown ? 'error' : undefined })}>
+          <Box key="h-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
+            <Box flexWrap="nowrap" flexShrink={1}>
+              <Button key="sec-header" plain label={short(`▸ ${foldedBits.join(' · ')}`, Math.max(14, cols - 4 - rightLen))} onPress={toggleSection('header', false)} />
+            </Box>
+            <Box flexWrap="nowrap" columnGap={1}>
+              {fixChip}
+              {restartCtl}
+            </Box>
+          </Box>
+        </Box>
+      )
+    // a one-line result of a press (closed t3, a restart's answer): a card with its Dismiss
+    const noticeCard =
+      !!notice && !errors.includes(notice)
+        ? card(
+            'notice',
+            <Box flexWrap="wrap" columnGap={1}>
+              <Text color="yellow">{notice}</Text>
+              <Button key="notice-dismiss" label="Dismiss" onPress={clearNotice} />
+            </Box>,
+            { color: 'warning' },
+          )
+        : null
+    // ---- the Sessions toolbar card: folded = its title (with the sort named) and ack all; unfolded = the sort chips and Close all done ----
+    const toolbarOpen = isOpen(ui, 'toolbar', false)
+    const toolbarTitle = `Sessions (${allItems.length})${v?.unread ? ` · ${v.unread} unread` : ''} · sorted by ${SORT_LABEL[cfgPane.sort]}`
+    const toolbarCard = (
+      <Box key="toolbar" {...cardProps()}>
+        <Box key="tb-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
+          <Box flexWrap="nowrap" flexShrink={1}>
+            {foldTitle('toolbar', toolbarTitle, false, v?.unread ? 'ack all'.length + 3 : 0)}
+          </Box>
+          {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
+        </Box>
+        {toolbarOpen && (
+          <Box key="tb-more" flexDirection="column">
+            <Box flexWrap="wrap" columnGap={1}>
+              <Text dimColor>sort:</Text>
+              {SORTS.map(k => (
+                <Button key={`sort-${k}`} plain dimColor={cfgPane.sort !== k} label={`${cfgPane.sort === k ? '● ' : ''}${SORT_LABEL[k]}`} onPress={sortPress(k)} />
+              ))}
+            </Box>
+            {doneThreads.length >= 2 && closable.length > 0 && (
+              <Box flexWrap="wrap" columnGap={1}>
+                <Button key="close-done" label={confirming(ui, 'close:done', now2) ? `Confirm close all done (${closable.length})` : `Close all done (${closable.length})`} onPress={closeDone} />
+              </Box>
             )}
-            {winAlert && !winGone && <Button key="window-dismiss" label="Dismiss" onPress={dismissLine([winId])} />}
           </Box>
         )}
-        <Box flexWrap="wrap" columnGap={1}>
-          {ctx > 0 && limit > 0 ? <Progress key="ctx" label="desk context" value={ctx} max={limit} valueText={`${kTokens(ctx)} of ${kTokens(limit)}`} color={barColor} /> : <Text dimColor>desk context: known after the next request</Text>}
-          {/* the one chip: what the desk needs when it is over its limit, else how many fixes wait in Health (a tap opens it) */}
-          {fixItems.length > 0 && <Button key="health-chip" label={overDesk && !desk?.restarting ? 'restart desk' : `${fixItems.length} ${fixItems.length === 1 ? 'fix' : 'fixes'}`} onPress={openHealth} />}
-        </Box>
-        <Text dimColor size="caption">
-          lean-agent {VERSION} · refreshed {lastRefresh || 'never'}
-          {lastErrorShown ? ` · last error: ${lastError}` : ''}
-        </Text>
       </Box>
     )
-    return (
-      <Box flexDirection="column">
-        {header}
-        {!!notice && !errors.includes(notice) && (
-          <Box flexWrap="wrap" columnGap={1}>
-            <Text color="yellow">{notice}</Text>
-            <Button key="notice-dismiss" label="Dismiss" onPress={clearNotice} />
-          </Box>
-        )}
-        {healthCard}
-        <Box flexWrap="wrap" columnGap={1}>
-          <Text bold>{`Sessions (${allItems.length})`}</Text>
-          {!!v?.unread && <Text dimColor>{`${v.unread} unread`}</Text>}
-          {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
-          {doneThreads.length >= 2 && closable.length > 0 && (
-            <Button key="close-done" label={confirming(ui, 'close:done', now2) ? `Confirm close all done (${closable.length})` : `Close all done (${closable.length})`} onPress={closeDone} />
-          )}
-        </Box>
-        <Box flexWrap="wrap" columnGap={1}>
-          <Text dimColor>sort:</Text>
-          {SORTS.map(k => (
-            <Button key={`sort-${k}`} plain dimColor={cfgPane.sort !== k} label={`${cfgPane.sort === k ? '● ' : ''}${SORT_LABEL[k]}`} onPress={sortPress(k)} />
-          ))}
-        </Box>
-        {v && !allItems.length && <Text dimColor>No threads yet.</Text>}
-        {capped.shown.map(sessionRow)}
-        {capped.hidden > 0 && <Button key="sessions-more" plain label={`show more (${capped.hidden} older)`} onPress={toggleRow('sessionsAll')} />}
-        {showAllRows && allItems.length > cfgPane.maxSessions && <Button key="sessions-less" plain label="show fewer" onPress={toggleRow('sessionsAll')} />}
-        {section('more', `More (${v?.goals.length ?? 0} goals, ${v?.projects.length ?? 0} projects, ${(v?.scripts.candidates ?? 0) + (v?.scripts.adopted ?? 0)} scripts)`, false)}
-        {isOpen(ui, 'more', false) && (
-          <Box flexDirection="column">
+    const moreOpen = isOpen(ui, 'more', false)
+    const moreCard = (
+      <Box key="more" {...cardProps()}>
+        {foldTitle('more', `More (${v?.goals.length ?? 0} goals, ${v?.projects.length ?? 0} projects, ${(v?.scripts.candidates ?? 0) + (v?.scripts.adopted ?? 0)} scripts)`, false)}
+        {moreOpen && (
+          <Box key="more-body" flexDirection="column">
             {v?.goals.map(g => (
               <Text key={`g-${g.id}`} color={TONE[g.tone]}>
                 {g.id} {g.tone}: {short(g.text, narrow ? 40 : 90)}
@@ -1237,13 +1300,31 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             )}
           </Box>
         )}
-        <Box flexWrap="wrap" columnGap={1}>
-          <Button key="new-thread" label="New thread" onPress={newThreadPress} />
-          <Button key="feedback" label={feedbackLabel} onPress={feedbackPress} />
-          <Button key="repair" label="Setup / repair" onPress={runSetup} />
-          {/* always here (the Health card's button shows only near the limit): the same two-press confirm, the same handover */}
-          <Button key="restart-desk-footer" label={restartLabel} onPress={restartDeskPress} />
-        </Box>
+      </Box>
+    )
+    return (
+      <Box flexDirection="column">
+        {headerCard}
+        {noticeCard}
+        {healthCard}
+        {toolbarCard}
+        {v && !allItems.length ? card('empty', <Text dimColor>No threads yet.</Text>) : null}
+        {capped.shown.map(sessionRow)}
+        {capped.hidden > 0 || (showAllRows && allItems.length > cfgPane.maxSessions)
+          ? card(
+              'sessions-cap',
+              capped.hidden > 0 ? <Button key="sessions-more" plain label={`show more (${capped.hidden} older)`} onPress={toggleRow('sessionsAll')} /> : <Button key="sessions-less" plain label="show fewer" onPress={toggleRow('sessionsAll')} />,
+            )
+          : null}
+        {moreCard}
+        {card(
+          'actions',
+          <Box flexWrap="wrap" columnGap={1}>
+            <Button key="new-thread" label="New thread" onPress={newThreadPress} />
+            <Button key="feedback" label={feedbackLabel} onPress={feedbackPress} />
+            <Button key="repair" label="Setup / repair" onPress={runSetup} />
+          </Box>,
+        )}
       </Box>
     )
   })

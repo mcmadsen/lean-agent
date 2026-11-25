@@ -3,6 +3,7 @@
 // model. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
+import { openCard } from './panetools'
 import { addRequest, listRequests, modelAllowed } from './expensive'
 import { resetLocks } from './threads'
 import { resetViewCache } from './view'
@@ -43,7 +44,10 @@ test('a request for opus is a card with Approve, Deny and Start on sonnet instea
   const r = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toMatch(/^▾ t1/) // 1.0.32: a request is a decision, so it is unfolded on its thread's card (no Needs-you section)
+  expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toMatch(/^▸ t1/) // 1.0.33: every card starts folded, a request too; the chip says it waits
+  expect(await ui.find({ type: 'Text', text: '1 to decide' })).toBeTruthy()
+  await openCard(ui, 't1')
+  expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toMatch(/^▾ t1/)
   expect(await has(ui, /t1 asks to run on opus\/high \(opus is not sonnet or haiku, so it needs your approval\): a cross-module change/)).toBe(true)
   for (const k of [`model-approve-${r.id}`, `model-deny-${r.id}`, `model-sonnet-${r.id}`, 'pane-t1']) expect([k, !!(await ui.find({ type: 'Button', key: k }))]).toEqual([k, true])
   await ui.press({ key: `model-approve-${r.id}` })
@@ -72,6 +76,7 @@ test('Deny keeps the thread off opus: a denied card offers Start on sonnet inste
   const r = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openCard(ui, 't1')
   await ui.press({ key: `model-deny-${r.id}` })
   expect(await ui.find({ type: 'Button', key: `model-deny-${r.id}`, text: 'Confirm deny opus' })).toBeTruthy()
   expect((await listRequests(w.store))[0]!.state).toBe('pending') // armed only
@@ -102,6 +107,7 @@ test('with no answer the card keeps offering Start on sonnet instead; Dismiss dr
   const r = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openCard(ui, 't1')
   expect(await ui.find({ type: 'Button', key: `model-sonnet-${r.id}`, text: 'Start on sonnet instead' })).toBeTruthy()
   await ui.press({ key: `model-deny-${r.id}` })
   await ui.press({ key: `model-deny-${r.id}` })
@@ -117,6 +123,7 @@ test('a request the guard made (a refused Agent call or claude command): Approve
   const r = await w.ask({ action: 'agent', origin: 'guard', reason: 'the worker-opus agent (rewrite the parser)' })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openCard(ui, 't1')
   expect(await has(ui, /t1 was refused opus and reported blocked: the worker-opus agent \(rewrite the parser\)\. Approve it to let t1 go on, or deny it\./)).toBe(true)
   expect(await ui.find({ type: 'Button', key: `model-sonnet-${r.id}` })).toBeFalsy() // nothing to start on sonnet: the thread is working
   await ui.press({ key: `model-approve-${r.id}` })
@@ -129,6 +136,7 @@ test('a request the guard made (a refused Agent call or claude command): Approve
   await ui.unmount()
   const d = await w.ask({ action: 'bash', origin: 'guard', model: 'fable', reason: 'a shell command that starts claude on fable' })
   const ui2 = await $.ui.mount(PANE as any)
+  await openCard(ui2, 't1')
   await ui2.press({ key: `model-deny-${d.id}` })
   await ui2.press({ key: `model-deny-${d.id}` })
   expect(w.h.files.get(`${T1}/inbox.jsonl`)).toContain('The user denied fable for this thread: do not retry it')

@@ -1,6 +1,6 @@
 // The desk pane's session list (1.0.32): ONE list of every thread (open, done and closed), ordered by last activity unless the user picked another
 // order, capped with one "show more" row. All of it is script on the state the view already holds: no model call, no polling.
-// Settings (hooks/configkeys.ts): pane.sort (also remembered in the mod's store, the press that changes it writes both), pane.maxSessions, pane.healthOpen.
+// Settings (hooks/configkeys.ts): pane.sort (also remembered in the mod's store, the press that changes it writes both), pane.maxSessions, pane.healthOpen, pane.foldAll.
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
 import { stateOf } from './view'
@@ -57,7 +57,7 @@ export function ageText(at: number, now: number): string {
 }
 
 // ---- settings ----
-export type PaneConfig = { sort: SortKey; maxSessions: number; healthOpen: boolean }
+export type PaneConfig = { sort: SortKey; maxSessions: number; healthOpen: boolean; foldAll: boolean }
 export const isSort = (x: unknown): x is SortKey => typeof x === 'string' && (SORTS as readonly string[]).includes(x)
 export async function paneConfig(h: Host): Promise<PaneConfig> {
   const cfg = await readJson<Record<string, any> | null>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
@@ -65,10 +65,12 @@ export async function paneConfig(h: Host): Promise<PaneConfig> {
   const stored = await h.store.get(SORT_STORE).catch(() => undefined)
   const max = Number(pick('maxSessions'))
   const open = pick('healthOpen')
+  const fold = pick('foldAll')
   return {
     sort: isSort(pick('sort')) ? (pick('sort') as SortKey) : isSort(stored) ? stored : 'active', // (the config key wins: it is what the user wrote; the store keeps the press when config.json cannot be written)
     maxSessions: Number.isInteger(max) && max >= 5 && max <= 500 ? max : MAX_SESSIONS,
     healthOpen: open === true || open === 'open',
+    foldAll: !(fold === false || fold === 'false'), // (1.0.33: every card starts folded; false brings back the old auto-unfold of a session card with a decision to take)
   }
 }
 export async function saveSort(h: Host, key: SortKey): Promise<void> {
