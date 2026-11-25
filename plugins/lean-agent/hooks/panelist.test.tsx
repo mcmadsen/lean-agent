@@ -2,7 +2,7 @@
 // cards, the cap with "show more", Health folded / highlighted / quiet, the own-PR notice under Standing approvals. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { openHeader, openToolbar, toolbarTitle } from './panetools'
+import { openHeader, openSessions, openToolbar, toolbarLine, toolbarTitle } from './panetools'
 import { ownRevoked } from './deskwrites'
 import { ownLine } from './ownpr'
 import { paneConfig } from './panelist'
@@ -40,8 +40,13 @@ const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface:
 const texts = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
 // the rows of the list, top to bottom (the title button of each card)
 const order = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Button' })).map((b: any) => String(b.key)).filter((k: string) => k.startsWith('card-')).map((k: string) => k.slice(5))
-const setUp = async (ui: any) => {
+// (1.0.35: the session cards are inside the Sessions card, folded on startup: these specs are about the list, so setUp unfolds it, once; a spec about the fold itself uses setUpFolded)
+const setUpFolded = async (ui: any) => {
   if (await ui.find({ type: 'Button', key: 'setup' })) await ui.press({ key: 'setup' })
+}
+const setUp = async (ui: any) => {
+  await setUpFolded(ui)
+  await openSessions(ui)
 }
 const openHealth = async (ui: any) => {
   const b = await ui.find({ type: 'Button', key: 'sec-health' })
@@ -59,11 +64,12 @@ test('the list is ordered by thread number (the highest first) by default; the c
   h.files.set(`${L}/desk/inbox.jsonl`, line({ ts: now - 10 * 60_000, from: 't5', kind: 'report', text: 'a report 10 minutes ago', state: 'working' })) // a report is activity too
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  await setUp(ui)
-  expect(await order(ui)).toEqual(['t5', 't4', 't3', 't2', 't1']) // the default: thread, t5 before t4
-  expect(await toolbarTitle(ui)).toContain('sorted by thread ↓') // the sort and its direction are named in the folded title; the chips are on the unfolded toolbar
+  await setUpFolded(ui)
+  expect(await order(ui)).toEqual([]) // 1.0.35: the cards are inside the folded Sessions card
+  expect(await toolbarTitle(ui)).toContain('sorted by thread ↓') // the sort and its direction are named in the folded title; the chips are in the unfolded card
   expect(await ui.find({ type: 'Button', key: 'sort-active' })).toBeFalsy()
   await openToolbar(ui)
+  expect(await order(ui)).toEqual(['t5', 't4', 't3', 't2', 't1']) // the default: thread, t5 before t4
   expect((await ui.find({ type: 'Button', key: 'sort-thread' }))?.text).toBe('● thread ↓')
   await ui.press({ key: 'sort-active' })
   expect(await order(ui)).toEqual(['t5', 't4', 't2', 't3', 't1'])
@@ -90,7 +96,8 @@ test('closed and done threads are one quiet row with their age ("closed 3 h ago"
   expect(all).toContain('closed 3 h ago')
   expect(all).toContain('[done]')
   expect(all).toContain('2 h ago')
-  expect(all).toContain('window 1.3k tokens') // the usage of the closed row
+  expect(all).toContain('1.3k') // the usage of the closed row: the figure only (the "window ... tokens" text is on its unfolded card)
+  expect(all).not.toContain('window 1.3k tokens')
   for (const k of ['view-t1', 'view-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy() // ONE row each: title, chip, cost, age, Open
   expect(await ui.find({ type: 'Button', key: 'reopen-t1' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /the last note of t1/ })).toBeFalsy()
@@ -270,7 +277,7 @@ test('"ack N" on a card reads only the rows the card shows (20 at most): an unre
   await setUp(ui)
   await ui.press({ key: 'card-t1' })
   await ui.press({ key: 'ack-card-t1' })
-  expect(await toolbarTitle(ui)).toContain('5 unread')
+  expect(await toolbarLine(ui)).toContain('5 unread')
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   await ui.unmount()
 })

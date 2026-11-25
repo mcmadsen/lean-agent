@@ -115,8 +115,10 @@ test('the desk pane shows the Setup / repair button and the fix lines after pres
   const { h, start } = fresh(on, '/h/lean-agent-desk')
   await start($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /Setup \/ repair/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /Setup \/ repair/ })).toBeFalsy() // 1.0.35: the action row is in the unfolded header card, nothing hangs after the sessions
   expect(await toolbarTitle(ui)).toContain('Sessions (0)') // the list of sessions (1.0.32)
+  await openHeader(ui)
+  expect(await ui.find({ type: 'Button', text: /Setup \/ repair/ })).toBeTruthy()
   await ui.press({ key: 'repair' })
   expect(await ui.find({ type: 'Text', text: /desk folder ready/ })).toBeFalsy() // the fix lines are in Health, folded once the setup is complete
   await ui.press({ key: 'sec-health' })
@@ -241,6 +243,7 @@ test('the desk pane names an MCP server that needs a variable (no text field: th
   expect(await ui.find({ type: 'Text', text: /MCP servers that need a value/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /plugin:datadog:mcp needs DD_MCP_DOMAIN/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Tell the desk/ })).toBeTruthy()
+  await openHeader(ui)
   await ui.press({ key: 'repair' }) // after a setup run the rows are all that is left: no "not set up" heading, the MCP block stays (in Health, a fix)
   expect(await ui.find({ type: 'Text', text: /lean-agent is not set up/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: 1 finding/ })).toBeTruthy() // folded again but highlighted

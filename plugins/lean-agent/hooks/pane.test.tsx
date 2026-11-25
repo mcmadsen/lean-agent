@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { openHeader, openToolbar, toolbarTitle } from './panetools'
+import { openCard, openHeader, openSessions, openToolbar, toolbarLine, toolbarTitle } from './panetools'
 import { ackRows, loadView, resetViewCache, threadStatus } from './view'
 import { deskClaudeMd, resetLocks } from './threads'
 import { hashText } from './recipe'
@@ -39,10 +39,8 @@ function setup(on: any = null, rows: any[] = []) {
   return h
 }
 // 1.0.32: a card's other actions (Resume, Close, Restart, Start) and its messages are on its unfolded part: a tap on the title unfolds it (kept across mounts)
-const openMore = async (ui: any, id: string) => {
-  const b = await ui.find({ type: 'Button', key: `card-${id}` })
-  if (b && String(b.text).startsWith('▸')) await ui.press({ key: `card-${id}` })
-}
+// (1.0.35: the session cards are inside the Sessions card; openCard unfolds that first, once)
+const openMore = (ui: any, id: string) => openCard(ui, id)
 // the fake home is not set up (the doctor finds the desk folder missing: a finding, so Health is unfolded and counts it): one press of "Set up lean-agent" so Health starts quiet
 const setUp = async (ui: any) => {
   if (await ui.find({ type: 'Button', key: 'setup' })) await ui.press({ key: 'setup' })
@@ -114,6 +112,8 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', {
   await inDesk($)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface } as any)
+    if (surface === 'terminal') expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeFalsy() // 1.0.35: the session cards are inside the folded Sessions card
+    await openSessions(ui)
     expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toContain('t1 one')
     if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /1\.0\.34/ })).toBeFalsy() // the version line is on the unfolded header card (the fold is kept across mounts)
     await openHeader(ui)
@@ -165,29 +165,28 @@ test('view and pane: an open question shows until an answer row closes it', { ti
   expect(v.openQuestions.map(x => [x.q, x.from, x.question])).toEqual([[1, 't1', 'which db?']])
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: /t1 asks: which db\?/ })).toBeFalsy() // on t1's card, folded
+  expect(await ui.find({ type: 'Text', text: /t1 asks: which db\?/ })).toBeFalsy() // on t1's card, folded (inside the folded Sessions card)
+  expect(await ui.find({ type: 'Text', text: /^\d+ needs you$/ })).toBeTruthy() // the question is never invisible: the Sessions line says it waits
   await openMore(ui, 't1')
   expect((await ui.find({ type: 'Text', text: /t1 asks: which db\?/ }))?.text).toBeTruthy() // 1.0.32: there is no "Needs you" section, the question is on its thread's card
   expect(await ui.find({ type: 'Text', text: /which cache/ })).toBeFalsy()
   await ui.unmount()
 })
 
-test('pane More section (projects and scripts): name, private, open threads, stale rules; hidden private ones left out', { timeoutMs: 20_000 }, async ($, on) => {
+test('1.0.35 no More card: projects and scripts (and goals) are not drawn in the pane any more; the view still holds them (name, private, open threads, stale rules; hidden private ones left out) for lean_thread projects', { timeoutMs: 20_000 }, async ($, on) => {
   const h = setup(on, [])
   h.files.set('/h/.lean-agent/projects.json', JSON.stringify({ p: { path: '/w/p' }, secret: { path: '/w/s', private: true } }))
   h.files.set('/h/.lean-agent/p/learn.json', JSON.stringify({ sha: 'a', areas: { ui: { globs: ['ui/**'], sha: 'a', lines: 5, stale: 'x' } } }))
   h.files.set('/h/.lean-agent/config.json', JSON.stringify({ private: 'off' }))
   await inDesk($)
+  const v = await loadView(h.host)
+  expect(v.projects.map(p => [p.name, p.private, p.threads, p.stale])).toEqual([['p', false, 2, 1]])
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Button', text: /▸ More \(2 goals, 1 projects, 0 scripts\)/ })).toBeTruthy() // folded by default
-  expect(await ui.find({ type: 'Text', text: /p · open/ })).toBeFalsy()
-  expect(await ui.find({ type: 'Button', text: /Projects/ })).toBeFalsy() // no section of its own any more
-  await ui.press({ key: 'sec-more' })
-  expect(await ui.find({ type: 'Button', text: /▾ More \(2 goals, 1 projects, 0 scripts\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /Scripts: 0 candidates, 0 adopted/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /p · open · 2 thread\(s\)/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /1 rule area\(s\) stale/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /secret/ })).toBeFalsy()
+  for (const re of [/More \(/, /Projects/, /Goals/]) expect(await ui.find({ type: 'Button', text: re })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'sec-more' })).toBeFalsy()
+  await openHeader(ui) // not in the unfolded header card either: each has its own tool
+  await openSessions(ui)
+  for (const re of [/p · open/, /Scripts: /, /rule area\(s\) stale/, /secret/, /ship it/]) expect(await ui.find({ type: 'Text', text: re })).toBeFalsy()
   await ui.unmount()
 })
 
@@ -196,9 +195,10 @@ test('pane thread card shows the thread\'s model/effort badge', { timeoutMs: 20_
   h.files.set('/h/.lean-agent/threads/t1/thread.json', JSON.stringify({ id: 't1', title: 'one', project: 'p', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'opus', effort: 'high' }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await ui.find({ type: 'Text', text: 'opus/high' })).toBeFalsy() // on the unfolded part, not on the two-line card
+  await openSessions(ui)
+  expect(await ui.findAll({ type: 'Text', text: 'opus/high' })).toHaveLength(1) // 1.0.35: the chip on line 2 of the folded card
   await openMore(ui, 't1')
-  expect(await ui.find({ type: 'Text', text: 'opus/high' })).toBeTruthy()
+  expect(await ui.findAll({ type: 'Text', text: 'opus/high' })).toHaveLength(2) // ... and in full in the unfolded card
   await ui.unmount()
 })
 
@@ -214,19 +214,22 @@ test('1.0.32 the pane is ONE list of sessions (open and closed) with Health and 
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: 1 finding/ })).toBeTruthy() // a missing setup is a finding and is never hidden
   await setUp(ui)
   expect(await toolbarTitle(ui)).toContain('Sessions (3)') // t1, t2 and the closed t3 in one list
-  expect(await toolbarTitle(ui)).toContain('2 unread') // the total; the messages are on the cards (t1, t2), there is no global inbox
+  expect(await toolbarLine(ui)).toContain('2 unread') // the total (a chip on the Sessions line); the messages are on the cards (t1, t2), there is no global inbox
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
-  for (const old of [/▾ Threads/, /▸ Closed/, /▾ Goals/]) expect(await ui.find({ type: 'Button', text: old })).toBeFalsy() // no sections of their own
-  expect(await ui.find({ type: 'Button', text: /▸ More \(2 goals, 0 projects, 0 scripts\)/ })).toBeTruthy()
+  for (const old of [/▾ Threads/, /▸ Closed/, /▾ Goals/, /More \(/]) expect(await ui.find({ type: 'Button', text: old })).toBeFalsy() // no sections of their own, no More card
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▸ Health: all good/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy() // the goals are in More
-  await ui.press({ key: 'sec-more' })
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeFalsy() // the session cards are inside the folded Sessions card
+  await openSessions(ui)
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy() // a goal is on its thread's unfolded card only
+  await openMore(ui, 't1')
   expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeTruthy()
   await ui.unmount()
-  ui = await $.ui.mount(PANE as any) // redraw: still unfolded
-  expect(await ui.find({ type: 'Button', text: /▾ More \(2 goals/ })).toBeTruthy()
-  await ui.press({ key: 'sec-more' })
-  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeFalsy()
+  ui = await $.ui.mount(PANE as any) // redraw: still unfolded (the Sessions card and the card)
+  expect(await ui.find({ type: 'Button', text: /▾ Sessions \(3\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /ship it/ })).toBeTruthy()
+  await ui.press({ key: 'sec-toolbar' }) // a second tap folds the Sessions card: the cards are gone
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeFalsy()
   void h
   await ui.unmount()
 })
@@ -239,7 +242,8 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   const rowsDrawn = async () => (await ui.findAll({ type: 'Button', text: /^[▸▾] (● )?(\? )?(report|x)/ })).length
-  expect(await toolbarTitle(ui)).toContain('12 unread') // the one total
+  expect(await toolbarLine(ui)).toContain('12 unread') // the one total
+  await openSessions(ui) // the cards (and their chips) are inside the Sessions card
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy() // every sender has a card: no global section
   expect(await ui.find({ type: 'Text', text: 'Nothing from the threads yet.' })).toBeFalsy()
   expect(await ui.findAll({ type: 'Button', text: '6 new' })).toHaveLength(2) // a chip on each collapsed card, nothing hidden silently
@@ -255,7 +259,7 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   expect(await ui.find({ type: 'Text', text: /THE-END/ })).toBeTruthy() // the full report text
   await ui.press({ key: 'row-11' })
   await ui.press({ key: 'ack-11' }) // one row: only it
-  expect(await toolbarTitle(ui)).toContain('11 unread')
+  expect(await toolbarLine(ui)).toContain('11 unread')
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', text: '6 new' })).toBeTruthy() // t2's chip is untouched
   expect(await ui.find({ type: 'Button', key: 'ack-11' })).toBeFalsy() // read: no ack button, dimmed, after the unread rows
@@ -267,7 +271,7 @@ test('1.0.31 inbox on the card: folded by default with a "N new" chip, one press
   // ack per card: one press reads all of t2's rows, t1's stay
   await openMore(ui, 't2')
   await ui.press({ key: 'ack-card-t2' })
-  expect(await toolbarTitle(ui)).toContain('5 unread')
+  expect(await toolbarLine(ui)).toContain('5 unread')
   expect(await ui.find({ type: 'Button', text: '6 new' })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: '5 new' })).toBeTruthy()
   await ui.unmount()
@@ -279,6 +283,8 @@ test('1.0.32 a chip "N new" on a collapsed card unfolds the card and its message
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Button', key: 'inbox-toggle-t2' })).toBeFalsy() // collapsed
+  expect(await ui.find({ type: 'Button', key: 'new-t2' })).toBeFalsy() // (the chip is on the card, inside the folded Sessions card)
+  await openSessions(ui)
   await ui.press({ key: 'new-t2' })
   expect((await ui.find({ type: 'Button', key: 'inbox-toggle-t2' }))?.text).toBe('Hide messages')
   expect(await ui.find({ type: 'Button', text: /only on a card/ })).toBeTruthy()
@@ -292,6 +298,7 @@ test('1.0.32 messages: a thread with nothing unread has no chip; its read rows a
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
+  await openSessions(ui)
   expect(await ui.findAll({ type: 'Button', text: /^\d+ new$/ })).toHaveLength(1) // t1: read only, t2: nothing: no chip; the closed t3 has one
   expect((await ui.find({ type: 'Button', key: 'new-t3' }))?.text).toBe('1 new') // on the CLOSED thread's row
   expect(await ui.find({ type: 'Text', text: '[closed]' })).toBeTruthy()
@@ -326,8 +333,9 @@ test('1.0.32 messages: a message from an unknown sender is never lost: it is a f
   await setUp(ui)
   expect(await ui.find({ type: 'Button', text: /Inbox \(/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /Nothing from the threads yet|Nothing unread/ })).toBeFalsy()
+  expect(await toolbarLine(ui)).toContain('1 unread')
+  await openSessions(ui)
   expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy()
-  expect(await toolbarTitle(ui)).toContain('1 unread')
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /Health: all good/ })).toBeTruthy()
   await ui.unmount()
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', rec({ ts: h.clock.t, from: 'mod', kind: 'report', text: 'a note from the mod itself', state: 'working' }))
@@ -346,6 +354,8 @@ test('1.0.32 a card with a need wears an amber border; the need (here a question
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   expect(await ui.find({ type: 'Text', text: /t2 asks: which cache\?/ })).toBeFalsy() // folded: no Needs-you section any more
+  expect(await ui.find({ type: 'Text', text: /^1 needs you$/ })).toBeTruthy() // t2 waits for an answer: never invisible, though the cards are inside the folded Sessions card
+  await openSessions(ui)
   expect(await ui.findAll({ type: 'Button', text: '1 new' })).toHaveLength(2) // a chip on each card (t1, t2); the rows are behind the toggle
   const amber = (await ui.findAll({ type: 'Box' })).filter((b: any) => b.props?.borderColor === 'warning')
   expect(amber.length).toBeGreaterThan(0) // t2 waits for an answer
@@ -369,7 +379,8 @@ test('inbox: at most the last 5 read rows per thread, "show all" expands; read r
   h.files.set('/h/.lean-agent/desk/pane-ack.json', JSON.stringify({ upTo: 11, ns: [] })) // the first 11 rows are read, "fresh" is not
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  expect(await toolbarTitle(ui)).toContain('1 unread')
+  expect(await toolbarLine(ui)).toContain('1 unread')
+  await openSessions(ui)
   expect(await ui.find({ type: 'Button', text: '1 new' })).toBeTruthy() // t1's chip: the 2 old read rows are archived, not even counted
   await ui.press({ key: 'new-t1' }) // the chip unfolds the card and its messages
   expect(await ui.find({ type: 'Button', text: /old a/ })).toBeFalsy()
@@ -412,8 +423,7 @@ test('a script waiting for the desk shows Adopt / Reject; each is two-step, Reje
   expect(await ui.find({ type: 'Button', key: 'health-chip', text: '2 fixes' })).toBeTruthy() // and the header chip says so
   await ui.press({ key: 'health-chip' }) // a tap on the chip opens Health
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: /▾ Health: 2 findings/ })).toBeTruthy()
-  await ui.press({ key: 'sec-more' })
-  expect((await ui.find({ type: 'Text', text: /2 waiting for you/ }))).toBeTruthy() // and counted in More's scripts line
+  expect((await ui.find({ type: 'Text', text: /needs you$/ }))?.text).toBe('1 needs you') // only t2's question: a script is no session, the Sessions line does not count it (Health and the header's fix chip do)
   expect(await ui.find({ type: 'Text', text: /keep \(global\) waits for you: uses the network/ })).toBeTruthy()
   await ui.press({ key: 'sr-drop' })
   expect(await ui.find({ type: 'Button', text: /Confirm reject drop/ })).toBeTruthy()
@@ -590,6 +600,7 @@ test('a finished thread is ONE row (chip done, Open); the "next message starts a
   thr(h, 't6', { finished: 5 })
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openSessions(ui)
   expect(await ui.find({ type: 'Text', text: /finished: the next message starts a new session/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: '[done]' })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'view-t6' })).toBeTruthy()
@@ -640,7 +651,8 @@ test('Restart desk (1.0.33): one tap, no second confirm; the handover is written
   expect(h.claudeCalls().some((a: string[]) => a[0] === '--desktop')).toBe(false)
   expect(await ui.find({ type: 'Text', text: /New desk opened with the handover: close this one/ })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy() // the 60 s floor: a dim line instead of the button
-  expect(await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^restart in \d+ s$/ })).toBeTruthy() // 1.0.35: short on purpose (the header line has little room)
+  expect(await ui.find({ type: 'Text', text: /next restart possible/ })).toBeFalsy()
   await ui.unmount()
   // the open fails: the handover is there and the notice says where
   h.clock.t += 61_000
@@ -746,14 +758,14 @@ test('a USER restart ignores the automatic guards (the 30 min gap, the per-day c
   expect(JSON.parse(h.files.get('/h/.lean-agent/desk/auto-restarts.json')!).runs).toHaveLength(12) // a user restart is not counted against the automatic ones
   // the floor: the button is a dim line now, the command refuses with the same words, nothing more opens
   expect(await ui.find({ type: 'Button', key: 'restart-desk' })).toBeFalsy()
-  expect((await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ }))?.text).toBe('next restart possible in 60 s')
+  expect((await ui.find({ type: 'Text', text: /^restart in \d+ s$/ }))?.text).toBe('restart in 60 s') // the header's short form (1.0.35)
   const r: any = await $.command.run({ command: 'lean-agent-restart-desk', surface: 'desktop' } as any)
   expect(JSON.stringify(r)).toContain('next restart possible in')
   expect(h.calls.filter((c: any) => c.argv[0] === 'open')).toHaveLength(1)
   await ui.unmount()
   h.clock.t += 30_000
   ui = await $.ui.mount(DESKPANE as any)
-  expect((await ui.find({ type: 'Text', text: /^next restart possible in \d+ s$/ }))?.text).toBe('next restart possible in 30 s') // the countdown
+  expect((await ui.find({ type: 'Text', text: /^restart in \d+ s$/ }))?.text).toBe('restart in 30 s') // the countdown
   await ui.unmount()
   h.clock.t += 31_000 // 61 s: the floor is over
   ui = await $.ui.mount(DESKPANE as any)

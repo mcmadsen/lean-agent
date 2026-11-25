@@ -2,7 +2,7 @@
 // section empty. Everything is synthetic: thread titles, branches, shas and numbers are made up.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { cardWith, lines, openHeader, openToolbar, toolbarTitle, topLevel } from './panetools'
+import { cardWith, lines, openCard, openHeader, openSessions, openToolbar, toolbarLine, toolbarTitle, topLevel } from './panetools'
 import { branchIn, claimsPushed, loadView, resetViewCache, shasIn, stateOf } from './view'
 import type { ThreadRow } from './view'
 import { writeReview } from './reviews'
@@ -47,10 +47,7 @@ const byButton = () => opened.filter(o => o.id !== 'lean-agent')
 const inDesk = ($: any) => $.session.start({ cwd: '/h/lean-agent-desk', surface: 'desktop', isInteractive: true } as any)
 const texts = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Text' })).map((x: any) => String(x.text))
 // 1.0.32: a tap on a card's title unfolds it; the fake home is not set up (a finding: Health is unfolded and counts it), one press makes Health quiet; Health is folded on startup
-const openCard = async (ui: any, id: string) => {
-  const b = await ui.find({ type: 'Button', key: `card-${id}` })
-  if (b && String(b.text).startsWith('▸')) await ui.press({ key: `card-${id}` })
-}
+// (1.0.35: the session cards are inside the Sessions card; openCard unfolds that first, once)
 const setUp = async (ui: any) => {
   if (await ui.find({ type: 'Button', key: 'setup' })) await ui.press({ key: 'setup' })
 }
@@ -194,6 +191,9 @@ test('1.0.32 what waits for the user: nothing when nothing waits; otherwise appr
   resetViewCache()
   ui = await $.ui.mount(PANE as any)
   await setUp(ui)
+  expect(await ui.find({ type: 'Text', text: /^4 needs you$/ })).toBeTruthy() // t1 (approval), t2 (question), t3 (blocked), t4 (ready to push): the folded Sessions line says so
+  expect(await ui.find({ type: 'Button', key: 'open-t1' })).toBeFalsy() // ... and the cards are inside the folded Sessions card
+  await openSessions(ui)
   expect((await texts(ui)).some(t => /needs your yes|asks:|ready to push|is blocked/.test(t))).toBe(false) // folded: the cards say it with a chip and ONE button
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy()
   expect((await ui.find({ type: 'Button', key: 'open-t1' }))?.text).toBe('Open t1') // approval: Open (the session) is the primary button
@@ -226,6 +226,7 @@ test('1.0.32 an idle thread with no report: the chip "idle, no report N min" on 
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
+  await openSessions(ui)
   let all = await texts(ui)
   expect(all).toContain('[idle]')
   expect(all).toContain('[idle, no report 12 min]')
@@ -247,18 +248,22 @@ test('1.0.32 a thread card: two lines collapsed (id and the whole title, state c
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
+  await openSessions(ui)
   let all = await texts(ui)
   const cut = String((await ui.find({ type: 'Button', key: 'card-t1' }))?.text)
   expect(cut.endsWith('…')).toBe(true) // 1.0.33: a long title is cut with an ellipsis on ONE line (the chips and Open keep line 2) ...
-  expect(cut.length).toBeLessThanOrEqual(80 - 4 - '[working]'.length - 1)
+  expect(cut.length).toBeLessThanOrEqual(80 - 8 - '[working]'.length - 1) // (1.0.35: inside the Sessions card: 4 more cells of border and padding)
   expect(all).not.toContain(title)
-  // the two lines: a status chip, the cost, the context bar (none recorded here), the age
-  for (const piece of ['[working]', 'window 42k tokens']) expect(all).toContain(piece)
+  // the two lines: a status chip, the usage as ONE figure (no "window ... tokens", no breakdown), the context bar (none recorded here), the age
+  for (const piece of ['[working]', '42k']) expect(all).toContain(piece)
+  expect(all.some(t => /window|tokens|reviews|restarts/.test(t) && !/^lean-agent|Sessions|last 5h/.test(t))).toBe(false) // line 2 of a folded card has no breakdown text
   expect(all.some(t => t.includes('$'))).toBe(false) // no dollar figure on a card
   expect(all.some(t => /^(just now|\d+ min ago|\d+ h ago|\d+ d ago)$/.test(t))).toBe(true)
   expect(all.some(t => /^busy$|\[running\]/.test(t))).toBe(false)
-  for (const piece of ['sonnet/high', 'feat/synthetic-x', 'review green', 'Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.']) expect(all).not.toContain(piece) // folded
+  expect(all.filter(t => t === 'sonnet/high')).toHaveLength(1) // 1.0.35: the model chip is on the folded line 2 (t1) ...
+  for (const piece of ['feat/synthetic-x', 'review green', 'Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.']) expect(all).not.toContain(piece) // ... the rest is folded
   expect(all).toContain('[idle]') // t2: no report, no model recorded
+  expect(all.some(t => /unknown|not recorded/.test(t))).toBe(false) // and no chip for it (nothing "unknown")
   // collapsed: no button but the title; a quiet row (idle) has Open; "working" has none
   for (const k of ['resume-t1', 'restart-t1', 'close-t1', 'resume-t2', 'restart-t2', 'close-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy()
   for (const k of ['card-t1', 'card-t2', 'view-t1', 'view-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy() // the title and Open on every card
@@ -267,6 +272,7 @@ test('1.0.32 a thread card: two lines collapsed (id and the whole title, state c
   await openCard(ui, 't2')
   all = await texts(ui)
   expect(all).toContain(title) // ... and the whole title is the first line of the unfolded card
+  expect(all).toContain('window 42k tokens') // the usage line (with the breakdown, when there is one) is on the unfolded card
   for (const piece of ['sonnet/high', 'feat/synthetic-x', 'review green', 'no review', 'Halfway. Branch: feat/synthetic-x, commit abcdef1. Second line.']) expect(all).toContain(piece) // the last report, one line
   for (const k of ['view-t1', 'view-t2', 'resume-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   for (const k of ['restart-t1', 'restart-t2', 'close-t2', 'start-t2']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
@@ -318,10 +324,12 @@ test('1.0.32: a done thread is ONE row (title, chip, cost, age, Open); Resume, R
   h.files.set(`${L}/ledger.jsonl`, line({ ts: h.clock.t, role: 'thread', tN: 't1', model: 'x', in: 2500, usd: 0 }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openSessions(ui)
   const all = await texts(ui)
   expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toBe('▸ t1 synthetic t1')
   expect(all).toContain('[done]')
-  expect(all.some(t => /window 2\.5k tokens/.test(t))).toBe(true)
+  expect(all).toContain('2.5k') // the figure only on the folded line 2
+  expect(all.some(t => /window 2\.5k tokens/.test(t))).toBe(false)
   expect(all.some(t => /^(just now|\d+ min ago|\d+ h ago|\d+ d ago)$/.test(t))).toBe(true) // the age of its last activity
   expect(all.some(t => /^Done\. Branch/.test(t))).toBe(false) // the report line is not on the one-row form
   expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy()
@@ -329,6 +337,7 @@ test('1.0.32: a done thread is ONE row (title, chip, cost, age, Open); Resume, R
   await openCard(ui, 't1')
   for (const k of ['resume-t1', 'restart-t1', 'close-t1', 'start-t1']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
   expect(await ui.find({ type: 'Button', key: 'restart-t1', text: 'Restart from handover' })).toBeTruthy() // named by its effect
+  expect(await ui.find({ type: 'Text', text: /^window 2\.5k tokens$/ })).toBeTruthy() // the full usage text moved to the unfolded card
   await ui.unmount()
 })
 
@@ -367,11 +376,13 @@ test('a narrow body (24 columns) draws the same tree with the short forms: butto
   await inDesk($)
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile']) {
     const ui = await $.ui.mount(withProps({ bodyColumns: 24, placement: 'inline' }, surface))
+    await openSessions(ui)
     const label = String((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).slice(2) // (the unfolded state is kept from the previous surface)
     expect(label.startsWith('t1 A long')).toBe(true) // 1.0.33: the title is cut with an ellipsis on ONE line, so the chips and Open keep line 2
     expect(label.endsWith('…')).toBe(true)
     expect(label.length + 2).toBeLessThanOrEqual(14)
     expect(await ui.find({ type: 'Button', key: 'view-t1' })).toBeTruthy()
+    await openHeader(ui) // Setup / repair is in the unfolded header card
     expect(await ui.find({ type: 'Button', key: 'repair' })).toBeTruthy()
     await ui.press({ key: 'new-t1' }) // the chip unfolds the card and its messages
     const row = await ui.find({ type: 'Button', key: 'row-0' })
@@ -391,14 +402,15 @@ test('1.0.32 every section empty: an empty-state line for the list, Health quiet
   expect(all.some(t => /Needs you|Inbox|Nothing from the threads/.test(t))).toBe(false)
   expect((await topLevel(ui)).loose).toEqual([]) // every block is a card
   expect(await ui.find({ type: 'Button', text: /Goals|Threads|Closed/ })).toBeFalsy()
-  expect(all).toContain('No threads yet.')
+  expect(all).not.toContain('No threads yet.') // (1.0.35: inside the Sessions card, which is folded)
   expect(await toolbarTitle(ui)).toContain('Sessions (0)')
   expect(await ui.find({ type: 'Button', key: 'sec-health', text: '▸ Health: all good' })).toBeTruthy() // folded, quiet
   expect(await ui.find({ type: 'Button', key: 'health-chip' })).toBeFalsy() // no fix: no chip
   for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeFalsy() // the chips are on the unfolded toolbar
   await openToolbar(ui)
   for (const k of ['sort-active', 'sort-needs', 'sort-usage', 'sort-name']) expect(await ui.find({ type: 'Button', key: k })).toBeTruthy()
-  expect(await ui.find({ type: 'Button', text: /▸ More \(0 goals, 0 projects, 0 scripts\)/ })).toBeTruthy()
+  expect(await texts(ui)).toContain('No threads yet.')
+  expect(await ui.find({ type: 'Button', text: /More \(/ })).toBeFalsy() // 1.0.35: no More card
   expect(String((await ui.find({ type: 'Button', key: 'sec-header' }))?.text)).toMatch(/^▸ lean-agent · /) // the header card, folded: one line
   expect(all.some(t => /lean-agent 1\.0\.\d+ · refreshed/.test(t))).toBe(false)
   await openHeader(ui)
@@ -445,14 +457,17 @@ test('1.0.32 every part full: cards, closed rows, messages (on their cards and i
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
-  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · 3 unread · sorted by thread ↓$/)
-  for (const re of [/^1 new$/, /^\[closed\]$/, /^▸ Health: 1 finding$/, /▸ More \(1 goals, 1 projects, 0 scripts\)/]) expect(await ui.find({ type: 'Button', text: re }) ?? (await ui.find({ type: 'Text', text: re }))).toBeTruthy()
+  expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · sorted by thread ↓$/)
+  expect(await toolbarLine(ui)).toContain('3 unread') // a chip on the Sessions line
+  await openSessions(ui)
+  for (const re of [/^1 new$/, /^\[closed\]$/, /^▸ Health: 1 finding$/]) expect(await ui.find({ type: 'Button', text: re }) ?? (await ui.find({ type: 'Text', text: re }))).toBeTruthy()
+  expect(await ui.find({ type: 'Button', text: /More \(/ })).toBeFalsy() // goals and projects have no card of their own any more
   expect(await ui.findAll({ type: 'Button', text: /^1 new$/ })).toHaveLength(2) // t1 and t2; the desk's message has no card: it is the one finding in Health
   expect(await ui.find({ type: 'Button', key: 'reopen-t3' })).toBeFalsy() // folded
   await ui.press({ key: 'card-t3' })
   expect(await ui.find({ type: 'Button', key: 'reopen-t3' })).toBeTruthy()
-  await ui.press({ key: 'sec-more' })
-  expect(await ui.find({ type: 'Text', text: /proj · open/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'new-thread' })).toBeFalsy() // the footer is gone: the button is in the unfolded header card
+  await openHeader(ui)
   await ui.press({ key: 'new-thread' })
   expect(byButton()).toEqual([{ id: 'lean-agent-new-thread', title: 'New thread' }]) // the footer button opens the form
   expect(await ui.find({ type: 'Text', text: /new thread form opened/ })).toBeTruthy()

@@ -3,7 +3,7 @@
 // model. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { openCard } from './panetools'
+import { openCard, openSessions } from './panetools'
 import { addRequest, listRequests, modelAllowed } from './expensive'
 import { resetLocks } from './threads'
 import { resetViewCache } from './view'
@@ -44,6 +44,8 @@ test('a request for opus is a card with Approve, Deny and Start on sonnet instea
   const r = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeFalsy() // 1.0.35: inside the folded Sessions card (its chip says "1 needs you")
+  await openSessions(ui)
   expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toMatch(/^▸ t1/) // 1.0.33: every card starts folded, a request too; the chip says it waits
   expect(await ui.find({ type: 'Text', text: '1 to decide' })).toBeTruthy()
   await openCard(ui, 't1')

@@ -6,6 +6,7 @@ import { leanThread, resetLocks } from './threads'
 import { openThreadSession, resumeLink } from './setup'
 import { approvalHint, threadTool } from './delivery'
 import { loadView, resetViewCache } from './view'
+import { openCard, openSessions } from './panetools'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const FOLDER = '/h/.lean-agent/threads/t1'
@@ -170,6 +171,9 @@ test('the pane row "tN needs your yes in its own session: <action>" and its Open
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', text: 'Open t1' }), 'the session cards are inside the folded Sessions card').toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^1 needs you$/ }), 'the folded Sessions line says it waits').toBeTruthy()
+  await openSessions(ui)
   expect(await ui.find({ type: 'Button', text: 'Open t1' }), 'the collapsed card has Open t1 as its one button').toBeTruthy()
   expect(await ui.find({ type: 'Text', text: new RegExp(`t1 needs your yes in its own session: ${ACTION}`) }), 'folded').toBeFalsy()
   await ui.press({ key: 'card-t1' }) // 1.0.32: the row is on the card, unfolded on a tap
@@ -186,7 +190,7 @@ test('no prompt is open (an idle session, a classifier denial): the card says so
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
-  await ui.press({ key: 'card-t1' }) // 1.0.33: folded on startup; the decision is on the unfolded card
+  await openCard(ui, 't1') // 1.0.33: folded on startup; the decision is on the unfolded card (1.0.35: inside the Sessions card)
   expect(await ui.find({ type: 'Text', text: /no permission prompt exists for t1: the auto-mode classifier denied a worker call/ }), 'truth').toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /There is nothing to press in the session\./ }), 'nothing to press').toBeTruthy()
   expect(await ui.find({ type: 'Button', text: 'Let t1 edit its worktree itself' }), 'self edit').toBeTruthy()
@@ -203,6 +207,8 @@ test('a thread that is working again has no yes-row (the blocked report is stale
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openSessions(ui)
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeTruthy() // (the card is drawn: the absence below is real)
   expect(await ui.find({ type: 'Text', text: /t1 needs your yes in its own session/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeFalsy()
   expect(w.order).toEqual([])
@@ -214,6 +220,8 @@ test('a blocked thread without an approval has no yes-row and no Open button', {
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  await openSessions(ui)
+  expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeTruthy() // (the card is drawn: the absence below is real)
   expect(await ui.find({ type: 'Text', text: /needs your yes in its own session/ })).toBeFalsy()
   expect(await ui.find({ type: 'Button', text: 'Open t1' })).toBeFalsy()
   expect(q.order).toEqual([])

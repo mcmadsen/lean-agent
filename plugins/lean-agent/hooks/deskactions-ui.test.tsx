@@ -2,7 +2,7 @@
 // AskUserQuestion hook that reads the user's answer from the tool's result. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { openCard } from './panetools'
+import { openCard, openSessions } from './panetools'
 import { addActionRequest, listActions, questionOf } from './deskactions'
 import { resetLocks } from './threads'
 import { resetViewCache } from './view'
@@ -42,6 +42,9 @@ test('a request is a Needs-you card with the exact text; Approve and Deny press 
   const v = await w.ask()
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'card-t5' })).toBeFalsy() // 1.0.35: the session cards are inside the folded Sessions card; the thread that needs you is its chip (and the header's)
+  expect(await ui.find({ type: 'Text', text: /^1 needs you$/ })).toBeTruthy()
+  await openSessions(ui)
   expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
   expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
   await openCard(ui, "t5")
@@ -162,6 +165,9 @@ test('a text the card cannot show in full has no Approve in the pane (the desk q
   const v = long.request!
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'card-t5' })).toBeFalsy() // 1.0.35: the session cards are inside the folded Sessions card; the thread that needs you is its chip (and the header's)
+  expect(await ui.find({ type: 'Text', text: /^1 needs you$/ })).toBeTruthy()
+  await openSessions(ui)
   expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
   expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
   await openCard(ui, "t5")
@@ -187,6 +193,9 @@ test('a review batch is numbered one-liners grouped by file (anchor + the first 
   const v = r.request!
   await inDesk($)
   const ui = await $.ui.mount(PANE as any)
+  expect(await ui.find({ type: 'Button', key: 'card-t5' })).toBeFalsy() // 1.0.35: the session cards are inside the folded Sessions card; the thread that needs you is its chip (and the header's)
+  expect(await ui.find({ type: 'Text', text: /^1 needs you$/ })).toBeTruthy()
+  await openSessions(ui)
   expect((await ui.find({ type: "Button", key: "card-t5" }))?.text).toMatch(/^▸ t5/) // 1.0.33: every card starts folded; the decision is behind a tap, the chip says it waits
   expect(await ui.find({ type: "Text", text: /^\d+ to decide$/ })).toBeTruthy()
   await openCard(ui, "t5")

@@ -156,6 +156,8 @@ test('the pane: each card has a two-press Dismiss that logs it; the count leaves
   }
   expect(await ui.find({ type: 'Text', text: /Needs you/ })).toBeFalsy() // 1.0.32: the cards are on their thread cards, folded
   expect(await ui.find({ type: 'Button', key: 'dismiss-t7-question' })).toBeFalsy()
+  expect(await ui.find({ type: 'Button', key: 'card-t7' })).toBeFalsy() // 1.0.35: the thread cards are inside the folded Sessions card
+  await unfold('sec-toolbar')
   for (const id of ['t3', 't4', 't5', 't7', 't8']) await unfold(`card-${id}`)
   for (const k of ['t3-blocked', 't4-prompt', 't5-approval', 't7-question', 't8-blocked']) expect([k, !!(await ui.find({ type: 'Button', key: `dismiss-${k}` }))]).toEqual([k, true])
   await unfold('sec-health') // the notice is in Health

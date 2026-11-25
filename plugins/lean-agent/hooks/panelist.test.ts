@@ -2,7 +2,22 @@
 // settings, what Health says when folded, and the level of the own-PR notice. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { DEFAULT_DIR, ageText, canHide, capItems, completed, effectiveDir, isHidden, itemsOf, needsUser, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
+import { DEFAULT_DIR, ageText, canHide, capItems, completed, effectiveDir, isHidden, itemsOf, modelChip, needsUser, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
+
+test('modelChip: model/effort with the effort abbreviated (low, med, high, xhigh, max), a leading "claude-" dropped, nothing when neither is recorded', () => {
+  expect(modelChip('sonnet', 'high')).toBe('sonnet/high')
+  expect(modelChip('haiku', 'low')).toBe('haiku/low')
+  expect(modelChip('opus', 'medium')).toBe('opus/med')
+  expect(modelChip('opus', 'med')).toBe('opus/med')
+  expect(modelChip('opus', 'xhigh')).toBe('opus/xhigh')
+  expect(modelChip('opus', 'MAX')).toBe('opus/max')
+  expect(modelChip('claude-sonnet-5-5', 'high')).toBe('sonnet-5-5/high')
+  expect(modelChip('sonnet')).toBe('sonnet')
+  expect(modelChip(undefined, 'high')).toBe('high')
+  expect(modelChip()).toBe('')
+  expect(modelChip('', '')).toBe('')
+  expect(modelChip('  ', undefined)).toBe('')
+})
 import { healthSummary } from './panehealth'
 import { loadView, noticeInfo, resetViewCache } from './view'
 import type { ClosedRow, ThreadRow } from './view'

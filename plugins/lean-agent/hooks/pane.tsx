@@ -1,14 +1,17 @@
-// The desk pane (1.0.33: cards only, everything folded). EVERY block is a card (one border, one padding, the same fold) and nothing sits outside one: the header card
-// (folded: ONE line "lean-agent · 1.2M tokens · window 1% · desk 37k/60k" with the fix chip and Restart desk), the Health card (findings, fixes, standing approvals, messages from
-// senders without a thread), a notice card (the result of a press), the Sessions toolbar card (title, ack all; unfolded: the sort chips), ONE card per thread session (open, done
-// or closed; folded = exactly two lines: title + state chip, then "N new", "N to decide", cost, context bar, age, Open), the "show more" card, More (goals, projects, scripts)
-// and the actions card. Everything starts folded, a session that needs you too: only the user's tap unfolds (pane.foldAll false brings the old auto-unfold of a decision back).
+// The desk pane (1.0.35: THREE cards, everything folded). EVERY block is a card (one border, one padding, the same fold) and nothing sits outside one: the header card
+// (folded: ONE line "lean-agent · 1.2M tokens · window 1% · desk 37k/60k" with the fix chip, the "N needs you" chip and Restart desk; unfolded: the bars and the actions New thread,
+// Feedback export, Setup / repair), the Health card (findings, fixes, standing approvals, messages from senders without a thread), a notice card (the result of a press, only
+// while there is one) and the Sessions card, the CONTAINER of every session: folded it is one line "Sessions (4) · sorted by thread" with the chips "N needs you", "N unread",
+// "N hidden"; unfolded it holds the sort chips, Hide all completed, the hidden chip, ack all, then ONE card per thread session (open, done or closed; folded = exactly two lines:
+// title + state chip, then "N new", "N to decide", usage, context bar, age, Hide, Open) and "show more". Nothing is drawn after the Sessions card. Everything starts folded, a
+// session that needs you too (its chip is on the Sessions line and on the header): only the user's tap unfolds (pane.foldAll false brings the old auto-unfold of a decision back,
+// inside the Sessions card, which is then unfolded while something needs you).
 // In the minimized widget form (e.props.placement 'widget') only a glance is drawn, with no button: clicks may not reach it.
 // Opens by itself only in the desk and through /lean-agent anywhere. Never blank: a failure is drawn as a red line.
 // Resume/Start/Restart/Close go through leanThread (the lean_thread tool), so the logic exists once.
 import { ACTION_CARD_MAX, OVER_PCT, READ_SHOWN, ackRows, loadView, resetViewCache, stateOf, threadStatus } from './view'
 import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './panestate'
-import type { ClosedRow, GoalTone, NeedRow, NoticeRow, ThreadRow, View } from './view'
+import type { ClosedRow, NeedRow, NoticeRow, ThreadRow, View } from './view'
 import { leanThread } from './threads'
 import { homeDir } from './state'
 import { dismissedKeys, dkey, recordDismiss } from './dismissstore'
@@ -22,7 +25,7 @@ import { destText, feedbackConfig } from './feedbackdest'
 import { NEXT_STEP, bounded, infoOf, missingOf, openDesk, openThreadSession, setupCheck, setupFix, setupText } from './setup'
 import type { Role } from './role'
 import { kTokens, recentUser, restartingNow, sessionId, userRestartDesk } from './deskcompact'
-import { noRestartNote, restartWaitMs } from './deskauto'
+import { restartWaitMs } from './deskauto'
 import { openNewThread, openThreadPane } from './panelinks'
 import { notifyTick } from './notify'
 // grantModelApproval is called from here and from nowhere else: only the user's press in this pane approves an expensive model (expensive.ts)
@@ -33,9 +36,9 @@ import type { ModelRequest } from './expensive'
 import { answerAction, approveAction, revokeGrant, standingLabelOf } from './deskactions'
 import { cancelHeld, sendHeldNow } from './sendhold'
 import { revokeOwn, revokeWrites } from './deskwrites'
-import { ARROW, SORTS, SORT_LABEL, ageText, canHide, capItems, effectiveDir, isHidden, itemsOf, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
+import { ARROW, SORTS, SORT_LABEL, ageText, canHide, capItems, effectiveDir, isHidden, itemsOf, modelChip, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
 import type { Item, SortKey } from './panelist'
-import { closedText, deskText, foldedText, headerText } from './formatusage'
+import { closedText, deskText, fmtTokens, foldedText, headerText } from './formatusage'
 import { healthSummary } from './panehealth'
 import { setNotice } from './notices'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
@@ -47,7 +50,6 @@ export const VERSION = '1.0.34'
 const NOTE_MS = 30_000 // the one-time "lean-agent set the model" line is drawn this long, then only the header chip carries it
 const GROUP_ROWS = 20 // rows drawn in one unfolded inbox group
 const NARROW = 50 // a body narrower than this (cells) gets the short forms
-const TONE: Record<GoalTone, string> = { working: 'success', waiting: 'warning', stuck: 'error', quiet: 'inactive' }
 
 let lastError = ''
 let lastRefresh = ''
@@ -917,6 +919,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const unfolded = !!grp && ui.rows[`inb${id}`] === true
       return {
         newChip: grp?.unread.length ? <Button key={`new-${id}`} plain label={`${grp.unread.length} new`} onPress={showMessages(id)} /> : null,
+        newPiece: (grp?.unread.length ? { len: `${grp.unread.length} new`.length, node: <Button key={`new-${id}`} plain label={`${grp.unread.length} new`} onPress={showMessages(id)} /> } : null) as { len: number; node: any } | null,
         buttons: grp
           ? [
               <Button key={`inbox-toggle-${id}`} plain label={unfolded ? 'Hide messages' : 'Show messages'} onPress={toggleRow(`inb${id}`)} />,
@@ -935,35 +938,54 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       }
     }
     // the context bar of a card: small, with the number
-    const ctxBar = (t: ThreadRow) => {
+    const ctxBar = (t: ThreadRow): { len: number; node: any } | null => {
       const cm = t.ctx ? /(\d+)k\/(\d+)k/.exec(t.ctx) : null
       const color = t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : 'success'
       if (cm) {
         const cells = Math.max(0, Math.min(8, Math.round((Number(cm[1]) / Math.max(1, Number(cm[2]))) * 8)))
-        return <Text key={`ctx-${t.id}`} color={color}>{`ctx ${'█'.repeat(cells)}${'░'.repeat(8 - cells)} ${cm[1]}k/${cm[2]}k${t.keep ? ' · keep' : ''}`}</Text>
+        // (a narrow pane: the figure only, so line 2 stays one line)
+        const text = narrow ? `ctx ${cm[1]}k/${cm[2]}k` : `ctx ${'█'.repeat(cells)}${'░'.repeat(8 - cells)} ${cm[1]}k/${cm[2]}k${t.keep ? ' · keep' : ''}`
+        return piece(text, <Text key={`ctx-${t.id}`} color={color}>{text}</Text>)
       }
-      return t.ctx ? <Text key={`ctx-${t.id}`} color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{`${t.ctx}${t.keep ? ' · keep' : ''}`}</Text> : null
+      if (!t.ctx) return null
+      const text = `${t.ctx}${t.keep ? ' · keep' : ''}`
+      return piece(text, <Text key={`ctx-${t.id}`} color={t.ctxLevel === 'over' ? 'error' : t.ctxLevel === 'warn' ? 'warning' : undefined} dimColor={t.ctxLevel === 'ok'}>{text}</Text>)
     }
     const goalOf = (id: string) => v?.goals.find(g => g.id === id)
     const DECIDE: string[] = ['action', 'model', 'denial']
     // the one shape of a session card, whatever the thread's state: two lines, then (unfolded) the details
-    const sessionCard = (o: { id: string; title: string; open: boolean; chips: any[]; chipLen: number; line2: any[]; primary: any; color?: string; dim: boolean; details: any }) =>
+    // (a session card sits INSIDE the Sessions card: 4 more cells of border and padding than a top-level card; line 2 is short on purpose: usage as one figure, the age, then Hide and Open
+    // together at the right end; the breakdown of the usage is in the unfolded card)
+    // line 2 is a list of pieces with their width in cells (`len`): the model chip first ("sonnet/high"), then "N new", "N to decide", the usage figure, the context bar, then the age, which
+    // is DROPPED to the unfolded card when the line would not fit the pane (never wrapped onto a third line), then Hide and Open at the right end (`primaryLen` = the primary button's cells)
+    type Piece = { len: number; node: any } | null
+    const piece = (text: string, node: any): Piece => ({ len: text.length, node })
+    const sessionCard = (o: { id: string; title: string; open: boolean; chips: any[]; chipLen: number; line2: Piece[]; age: { text: string; node: any }; primary: any; primaryLen: number; color?: string; dim: boolean; details: any }) =>
       {
         const hc = hideCtl(o.id)
+        const titleW = Math.max(14, cols - 8 - o.chipLen - 1)
+        const parts = o.line2.filter((p): p is NonNullable<Piece> => !!p)
+        const rightLen = (hc.chip ? (hiddenIds.has(o.id) ? 'Unhide'.length : 'Hide'.length) + 3 : 0) + o.primaryLen + 3
+        const ageFits = parts.reduce((n, p) => n + p.len + 1, 0) + rightLen + o.age.text.length + 1 <= cols - 8
+        const ageDetail = !ageFits && o.open ? <Text key="age-detail" dimColor>{o.age.text}</Text> : null
         return (
           <Box key={`t-${o.id}`} {...cardProps({ color: o.color, dim: o.dim })}>
             <Box key="line1" flexWrap="nowrap" columnGap={1}>
-              <Button key={`card-${o.id}`} plain label={short(`${o.open ? '▾' : '▸'} ${o.id} ${o.title}`, Math.max(14, cols - 4 - o.chipLen - 1))} onPress={toggleCard(o.id)} />
+              <Button key={`card-${o.id}`} plain label={short(`${o.open ? '▾' : '▸'} ${o.id} ${o.title}`, titleW)} onPress={toggleCard(o.id)} />
               {o.chips}
             </Box>
             <Box key="line2" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
               <Box flexWrap="nowrap" columnGap={1} flexShrink={1}>
-                {o.line2}
-                {hc.chip}
+                {parts.map(p => p.node)}
+                {ageFits ? o.age.node : null}
               </Box>
-              {o.primary}
+              <Box flexWrap="nowrap" columnGap={1}>
+                {hc.chip}
+                {o.primary}
+              </Box>
             </Box>
-            {o.open && `▾ ${o.id} ${o.title}`.length > Math.max(14, cols - 4 - o.chipLen - 1) ? <Text key="full-title" wrap="wrap">{o.title}</Text> : null}
+            {o.open && `▾ ${o.id} ${o.title}`.length > titleW ? <Text key="full-title" wrap="wrap">{o.title}</Text> : null}
+            {ageDetail}
             {o.details}
             {o.open && hc.button ? (
               <Box key="hide-row" flexWrap="wrap" columnGap={1}>
@@ -995,8 +1017,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Text>
       ) : null
       const review = t.review === 'green' ? { text: 'review green', color: 'success' } : t.review === 'red' ? { text: 'review not green', color: t.done || t.ready ? 'error' : undefined } : { text: 'no review', color: undefined }
-      const costNode = t.costBadge ? <Text color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver}>{t.costLine ?? `window ${t.costBadge} tokens`}</Text> : t.cost > 0 ? <Text dimColor>{closedText(t.cost)}</Text> : null
-      const age = <Text dimColor>{ageText(t.activity ?? t.recTs, now2)}</Text>
+      // line 2 carries the figure only ("7.7M", "48k!" over its soft budget); the window text and the breakdown (reviews, restarts) are in the unfolded card
+      const costText = t.costBadge ?? (t.cost > 0 ? fmtTokens(t.cost) : '')
+      const costNode = costText ? piece(costText, <Text color={t.costBadge && t.costOver ? 'warning' : undefined} dimColor={!(t.costBadge && t.costOver)}>{costText}</Text>) : null
+      const costDetail = t.costLine ?? (t.cost > 0 ? closedText(t.cost) : '')
+      const ageStr = ageText(t.activity ?? t.recTs, now2)
+      const mchip = modelChip(t.model, t.effort) // the model chip, first on line 2 (nothing when neither is recorded)
+      const modelNode = mchip ? piece(mchip, <Text key={`model-${t.id}`} dimColor>{mchip}</Text>) : null
       const openBtn = <Button key={`view-${t.id}`} label="Open" onPress={openPaneOne(t.id)} />
       const resumeBtn = t.resumable && <Button key={`resume-${t.id}`} label="Resume" onPress={thread('resume', t.id)} />
       const restartBtn = t.state === 'open' && (
@@ -1022,13 +1049,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       const details = open ? (
         <Box key="details" flexDirection="column">
           <Box flexWrap="wrap" columnGap={1}>
-            {t.model ? <Text dimColor>{`${t.model}${t.effort ? `/${t.effort}` : ''}`}</Text> : null}
+            {t.model || t.effort ? <Text dimColor>{[t.model, t.effort].filter(Boolean).join('/')}</Text> : null}
             {t.keepGoing ? <Text color="cyan">keep-going</Text> : null}
             {t.rules ? <Text dimColor>{`${t.rules} rule${t.rules > 1 ? 's' : ''}`}</Text> : null}
             {t.agents ? <Text dimColor>{t.agents}</Text> : null}
             {t.branch ? <Text dimColor>{t.branch}</Text> : null}
             <Text color={review.color} dimColor={!review.color}>{review.text}</Text>
           </Box>
+          {costDetail ? <Text key="usage-detail" color={t.costOver ? 'warning' : undefined} dimColor={!t.costOver} wrap="wrap">{costDetail}</Text> : null}
           {t.finished ? <Text dimColor>finished: the next message starts a new session</Text> : null}
           {statusLine}
           {t.pending && myNeeds.length === 0 ? <Text color="warning" wrap="wrap">{t.pending}</Text> : null}
@@ -1053,8 +1081,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         open,
         chips: [chip, noRepChip],
         chipLen: chipWord.length + 2 + (t.noReport ? t.noReport.length + 3 : 0),
-        line2: [msg.newChip, decideN > 0 ? <Text key={`decide-${t.id}`} bold color="warning">{`${decideN} to decide`}</Text> : null, costNode, live ? ctxBar(t) : null, age],
+        line2: [modelNode, msg.newPiece, decideN > 0 ? piece(`${decideN} to decide`, <Text key={`decide-${t.id}`} bold color="warning">{`${decideN} to decide`}</Text>) : null, costNode, live ? ctxBar(t) : null],
+        age: { text: ageStr, node: <Text dimColor>{ageStr}</Text> },
         primary,
+        primaryLen: (approvalOpen ? `Open ${t.id}`.length : 'Open'.length) + 2,
         color: blockedWord ? sc.color : attention ? 'warning' : undefined,
         dim: !blockedWord,
         details,
@@ -1064,6 +1094,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const closedRow = (c: ClosedRow) => {
       const open = expanded(c.id)
       const msg = messagePieces(c.id)
+      const mchip = modelChip(c.model, c.effort)
+      const closedAge = `closed ${ageText(c.activity, now2)}`
       return sessionCard({
         id: c.id,
         title: c.title,
@@ -1074,11 +1106,15 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           </Text>,
         ],
         chipLen: 'closed'.length + 2,
-        line2: [msg.newChip, c.cost > 0 ? <Text dimColor>{closedText(c.cost)}</Text> : null, <Text dimColor>{`closed ${ageText(c.activity, now2)}`}</Text>],
+        line2: [mchip ? piece(mchip, <Text key={`model-${c.id}`} dimColor>{mchip}</Text>) : null, msg.newPiece, c.cost > 0 ? piece(fmtTokens(c.cost), <Text dimColor>{fmtTokens(c.cost)}</Text>) : null],
+        age: { text: closedAge, node: <Text dimColor>{closedAge}</Text> },
         primary: <Button key={`view-${c.id}`} label="Open" onPress={openPaneOne(c.id)} />,
+        primaryLen: 'Open'.length + 2,
         dim: true,
         details: open ? (
           <Box key="details" flexDirection="column">
+            {c.model || c.effort ? <Text key="model-detail" dimColor>{[c.model, c.effort].filter(Boolean).join('/')}</Text> : null}
+            {c.cost > 0 ? <Text key="usage-detail" dimColor>{closedText(c.cost)}</Text> : null}
             {c.last ? <Text dimColor wrap="wrap">{short(c.last, 300)}</Text> : null}
             <Box flexWrap="wrap" columnGap={1}>
               <Button key={`reopen-${c.id}`} label="Reopen" onPress={reopen(c.id)} />
@@ -1106,6 +1142,14 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const showAllRows = ui.rows.sessionsAll === true
     const capped = showAllRows ? { shown: allItems, hidden: 0 } : capItems(allItems, cfgPane.maxSessions, (i: Item) => i.needs || unreadIds.has(i.id) || holdsOf(i.id).length > 0)
     const sessionRow = (i: Item) => (i.t ? threadRow(i.t) : closedRow(i.c!))
+    // a thread that needs the user is never invisible (the session cards are inside the folded Sessions card): "N needs you" on the Sessions line and on the header; a tap unfolds the Sessions card
+    const needsN = sortedAll.filter(i => i.needs).length
+    const needsLabel = `${needsN} needs you`
+    const sessionsDflt = !cfgPane.foldAll && needsN > 0 // (pane.foldAll false: the Sessions card is unfolded while something needs you, and a decision unfolds its own card inside it)
+    const openSessions = async () => {
+      await patchUi($, u => ({ ...u, open: { ...u.open, toolbar: true } }))
+      tell()
+    }
 
     // ---- header: ONE compact block: the model chip, the budget, the plan window, the desk's context with the Health chip, the version ----
     const desk = v?.desk
@@ -1257,7 +1301,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     // for 60 s after the last one, a dim line says so instead of the button (the 30 min gap and the per-day count are for AUTOMATIC restarts only).
     const restarting = restartingNow()
     const restartWait = restarting ? 0 : await restartWaitMs(host)
-    const restartText = restarting ? 'restarting…' : restartWait > 0 ? noRestartNote(restartWait) : ''
+    // (the wait is "restart in 11 s": short on purpose, the header line has little room)
+    const restartText = restarting ? 'restarting…' : restartWait > 0 ? `restart in ${Math.max(1, Math.ceil(restartWait / 1000))} s` : ''
     const restartCtl = restartText ? (
       <Text key="restart-desk-state" dimColor>
         {restartText}
@@ -1267,7 +1312,27 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     )
     const fixLabel = `${fixItems.length} ${fixItems.length === 1 ? 'fix' : 'fixes'}`
     const fixChip = fixItems.length > 0 ? <Button key="health-chip" label={fixLabel} onPress={openHealth} /> : null
-    const rightLen = (fixItems.length > 0 ? fixLabel.length + 3 : 0) + (restartText ? restartText.length : 'Restart desk'.length + 2) + 2
+    // the same "N needs you" chip as on the Sessions line: a tap unfolds the Sessions card (the thread is inside it)
+    const needsChip = needsN > 0 ? <Button key="needs-chip" label={needsLabel} onPress={openSessions} /> : null
+    const rightLen = (fixItems.length > 0 ? fixLabel.length + 3 : 0) + (needsN > 0 ? needsLabel.length + 3 : 0) + (restartText ? restartText.length : 'Restart desk'.length + 2) + 2
+    // the name has priority: when the title would not fit beside the chips, the chips go on a second line under it (a narrow pane) instead of cutting the name
+    const foldedLabel = `▸ ${foldedBits.join(' · ')}`
+    const stackChips = foldedLabel.length > cols - 4 - rightLen
+    const headerChips = (
+      <>
+        {fixChip}
+        {needsChip}
+        {restartCtl}
+      </>
+    )
+    // the actions that used to hang after the sessions: the same handlers, one normal button each
+    const headerActions = (
+      <Box key="h-actions" flexWrap="wrap" columnGap={1}>
+        <Button key="new-thread" label="New thread" onPress={newThreadPress} />
+        <Button key="feedback" label={feedbackLabel} onPress={feedbackPress} />
+        <Button key="repair" label="Setup / repair" onPress={runSetup} />
+      </Box>
+    )
     const headerCard = headerOpen ? (
         <Box key="header" {...cardProps({ color: lastErrorShown ? 'error' : undefined })}>
           <Box key="h-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
@@ -1300,7 +1365,9 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
           <Box key="h-ctx" flexWrap="wrap" columnGap={1}>
             {ctx > 0 && limit > 0 ? <Progress key="ctx" label="desk context" value={ctx} max={limit} valueText={`${kTokens(ctx)} of ${kTokens(limit)}`} color={barColor} /> : <Text dimColor>desk context: known after the next request</Text>}
             {fixChip}
+            {needsChip}
           </Box>
+          {headerActions}
           <Text key="h-version" dimColor size="caption">
             lean-agent {VERSION} · refreshed {lastRefresh || 'never'}
             {lastErrorShown ? ` · last error: ${lastError}` : ''}
@@ -1310,13 +1377,19 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         <Box key="header" {...cardProps({ color: lastErrorShown ? 'error' : undefined })}>
           <Box key="h-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
             <Box flexWrap="nowrap" flexShrink={1}>
-              <Button key="sec-header" plain label={short(`▸ ${foldedBits.join(' · ')}`, Math.max(14, cols - 4 - rightLen))} onPress={toggleSection('header', false)} />
+              <Button key="sec-header" plain label={short(foldedLabel, Math.max(14, stackChips ? cols - 4 : cols - 4 - rightLen))} onPress={toggleSection('header', false)} />
             </Box>
-            <Box flexWrap="nowrap" columnGap={1}>
-              {fixChip}
-              {restartCtl}
-            </Box>
+            {!stackChips && (
+              <Box flexWrap="nowrap" columnGap={1}>
+                {headerChips}
+              </Box>
+            )}
           </Box>
+          {stackChips && (
+            <Box key="h-chips" flexWrap="wrap" columnGap={1}>
+              {headerChips}
+            </Box>
+          )}
         </Box>
       )
     // a one-line result of a press (closed t3, a restart's answer): a card with its Dismiss
@@ -1331,20 +1404,38 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
             { color: 'warning' },
           )
         : null
-    // ---- the Sessions toolbar card: folded = its title (with the sort named) and ack all; unfolded = the sort chips and Close all done ----
-    const toolbarOpen = isOpen(ui, 'toolbar', false)
+    // ---- the Sessions card (1.0.35): the CONTAINER of every session card. Folded (the default) it is ONE line, "Sessions (4) · sorted by thread ↓", with the chips "N needs you"
+    // (amber), "N unread" and "N hidden" (each only when above 0); unfolded it holds the sort chips, Hide all completed, the hidden chip, ack all, Close all done, the session cards
+    // and "show more". Nothing is drawn after it. ----
+    const toolbarOpen = isOpen(ui, 'toolbar', sessionsDflt)
     const dir = effectiveDir(cfgPane)
-    const toolbarTitle = `Sessions (${allItems.length})${v?.unread ? ` · ${v.unread} unread${hiddenUnread > 0 ? ` (${hiddenUnread} hidden)` : ''}` : ''} · sorted by ${SORT_LABEL[cfgPane.sort]} ${ARROW[dir]}`
+    const toolbarTitle = `Sessions (${allItems.length}) · sorted by ${SORT_LABEL[cfgPane.sort]} ${ARROW[dir]}`
     const hiddenLabel = hiddenShown ? `showing ${hiddenIds.size} hidden` : `${hiddenIds.size} hidden`
-    const toolbarCard = (
+    const unreadLabel = `${v?.unread ?? 0} unread${hiddenUnread > 0 ? ` (${hiddenUnread} hidden)` : ''}`
+    const hiddenChipLabel = `${hiddenIds.size} hidden`
+    const lineChips = [needsN > 0 ? needsLabel : '', v?.unread ? unreadLabel : '', !toolbarOpen && hiddenIds.size > 0 ? hiddenChipLabel : ''].filter(Boolean)
+    const sessionsCard = (
       <Box key="toolbar" {...cardProps()}>
         <Box key="tb-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
           <Box flexWrap="nowrap" flexShrink={1}>
-            {foldTitle('toolbar', toolbarTitle, false, (v?.unread ? 'ack all'.length + 3 : 0) + (hiddenIds.size > 0 ? hiddenLabel.length + 3 : 0))}
+            {foldTitle('toolbar', toolbarTitle, sessionsDflt, lineChips.reduce((n, c) => n + c.length + 1, 0))}
           </Box>
           <Box flexWrap="nowrap" columnGap={1}>
-            {hiddenIds.size > 0 && <Button key="hidden-chip" label={hiddenLabel} onPress={toggleRow('hiddenShown')} />}
-            {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
+            {needsN > 0 && (
+              <Text key="needs-line-chip" bold color="warning">
+                {needsLabel}
+              </Text>
+            )}
+            {!!v?.unread && (
+              <Text key="unread-chip" dimColor>
+                {unreadLabel}
+              </Text>
+            )}
+            {!toolbarOpen && hiddenIds.size > 0 && (
+              <Text key="hidden-line-chip" dimColor>
+                {hiddenChipLabel}
+              </Text>
+            )}
           </Box>
         </Box>
         {toolbarOpen && (
@@ -1356,9 +1447,11 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
               ))}
               <Button key="sort-dir" label={`${ARROW[dir]} ${dir}`} onPress={flipDir} />
             </Box>
-            {hideableNow.length > 0 && (
-              <Box flexWrap="wrap" columnGap={1}>
-                <Button key="hide-completed" label={`Hide all completed (${hideableNow.length})`} onPress={hideCompleted} />
+            {(hideableNow.length > 0 || hiddenIds.size > 0 || !!v?.unread) && (
+              <Box key="tb-tools" flexWrap="wrap" columnGap={1}>
+                {hideableNow.length > 0 && <Button key="hide-completed" label={`Hide all completed (${hideableNow.length})`} onPress={hideCompleted} />}
+                {hiddenIds.size > 0 && <Button key="hidden-chip" label={hiddenLabel} onPress={toggleRow('hiddenShown')} />}
+                {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
               </Box>
             )}
             {doneThreads.length >= 2 && closable.length > 0 && (
@@ -1366,60 +1459,26 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
                 <Button key="close-done" label={confirming(ui, 'close:done', now2) ? `Confirm close all done (${closable.length})` : `Close all done (${closable.length})`} onPress={closeDone} />
               </Box>
             )}
+            {v && !allItems.length ? card('empty', <Text dimColor>No threads yet.</Text>) : null}
+            {capped.shown.map(sessionRow)}
+            {capped.hidden > 0 || (showAllRows && allItems.length > cfgPane.maxSessions)
+              ? card(
+                  'sessions-cap',
+                  capped.hidden > 0 ? <Button key="sessions-more" plain label={`show more (${capped.hidden} older)`} onPress={toggleRow('sessionsAll')} /> : <Button key="sessions-less" plain label="show fewer" onPress={toggleRow('sessionsAll')} />,
+                )
+              : null}
           </Box>
         )}
       </Box>
     )
-    const moreOpen = isOpen(ui, 'more', false)
-    const moreCard = (
-      <Box key="more" {...cardProps()}>
-        {foldTitle('more', `More (${v?.goals.length ?? 0} goals, ${v?.projects.length ?? 0} projects, ${(v?.scripts.candidates ?? 0) + (v?.scripts.adopted ?? 0)} scripts)`, false)}
-        {moreOpen && (
-          <Box key="more-body" flexDirection="column">
-            {v?.goals.map(g => (
-              <Text key={`g-${g.id}`} color={TONE[g.tone]}>
-                {g.id} {g.tone}: {short(g.text, narrow ? 40 : 90)}
-              </Text>
-            ))}
-            {v && !v.projects.length && <Text dimColor>No projects registered.</Text>}
-            {v?.projects.map(p => (
-              <Text key={`p-${p.name}`}>
-                {p.name} · {p.private ? 'private' : 'open'} · {p.threads} thread(s)
-                {p.stale > 0 ? <Text color="yellow"> · {p.stale} rule area(s) stale</Text> : null}
-              </Text>
-            ))}
-            {!!v && (
-              <Text dimColor={!v.scripts.candidates && !v.scripts.adopted} color={v.scripts.needsUpdate ? 'yellow' : undefined}>
-                Scripts: {v.scripts.candidates} candidates, {v.scripts.adopted} adopted{v.scripts.needsUpdate ? `, ${v.scripts.needsUpdate} need an update` : ''}{v.scripts.waiting.length ? `, ${v.scripts.waiting.length} waiting for you` : ''}
-              </Text>
-            )}
-          </Box>
-        )}
-      </Box>
-    )
+    // the pane body: the header, Health (and the notice of a press, while there is one), then the Sessions card; NOTHING after it (the More card and the footer buttons are gone: New thread,
+    // Feedback export and Setup / repair are in the unfolded header card; goals, projects and scripts have their own tools, /lean-agent:goals and /lean-agent:scripts, and each thread's card its goal)
     return (
       <Box flexDirection="column">
         {headerCard}
         {noticeCard}
         {healthCard}
-        {toolbarCard}
-        {v && !allItems.length ? card('empty', <Text dimColor>No threads yet.</Text>) : null}
-        {capped.shown.map(sessionRow)}
-        {capped.hidden > 0 || (showAllRows && allItems.length > cfgPane.maxSessions)
-          ? card(
-              'sessions-cap',
-              capped.hidden > 0 ? <Button key="sessions-more" plain label={`show more (${capped.hidden} older)`} onPress={toggleRow('sessionsAll')} /> : <Button key="sessions-less" plain label="show fewer" onPress={toggleRow('sessionsAll')} />,
-            )
-          : null}
-        {moreCard}
-        {card(
-          'actions',
-          <Box flexWrap="wrap" columnGap={1}>
-            <Button key="new-thread" label="New thread" onPress={newThreadPress} />
-            <Button key="feedback" label={feedbackLabel} onPress={feedbackPress} />
-            <Button key="repair" label="Setup / repair" onPress={runSetup} />
-          </Box>,
-        )}
+        {sessionsCard}
       </Box>
     )
   })

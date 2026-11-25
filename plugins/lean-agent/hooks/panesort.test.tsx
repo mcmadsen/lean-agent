@@ -43,9 +43,11 @@ const setUp = async (ui: any) => {
 const order = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Button' })).map((b: any) => String(b.key)).filter((k: string) => k.startsWith('card-')).map((k: string) => k.slice(5))
 const keys = async (ui: any): Promise<string[]> => (await ui.findAll({ type: 'Button' })).map((b: any) => String(b.key))
 const btn = async (ui: any, key: string) => String((await ui.find({ type: 'Button', key }))?.text ?? '')
-const mount = async ($: any) => {
+// (1.0.35: the session cards are inside the Sessions card, folded on startup: `mount` unfolds it, once, unless the spec is about the fold itself)
+const mount = async ($: any, folded = false) => {
   const ui = await $.ui.mount(PANE as any)
   await setUp(ui)
+  if (!folded) await openToolbar(ui)
   return ui
 }
 
@@ -60,11 +62,12 @@ test('the default order is the thread number, the highest first (t90, t89, t7); 
   const w = world(on)
   threeThreads(w)
   await inDesk($)
-  const ui = await mount($)
-  expect(await order(ui)).toEqual(['t90', 't89', 't7'])
+  const ui = await mount($, true)
+  expect(await order(ui)).toEqual([]) // 1.0.35: the cards are inside the folded Sessions card
   expect(await toolbarTitle(ui)).toMatch(/^▸ Sessions \(3\) · sorted by thread ↓$/)
   expect((await paneConfig(w.host)).sort).toBe('thread')
   await openToolbar(ui)
+  expect(await order(ui)).toEqual(['t90', 't89', 't7'])
   expect(await btn(ui, 'sort-thread')).toBe('● thread ↓')
   expect(await btn(ui, 'sort-dir')).toBe('↓ desc')
   await ui.unmount()
@@ -265,10 +268,10 @@ test('Hide all completed (on the unfolded toolbar) hides every done and closed s
   states(w)
   await addActionRequest(w.host, 't5', REPLY)
   await inDesk($)
-  let ui = await mount($)
-  await ackAll(ui)
+  let ui = await mount($, true)
   expect(await ui.find({ type: 'Button', key: 'hide-completed' })).toBeFalsy() // the unfolded part only
   await openToolbar(ui)
+  await ackAll(ui)
   expect(await btn(ui, 'hide-completed')).toBe('Hide all completed (3)') // t3, t4, t6 (not t5: a decision waits)
   await ui.press({ key: 'hide-completed' })
   expect(await order(ui)).toEqual(expect.arrayContaining(['t1', 't2', 't5']))

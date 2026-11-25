@@ -87,6 +87,16 @@ export function capItems(items: Item[], max: number, keep: (i: Item) => boolean)
   return { shown, hidden: items.length - shown.length }
 }
 
+// the model chip of a folded session card (1.0.35): "sonnet/high", "haiku/low"; the effort abbreviated (low / med / high / xhigh / max), a leading "claude-" dropped; nothing when
+// neither is recorded (no "unknown" chip). The unfolded card says both in full.
+export const EFFORT_SHORT: Record<string, string> = { low: 'low', medium: 'med', med: 'med', high: 'high', xhigh: 'xhigh', max: 'max' }
+export function modelChip(model?: string, effort?: string): string {
+  const m = (model ?? '').trim().replace(/^claude-/, '')
+  const e = (effort ?? '').trim()
+  const es = e ? (EFFORT_SHORT[e.toLowerCase()] ?? e) : ''
+  return m && es ? `${m}/${es}` : m || es
+}
+
 // "just now", "5 min ago", "3 h ago", "2 d ago"
 export function ageText(at: number, now: number): string {
   if (!(at > 0)) return 'no activity yet'
