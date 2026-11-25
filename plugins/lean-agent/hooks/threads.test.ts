@@ -675,7 +675,7 @@ test('reopen of a closed thread starts a NEW session (claude --bg, never --resum
     { ts: 3, from: 't1', kind: 'report', text: 'branch fix-login, last commit abc1234, not pushed; next: open the PR', state: 'done' },
   ].map(r => JSON.stringify(r)).join('\n') + '\n')
   await call({ action: 'close', tN: 't1' })
-  await call({ action: 'send', tN: 't1', text: 'also bump the changelog' }) // queued while closed
+  await call({ action: 'send', tN: 't1', text: 'also bump the changelog', internal: true }) // queued while closed (the mod's own send: a desk send reopens it since 1.0.35)
   state.rows = []
   const r = await call({ action: 'reopen', tN: 't1' })
   expect(r.ok).toBe(true)
@@ -774,7 +774,7 @@ test('a huge report and queue cannot blow the handover past one argv string; a c
   h.files.set('/h/.lean-agent/desk/inbox.jsonl', JSON.stringify({ ts: 1, from: 't1', kind: 'report', text: 'Z'.repeat(200_000), state: 'done' }) + '\n')
   h.files.set('/h/.lean-agent/goals.json', JSON.stringify({ t1: { text: '', ts: 1 } }))
   expect((await call({ action: 'close', tN: 't1' })).text).toBe('t1 closed, goal cleared; no session in the list (already removed)')
-  for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: `${'q'.repeat(10_000)} ${n}` }) // (distinct texts: an identical unread one is deduped, msgstate.ts)
+  for (let n = 0; n < 40; n++) await call({ action: 'send', tN: 't1', text: `${'q'.repeat(10_000)} ${n}`, internal: true }) // (distinct texts: an identical unread one is deduped, msgstate.ts)
   state.rows = []
   expect((await call({ action: 'reopen', tN: 't1' })).ok).toBe(true)
   const prompt = bg[1]![bg[1]!.length - 1]!

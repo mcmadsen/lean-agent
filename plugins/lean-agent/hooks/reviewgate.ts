@@ -45,6 +45,17 @@ const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
 const hasName = (text: string, name: string) => !!name && new RegExp(`(?<![\\w$])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`).test(text)
 const base = (p: string) => p.split('/').pop() ?? p
 
+// a finding number in any form a reviewer writes it: 3, "3", "#3", "F3", "finding 3", {n|id|number|finding: 3}; null when it is none
+export function fixedNumber(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isInteger(v) && v > 0 ? v : null
+  if (typeof v === 'string') { const m = /^\s*(?:#|f|finding\s*#?|n)?\s*(\d+)\s*[.:)]?\s*$/i.exec(v); return m && Number(m[1]) > 0 ? Number(m[1]) : null }
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>
+    for (const k of ['n', 'id', 'number', 'finding']) if (o[k] !== undefined) { const r = fixedNumber(o[k]); if (r) return r }
+  }
+  return null
+}
+
 export function normalize(raw: unknown): Result {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   let n = 0
@@ -65,7 +76,7 @@ export function normalize(raw: unknown): Result {
     verdict: VERDICTS.includes(str(r.verdict).toLowerCase()) ? str(r.verdict).toLowerCase() : '', // anything else counts as missing
     goal: str(r.goal),
     findings,
-    fixed: Array.isArray(r.fixed) ? r.fixed.map(Number).filter(n => Number.isInteger(n) && n > 0) : [],
+    fixed: Array.isArray(r.fixed) ? r.fixed.map(fixedNumber).filter((n): n is number => n !== null) : [],
     gaps: objs(r.gaps),
     user_facing: objs(r.user_facing),
     risks: objs(r.risks),
@@ -122,7 +133,7 @@ export type Context = {
   declines: Decline[]
   second?: { symbol: string; candidate?: string }[] // the second opinion's candidates: each must be answered
 }
-export type Verdict = { green: boolean; reasons: string[]; open: Finding[]; declined: Finding[]; checks: Result['checks']; reuse: Result['reuse']; coverage: Result['coverage']; notes: string[] }
+export type Verdict = { green: boolean; reasons: string[]; open: Finding[]; declined: Finding[]; checks: Result['checks']; reuse: Result['reuse']; coverage: Result['coverage']; notes: string[]; unlisted?: Finding[]; uncovered?: Prep['tests'] }
 
 export function enforce(res: Result, ctx: Context): Verdict {
   const notes: string[] = []
@@ -222,9 +233,11 @@ export function enforce(res: Result, ctx: Context): Verdict {
     }
   }
   // an earlier open blocker/major does not just vanish: the reviewer lists it again or says it is fixed (`fixed`: its number)
+  const unlisted: Finding[] = []
   for (const ef of ctx.earlier?.open ?? []) {
     if (ef.severity !== 'blocker' && ef.severity !== 'major') continue
     if (isDeclined(ef, ctx.declines) || res.fixed.includes(ef.n) || res.findings.some(f => jaccard(words(f.text), words(ef.text)) >= 0.3)) continue
+    unlisted.push(ef)
     reasons.push(`earlier ${ef.severity} #${ef.n} (${label(ef).slice(0, 120)}) is neither listed again nor in "fixed": say whether it is fixed`)
   }
 
@@ -238,7 +251,7 @@ export function enforce(res: Result, ctx: Context): Verdict {
   if (res.verdict === 'needs-checks') reasons.push(`the reviewer needs checks run first (${checks.slice(0, 3).map(c => c.what.slice(0, 80)).join('; ') || 'none listed'}): run them, then review again`)
   if (res.verdict === 'changes-requested' && !blocking.length && !declined.length) reasons.push('the reviewer said changes-requested but lists no blocker or major finding: ask it to name them')
   if (!res.verdict) reasons.push('the reviewer result has no verdict (missing or unparsable JSON block)')
-  return { green: reasons.length === 0, reasons, open, declined, checks, reuse, coverage, notes }
+  return { green: reasons.length === 0, reasons, open, declined, checks, reuse, coverage, notes, ...(unlisted.length ? { unlisted } : {}), ...(missingCov.length ? { uncovered: missingCov } : {}) }
 }
 
 export const findingLine = (f: Finding) => `${f.n}. ${label(f)}${f.fix ? ` -> ${f.fix.slice(0, 160)}` : ''}`

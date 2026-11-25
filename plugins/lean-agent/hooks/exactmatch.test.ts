@@ -203,7 +203,7 @@ test('3: a question with no request header, and several options changed, say so'
   const a = await pressQ(s, q.replace(/\[request [^\]]*\]/, `(${v.id})`), v, 'Approve')
   expect(a.join(' ')).toContain('has no "[request <id>, check <code>]" part')
   const b = await bindAnswers(s.host, [{ question: q, options: optsOf(v).slice(0, 2) }], { [q]: 'Approve' }, s.tell)
-  expect(b.join(' ')).toContain('the options differ')
+  expect(b.join(' ')).toContain('label mismatch')
   const c = await bindAnswers(s.host, [{ question: q, options: optsOf(v), multiSelect: true }], { [q]: 'Approve' }, s.tell)
   expect(c.join(' ')).toContain('multiSelect')
   expect(await stateOfId(s, v.id)).toBe('pending')

@@ -24,6 +24,7 @@ import { runGranted } from './deskwrites'
 import { runOwnPr } from './ownpr'
 import { logRefusal } from './feedback'
 import { missingOutputs, notDoneText } from './donecheck'
+import { noteReport } from './repeatreport'
 import { digestable, digestText, partLines, partsOf, pointerText, prepareDigest, reportChars, sentenceCut } from './reportdigest'
 import type { Digest } from './reportdigest'
 
@@ -515,6 +516,9 @@ export async function threadTool(h: Host, id: string, name: string, i: any, send
       const rText = standing ? `${str(i.text)}\n(${standing})` : truth?.category ? truth.text : str(i.text)
       const rState = standing || action ? 'working' : str(i.state) || 'working' // (a request waiting for the user is no "blocked": the thread goes on with what does not need it)
       const rec = { ts, from: id, kind: 'report', text: rText, state: rState, ...(i.superseded === true ? { superseded: true } : {}), ...(approval ? { approval } : {}), ...(action ? { action } : {}) } satisfies DeskRec
+      // 1.0.35 (repeatreport.ts): the same "still waiting" report as the previous one is recorded and not forwarded to the desk again
+      const again = await noteReport(h, home, id, { state: rState, text: rText, ts, plain: !action && !standing && !approval && i.important !== true && i.superseded !== true && !rText.includes('?') })
+      if (again) return { ok: true, text: again }
       const failed = await writeReport(h, home, rec)
       if (failed) {
         await noteReportFailure(h, home, { ts, thread: id, error: failed, text: rec.text })

@@ -121,7 +121,7 @@ test('deliver-to-thread, approval-result messages, the chaser and scheduled send
   const { h, started } = setup()
   const direct: string[] = []
   setThreadSender(async (sid, text) => void direct.push(`${sid}|${text}`))
-  const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'The user approved your request a1-1 and the desk sent it.' })
+  const r = await leanThread(h.host, ROOT, { action: 'send', tN: 't1', text: 'The user approved your request a1-1 and the desk sent it.', internal: true }) // (the mod's own sends are internal; the desk's own send to a parked thread unparks it since 1.0.35: fix751.test.ts)
   setThreadSender(null)
   expect(r.text).toBe('t1 is parked: message queued, no wake')
   expect(direct).toEqual([])

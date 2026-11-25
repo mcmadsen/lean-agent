@@ -13,6 +13,11 @@ import { logHistory, threadOk } from './deskactions'
 import { recentPrompts } from './humanprompts'
 import { readRegistry } from './worktreereg'
 import { feedbackConfig, wantsFolder } from './feedbackdest'
+import { VERSION_LINE, draftBanner, readChangelog, stampVersion } from './draftnote'
+import { readJson } from './state'
+
+// the installed plugin version ('' when unknown): what a draft is compared with (draftnote.ts)
+const installedOf = async (h: Host, root: string | undefined): Promise<string> => (root ? String((await readJson<{ version?: string }>(h, `${root}/.claude-plugin/plugin.json`, {}).catch(() => ({}) as { version?: string })).version ?? '') : '')
 
 export const FOLDERS = ['Downloads', 'Desktop', 'Documents']
 const OK_KEY = (k: string) => `deliver.ok.${k}`
@@ -83,23 +88,31 @@ const keyOf = (thread: string, file: string, folder: string) => hex(`${thread}\n
 // under the user's home and not hidden or lean-agent's own state, and at most DRAFT_MAX bytes.
 export const DRAFT_MAX = 256 * 1024
 const mine = (home: string, real: string): boolean => under(real, `${leanDir(home)}/feedback-drafts`) || under(real, `${leanDir(home)}/feedback-export`)
-async function deliverDraft(h: Host, home: string, thread: string, real: string, i: DeliverIn): Promise<{ ok: boolean; text: string }> {
+// the configured feedback folder, checked: { dest, folderReal, label } or a refusal text (shared by the copy of a draft and by save-draft)
+async function feedbackTarget(h: Host, home: string, to: string | undefined, what: string): Promise<{ dest: { folder: string; label: string }; folderReal: string; label: string } | { text: string }> {
   const c = await feedbackConfig(h, home)
-  if (!wantsFolder(c.dest)) return { ok: false, text: `feedback.destination is ${c.dest}: a feedback draft is copied only when it includes folder (lean_config set feedback.destination folder, and feedback.folder <path>). Nothing was copied` }
-  if (!c.folder) return { ok: false, text: 'feedback.folder is not set (lean_config set feedback.folder ~/Downloads). Nothing was copied' }
-  if (i.to && i.to.trim() && i.to.trim().toLowerCase() !== 'feedback') {
-    const asked = await destination(h, home, i.to)
+  if (!wantsFolder(c.dest)) return { text: `feedback.destination is ${c.dest}: a feedback draft is ${what} only when it includes folder (lean_config set feedback.destination folder, and feedback.folder <path>). Nothing was ${what}` }
+  if (!c.folder) return { text: `feedback.folder is not set (lean_config set feedback.folder ~/Downloads). Nothing was ${what}` }
+  if (to && to.trim() && to.trim().toLowerCase() !== 'feedback') {
+    const asked = await destination(h, home, to)
     const conf = await destination(h, home, c.folder)
-    if (!('folder' in asked) || !('folder' in conf) || asked.folder !== conf.folder) return { ok: false, text: `a feedback draft goes only to feedback.folder (${c.folder}); to: ${i.to.slice(0, 80)} is another folder: leave to out. Nothing was copied` }
+    if (!('folder' in asked) || !('folder' in conf) || asked.folder !== conf.folder) return { text: `a feedback draft goes only to feedback.folder (${c.folder}); to: ${to.slice(0, 80)} is another folder: leave to out. Nothing was ${what}` }
   }
   const dest = await destination(h, home, c.folder)
-  if (!('folder' in dest)) return { ok: false, text: `feedback.folder ${c.folder} is refused: ${dest.text}. Nothing was copied` }
+  if (!('folder' in dest)) return { text: `feedback.folder ${c.folder} is refused: ${dest.text}. Nothing was ${what}` }
   const folderReal = await realPath(h, dest.folder)
   const homeReal = await realPath(h, home)
-  if (!under(folderReal, homeReal) || folderReal === homeReal || under(folderReal, await realPath(h, leanDir(home)))) return { ok: false, text: `feedback.folder ${c.folder} resolves outside the user's home or into lean-agent's own state (${folderReal}): refused. Nothing was copied` }
+  if (!under(folderReal, homeReal) || folderReal === homeReal || under(folderReal, await realPath(h, leanDir(home)))) return { text: `feedback.folder ${c.folder} resolves outside the user's home or into lean-agent's own state (${folderReal}): refused. Nothing was ${what}` }
   const fst = await h.fs.stat(folderReal).catch(() => null)
-  if (!fst) return { ok: false, text: `feedback.folder ${c.folder} does not exist. Nothing was copied` }
-  if (fst.kind !== 'dir' && fst.kind !== 'directory') return { ok: false, text: `feedback.folder ${c.folder} is not a folder. Nothing was copied` }
+  if (!fst) return { text: `feedback.folder ${c.folder} does not exist. Nothing was ${what}` }
+  if (fst.kind !== 'dir' && fst.kind !== 'directory') return { text: `feedback.folder ${c.folder} is not a folder. Nothing was ${what}` }
+  return { dest, folderReal, label: c.folder }
+}
+async function deliverDraft(h: Host, home: string, thread: string, real: string, i: DeliverIn): Promise<{ ok: boolean; text: string }> {
+  const tg = await feedbackTarget(h, home, i.to, 'copied')
+  if ('text' in tg) return { ok: false, text: tg.text }
+  const { dest, folderReal } = tg
+  const c = { folder: tg.label }
   const st = await h.fs.stat(real).catch(() => null)
   if (!st || st.kind !== 'file') return { ok: false, text: `${real} is not a file` }
   if (typeof st.size === 'number' && st.size > DRAFT_MAX) return { ok: false, text: `${baseName(real)} is ${st.size} bytes: a feedback draft is at most ${DRAFT_MAX} bytes. Nothing was copied` }
@@ -115,11 +128,45 @@ async function deliverDraft(h: Host, home: string, thread: string, real: string,
     return { ok: false, text: /operation not permitted|permission denied|EPERM|EACCES/i.test(bad) ? eperm(c.folder) : `copy to ${c.folder} failed: ${bad.trim().slice(0, 160) || `exit ${r.exitCode}`}` }
   }
   await logHistory(h, thread || 't0', { kind: 'delivered', file: real, to: target, by: 'config feedback.folder' })
-  return { ok: true, text: `copied ${baseName(real)} to ${target}${final !== name ? ` (${name} existed: nothing was overwritten)` : ''}. Tell the user the full path in one line` }
+  // 1.0.35: a draft is an old report: when it was written against another version than the installed one, the reply says so (draftnote.ts)
+  const text = String(await h.fs.read(real).catch(() => ''))
+  const inst = await installedOf(h, i.root)
+  const note = inst ? draftBanner({ text, title: (text.split('\n').find(l => l.trim()) ?? '').replace(/^#+\s*/, ''), installed: inst, log: await readChangelog(h, i.root!) }) : ''
+  return { ok: true, text: `copied ${baseName(real)} to ${target}${final !== name ? ` (${name} existed: nothing was overwritten)` : ''}. Tell the user the full path in one line${note ? `. Draft note: ${note}` : ''}` }
 }
 const dirName = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
 
-export type DeliverIn = { tN?: string; file?: string; to?: string; name?: string }
+// 1.0.35 `lean_thread save-draft` {text, name?}: the DESK writes a draft (text it composed) into feedback.folder without a thread (a thread costs a 49k first request for one small file).
+// The same guards as the copy of a draft: needs feedback.destination folder + feedback.folder (the user's one-time choice), ONE file a call, never overwritten (-2, -3 ...), inside the folder only
+// (a plain name from a safe pattern, real paths compared), the folder under the user's home and not hidden or lean-agent's own state, at most DRAFT_MAX bytes, a .md or .txt file.
+const DRAFT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.(md|txt)$/
+export async function saveDraft(h: Host, i: { text?: string; name?: string; to?: string; root?: string }): Promise<{ ok: boolean; text: string }> {
+  const home = await homeDir(h)
+  // a draft the mod saves carries the plugin version it was written against (draftnote.ts): a "Plugin version: lean-agent X" line under its title when it has none
+  const inst = await installedOf(h, i.root)
+  const body = typeof i.text === 'string' ? (inst && !VERSION_LINE.test(i.text) && i.text.trim() ? stampVersion(i.text, inst) : i.text) : ''
+  if (!body.trim()) return { ok: false, text: 'save-draft needs text: the draft to write. Nothing was saved' }
+  const bytes = new TextEncoder().encode(body).length
+  if (bytes > DRAFT_MAX) return { ok: false, text: `the draft is ${bytes} bytes: a feedback draft is at most ${DRAFT_MAX} bytes. Nothing was saved` }
+  const name = (i.name ?? '').trim() || 'feedback-draft.md'
+  if (!DRAFT_NAME.test(name) || name.includes('..')) return { ok: false, text: 'name must be a plain file name of letters, digits, . _ - ending in .md or .txt (no slash, not hidden, no ..). Nothing was saved' }
+  const tg = await feedbackTarget(h, home, i.to, 'saved')
+  if ('text' in tg) return { ok: false, text: tg.text }
+  const final = await freeName(h, tg.dest.folder, name)
+  if (!final) return { ok: false, text: `${tg.label} already holds ${name} and 98 numbered copies: refused` }
+  const target = `${tg.folderReal}/${final}`
+  if (!under(target, tg.folderReal) || dirName(target) !== tg.folderReal) return { ok: false, text: 'the target is not inside feedback.folder: refused. Nothing was saved' }
+  try {
+    await h.fs.write(target, body.endsWith('\n') ? body : `${body}\n`)
+  } catch (e) {
+    const bad = String((e as Error)?.message ?? e)
+    return { ok: false, text: /operation not permitted|permission denied|EPERM|EACCES/i.test(bad) ? eperm(tg.label) : `saving to ${tg.label} failed: ${bad.slice(0, 160)}` }
+  }
+  await logHistory(h, 't0', { kind: 'delivered', file: '(text from the desk)', to: target, by: 'config feedback.folder' })
+  return { ok: true, text: `saved ${bytes} bytes as ${target}${final !== name ? ` (${name} existed: nothing was overwritten)` : ''}. Tell the user the full path in one line` }
+}
+
+export type DeliverIn = { tN?: string; file?: string; to?: string; name?: string; root?: string /* the plugin folder: the installed version and the CHANGELOG for the draft banner (draftnote.ts) */ }
 export async function deliver(h: Host, i: DeliverIn): Promise<{ ok: boolean; text: string; data?: unknown }> {
   const thread = (i.tN ?? '').trim()
   const home = await homeDir(h)

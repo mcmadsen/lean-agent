@@ -212,7 +212,7 @@ test('send to a DONE thread restarts it by script with its handover and the text
   expect(bg[0]!.at(-1)).toContain('work item: 4210')
   expect(bg[0]!.at(-1)).toContain('also check the staging data')
   expect(row('t1').finished).toBeUndefined()
-  // closed: a follow-up reopens (a thread with no work item or PR stays closed, as before)
+  // closed: a follow-up reopens (since 1.0.35 a thread with no work item or PR too: see the end of this spec)
   await call({ action: 'close', tN: 't1' })
   expect(row('t1').state).toBe('closed')
   bg.length = 0
@@ -223,8 +223,12 @@ test('send to a DONE thread restarts it by script with its handover and the text
   expect(bg.at(-1)!.at(-1)).toContain('one more question about the fix')
   await call({ action: 'new', title: 'plain', text: 'nothing linked' })
   await call({ action: 'close', tN: 't2' })
-  const p = await call({ action: 'send', tN: 't2', text: 'hello' })
+  const p = await call({ action: 'send', tN: 't2', text: 'hello', internal: true } as any) // (the mod's own send: stays closed)
   expect(p.text).toContain('t2 is closed: message queued, no wake')
+  // 1.0.35 one continue path: the desk's send reopens a closed thread that has no work item or PR too (closed by mistake)
+  const q = await call({ action: 'send', tN: 't2', text: 'hello again' })
+  expect(q.text).toContain('t2 was closed: reopened as a new session')
+  expect(row('t2').state).toBe('open')
 })
 
 test('a send of the mod itself (internal: a chaser, a timer, a tell) never reopens a closed thread that has a work item; the user\'s send does', { timeoutMs: 20_000 }, async () => {

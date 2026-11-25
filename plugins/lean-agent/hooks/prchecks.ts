@@ -3,7 +3,9 @@
 import { homeDir, leanDir, readJson, threadsDir } from './state'
 import type { Host } from './state'
 import { checkOn } from './prvote'
+import { checkPrText, findingsText, isAdoUrl } from './adotext'
 import { guideOf, guideText, lintPr } from './prguide'
+import { skeletonOf, storedWorkItem, storeIntent, threadRepoDir } from './prready'
 
 export const SIZE_LINES = 400
 export const SIZE_FILES = 15
@@ -87,7 +89,7 @@ export async function greenRun(h: Host, thread: string, sha: string): Promise<Ru
 
 // ---- the checks before a PR is created ---------------------------------------------------------------------------------------------------------
 export type CreateIn = { dir: string; project: string; thread: string; sha: string; remote: string; base: string; title: string; body: string; draft: boolean | undefined }
-export type CreateOut = { ok: false; text: string } | { ok: true; draft: boolean; notes: string[] }
+export type CreateOut = { ok: false; text: string } | { ok: true; draft: boolean; notes: string[]; title?: string; body?: string /* the text that goes out when the Azure DevOps text rules converted something (adotext.ts) */ }
 export async function createChecks(h: Host, a: CreateIn): Promise<CreateOut> {
   const cfg = await readJson<unknown>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
   const notes: string[] = []
@@ -95,7 +97,7 @@ export async function createChecks(h: Host, a: CreateIn): Promise<CreateOut> {
   if (checkOn(cfg, 'pr', 'guide')) {
     const { guide } = await guideOf(h, a.project, a.dir)
     const missing = lintPr(guide, { title: a.title, body: a.body }, { evidence: green?.line })
-    if (missing.length) return { ok: false, text: `the PR text does not follow this repo's guidelines, so nothing was pushed (the approval is kept): ${missing.join('; ')}.\n${guideText(guide)}\nFix the title and the description (lean_run {pr-guide: {title, body}} checks them) and report again.` }
+    if (missing.length) return { ok: false, text: `the PR text does not follow this repo's guidelines, so nothing was pushed (the approval is kept): ${missing.join('; ')}.\n${guideText(guide)}\nA skeleton from the repo's template:\n${skeletonOf(guide, { title: a.title, body: a.body, workItem: await storedWorkItem(h, await homeDir(h), a.thread).catch(() => null) })}\nFix the title and the description (lean_run {pr-guide: {title, body}} checks them) and report again.` }
   }
   const range = async (...extra: string[]): Promise<string | null> => (await git(h, a.dir, 'diff', ...extra, `${a.remote}/${a.base}...${a.sha}`)) ?? (await git(h, a.dir, 'diff', ...extra, `${a.base}...${a.sha}`))
   if (checkOn(cfg, 'pr', 'size')) {
@@ -115,19 +117,23 @@ export async function createChecks(h: Host, a: CreateIn): Promise<CreateOut> {
     draft = true
     notes.push(`opened as a DRAFT: no green test run is recorded for ${a.sha.slice(0, 8)} (lean_run); say draft: false to open it as ready`)
   }
-  return { ok: true, draft, notes }
+  // 1.0.35 (adotext.ts): on an Azure DevOps origin "#<id>" is a work item, "!<id>" a PR; mentions, hashes, emoji, HTML and the 4000-character description limit are looked at too:
+  // findings are notes (the push answer), a known PR "#id" is written "!id" only with config ado.textRules convert. GitHub origins are not checked.
+  let out: { title?: string; body?: string } = {}
+  const origin = ((await git(h, a.dir, 'remote', 'get-url', a.remote)) ?? '').trim()
+  if (origin && isAdoUrl(origin)) {
+    const r = await checkPrText(h, a.thread, { title: a.title, body: a.body })
+    if (r.findings.length) notes.push(findingsText(r.findings))
+    if (r.title !== a.title || r.body !== a.body) out = { title: r.title, body: r.body }
+  }
+  return { ok: true, draft, notes, ...out }
 }
 
 // `lean_run {pr-guide: true | {title, body}}`: the repo's guidelines, and the lint of a PR text when one is given (no push, no forge)
 export async function runPrGuide(h: Host, thread: string, input: unknown, cwd: unknown): Promise<string> {
   const home = await homeDir(h)
   const t = await readJson<{ project?: string }>(h, `${threadsDir(home)}/${thread}/thread.json`, {}).catch(() => ({}) as { project?: string })
-  let dir = typeof cwd === 'string' && cwd.startsWith('/') ? cwd : ''
-  if (!dir) {
-    const reg = await readJson<Record<string, { path?: unknown; thread?: unknown }>>(h, `${leanDir(home)}/worktrees.json`, {}).catch(() => ({}))
-    const mine = Object.values(reg ?? {}).filter(w => w && w.thread === thread && typeof w.path === 'string')
-    dir = mine.length ? String(mine[mine.length - 1]!.path) : ''
-  }
+  const dir = await threadRepoDir(h, home, thread, cwd)
   if (!dir) throw new Error('pr-guide needs the repository folder: pass cwd (the worktree) or register the worktree first')
   const { guide, cached } = await guideOf(h, t.project || dir, dir)
   const lines = [guideText(guide, cached)]
@@ -135,8 +141,15 @@ export async function runPrGuide(h: Host, thread: string, input: unknown, cwd: u
   if (o) {
     const head = ((await git(h, dir, 'rev-parse', 'HEAD')) ?? '').trim()
     const green = head ? await greenRun(h, thread, head) : null
-    const missing = lintPr(guide, { title: typeof o.title === 'string' ? o.title : '', body: typeof o.body === 'string' ? o.body : '' }, { evidence: green?.line })
+    const text = { title: typeof o.title === 'string' ? o.title : '', body: typeof o.body === 'string' ? o.body : '' }
+    await storeIntent(h, thread, text.title, text.body) // the lean_report ready check lints this text again (prready.ts)
+    const missing = lintPr(guide, text, { evidence: green?.line })
     lines.push(missing.length ? `lint: refused:\n- ${missing.join('\n- ')}` : 'lint: the title and the description follow the guidelines')
+    const origin = ((await git(h, dir, 'remote', 'get-url', 'origin')) ?? '').trim()
+    if (origin && isAdoUrl(origin)) {
+      const ado = await checkPrText(h, thread, text) // (adotext.ts: "#<id>" is a work item here, a PR is "!<id>"; mentions, hashes, emoji, HTML, 4000 characters)
+      if (ado.findings.length) lines.push(findingsText(ado.findings))
+    }
   }
   const green = ((await git(h, dir, 'rev-parse', 'HEAD')) ?? '').trim()
   const run = green ? await greenRun(h, thread, green) : null

@@ -11,6 +11,7 @@ import { BUSY_MAX_MS, DEFERRED_THREAD_TOOLS, THREAD_TOOLS, markConsumed, markDel
 import { decide, workerBrief, workerJob } from './guard'
 import { bindAnswers, resetActions, runPrChanges, runStanding, sweepExpired, withdrawByWords } from './deskactions'
 import { noteRun, runPrGuide } from './prchecks'
+import { readyCheck } from './prready'
 import { holdLines, holdsTick } from './sendhold'
 import { isHumanPrompt, recordHumanPrompt } from './humanprompts'
 import { auditStanding, bindOfferAnswers, revokeByWords, runGranted } from './deskwrites'
@@ -78,6 +79,7 @@ import { clearDenied, fallbackUsed, hitBudget, isSmall, launchOf, liveWorkers, l
 import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRec, worktreeRoots } from './denial'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
+import { GATES_RE, runGates } from './gates'
 import { runGet } from './forgeget'
 import { contextReport, sessionBreakdown } from './contextstat'
 import { briefHint } from './briefsize'
@@ -106,6 +108,8 @@ import { handoverReport, setPreflight } from './handover'
 import { preflightFor } from './preflight'
 import { currentTasks, noteEdited, noteTasks, resetEdited, takeEdited } from './snapshot'
 import { asksRestart, checkpointTick, noteWarn, requestCheckpoint } from './checkpoint'
+import { modelChangeTick } from './modelnext'
+import { commitHint } from './adotext'
 import { recordWindows, windowTick } from './windows'
 import { softBudgetTick, softCheckpointTick, windowParkTick } from './budgettick'
 
@@ -236,7 +240,7 @@ const MEMORY = 'lean_memory' // the desk's memory tool (memorytool.ts); a thread
 const SCHEMA = {
   type: 'object',
   properties: {
-    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'restart', 'keep', 'keep-going', 'action-cancel', 'withdraw-action', 'find', 'ask', 'report', 'messages', 'dismiss', 'rule', 'set', 'limit', 'budget'] },
+    action: { type: 'string', enum: ['new', 'send', 'wake', 'close', 'park', 'reopen', 'list', 'resume', 'start', 'projects', 'project-add', 'project-remove', 'project-private', 'profile', 'goal-set', 'goal-clear', 'approve-push', 'push', 'action-list', 'approve-action', 'allow-writes', 'allow-ask', 'revoke-writes', 'allow-self-edit', 'revoke-self-edit', 'deliver', 'save-draft', 'restart', 'keep', 'keep-going', 'action-cancel', 'withdraw-action', 'find', 'ask', 'report', 'messages', 'dismiss', 'rule', 'set', 'limit', 'budget'] },
     priority: { type: 'string', enum: ['low', 'normal', 'urgent'], description: 'new: low waits and is parked while the 5h window is hot; urgent starts even above the block line' },
     tN: { type: 'string', description: 'thread id like t3 (every action except new, list, project-*)' },
     message: { type: 'string', description: 'alias of text' },
@@ -661,14 +665,14 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
       })
       // a covered reply held for actions.holdSeconds (sendhold.ts): sent when its window ends or the user pressed Send now; a thread that is no longer open sends nothing
       every($, 5_000, 'desk', async host2 => {
-        const notes = await holdsTick(host2, { run: async id => (await runStanding(host2, id)) ?? (await runGranted(host2, id)), tell: (thread, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined) })
+        const notes = await holdsTick(host2, { run: async id => (await runStanding(host2, id)) ?? (await runGranted(host2, id)), tell: (thread, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-hold-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
       // the chaser: a goal untouched for an hour gets one status message to its open thread
-      every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
+      every($, 60_000, 'desk', async host2 => void (await chase(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text, internal: true }))))
       // usage limit: a thread blocked by it is resumed once, two minutes after the reset (docs/usage-limit-resume.md; config desk.autoResume)
       every($, 60_000, 'desk', async host2 => {
         const did = await limitTick(host2, {
@@ -690,7 +694,7 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         for (const line of await guardTick(host2)) $.ui.log(`lean-agent: ${line}`, { to: 'debug' })
       })
       // scheduled sends: due lines of scheduled.jsonl go to their thread while the desk runs
-      every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text }))))
+      every($, 30_000, 'desk', async host2 => void (await runSchedule(host2, (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text, internal: true }))))
       // a thread over its context limit (checkpointed at its turn end, autorestart.ts) is restarted by script once its session has been idle
       // 20 s: a notice for the desk's next prompt and a toast, no desk model turn (config threads.autoRestart, default on)
       every($, 30_000, 'desk', async host2 => {
@@ -724,6 +728,14 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
         const notes = await checkpointTick(host2, { agents: async () => (await listAgents(host2)) as any, restart: (id, why, force, text) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why, force, text }) })
         for (const n of notes) {
           $.ui.notify(n.text, { key: `lean-checkpoint-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // a model / effort stored with `lean_thread set tN model|effort` is applied by ONE restart from the handover once the thread's session is idle (modelnext.ts)
+      every($, 15_000, 'desk', async host2 => {
+        const notes = await modelChangeTick(host2, await homeDir(host2), { agents: async () => (await listAgents(host2)) as any, restart: (id, why) => leanThread(host2, $.plugin.root, { action: 'auto-restart', tN: id, reason: why }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-modelnext-${n.id}` })
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
@@ -974,7 +986,7 @@ export const register: Register = on => {
     if (role.kind === 'desk') {
       // a standing approval that rests on no press of yours is revoked and flagged (FIX row); a request nobody decided in time leaves unsent and says so (deskactions.ts)
       await soft($, 'standing audit', async () => { await auditStanding(host) })
-      await soft($, 'request expiry', async () => { await sweepExpired(host, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)) })
+      await soft($, 'request expiry', async () => { await sweepExpired(host, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)) })
       // the desk's next prompt says so once, whichever session did it (the pane lists the notice until then)
       const said = await takeNotice(host, 'ledger-rotation')
       if (said) pending.push(`[lean-agent] ${said}`)
@@ -1313,9 +1325,9 @@ export const register: Register = on => {
     const host = hostOf($)
     setThreadSender((sid, text) => $.session.send({ to: { sessionId: sid }, text }))
     try {
-      const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined))
+      const notes = await bindAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined))
       // the same for the other two human answers: "Let tN edit its worktree itself" (selfedit.ts) and "Save <file> to <folder>?" (deliver.ts)
-      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
+      notes.push(...(await bindSelfEditAnswers(host, e.questions, r?.result?.answers, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)).catch(() => [])), ...(await bindDeliverAnswers(host, e.questions, r?.result?.answers).catch(() => [])))
       notes.push(...(await bindConfigAnswers(host, e.questions, r?.result?.answers).catch(() => []))) // an Approve of lean_config's own question for a safety-loosening setting (configtool.ts)
       // and an Allow to a grant offer (deskwrites.ts bindOfferAnswers): the user's dialog answer is the written yes; the PR or work item it names becomes the thread's own
       const offer = await bindOfferAnswers(host, e.questions, r?.result?.answers).catch(() => ({ notes: [] as string[], granted: [] as { thread: string; target: undefined }[] }))
@@ -1566,6 +1578,11 @@ export const register: Register = on => {
     if (e.agentId) return { result: "lean_run is the thread's own tool: a worker runs its one step with its own tools", isError: true } as any
     try {
       const home = await homeDir(hostOf($))
+      if (GATES_RE.test(String(e.command ?? '').trim())) { // the project's gates by the mod, no model call (gates.ts)
+        const g = await runGates(hostOf($), { command: String(e.command), cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : undefined, home })
+        await noteRun(hostOf($), role.id, typeof e.cwd === 'string' ? e.cwd : '', g.ok ? 0 : 1, g.text.split('\n')[0] ?? '')
+        return { result: g.text, ...(g.ok ? {} : { isError: true as const }) } as any
+      }
       const r = await runSummary(hostOf($), { command: String(e.command ?? ''), cwd: typeof e.cwd === 'string' && e.cwd ? e.cwd : undefined, home })
       await noteRun(hostOf($), role.id, typeof e.cwd === 'string' ? e.cwd : '', r.exit, r.body.split('\n')[0] ?? '') // the commit this run was on (a PR without a green run opens as a draft)
       return { result: runText(r), ...(r.exit === 0 ? {} : { isError: true as const }) } as any
@@ -1605,7 +1622,9 @@ export const register: Register = on => {
         const r = await requestCheckpoint(hostOf($), role.id, { sid, next: announcedNext(String(e.text)) ?? 'continue your task from scratch/notes.md and your last report', source: 'report', tokens: lastTokens ?? undefined, snapshot: { edited: takeEdited(), tasks: currentTasks() } })
         cp = r.text
       }
-      return { result: [out.text, ask, cp].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
+      // a report that says the work is ready to push gets the PR guide check of the intended text and, when it fails, the template skeleton (prready.ts): fixed before the push is refused
+      const ready = t.name === 'lean_report' && out.ok && !e.agentId ? await readyCheck(hostOf($), role.id, { state: String(e.state ?? ''), text: String(e.text ?? ''), cwd: e.cwd }).catch(() => null) : null
+      return { result: [out.text, ask, cp, ready].filter(Boolean).join('\n'), ...(out.ok ? {} : { isError: true as const }) } as any
     })
   }
 
@@ -1719,6 +1738,11 @@ export const register: Register = on => {
       const hint = await briefHint(host, String(e.prompt ?? ''), octx.threadDir).catch(() => null)
       if (hint) r = { ...r, context: [...(r?.context ?? []), hint] }
     }
+    // a `git commit -m "... #<id> ..."` on an Azure DevOps origin: "#<id>" is a WORK ITEM there, a PR is "!<id>" (adotext.ts): one hint line, never a refusal
+    if (role.kind === 'thread' && e.tool === 'Bash' && r?.deny === undefined && !r?.isError && typeof e.command === 'string' && /\bcommit\b/.test(e.command)) {
+      const line = await commitHint(host, role.id, e.command, typeof cwd === 'string' ? cwd : '').catch(() => '')
+      if (line) r = { ...r, context: [...(r?.context ?? []), line] }
+    }
     // execution model: the desk's results and a worker's Agent result are cut (head + tail, the full text a file), config deskToolResultChars / agentResultChars
     if (octx && r?.deny === undefined && !e.agentId && !launch?.async) { // (an async launch has no report to cut yet)
       const oc = await loadOrch(host).catch(() => ({ on: false, deskChars: 0, agentChars: 0 }))
@@ -1831,7 +1855,7 @@ export const register: Register = on => {
       // the user's own typed words (the engine's origin 'composer' / 'bridge', never an injected prompt): what an advance accept rests on (humanprompts.ts)
       // (and the user's own "stop writes" / "revoke" takes the written approvals back, deskwrites.ts)
       const inApp = await $.session.surfaces().then((ss: readonly string[]) => ss.some(x => x !== 'terminal')).catch(() => false) // the desktop app's typed turn is origin 'sdk'
-      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await withdrawByWords(host, e.text, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text }).then(() => undefined)).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
+      if (!e.agentId && (await recordHumanPrompt(host, e, inApp).catch(() => false))) { await revokeByWords(host, e.text).catch(() => undefined); await withdrawByWords(host, e.text, (thread, text) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)).catch(() => undefined); await revokeSelfEditByWords(host, e.text).catch(() => undefined) }
       // the first typed message of a freshly restarted desk: a lone "." means "continue from the handover" (dotcontinue.ts; the words above saw the typed text)
       const dot = await dotStep(host, e, lastSid, inApp)
       if (dot) e = { ...e, text: dot }

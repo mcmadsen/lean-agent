@@ -164,12 +164,15 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
   const changed = new Set<string>()
   let oldP: string | null = null
   let newP: string | null = null
+  let headA: string | null = null // the a/ path of the current "diff --git" header
+  const deletedFiles: string[] = []
   let oldLine = 0
   let newLine = 0
   let inHunk = false
   const note = (path: string, t: string, why: string) => { const m = tests.get(path) ?? new Map<string, string>(); tests.set(path, m); if (!m.has(t) || why === 'skipped' || why === 'focused') m.set(t, why) }
   for (const line of diff.split('\n')) {
-    if (line.startsWith('diff --git ')) { inHunk = false; oldP = null; newP = null; continue }
+    if (line.startsWith('diff --git ')) { inHunk = false; oldP = null; newP = null; headA = /^diff --git a\/(.+) b\/.+$/.exec(line)?.[1] ?? null; continue }
+    if (!inHunk && line.startsWith('deleted file mode') && headA) { deletedFiles.push(headA); continue }
     if (!inHunk && line.startsWith('--- ')) { oldP = fileOf(line, '---'); continue }
     if (!inHunk && line.startsWith('+++ ')) { newP = fileOf(line, '+++'); if (newP) changed.add(newP); else if (oldP) changed.add(oldP); continue }
     const hm = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))?/.exec(line)
@@ -274,6 +277,8 @@ export async function analyzeDiff(diff: string, readBase: (path: string) => Prom
       if (owner) note(f, owner, 'assertions changed')
     }
   }
+  // a deleted test file whose tests have no recognisable title still needs one entry (named by its file)
+  for (const f of deletedFiles) if (isTestPath(f) && !tests.has(f)) note(f, f.split('/').pop() ?? f, 'file deleted')
   // a rename whose assertions also changed still needs a coverage entry; a pure rename does not
   out.renamed = out.renamed.filter(r => tests.get(r.path)?.get(r.from) !== 'assertions changed')
   for (const [path, m] of tests) for (const [test, why] of m) out.tests.push({ path, test, why })

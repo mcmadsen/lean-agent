@@ -36,6 +36,7 @@ import { checkOn, severityWord, withSeverity } from './prvote'
 import { checkMove } from './owntask'
 import { createCheck } from './workitemflow'
 import { FALLBACK_KINDS, fallbackText } from './actionfallback'
+import { checkActionText, findingLines } from './adotext'
 
 export const ACTION_TTL_MS = 24 * 60 * 60 * 1000 // the default wait (config actions.pendingHours; was 2 h before 1.0.31)
 export const ACTIONS_MAX = 40 // requests kept in the store
@@ -584,12 +585,12 @@ export function reviewListing(items: ReviewItem[], cutAt?: number): string {
 // `exit` (1.0.31): how and why the request left the pending list (set once, never removed: the record stays as evidence)
 // 1.0.33 'failed': the server answered the send with an error status (HTTP 400 ...) and nothing was written: "failed (HTTP 400): <short body>", never approved-and-waiting again; the thread asks with a NEW request
 export type RequestExit = { kind: 'executed' | 'denied' | 'expired' | 'withdrawn' | 'edit' | 'failed'; reason: string; ts: number }
-export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string; exit?: RequestExit }
+export type ActionRequest = { id: string; thread: string; kind: ActionKind; params: Params; why: string; hash: string; ts: number; exp: number; sig: string; exit?: RequestExit; ado?: string[] /* 1.0.35: the Azure DevOps text findings of this request (adotext.ts), shown before the user approves; display only, not signed */ }
 // `via` (1.0.31): where the answer came from when it was not the plain press of an option: the user's typed words in the dialog
 export type Answer = { id: string; hash: string; answer: 'approve' | 'deny' | 'edit'; by: 'ask' | 'pane' | 'standing'; ts: number; sig: string; via?: 'typed' }
 export type ActionState = 'pending' | 'approved' | 'denied' | 'edit' | 'used' | 'expired' | 'withdrawn' | 'failed'
 // a request as the desk and the pane see it (never carries a signature)
-export type ActionView = { id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */; fallback?: string /* this kind failed twice: a command for the user's own shell and why the thread cannot run it (actionfallback.ts) */ }
+export type ActionView = { notes?: string[] /* Azure DevOps text findings (adotext.ts) */; id: string; thread: string; kind: ActionKind; why: string; headline: string; text: string; target: string; hash: string; ts: number; exp: number; state: ActionState; writes?: number /* a batch or a reply with a status: how many writes one Approve covers */; standing?: boolean /* a status change that may carry the third choice (standing approval for this PR) */; anchors?: number /* inline comments whose line was checked against the PR diff */; items?: ReviewItem[] /* a review batch: its comments */; cont?: boolean /* a failing item does not stop the rest */; then?: string /* a review batch ending with a vote: what it does after the comments */; fallback?: string /* this kind failed twice: a command for the user's own shell and why the thread cannot run it (actionfallback.ts) */ }
 
 // ---- standing approval: ONLY a status change carries it (never text) ------------------------------------------------------------------------
 // The kinds and statuses that can be covered: a thread status to fixed / closed / active, a GitHub review thread resolved. Never a reply, a comment, a
@@ -786,7 +787,7 @@ export async function viewOf(h: Host, r: ActionRequest, now: number): Promise<Ac
   if (!plan) return null
   // an inline comment's line was read against the PR's diff before this request existed (addActionRequest): the card and the question say so
   const anchors = (plan.steps ?? [plan]).filter(s => s.anchor).length
-  return { id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.then ? { then: plan.then } : {}), ...(plan.cont ? { cont: true } : {}), ...(await fallbackOf(h, r).then(f => (f ? { fallback: f } : {}), () => ({}))) }
+  return { ...(r.ado?.length ? { notes: r.ado } : {}), id: r.id, thread: r.thread, kind: r.kind, why: r.why, headline: plan.headline, text: anchors ? `${plan.text}\n(${ANCHOR_NOTE})` : plan.text, target: plan.url, hash: r.hash, ts: r.ts, exp: r.exp, state: await stateOf(h, r, now), ...(plan.steps ? { writes: plan.steps.length } : {}), ...(standingEligible(r.kind, r.params) ? { standing: true } : {}), ...(anchors ? { anchors } : {}), ...(plan.items ? { items: plan.items } : {}), ...(plan.then ? { then: plan.then } : {}), ...(plan.cont ? { cont: true } : {}), ...(await fallbackOf(h, r).then(f => (f ? { fallback: f } : {}), () => ({}))) }
 }
 // A kind that failed twice for a thread (1.0.33, actionfallback.ts): the requests of that thread and kind that closed as failed in the last 24 h, plus the failed send attempts of an
 // approved request that is still open (its history says action-failed). The desk's own requests (gh-issue-create, thread t0) have no history folder: only their closed rows count.
@@ -827,12 +828,12 @@ export async function listActions(h: Host, all = false): Promise<ActionView[]> {
 // ---- what the user is asked, word for word -----------------------------------------------------------------------------------------------
 export const OPTION_LABELS = ['Approve', 'Deny', 'Edit first'] as const
 export const checkCode = (hash: string): string => hash.slice(0, 12)
-export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { writes?: number; standing?: boolean; kind?: string; anchors?: number; items?: ReviewItem[]; cont?: boolean; then?: string }):{ question: string; options: { label: string; description: string }[] } {
+export function questionOf(v: Pick<ActionView, 'id' | 'thread' | 'headline' | 'text' | 'target' | 'hash'> & { notes?: string[]; writes?: number; standing?: boolean; kind?: string; anchors?: number; items?: ReviewItem[]; cont?: boolean; then?: string }):{ question: string; options: { label: string; description: string }[] } {
   // a review batch: numbered, grouped by file, each text cut at QUESTION_TEXT_MAX here (the card shows all of it)
   const shown = v.items ? `${reviewListing(v.items, QUESTION_TEXT_MAX)}${v.items.some(i => i.text.replace(/\s+/g, ' ').trim().length > QUESTION_TEXT_MAX) ? `\n(texts are cut at ${QUESTION_TEXT_MAX} characters here: the full text of each is on the card in the pane)` : ''}${v.then ? `\nthen: ${v.then}` : ''}${v.anchors ? `\n(${ANCHOR_NOTE})` : ''}` : v.text
   const standing = v.standing ? [{ label: standingLabelOf(v.kind ?? ''), description: `the desk sends exactly this text, once; and ${v.thread}'s later writes of this kind on this ${(v.kind ?? '').startsWith('ado-workitem') ? 'work item' : 'PR'} (statuses only fixed, closed, active) are sent without asking, for 24 h, at most 40, or until it closes (Revoke in the pane)` }] : []
   return {
-    question: `${v.thread === DESK_THREAD ? 'the desk' : v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${shown}\n---\nTarget: ${v.target}\nSend exactly this?`,
+    question: `${v.thread === DESK_THREAD ? 'the desk' : v.thread} wants to ${v.headline} [request ${v.id}, check ${checkCode(v.hash)}]. The exact text that will be sent:\n---\n${shown}\n---\nTarget: ${v.target}${v.notes?.length ? `\nAzure DevOps text check: ${v.notes.join('; ')}` : ''}\nSend exactly this?`,
     options: [
       { label: 'Approve', description: v.writes && v.writes > 1 ? `the desk sends exactly these ${v.writes} writes, in this order, once; ${v.cont ? 'a failing one is reported and the rest still run' : 'it stops at the first failure'}` : 'the desk sends exactly this text, once' },
       v.thread === DESK_THREAD ? { label: 'Deny', description: 'nothing is posted; the export stays where it was written' } : { label: 'Deny', description: `${v.thread} is told it was denied and goes on without it` },
@@ -871,7 +872,11 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
   // the desk's own kinds (a public issue) are made by the mod for the desk only; a thread asking for one, or the desk asking for a thread's kind, is refused
   if (DESK_ONLY_KINDS.includes(typeof a.kind === 'string' ? a.kind.trim() : '') !== (thread === DESK_THREAD)) return { ok: false, text: thread === DESK_THREAD ? 'the desk makes only its own request kinds this way' : `${typeof a.kind === 'string' ? a.kind.trim().slice(0, 40) : 'that kind'} is not one a thread may ask for` }
   const cfg = await readJson<any>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
-  const c = checkAction(a, { severity: checkOn(cfg, 'review', 'severity') })
+  // 1.0.35 (adotext.ts): the Azure DevOps text rules look at the text of a PR reply / comment / description / work item comment BEFORE it is checked and signed: a known PR "#id" is written "!id" in
+  // convert mode, every finding is kept on the request and shown with it (card, action-list, question). Default warn: the text is not changed.
+  const kind0 = typeof a.kind === 'string' ? a.kind.trim() : ''
+  const adoChk = thread !== DESK_THREAD && kind0.startsWith('ado-') ? await checkActionText(h, thread, kind0, a.params) : null
+  const c = checkAction(adoChk ? { ...a, params: adoChk.params } : a, { severity: checkOn(cfg, 'review', 'severity') })
   if (!c.ok) return { ok: false, text: c.text }
   // 1.0.31: the PR this thread opened is the user's work: the mod never approves it (nor completes it: that kind does not exist)
   const mine = await ownApproval(h, thread, c.kind, c.params)
@@ -911,7 +916,7 @@ export async function addActionRequest(h: Host, thread: string, a: { kind?: unkn
     const base = { id: `a${ts}-${++seq}`, thread, kind: c.kind, hash, ts, exp: ts + (await pendingMsOf(h)) }
     const sig = await macOf(h, sigText(base), true)
     if (!sig) return { ok: false, text: 'no key to sign the request with' }
-    const rec: ActionRequest = { ...base, params: c.params, why, sig }
+    const rec: ActionRequest = { ...base, params: c.params, why, sig, ...(adoChk?.findings.length ? { ado: findingLines(adoChk.findings) } : {}) }
     await save(h, [...all, rec])
     await logHistory(h, thread, { kind: 'action-request', id: rec.id, action: rec.kind, hash: checkCode(hash), target: c.plan.url, why: why || undefined })
     const v = (await viewOf(h, rec, ts))!
@@ -975,8 +980,9 @@ export function unrecorded(r: ActionRequest, v: ActionView | null, canon: { ques
     const part = i < bodyAt ? 'the heading line' : i <= endAt ? 'the exact text to be sent' : 'the target line'
     return `text differs in ${part}, first at character ${i + 1}: the question shown has ${snip(text, i)}, request ${r.id} has ${snip(canon.question, i)}. ${STILL}`
   }
-  const same = opts.length === canon.options.length && canon.options.every((c, k) => opts[k]?.label === c.label && opts[k]?.description === c.description)
-  if (!same) return `the options differ: expected exactly ${canon.options.map(o => `"${o.label}"`).join(' | ')} with their descriptions, got ${opts.map(o => JSON.stringify(typeof o?.label === 'string' ? o.label : '?')).join(' | ') || 'none'}. ${STILL}`
+  // 1.0.35: only the option LABELS count (exact, same order); the description text is wording and never decides (a re-worded or re-capitalised description was refused before)
+  const same = opts.length === canon.options.length && canon.options.every((c, k) => opts[k]?.label === c.label)
+  if (!same) return `label mismatch: the option labels differ (the descriptions do not matter): expected exactly ${canon.options.map(o => `"${o.label}"`).join(' | ')}, got ${opts.map(o => JSON.stringify(typeof o?.label === 'string' ? o.label : '?')).join(' | ') || 'none'}. ${STILL}`
   if (multi) return `the question allowed several answers (multiSelect): one choice is needed. ${STILL}`
   if (label !== null && !canon.options.some(o => o.label === label)) return `the answer ${JSON.stringify(label.slice(0, 80))} is not exactly one of the options offered (${canon.options.map(o => `"${o.label}"`).join(' | ')}). ${STILL}`
   return null

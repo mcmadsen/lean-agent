@@ -6,6 +6,8 @@
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, threadsDir, writeJson } from './state'
 import type { Host } from './state'
 import { check } from './doctor'
+import { VERSION_LINE, draftBanner, draftVersion, readChangelog, verText } from './draftnote'
+import type { ChangeSection } from './draftnote'
 import { allScripts } from './scripts'
 import { copyToFolder, feedbackConfig, offerPost, wantsFolder, wantsGithub } from './feedbackdest'
 
@@ -315,7 +317,7 @@ type Collected = {
   notes: string
   env: string[]
   problems: string[]
-  drafts: { raw: string; title: string; text: string }[]
+  drafts: { raw: string; title: string; text: string; note: string }[]
   sources: string[] // "feedback.jsonl: 120 rows" ...: what was read, so an empty section can be told from a file that was not found
   statuses: [string, number][]
   missingReports: number // reports that name missing context (the texts come from the gap logs and from older rows that carry them)
@@ -343,6 +345,7 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
   ]
   const problems = ((await check(h, root).catch(() => ['FIX  the doctor check failed to run'])) as string[]).filter(l => l.startsWith('FIX')).map(l => A(l.replace(/^FIX\s+/, '')))
   const drafts: Collected['drafts'] = []
+  let log: ChangeSection[] | undefined
   for (const f of (await h.fs.list(`${lean}/feedback-drafts`).catch(() => [])).filter(f => f.kind === 'file' && f.name.endsWith('.md')).sort((a, b) => a.name.localeCompare(b.name)))
     if (!st.drafts.includes(f.name)) {
       const raw = String(await h.fs.read(`${lean}/feedback-drafts/${f.name}`).catch(() => ''))
@@ -350,7 +353,10 @@ async function collect(h: Host, root: string, o: { notes?: string; version: stri
       const body = t.at >= 0 ? raw.split('\n').filter((_, i) => i !== t.at).join('\n') : raw // exactly the title's line is dropped
       // the title is the draft's own first heading (anonymised as text, then cut); a draft without text falls back to its file name as
       // words, which only the name rules see: a long date-slug name is not a secret
-      drafts.push({ raw: f.name, title: t.text ? A(t.text).slice(0, 120).replace(/<[a-z]*$/, '') : an.name(nameWords(f.name)) || 'untitled draft', text: A(body) })
+      const title = t.text ? A(t.text).slice(0, 120).replace(/<[a-z]*$/, '') : an.name(nameWords(f.name)) || 'untitled draft'
+      // 1.0.35 (draftnote.ts): a draft is an OLD report: its version line and, when it differs from the installed one, the banner that says it may be fixed already
+      log ??= await readChangelog(h, root)
+      drafts.push({ raw: f.name, title, text: A(body), note: [VERSION_LINE.test(raw) ? '' : `Plugin version: lean-agent ${draftVersion(raw) ? verText(draftVersion(raw)!) : 'unknown'}`, A(draftBanner({ text: raw, title: t.text || title, installed, log }))].filter(Boolean).join('\n> ') })
     }
   // worker feedback rows from both places (and the file that was not there is said, not skipped)
   // (a row that sits in an earlier file too is counted once; identical rows inside ONE file are separate reports)
@@ -446,7 +452,7 @@ function render(c: Collected, at: number, lim: Limits): string {
   out.push('## Doctor check: problems', '', ...(c.problems.length ? [...c.problems.map(p => `- ${p}`), ''] : none))
   out.push('## Drafts not exported before', '')
   if (!c.drafts.length) out.push(...none)
-  for (const d of c.drafts) out.push(`### ${d.title}`, '', d.text.length > lim.draft ? `${d.text.slice(0, lim.draft)}\n\n_(truncated at ${lim.draft} characters)_` : d.text.trim() || 'none', '')
+  for (const d of c.drafts) out.push(`### ${d.title}`, '', ...(d.note ? [`> ${d.note}`, ''] : []), d.text.length > lim.draft ? `${d.text.slice(0, lim.draft)}\n\n_(truncated at ${lim.draft} characters)_` : d.text.trim() || 'none', '')
   const fbTotal = c.statuses.reduce((n, [, k]) => n + k, 0)
   out.push('## LEAN-FEEDBACK since the last export', '', `Read: ${c.sources.join('; ')}`, '', fbTotal ? `Reports: ${fbTotal} (${c.statuses.map(([s, k]) => `${s} ${k}`).join(', ')})` : 'Reports: none', '', `Reports naming missing context: ${c.missingReports || 'none'}`, '')
   for (const f of FB_FIELDS) {

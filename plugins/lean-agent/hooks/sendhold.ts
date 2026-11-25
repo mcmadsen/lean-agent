@@ -14,10 +14,12 @@ import { recentPrompts } from './humanprompts'
 import type { Thread } from './threads'
 
 export const HOLD_SECONDS = 30
+export const HOLD_MIN = 5 // 1.0.35: config actions.holdSeconds is 5 to 600 (0 stays "no window", as before: a file written by hand; the registry refuses it)
+export const HOLD_MAX = 600
 export const NEWER_WINDOW_MS = 30 * 60_000
 const HOLDS = 'action.holds'
 const NOTES = 'action.holds.notes'
-export type Held = { id: string; thread: string; kind: string; headline: string; text: string; at: number; until: number; forced?: boolean }
+export type Held = { id: string; thread: string; kind: string; headline: string; text: string; at: number; until: number; forced?: boolean; extended?: boolean }
 export type HoldResult = { sent: boolean; line: string }
 type Req = { id: string; thread: string; kind: string; params: Record<string, unknown> }
 type PlanLike = { headline?: string; text?: string }
@@ -25,7 +27,8 @@ type PlanLike = { headline?: string; text?: string }
 export async function holdSeconds(h: Host): Promise<number> {
   const cfg = await readJson<{ actions?: { holdSeconds?: unknown } } | null>(h, `${leanDir(await homeDir(h))}/config.json`, null).catch(() => null)
   const v = cfg?.actions?.holdSeconds
-  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : HOLD_SECONDS
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return HOLD_SECONDS
+  return v === 0 ? 0 : Math.min(HOLD_MAX, Math.max(HOLD_MIN, v)) // 1 -> 5 s, 9999 -> 600 s
 }
 
 // the texts a request would post (a batch: its items'); status-only kinds have none
@@ -81,7 +84,7 @@ export async function holdCovered(h: Host, r: Req, plan: PlanLike, label = ''): 
     return null
   }
 }
-const heldLine = (x: Held, secs: number) => `held ${secs} s before sending, then it goes out unless you cancel (the pane has Send now / Cancel; lean_thread action-cancel ${x.id}): ${x.text}`
+const heldLine = (x: Held, secs: number) => `held ${secs} s before sending, then it goes out unless you cancel (the pane has Send now / Cancel; lean_thread action-cancel ${x.id} with text = your reason; on: true extends the hold once by ${secs} s): ${x.text}`
 async function release(h: Host, all: Held[], id: string): Promise<null> {
   await saveHolds(h, all.filter(x => x.id !== id))
   return null
@@ -134,12 +137,32 @@ async function dropHold(h: Host, id: string): Promise<void> {
 }
 // `lean_thread action-cancel <id>` and the pane's Cancel: the held send is not sent. The request stays PENDING (a human answer is written only by the pane press and
 // the desk's question, never here): the user is asked as usual, the pane's Cancel also denies it. The thread is told when `tell` is given.
-export async function cancelHeld(h: Host, id: string, tell?: (thread: string, text: string) => Promise<void>): Promise<{ ok: boolean; text: string }> {
+// 1.0.35: the thread is told WHO cancelled: the desk (lean_thread action-cancel, with its reason) or the user (the pane's Cancel)
+export type CancelBy = { who: 'user' | 'desk'; reason?: string }
+export const cancelNotice = (id: string, kind: string, by: CancelBy): string => {
+  const why = (by.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, 300)
+  const head = by.who === 'desk' ? `Your request ${id} (${kind}) was cancelled by the desk before sending: ${why || 'no reason given'}.` : `Your request ${id} (${kind}) was cancelled by the user before it was sent.`
+  return `${head} Nothing went out. It waits for the user's own yes at the desk; continue without it meanwhile. Do not send the same text again.`
+}
+export async function cancelHeld(h: Host, id: string, tell?: (thread: string, text: string) => Promise<void>, by: CancelBy = { who: 'user' }): Promise<{ ok: boolean; text: string }> {
   const x = (await holds(h)).find(v => v.id === id)
   if (!x) return { ok: false, text: `no held send ${id || '(an id is needed)'}: it was already sent, cancelled, or never held` }
   await dropHold(h, id)
-  if (tell) await tell(x.thread, `Your request ${id} (${x.kind}) was cancelled by the user before it was sent: nothing went out. It waits for the user's own yes at the desk; continue without it meanwhile. Do not send the same text again.`).catch(() => undefined)
-  return { ok: true, text: `cancelled ${id}: nothing was sent${tell ? `; ${x.thread} was told` : ''}; the request stays pending for the user's own answer` }
+  if (tell) await tell(x.thread, cancelNotice(id, x.kind, by)).catch(() => undefined)
+  return { ok: true, text: `cancelled ${id}: nothing was sent${tell ? `; ${x.thread} was told (${by.who === 'desk' ? 'by the desk' : 'by the user'})` : ''}; the request stays pending for the user's own answer` }
+}
+// `lean_thread action-cancel <id> on: true`: the desk needs longer to check a batch: the window grows by one hold length, ONCE per request (never past 600 s from now)
+export async function extendHeld(h: Host, id: string): Promise<{ ok: boolean; text: string }> {
+  const all = await holds(h)
+  const x = all.find(v => v.id === id)
+  if (!x) return { ok: false, text: `no held send ${id || '(an id is needed)'}: it was already sent, cancelled, or never held` }
+  if (x.forced) return { ok: false, text: `the user pressed Send now for ${id}: it goes out at once` }
+  if (x.extended) return { ok: false, text: `the hold of ${id} was already extended once: cancel it (action-cancel with your reason) or let it go out` }
+  const now = await h.clock.now()
+  const add = Math.max(HOLD_MIN, (await holdSeconds(h)) || HOLD_SECONDS) * 1000
+  const until = Math.min(Math.max(x.until, now) + add, now + HOLD_MAX * 1000)
+  await saveHolds(h, all.map(v => (v.id === id ? { ...v, until, extended: true } : v)))
+  return { ok: true, text: `extended the hold of ${id}: it goes out in ${Math.ceil((until - now) / 1000)} s unless cancelled (this is the only extension)` }
 }
 // the pane's Send now: the window ends at once; the desk's timer sends it within seconds
 export async function sendHeldNow(h: Host, id: string): Promise<boolean> {
