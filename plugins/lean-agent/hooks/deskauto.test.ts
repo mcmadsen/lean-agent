@@ -21,7 +21,7 @@ function world() {
   resetOldDesk()
   const h = fakeHost(null)
   h.clock.t = 50_000_000
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000 } })) // (the default is 60k since 1.0.31; these cases are written against 100k)
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true } })) // (1.0.33: the automatic restart is opt-in, these cases are the opted-in path; the default is off, see deskwarn.test.ts. The limit is written as 100k)
   h.files.set(`${DESK}/CLAUDE.md`, 'desk')
   h.files.set(`${L}/desk.json`, JSON.stringify({ sid: 'desk-a' }))
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'parser work', project: 'demo', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
@@ -105,6 +105,8 @@ test('blocked: config off, a turn running, the desk not in the app, a thread que
   expect(await run({ tokens: 150_000 })).toBe('off')
   expect(seen.restarts).toBe(0)
   h.files.set(`${L}/config.json`, '{}')
+  expect(await run({ tokens: 250_000 })).toBe('off') // (1.0.33: with nothing configured the desk is never restarted by itself)
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: true } }))
   expect(await run({ tokens: 250_000 })).toBe('restarted') // the handover carries the question: over 120% of the limit (200k since 1.0.33) it goes on
   expect(seen.restarts).toBe(1)
 })
@@ -144,7 +146,7 @@ test('the loop guard: 30 minutes between automatic restarts and fewer than desk.
 
 test('desk.autoRestartPerDay sets the daily cap (the 30-minute gap stays); a bad value falls back to 12', async () => {
   const { h, run, seen } = world()
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestartPerDay: 2 } }))
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true, autoRestartPerDay: 2 } }))
   const over = { tokens: 100_000 }
   expect(await run(over)).toBe('restarted')
   h.clock.t += AUTO_GAP_MS + MIN
@@ -154,7 +156,7 @@ test('desk.autoRestartPerDay sets the daily cap (the 30-minute gap stays); a bad
   resetDeskCompact()
   expect(await run(over)).toBe('guard')
   expect(seen.status.at(-1)).toMatch(/2 automatic desk restarts in the last 24 h \(the limit is 2/)
-  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestartPerDay: 'many' } }))
+  h.files.set('/h/.lean-agent/config.json', JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true, autoRestartPerDay: 'many' } }))
   resetDeskCompact()
   expect(await run(over)).toBe('restarted') // the default 12 applies again
 })

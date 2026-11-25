@@ -2,7 +2,7 @@
 // settings, what Health says when folded, and the level of the own-PR notice. Everything is synthetic.
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
-import { ageText, capItems, itemsOf, needsUser, paneConfig, saveSort, sortItems } from './panelist'
+import { DEFAULT_DIR, ageText, canHide, capItems, completed, effectiveDir, isHidden, itemsOf, needsUser, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
 import { healthSummary } from './panehealth'
 import { loadView, noticeInfo, resetViewCache } from './view'
 import type { ClosedRow, ThreadRow } from './view'
@@ -45,6 +45,71 @@ test('cap: the first N rows, and every later row that has something unread or wa
   expect(capItems(items, 30, () => false).hidden).toBe(0)
 })
 
+test('sort: thread (the default) puts the highest thread number first (t199, t198, t7); an id without a number is last in BOTH directions; asc reverses', () => {
+  const items = itemsOf([t('t7'), t('t198'), t('t199'), t('scratch')], [c('t20')])
+  expect(ids(sortItems(items, 'thread'))).toEqual(['t199', 't198', 't20', 't7', 'scratch'])
+  expect(ids(sortItems(items, 'thread', 'desc'))).toEqual(['t199', 't198', 't20', 't7', 'scratch'])
+  expect(ids(sortItems(items, 'thread', 'asc'))).toEqual(['t7', 't20', 't198', 't199', 'scratch'])
+  expect(DEFAULT_DIR).toEqual({ thread: 'desc', active: 'desc', needs: 'desc', cost: 'desc', name: 'asc' })
+})
+
+test('sort: every key has both directions, its own default first', () => {
+  const items = itemsOf([t('t1', { activity: 500, cost: 1, title: 'bravo' }), t('t2', { activity: 300, cost: 9, title: 'Alpha' }), t('t3', { activity: 400, cost: 5, title: 'charlie' })], [])
+  expect(ids(sortItems(items, 'active'))).toEqual(['t1', 't3', 't2'])
+  expect(ids(sortItems(items, 'active', 'asc'))).toEqual(['t2', 't3', 't1'])
+  expect(ids(sortItems(items, 'cost'))).toEqual(['t2', 't3', 't1'])
+  expect(ids(sortItems(items, 'cost', 'asc'))).toEqual(['t1', 't3', 't2'])
+  expect(ids(sortItems(items, 'name'))).toEqual(['t2', 't1', 't3'])
+  expect(ids(sortItems(items, 'name', 'desc'))).toEqual(['t3', 't1', 't2'])
+  expect(ids(sortItems(items, 'thread'))).toEqual(['t3', 't2', 't1'])
+  expect(ids(sortItems(items, 'thread', 'asc'))).toEqual(['t1', 't2', 't3'])
+})
+
+test('sort: needs you first keeps its two groups whatever the direction; the direction applies inside each group (by last activity)', () => {
+  const rows = [t('t1', { activity: 500 }), t('t2', { activity: 100, blocked: true }), t('t3', { activity: 300, asking: true }), t('t4', { activity: 400 }), t('t5', { activity: 50, blocked: true })]
+  const items = itemsOf(rows, [])
+  expect(ids(sortItems(items, 'needs'))).toEqual(['t3', 't2', 't5', 't1', 't4'])
+  expect(ids(sortItems(items, 'needs', 'desc'))).toEqual(['t3', 't2', 't5', 't1', 't4'])
+  expect(ids(sortItems(items, 'needs', 'asc'))).toEqual(['t5', 't2', 't3', 't4', 't1'])
+})
+
+test('direction: the effective one is the explicit choice, else the default of the sort; a press writes the store AND config pane.sortDir; the config key wins over the store', async () => {
+  expect(effectiveDir({ sort: 'thread', sortDir: 'auto' })).toBe('desc')
+  expect(effectiveDir({ sort: 'name', sortDir: 'auto' })).toBe('asc')
+  expect(effectiveDir({ sort: 'name', sortDir: 'desc' })).toBe('desc')
+  const h = fakeHost(null)
+  await saveSortDir(h.host, 'asc')
+  expect(await h.host.store.get('pane.sortDir')).toBe('asc')
+  expect(JSON.parse(h.files.get(`${L}/config.json`)!)).toMatchObject({ pane: { sortDir: 'asc' } })
+  expect((await paneConfig(h.host)).sortDir).toBe('asc')
+  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sortDir: 'desc' } }))
+  expect((await paneConfig(h.host)).sortDir).toBe('desc')
+  h.files.delete(`${L}/config.json`)
+  expect((await paneConfig(h.host)).sortDir).toBe('asc') // a store with no config still remembers the press
+})
+
+test('hide: only a completed session (done, or closed) can be hidden; it stays hidden only while nothing is newer, unread or waiting; the set lives in the mod store', async () => {
+  const items = itemsOf([t('t1', { done: true, activity: 100 }), t('t2', { activity: 100 }), t('t3', { done: true, working: true, run: 'running' }), t('t4', { done: true, needsYou: true }), t('t6', { done: true, pending: 'waiting for your Approve: reply' })], [c('t5', { activity: 50 })], [{ thread: 't4' }])
+  const by = Object.fromEntries(items.map(i => [i.id, i]))
+  const free = { unread: false, held: false }
+  expect(Object.fromEntries(items.map(i => [i.id, canHide(i, free)]))).toEqual({ t1: true, t2: false, t3: false, t4: false, t5: true, t6: false })
+  expect(completed(by.t1!)).toBe(true)
+  expect(completed(by.t5!)).toBe(true)
+  expect(canHide(by.t1!, { unread: true, held: false })).toBe(false) // an unread message
+  expect(canHide(by.t1!, { unread: false, held: true })).toBe(false) // a held send
+  expect(isHidden(by.t1!, { t1: 100 }, free)).toBe(true)
+  expect(isHidden(by.t1!, { t1: 99 }, free)).toBe(false) // something newer happened (a wake, a report, a message)
+  expect(isHidden(by.t1!, {}, free)).toBe(false)
+  expect(isHidden(by.t1!, { t1: 100 }, { unread: true, held: false })).toBe(false) // reappears with an unread message
+  expect(isHidden(by.t2!, { t2: 100 }, free)).toBe(false) // not completed
+  const h = fakeHost(null)
+  await saveHidden(h.host, cur => ({ ...cur, t1: 100, t5: 50 }))
+  await h.host.store.set('pane.hidden', { t1: 100, t5: 50, bad: 3, t9: 'x' })
+  expect(await readHidden(h.host)).toEqual({ t1: 100, t5: 50 }) // junk is left out
+  await saveHidden(h.host, cur => Object.fromEntries(Object.entries(cur).filter(([k]) => k !== 't1')))
+  expect(await readHidden(h.host)).toEqual({ t5: 50 })
+})
+
 test('ageText: just now, minutes, hours, days; "no activity yet" when nothing is known', () => {
   const now = 10_000_000_000
   expect([ageText(now - 20_000, now), ageText(now - 5 * MIN, now), ageText(now - 3 * 60 * MIN, now), ageText(now - 47 * 60 * MIN, now), ageText(now - 3 * 24 * 60 * MIN, now), ageText(0, now), ageText(now + 5000, now)]).toEqual(['just now', '5 min ago', '3 h ago', '47 h ago', '3 d ago', 'no activity yet', 'just now'])
@@ -58,15 +123,15 @@ test('Health summary: quiet "all good" when nothing needs a fix; amber with the 
   expect(healthSummary({ fix: 2, standing: 0, info: 0, blocker: true }).tone).toBe('error')
 })
 
-test('settings: pane.sort (config, else the mod store, else last active), pane.maxSessions (5 to 500, default 30), pane.healthOpen (true or "open")', async () => {
+test('settings: pane.sort (config, else the mod store, else thread), pane.sortDir (auto | asc | desc), pane.maxSessions (5 to 500, default 30), pane.healthOpen (true or "open")', async () => {
   const h = fakeHost(null)
-  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false, foldAll: true })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'thread', sortDir: 'auto', maxSessions: 30, healthOpen: false, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'cost', maxSessions: 12, healthOpen: true } }))
-  expect(await paneConfig(h.host)).toEqual({ sort: 'cost', maxSessions: 12, healthOpen: true, foldAll: true })
-  h.files.set(`${L}/config.json`, JSON.stringify({ 'pane.sort': 'name', 'pane.maxSessions': 7, 'pane.healthOpen': 'open' })) // the flat spelling
-  expect(await paneConfig(h.host)).toEqual({ sort: 'name', maxSessions: 7, healthOpen: true, foldAll: true })
-  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'newest', maxSessions: 2, healthOpen: 'yes' } })) // not valid: the defaults
-  expect(await paneConfig(h.host)).toEqual({ sort: 'active', maxSessions: 30, healthOpen: false, foldAll: true })
+  expect(await paneConfig(h.host)).toEqual({ sort: 'cost', sortDir: 'auto', maxSessions: 12, healthOpen: true, foldAll: true })
+  h.files.set(`${L}/config.json`, JSON.stringify({ 'pane.sort': 'name', 'pane.sortDir': 'desc', 'pane.maxSessions': 7, 'pane.healthOpen': 'open' })) // the flat spelling
+  expect(await paneConfig(h.host)).toEqual({ sort: 'name', sortDir: 'desc', maxSessions: 7, healthOpen: true, foldAll: true })
+  h.files.set(`${L}/config.json`, JSON.stringify({ pane: { sort: 'newest', sortDir: 'up', maxSessions: 2, healthOpen: 'yes' } })) // not valid: the defaults
+  expect(await paneConfig(h.host)).toEqual({ sort: 'thread', sortDir: 'auto', maxSessions: 30, healthOpen: false, foldAll: true })
   h.files.set(`${L}/config.json`, JSON.stringify({ pane: { maxSessions: 9999 } }))
   expect((await paneConfig(h.host)).maxSessions).toBe(30)
   // the press that changes the order writes the mod's store AND config pane.sort

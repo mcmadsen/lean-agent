@@ -34,7 +34,7 @@ function world() {
   resetDeskCompact()
   const h = fakeHost(null)
   h.clock.t = 10_000_000
-  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 100_000 }, handover: { mode: 'full' } })) // (60k and the core handover are the defaults since 1.0.31; these cases are written against 100k and the full form)
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true }, handover: { mode: 'full' } })) // (1.0.33: the opted-in path; the default is deskwarn.test.ts) (60k and the core handover are the defaults since 1.0.31; these cases are written against 100k and the full form)
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'parser work', project: 'demo', state: 'open', sid: '', created: 1, lastWake: 0, delivered: 0 }))
   return h
 }
@@ -84,13 +84,15 @@ test("at the limit the handover is written and the desk's next reply starts with
   expect(limitLineOnce()).toContain('110k of 100k')
 })
 
-test('desk.autoRestart: on by default (false = the button only); over the limit and with no question open it opens the new desk once; an open question waits; a failure is a notice', async () => {
+test('desk.autoRestart: opt-in (1.0.33: off by default, see deskwarn.test.ts); over the limit and with no question open it opens the new desk once; an open question waits; a failure is a notice', async () => {
   const h = world()
   let opened = 0
   const restart = async () => ({ ok: true, text: `opened ${++opened}` })
   h.files.set(`${L}/config.json`, JSON.stringify({ desk: { autoRestart: false } }))
   expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('off')
   h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 100_000 } }))
+  expect(await autoRestartDesk(h.host, { tokens: 120_000, restart })).toBe('off') // (nothing configured: off)
+  h.files.set(`${L}/config.json`, JSON.stringify({ desk: { contextLimit: 100_000, autoRestart: true } }))
   expect(await autoRestartDesk(h.host, { tokens: 70_000, restart })).toBe('none')
   h.files.set(`${L}/questions.jsonl`, `${JSON.stringify({ from: 't1', question: 'which db?' })}\n`)
   expect(await autoRestartDesk(h.host, { tokens: 110_000, restart })).toBe('question')

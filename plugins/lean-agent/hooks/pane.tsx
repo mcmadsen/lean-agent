@@ -33,7 +33,7 @@ import type { ModelRequest } from './expensive'
 import { answerAction, approveAction, revokeGrant, standingLabelOf } from './deskactions'
 import { cancelHeld, sendHeldNow } from './sendhold'
 import { revokeOwn, revokeWrites } from './deskwrites'
-import { SORTS, SORT_LABEL, ageText, capItems, itemsOf, paneConfig, saveSort, sortItems } from './panelist'
+import { ARROW, SORTS, SORT_LABEL, ageText, canHide, capItems, effectiveDir, isHidden, itemsOf, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
 import type { Item, SortKey } from './panelist'
 import { healthSummary } from './panehealth'
 import { setNotice } from './notices'
@@ -80,6 +80,157 @@ export async function openPane($: any): Promise<void> {
 }
 
 const short = (s: string, n = 90) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/\s+/g, ' ')
+
+// The presses that DECIDE something, once (1.0.33): the desk pane's session cards and a thread's own pane (threadpane.tsx, handed this factory by register.tsx) draw
+// different buttons but run the SAME code. They stay in this file on purpose: only the user's press in the pane approves (skills-contract.test.sh names the callers).
+export type DecideEnv = {
+  host: any
+  root: string
+  say: (text: string, bad: boolean) => void
+  tell: () => void
+  twoStep: (key: string, run: () => Promise<void>) => () => Promise<void>
+}
+export function makeDecisions(env: DecideEnv) {
+  const { host, root, say: sayModel, tell, twoStep } = env
+  // ---- a request for an expensive model (expensive.ts): Approve / Deny press twice; Start on sonnet instead starts it on the default ----
+  const tellThread = (r: ModelRequest, text: string) => (r.thread === 'desk' ? Promise.resolve() : leanThread(host, root, { action: 'send', tN: r.thread, text, internal: true }).then(() => undefined, () => undefined))
+  // the action that goes on after an approval or on sonnet: what a tool call asked for (a new thread is started now), nothing for a guard refusal
+  const retryOf = (r: ModelRequest, model?: string) => ({ action: r.action === 'new' ? 'start' : r.action, tN: r.thread, ...(model ? { model } : r.asked ? { model: r.model, ...(r.effort ? { effort: r.effort } : {}) } : {}) })
+  const approveModel = (r: ModelRequest) =>
+    twoStep(`model:approve:${r.id}`, async () => {
+      resetViewCache()
+      try {
+        await grantModelApproval(host, { scope: r.thread, model: r.model, reason: r.reason })
+      } catch (err) {
+        sayModel(`approve failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`, true)
+        return tell()
+      }
+      await removeRequest(host, r.id)
+      let said = `${r.thread === 'desk' ? 'the desk' : r.thread} may use ${r.family} (until it closes, at most 24 h)`
+      if (r.origin === 'tool') {
+        const out = await leanThread(host, root, retryOf(r) as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
+        said += `; ${out.text}`
+        resetViewCache()
+        sayModel(said, !out.ok)
+      } else {
+        await tellThread(r, `The user approved ${r.family} for this thread in the pane (until it closes, at most 24 h): you may retry what was refused.`)
+        sayModel(`${said}; ${r.thread === 'desk' ? 'retry it' : `${r.thread} was told it may retry`}`, false)
+      }
+      tell()
+    })
+  const denyModel = (r: ModelRequest) =>
+    twoStep(`model:deny:${r.id}`, async () => {
+      await denyRequest(host, r.id)
+      if (r.origin !== 'tool') await tellThread(r, `The user denied ${r.family} for this thread: do not retry it; go on without it or report.`)
+      sayModel(`denied ${r.family} for ${r.thread === 'desk' ? 'the desk' : r.thread}`, false)
+      tell()
+    })
+  const onSonnet = (r: ModelRequest) => async () => {
+    resetViewCache()
+    await removeRequest(host, r.id)
+    const out = await leanThread(host, root, retryOf({ ...r, action: r.action === 'resume' ? 'restart' : r.action }, 'sonnet') as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} on sonnet failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
+    resetViewCache()
+    sayModel(out.text, !out.ok)
+    tell()
+  }
+  const dismissModel = (r: ModelRequest) => async () => {
+    await removeRequest(host, r.id)
+    tell()
+  }
+  // ---- a thread's request for a remote write (deskactions.ts): the same decision as the desk's question, pressed twice. Approve sends it
+  // at once (the mod, once, exactly the text on the card); Deny tells the thread. Nothing here is a model's call. ----
+  const tellAction = (thread: string, text: string) => leanThread(host, root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)
+  const approveWrite = (a: ActionView) =>
+    twoStep(`action:approve:${a.id}`, async () => {
+      resetViewCache()
+      const said = a.state === 'approved' ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction)
+      if (!said.ok) {
+        sayModel(said.text, true)
+        return tell()
+      }
+      const out = await approveAction(host, a.id, tellAction)
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    })
+  // the third choice (a status change only): the same human decision, and the mod stores the signed grant (deskactions.ts, inside answerAction only)
+  const approveWriteStanding = (a: ActionView) =>
+    twoStep(`action:standing:${a.id}`, async () => {
+      resetViewCache()
+      // a request already approved once (the plain Approve, in the dialog): the first answer wins, so it is sent once as approved and NO 24 h approval is made (and this says so)
+      const already = a.state === 'approved'
+      const said = already ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction, true)
+      if (!said.ok) {
+        sayModel(said.text, true)
+        return tell()
+      }
+      const out = await approveAction(host, a.id, tellAction)
+      resetViewCache()
+      sayModel(already ? `${out.text}; it had already been approved once with the plain Approve, so NO 24 h approval was made (the first answer wins): the thread's next request of this kind asks again` : `${out.text}; this kind of write on this ${a.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} is allowed for 24 h (Revoke in the pane; your own approved send is not counted in its 40 writes)`, !out.ok)
+      tell()
+    })
+  const revokeStanding = (grant: string) => async () => {
+    resetViewCache()
+    const out = await revokeGrant(host, grant)
+    resetViewCache()
+    sayModel(out.text, !out.ok)
+    tell()
+  }
+  // the user's written approvals (deskwrites.ts): the pane's Revoke only takes power away
+  const revokeWritten = (grant: string) => async () => {
+    resetViewCache()
+    const out = await revokeWrites(host, { id: grant })
+    resetViewCache()
+    sayModel(out.text, !out.ok)
+    tell()
+  }
+  // a classifier denial has no prompt (denial.ts): the user's press here is a human answer the mod can trust, so it makes the same grant as the words do
+  const selfEditPress = (id: string) => async () => {
+    resetViewCache()
+    const out = await grantByHuman(host, id, 'pane')
+    if (out.ok) await leanThread(host, root, { action: 'send', tN: id, text: `[lean-agent] The user let you edit your worktree yourself (their choice in the pane). Do the step yourself with your own Edit / Write / Read / Grep / Glob inside your worktree, then continue and report.`, internal: true }).catch(() => undefined)
+    resetViewCache()
+    sayModel(out.text, !out.ok)
+    tell()
+  }
+  const retryPress = (id: string) => async () => {
+    resetViewCache()
+    const out = await leanThread(host, root, { action: 'send', tN: id, text: `[lean-agent] The user chose: retry the worker with a narrower brief. ${NARROW_BRIEF}.`, internal: true }).catch(() => ({ ok: false, text: `retry ${id} failed` }))
+    resetViewCache()
+    sayModel(out.ok ? `${id} was told to retry with a narrower brief` : out.text, !out.ok)
+    tell()
+  }
+  const revokeSelfEditPress = (grant: string) => async () => {
+    resetViewCache()
+    const out = await revokeSelfEdit(host, { id: grant })
+    resetViewCache()
+    sayModel(out.text, !out.ok)
+    tell()
+  }
+  const denyWrite = (a: ActionView) =>
+    twoStep(`action:deny:${a.id}`, async () => {
+      resetViewCache()
+      const out = await answerAction(host, a.id, 'deny', 'pane', tellAction)
+      resetViewCache()
+      sayModel(out.text, !out.ok)
+      tell()
+    })
+  // ---- covered replies in their hold window (sendhold.ts): Send now sends the exact text at once, Cancel drops it and tells the thread no ----
+  const holdNow = (id: string) => async () => {
+    resetViewCache()
+    await sendHeldNow(host, id)
+    tell()
+  }
+  const holdCancel = (id: string) => async () => {
+    resetViewCache()
+    const out = await cancelHeld(host, id)
+    const den = out.ok ? await answerAction(host, id, 'deny', 'pane', tellAction) : out
+    resetViewCache()
+    sayModel(den.ok ? out.text : den.text, !den.ok)
+    tell()
+  }
+  return { approveModel, denyModel, onSonnet, dismissModel, approveWrite, approveWriteStanding, revokeStanding, revokeWritten, selfEditPress, retryPress, revokeSelfEditPress, denyWrite, holdNow, holdCancel }
+}
 
 export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain' })) {
   // the pane opens by itself in the desk only; the mod's own session.start hook calls this after the role is known
@@ -493,128 +644,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       notice = short(text, 300)
       if (bad) lastError = notice
     }
-    const tellThread = (r: ModelRequest, text: string) => (r.thread === 'desk' ? Promise.resolve() : leanThread(host, $.plugin.root, { action: 'send', tN: r.thread, text, internal: true }).then(() => undefined, () => undefined))
-    // the action that goes on after an approval or on sonnet: what a tool call asked for (a new thread is started now), nothing for a guard refusal
-    const retryOf = (r: ModelRequest, model?: string) => ({ action: r.action === 'new' ? 'start' : r.action, tN: r.thread, ...(model ? { model } : r.asked ? { model: r.model, ...(r.effort ? { effort: r.effort } : {}) } : {}) })
-    const approveModel = (r: ModelRequest) =>
-      twoStep(`model:approve:${r.id}`, async () => {
-        resetViewCache()
-        try {
-          await grantModelApproval(host, { scope: r.thread, model: r.model, reason: r.reason })
-        } catch (err) {
-          sayModel(`approve failed: ${String((err as Error)?.message ?? err).slice(0, 160)}`, true)
-          return tell()
-        }
-        await removeRequest(host, r.id)
-        let said = `${r.thread === 'desk' ? 'the desk' : r.thread} may use ${r.family} (until it closes, at most 24 h)`
-        if (r.origin === 'tool') {
-          const out = await leanThread(host, $.plugin.root, retryOf(r) as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
-          said += `; ${out.text}`
-          resetViewCache()
-          sayModel(said, !out.ok)
-        } else {
-          await tellThread(r, `The user approved ${r.family} for this thread in the pane (until it closes, at most 24 h): you may retry what was refused.`)
-          sayModel(`${said}; ${r.thread === 'desk' ? 'retry it' : `${r.thread} was told it may retry`}`, false)
-        }
-        tell()
-      })
-    const denyModel = (r: ModelRequest) =>
-      twoStep(`model:deny:${r.id}`, async () => {
-        await denyRequest(host, r.id)
-        if (r.origin !== 'tool') await tellThread(r, `The user denied ${r.family} for this thread: do not retry it; go on without it or report.`)
-        sayModel(`denied ${r.family} for ${r.thread === 'desk' ? 'the desk' : r.thread}`, false)
-        tell()
-      })
-    const onSonnet = (r: ModelRequest) => async () => {
-      resetViewCache()
-      await removeRequest(host, r.id)
-      const out = await leanThread(host, $.plugin.root, retryOf({ ...r, action: r.action === 'resume' ? 'restart' : r.action }, 'sonnet') as any).catch(err => ({ ok: false, text: `${r.action} ${r.thread} on sonnet failed: ${String((err as Error)?.message ?? err).slice(0, 120)}` }))
-      resetViewCache()
-      sayModel(out.text, !out.ok)
-      tell()
-    }
-    const dismissModel = (r: ModelRequest) => async () => {
-      await removeRequest(host, r.id)
-      tell()
-    }
-    // ---- a thread's request for a remote write (deskactions.ts): the same decision as the desk's question, pressed twice. Approve sends it
-    // at once (the mod, once, exactly the text on the card); Deny tells the thread. Nothing here is a model's call. ----
-    const tellAction = (thread: string, text: string) => leanThread(host, $.plugin.root, { action: 'send', tN: thread, text, internal: true }).then(() => undefined)
-    const approveWrite = (a: ActionView) =>
-      twoStep(`action:approve:${a.id}`, async () => {
-        resetViewCache()
-        const said = a.state === 'approved' ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction)
-        if (!said.ok) {
-          sayModel(said.text, true)
-          return tell()
-        }
-        const out = await approveAction(host, a.id, tellAction)
-        resetViewCache()
-        sayModel(out.text, !out.ok)
-        tell()
-      })
-    // the third choice (a status change only): the same human decision, and the mod stores the signed grant (deskactions.ts, inside answerAction only)
-    const approveWriteStanding = (a: ActionView) =>
-      twoStep(`action:standing:${a.id}`, async () => {
-        resetViewCache()
-        // a request already approved once (the plain Approve, in the dialog): the first answer wins, so it is sent once as approved and NO 24 h approval is made (and this says so)
-        const already = a.state === 'approved'
-        const said = already ? { ok: true, text: '' } : await answerAction(host, a.id, 'approve', 'pane', tellAction, true)
-        if (!said.ok) {
-          sayModel(said.text, true)
-          return tell()
-        }
-        const out = await approveAction(host, a.id, tellAction)
-        resetViewCache()
-        sayModel(already ? `${out.text}; it had already been approved once with the plain Approve, so NO 24 h approval was made (the first answer wins): the thread's next request of this kind asks again` : `${out.text}; this kind of write on this ${a.kind.startsWith('ado-workitem') ? 'work item' : 'PR'} is allowed for 24 h (Revoke in the pane; your own approved send is not counted in its 40 writes)`, !out.ok)
-        tell()
-      })
-    const revokeStanding = (grant: string) => async () => {
-      resetViewCache()
-      const out = await revokeGrant(host, grant)
-      resetViewCache()
-      sayModel(out.text, !out.ok)
-      tell()
-    }
-    // the user's written approvals (deskwrites.ts): the pane's Revoke only takes power away
-    const revokeWritten = (grant: string) => async () => {
-      resetViewCache()
-      const out = await revokeWrites(host, { id: grant })
-      resetViewCache()
-      sayModel(out.text, !out.ok)
-      tell()
-    }
-    // a classifier denial has no prompt (denial.ts): the user's press here is a human answer the mod can trust, so it makes the same grant as the words do
-    const selfEditPress = (id: string) => async () => {
-      resetViewCache()
-      const out = await grantByHuman(host, id, 'pane')
-      if (out.ok) await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user let you edit your worktree yourself (their choice in the pane). Do the step yourself with your own Edit / Write / Read / Grep / Glob inside your worktree, then continue and report.`, internal: true }).catch(() => undefined)
-      resetViewCache()
-      sayModel(out.text, !out.ok)
-      tell()
-    }
-    const retryPress = (id: string) => async () => {
-      resetViewCache()
-      const out = await leanThread(host, $.plugin.root, { action: 'send', tN: id, text: `[lean-agent] The user chose: retry the worker with a narrower brief. ${NARROW_BRIEF}.`, internal: true }).catch(() => ({ ok: false, text: `retry ${id} failed` }))
-      resetViewCache()
-      sayModel(out.ok ? `${id} was told to retry with a narrower brief` : out.text, !out.ok)
-      tell()
-    }
-    const revokeSelfEditPress = (grant: string) => async () => {
-      resetViewCache()
-      const out = await revokeSelfEdit(host, { id: grant })
-      resetViewCache()
-      sayModel(out.text, !out.ok)
-      tell()
-    }
-    const denyWrite = (a: ActionView) =>
-      twoStep(`action:deny:${a.id}`, async () => {
-        resetViewCache()
-        const out = await answerAction(host, a.id, 'deny', 'pane', tellAction)
-        resetViewCache()
-        sayModel(out.text, !out.ok)
-        tell()
-      })
+    // the presses that decide something live once, above (makeDecisions): the same code runs from a thread's own pane
+    const { approveModel, denyModel, onSonnet, dismissModel, approveWrite, approveWriteStanding, revokeStanding, revokeWritten, selfEditPress, retryPress, revokeSelfEditPress, denyWrite, holdNow, holdCancel } = makeDecisions({ host, root: $.plugin.root, say: sayModel, tell, twoStep })
     const reopen = (id: string) => act(`reopen ${id}`, () => leanThread(host, $.plugin.root, { action: 'reopen', tN: id }))
     // a script the auditor judged adopt that the mod's rules did not adopt on their own: the user's two presses decide (logged as the
     // user's decision; a secret or privacy finding is never adopted, whatever is pressed)
@@ -779,8 +810,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       holdsOf(id).map(x => (
         <Box key={`hold-${x.id}`} flexWrap="wrap" columnGap={1}>
           <Text color="yellow" wrap="wrap">{`${x.thread}: goes out in ${Math.max(0, Math.ceil((x.until - Date.now()) / 1000))} s: ${x.text}`}</Text>
-          <Button key={`hold-now-${x.id}`} label="Send now" onPress={async () => { resetViewCache(); await sendHeldNow(host, x.id); tell() }} />
-          <Button key={`hold-cancel-${x.id}`} label="Cancel" onPress={async () => { resetViewCache(); const out = await cancelHeld(host, x.id); const den = out.ok ? await answerAction(host, x.id, 'deny', 'pane', tellAction) : out; resetViewCache(); sayModel(den.ok ? out.text : den.text, !den.ok); tell() }} />
+          <Button key={`hold-now-${x.id}`} label="Send now" onPress={holdNow(x.id)} />
+          <Button key={`hold-cancel-${x.id}`} label="Cancel" onPress={holdCancel(x.id)} />
         </Box>
       ))
     // ---- the user's standing approvals (deskactions.ts): what the mod sent under one, and the grants still active, each with a Revoke button ----
@@ -848,9 +879,36 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       await patchUi($, u => ({ ...u, rows: { ...u.rows, [`x${id}`]: true, [`inb${id}`]: true } }))
       tell()
     }
+    // a tap on another sort chip changes the sort; a tap on the ACTIVE chip (or on the direction chip) flips the direction (the choice is then explicit: asc or desc)
+    const flipDir = async () => {
+      await saveSortDir(host, effectiveDir(cfgPane) === 'asc' ? 'desc' : 'asc')
+      tell()
+    }
     const sortPress = (k: SortKey) => async () => {
+      if (k === cfgPane.sort) return flipDir()
       await saveSort(host, k)
       tell()
+    }
+    // Hide / Unhide (1.0.33): a completed session (done or closed) the user hides is only drawn again when it is no longer completed or has something unread or waiting; nothing is
+    // closed or deleted. The set is kept in the mod's store (panelist.ts). `itemById` and `hiddenIds` are set below, where the list is built.
+    const hidePress = (id: string, hide: boolean) => async () => {
+      const at = itemById.get(id)?.activity ?? 0
+      await saveHidden(host, cur => {
+        const next = { ...cur }
+        if (hide) next[id] = at
+        else delete next[id]
+        return next
+      })
+      tell()
+    }
+    const hideCtl = (id: string) => {
+      const i = itemById.get(id)
+      const un = hiddenIds.has(id)
+      const can = !!i && canHide(i, { unread: unreadIds.has(id), held: holdsOf(id).length > 0 })
+      return {
+        chip: un ? <Button key={`unhide-${id}`} plain label="Unhide" onPress={hidePress(id, false)} /> : can ? <Button key={`hide-${id}`} plain label="Hide" onPress={hidePress(id, true)} /> : null,
+        button: un ? <Button key={`unhide-more-${id}`} label="Unhide" onPress={hidePress(id, false)} /> : can ? <Button key={`hide-more-${id}`} label="Hide" onPress={hidePress(id, true)} /> : null,
+      }
     }
     // a thread's messages: the "N new" chip (a tap shows them), Show / Hide messages, ack for the whole card, the rows themselves
     const messagePieces = (id: string) => {
@@ -889,22 +947,31 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const DECIDE: string[] = ['action', 'model', 'denial']
     // the one shape of a session card, whatever the thread's state: two lines, then (unfolded) the details
     const sessionCard = (o: { id: string; title: string; open: boolean; chips: any[]; chipLen: number; line2: any[]; primary: any; color?: string; dim: boolean; details: any }) =>
-      (
-        <Box key={`t-${o.id}`} {...cardProps({ color: o.color, dim: o.dim })}>
-          <Box key="line1" flexWrap="nowrap" columnGap={1}>
-            <Button key={`card-${o.id}`} plain label={short(`${o.open ? '▾' : '▸'} ${o.id} ${o.title}`, Math.max(14, cols - 4 - o.chipLen - 1))} onPress={toggleCard(o.id)} />
-            {o.chips}
-          </Box>
-          <Box key="line2" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
-            <Box flexWrap="nowrap" columnGap={1} flexShrink={1}>
-              {o.line2}
+      {
+        const hc = hideCtl(o.id)
+        return (
+          <Box key={`t-${o.id}`} {...cardProps({ color: o.color, dim: o.dim })}>
+            <Box key="line1" flexWrap="nowrap" columnGap={1}>
+              <Button key={`card-${o.id}`} plain label={short(`${o.open ? '▾' : '▸'} ${o.id} ${o.title}`, Math.max(14, cols - 4 - o.chipLen - 1))} onPress={toggleCard(o.id)} />
+              {o.chips}
             </Box>
-            {o.primary}
+            <Box key="line2" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
+              <Box flexWrap="nowrap" columnGap={1} flexShrink={1}>
+                {o.line2}
+                {hc.chip}
+              </Box>
+              {o.primary}
+            </Box>
+            {o.open && `▾ ${o.id} ${o.title}`.length > Math.max(14, cols - 4 - o.chipLen - 1) ? <Text key="full-title" wrap="wrap">{o.title}</Text> : null}
+            {o.details}
+            {o.open && hc.button ? (
+              <Box key="hide-row" flexWrap="wrap" columnGap={1}>
+                {hc.button}
+              </Box>
+            ) : null}
           </Box>
-          {o.open && `▾ ${o.id} ${o.title}`.length > Math.max(14, cols - 4 - o.chipLen - 1) ? <Text key="full-title" wrap="wrap">{o.title}</Text> : null}
-          {o.details}
-        </Box>
-      )
+        )
+      }
     const threadRow = (t: ThreadRow) => {
       const sc = stateOf(t)
       const myNeeds = needs.filter(n => n.thread === t.id)
@@ -1021,8 +1088,20 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         ) : null,
       })
     }
-    const allItems = sortItems(itemsOf(v?.threads ?? [], v?.closed ?? [], needs), cfgPane.sort)
+    const sortedAll = sortItems(itemsOf(v?.threads ?? [], v?.closed ?? [], needs), cfgPane.sort, effectiveDir(cfgPane))
     const unreadIds = new Set(inbox.filter(g => g.unread.length > 0).map(g => g.from))
+    // the hidden completed sessions (panelist.ts isHidden): out of the list unless the "N hidden" chip was tapped (then they are drawn folded, with Unhide)
+    const hiddenSet = await readHidden(host)
+    const itemById = new Map(sortedAll.map(i => [i.id, i] as const))
+    const hiddenIds = new Set(sortedAll.filter(i => isHidden(i, hiddenSet, { unread: unreadIds.has(i.id), held: holdsOf(i.id).length > 0 })).map(i => i.id))
+    const hiddenShown = ui.rows.hiddenShown === true
+    const allItems = hiddenShown ? sortedAll : sortedAll.filter(i => !hiddenIds.has(i.id))
+    const hideableNow = allItems.filter(i => !hiddenIds.has(i.id) && canHide(i, { unread: unreadIds.has(i.id), held: holdsOf(i.id).length > 0 }))
+    const hiddenUnread = [...hiddenIds].reduce((n, id) => n + (inboxOf.get(id)?.unread.length ?? 0), 0) // (a hidden session has nothing unread by rule: this says so if it ever does)
+    const hideCompleted = async () => {
+      await saveHidden(host, cur => ({ ...cur, ...Object.fromEntries(hideableNow.map(i => [i.id, i.activity] as const)) }))
+      tell()
+    }
     const showAllRows = ui.rows.sessionsAll === true
     const capped = showAllRows ? { shown: allItems, hidden: 0 } : capItems(allItems, cfgPane.maxSessions, (i: Item) => i.needs || unreadIds.has(i.id) || holdsOf(i.id).length > 0)
     const sessionRow = (i: Item) => (i.t ? threadRow(i.t) : closedRow(i.c!))
@@ -1100,7 +1179,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         </Box>,
       )
     }
-    if (overDesk && !desk?.restarting) fixItems.push(row('h-restart', 'restart desk', 'warning', `restart the desk (context ${kTokens(ctx)} of ${kTokens(limit)}, the handover is ready): press Restart desk in the header`))
+    // (1.0.33) the limit is a warning level only: above it the desk goes on, this ONE amber finding says so; from 80 % the same finding in softer words; nothing red, nothing repeated
+    if (overDesk && !desk?.restarting) fixItems.push(row('h-restart', 'restart desk', 'warning', ctx >= limit ? `above its limit (${kTokens(ctx)} of ${kTokens(limit)}): press Restart desk when it suits you (the handover is ready)` : `desk context ${kTokens(ctx)} of ${kTokens(limit)}: press Restart desk when it suits you (the handover is ready)`))
     // the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick
     if (v?.deskModel && !v.deskModelRed) fixItems.push(row('h-deskmodel', 'desk model', 'warning', v.deskModel))
     for (const [i, m] of fixes.entries()) fixItems.push(row(`df-${i}`, 'fix', 'warning', short(m, 160), [<Button key={`doctor-dismiss-fix-${i}`} label="Dismiss" onPress={dismissLine([docId(m)])} />]))
@@ -1168,7 +1248,10 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const lastErrorShown = !!lastError && !errors.includes(lastError) && notice !== lastError
     const headerOpen = isOpen(ui, 'header', false)
     const winShown = !!v?.window && (!winGone || showHidden)
-    const foldedBits = ['lean-agent', v?.spend ? `today $${v.spend.today.toFixed(2)}` : 'budget n/a', winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '', ctx > 0 && limit > 0 ? `desk ${kTokens(ctx)}/${kTokens(limit)}` : ''].filter(Boolean)
+    // above its limit the desk's own figure comes right after the name ("lean-agent · desk 230k of 200k - Restart desk · today ..."), so a narrow line cuts the cost, not the warning
+    const deskBit = ctx > 0 && limit > 0 ? (ctx >= limit ? `desk ${kTokens(ctx)} of ${kTokens(limit)} - Restart desk` : `desk ${kTokens(ctx)}/${kTokens(limit)}`) : ''
+    const restBits = [v?.spend ? `today $${v.spend.today.toFixed(2)}` : 'budget n/a', winShown && winPct !== undefined ? `${winLabel.split(/\s+/)[0] || 'window'} ${winPct}%` : '']
+    const foldedBits = (ctx > 0 && limit > 0 && ctx >= limit ? ['lean-agent', deskBit, ...restBits] : ['lean-agent', ...restBits, deskBit]).filter(Boolean)
     // Restart desk: always here (1.0.33), one tap (no second confirm), the same restart path as the automatic one (handover first, then the new desk). While a restart runs, or
     // for 60 s after the last one, a dim line says so instead of the button (the 30 min gap and the per-day count are for AUTOMATIC restarts only).
     const restarting = restartingNow()
@@ -1249,23 +1332,34 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
         : null
     // ---- the Sessions toolbar card: folded = its title (with the sort named) and ack all; unfolded = the sort chips and Close all done ----
     const toolbarOpen = isOpen(ui, 'toolbar', false)
-    const toolbarTitle = `Sessions (${allItems.length})${v?.unread ? ` · ${v.unread} unread` : ''} · sorted by ${SORT_LABEL[cfgPane.sort]}`
+    const dir = effectiveDir(cfgPane)
+    const toolbarTitle = `Sessions (${allItems.length})${v?.unread ? ` · ${v.unread} unread${hiddenUnread > 0 ? ` (${hiddenUnread} hidden)` : ''}` : ''} · sorted by ${SORT_LABEL[cfgPane.sort]} ${ARROW[dir]}`
+    const hiddenLabel = hiddenShown ? `showing ${hiddenIds.size} hidden` : `${hiddenIds.size} hidden`
     const toolbarCard = (
       <Box key="toolbar" {...cardProps()}>
         <Box key="tb-line" flexWrap="nowrap" columnGap={1} justifyContent="space-between">
           <Box flexWrap="nowrap" flexShrink={1}>
-            {foldTitle('toolbar', toolbarTitle, false, v?.unread ? 'ack all'.length + 3 : 0)}
+            {foldTitle('toolbar', toolbarTitle, false, (v?.unread ? 'ack all'.length + 3 : 0) + (hiddenIds.size > 0 ? hiddenLabel.length + 3 : 0))}
           </Box>
-          {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
+          <Box flexWrap="nowrap" columnGap={1}>
+            {hiddenIds.size > 0 && <Button key="hidden-chip" label={hiddenLabel} onPress={toggleRow('hiddenShown')} />}
+            {!!v?.unread && <Button key="ack-all" label="ack all" onPress={act('ack', async () => ackRows(host, 'all'))} />}
+          </Box>
         </Box>
         {toolbarOpen && (
           <Box key="tb-more" flexDirection="column">
             <Box flexWrap="wrap" columnGap={1}>
               <Text dimColor>sort:</Text>
               {SORTS.map(k => (
-                <Button key={`sort-${k}`} plain dimColor={cfgPane.sort !== k} label={`${cfgPane.sort === k ? '● ' : ''}${SORT_LABEL[k]}`} onPress={sortPress(k)} />
+                <Button key={`sort-${k}`} plain dimColor={cfgPane.sort !== k} label={`${cfgPane.sort === k ? '● ' : ''}${SORT_LABEL[k]}${cfgPane.sort === k ? ` ${ARROW[dir]}` : ''}`} onPress={sortPress(k)} />
               ))}
+              <Button key="sort-dir" label={`${ARROW[dir]} ${dir}`} onPress={flipDir} />
             </Box>
+            {hideableNow.length > 0 && (
+              <Box flexWrap="wrap" columnGap={1}>
+                <Button key="hide-completed" label={`Hide all completed (${hideableNow.length})`} onPress={hideCompleted} />
+              </Box>
+            )}
             {doneThreads.length >= 2 && closable.length > 0 && (
               <Box flexWrap="wrap" columnGap={1}>
                 <Button key="close-done" label={confirming(ui, 'close:done', now2) ? `Confirm close all done (${closable.length})` : `Close all done (${closable.length})`} onPress={closeDone} />
