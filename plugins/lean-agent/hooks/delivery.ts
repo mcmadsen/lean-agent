@@ -71,12 +71,23 @@ export async function unconsumed(h: Host, home: string, id: string): Promise<{ m
 const render = (msgs: Inbox[]) => msgs.map(m => `[lean-agent] message from ${m.from || 'the desk'}: ${m.text}`).join('\n')
 
 // Thread side, after a tool call: the batch as extra context, marked consumed first (once only).
-export async function takeBatch(h: Host, id: string): Promise<string | null> {
+// `defer` (1.0.35): the 1.0.33 rule for every route, not only a wake prompt: a message is consumed once the model ANSWERED a request that carried it. The lines are handed
+// out now (once: `handed` remembers how far in this process) and `defer(upTo)` tells the caller which position the next answered request makes consumed (register.tsx wakeAt);
+// without `defer` they are marked at once (the old path, the specs).
+const handed = new Map<string, number>()
+export const resetHanded = (): void => handed.clear()
+export async function takeBatch(h: Host, id: string, o: { defer?: (upTo: number) => void } = {}): Promise<string | null> {
   return serial(`batch:${id}`, async () => {
     const home = await homeDir(h)
-    const { msgs, upTo } = await unconsumed(h, home, id)
+    const un = await unconsumed(h, home, id)
+    let { msgs } = un
+    const { upTo } = un
+    if (o.defer) msgs = msgs.slice(Math.max(0, (handed.get(id) ?? 0) - (upTo - msgs.length))) // (what an earlier call of this process already handed out)
     if (!msgs.length) return null
-    await markConsumed(h, home, id, upTo)
+    if (o.defer) {
+      handed.set(id, upTo)
+      o.defer(upTo)
+    } else await markConsumed(h, home, id, upTo)
     return render(msgs)
   })
 }

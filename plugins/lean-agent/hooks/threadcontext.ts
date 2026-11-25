@@ -6,8 +6,10 @@
 // code starts a fresh session with the handover instead of resuming (threads.ts wake). A working session is never touched.
 //
 // Config (config.json), both numbers of tokens; a value that is not a finite number of at least MIN_TOKENS is ignored (the default applies):
-//   threadTokens      default 120000: the limit; a recorded size ABOVE it restarts at the next message (equal is still fine)
-//   threadWarnTokens  default 100000 (83% of the limit, to the nearest 1000): above it the pane shows the size in yellow
+//   threadTokens      default 200000 (1.0.35; 120000 before): the limit; a recorded size ABOVE it restarts at the next message (equal is still fine). The EFFECTIVE limit
+//                     is never more than 90% of the model's real context window once the session reported it (context.json `window`): 180000 on a 200k window
+//   threads.softCheckpointTokens  default 80% of the effective limit (160000 of 200000): a work thread this big is told once to checkpoint
+//   threadWarnTokens  default: the soft checkpoint size, at most 83% of the limit: above it the pane shows the size in yellow
 // A size is only believed for the session it was recorded by (`sid`): an older session's record is ignored, and no record at all (an older
 // thread, a failed write) counts as "unknown", never as over the limit: a session is not restarted on a guess.
 // Keep mode (thread.json `keep: true`): a thread that reported done is RESUMED for follow-ups until its context passes the limit
@@ -19,11 +21,15 @@ import { readConfig } from './budget'
 import { usageTokens } from './usage'
 import { fmtTokens } from './formatusage'
 import { readParts } from './ctxparts'
+import { effectiveLimit } from './deskcompact'
 
-export const DEFAULT_LIMIT = 120_000
-export const DEFAULT_SOFT = 80_000 // config threads.softCheckpointTokens (1.0.31): a work thread this big is told once to checkpoint at its next natural boundary
-export const DEFAULT_WARN = DEFAULT_SOFT
-export const WARN_SHARE = 0.83
+// ONE value (1.0.35): the thread limit is 200k (it was 120k; the user chose it, like the desk's); everything else is a share of the EFFECTIVE limit, which is the
+// configured one but never more than 90% of the model's real context window when the engine reported it (the desk's rule since 1.0.33: deskcompact.ts effectiveLimit;
+// a 200k setting on a 200k window is 180k). Higher limit = each turn re-reads a bigger cached context: `threadTokens` lowers it again.
+export const DEFAULT_LIMIT = 200_000
+export const SOFT_SHARE = 0.8 // the soft checkpoint (threads.softCheckpointTokens) defaults to this share of the effective limit: 160k of 200k, 144k of 180k
+export const WARN_SHARE = 0.83 // the warn level (threadWarnTokens) is the soft checkpoint, never above this share of the effective limit
+export const softOf = (limit: number): number => Math.floor((limit * SOFT_SHARE) / 1000) * 1000
 export const MIN_TOKENS = 10_000 // a smaller configured value is ignored (a restart every few turns would be worse than none)
 export const OVERRIDE_MIN = 40_000 // lean_thread limit tN <tokens>: the range one thread's own hard limit may have
 export const OVERRIDE_MAX = 200_000
@@ -33,37 +39,42 @@ const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFin
 export const overrideOk = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= OVERRIDE_MIN && v <= OVERRIDE_MAX
 
 type LimitCfg = { threadTokens?: unknown; threadWarnTokens?: unknown; threads?: { softCheckpointTokens?: unknown } | null; 'threads.softCheckpointTokens'?: unknown }
-// the two limits from a config object (pure); the warn level never exceeds the limit. The warn level is the soft checkpoint size (threads.softCheckpointTokens, default 80k)
-// unless the old threadWarnTokens key is set; a per-thread `override` of the hard limit moves the warn level with it (the same share of it as the default pair: 80k of 120k).
-export function limitsOf(cfg: LimitCfg | null | undefined, override?: number | null): Limits {
+// the two limits from a config object (pure); the warn level never exceeds the limit. The warn level is the soft checkpoint size (threads.softCheckpointTokens, default 80% of the effective limit)
+// unless the old threadWarnTokens key is set; a per-thread `override` of the hard limit moves the warn level with it (the same share of it: 80%).
+// `window`: the model's real context window as the session reported it (context.json `window`); 0 / absent = not known (nothing is capped on a guess).
+// `soft`: the soft checkpoint size, the share of the effective limit unless threads.softCheckpointTokens says another number (an own limit scales that number by its share).
+export function limitsOf(cfg: LimitCfg | null | undefined, override?: number | null, window?: number | null): Limits {
   const base = valid(cfg?.threadTokens) ? Math.floor(cfg!.threadTokens as number) : DEFAULT_LIMIT
-  const limit = overrideOk(override) ? Math.floor(override) : base
+  const configured = overrideOk(override) ? Math.floor(override) : base
+  const limit = effectiveLimit(configured, typeof window === 'number' ? window : 0)
   const softRaw = cfg?.threads?.softCheckpointTokens ?? cfg?.['threads.softCheckpointTokens']
-  const soft = valid(softRaw) ? Math.floor(softRaw) : DEFAULT_SOFT
+  const scaled = valid(softRaw) ? (overrideOk(override) || limit < base ? Math.round((limit * Math.floor(softRaw)) / base / 1000) * 1000 : Math.floor(softRaw)) : softOf(limit)
   const share83 = Math.round((limit * WARN_SHARE) / 1000) * 1000 // a soft line never sits above 83% of the limit
-  const scaled = overrideOk(override) ? Math.round((limit * soft) / base / 1000) * 1000 : soft
   const asked = valid(cfg?.threadWarnTokens) ? Math.floor(cfg!.threadWarnTokens as number) : Math.min(scaled, share83)
   return { limit, warn: Math.min(asked, limit) }
 }
 export async function threadLimits(h: Host): Promise<Limits> {
   return limitsOf((await readConfig(h, await homeDir(h)).catch(() => null)) as any)
 }
-// the limits of ONE thread: the same, with the thread's own override (thread.json tokenLimit) when it has one
+// the limits of ONE thread: the same, with the thread's own override (thread.json tokenLimit) when it has one, and the window its session reported (context.json)
 export async function threadLimitsFor(h: Host, id: string): Promise<Limits> {
   const home = await homeDir(h)
-  const t = /^t\d+$/.test(id) ? await readJson<{ tokenLimit?: unknown } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null).catch(() => null) : null
-  return limitsOf((await readConfig(h, home).catch(() => null)) as any, overrideOk(t?.tokenLimit) ? t!.tokenLimit : null)
+  const ok = /^t\d+$/.test(id)
+  const t = ok ? await readJson<{ tokenLimit?: unknown } | null>(h, `${threadsDir(home)}/${id}/thread.json`, null).catch(() => null) : null
+  const rec = ok ? await readJson<{ window?: unknown } | null>(h, contextFile(home, id), null).catch(() => null) : null
+  return limitsOf((await readConfig(h, home).catch(() => null)) as any, overrideOk(t?.tokenLimit) ? t!.tokenLimit : null, windowOk(rec?.window))
 }
+const windowOk = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0)
 
 // ---- the record: <thread folder>/context.json {tokens, at, sid} ----
 export type Sample = { at: number; tokens: number }
 export const HIST_MAX = 20 // the last turn-end samples kept in context.json (the pane's growth per turn)
-export type ContextRec = { tokens: number; at: number; sid: string; hist?: Sample[] }
+export type ContextRec = { tokens: number; at: number; sid: string; hist?: Sample[]; window?: number /* the model's real context window, as the session reported it */ }
 export const contextFile = (home: string, id: string) => `${threadsDir(home)}/${id}/context.json`
 
 // Written by the thread's own mod at the end of a turn; false = nothing written (no usable size or session id), never throws.
 // `sample`: a turn end, one history sample is kept (the last HIST_MAX); every other write keeps the history of the same session as it was.
-export async function recordContext(h: Host, id: string, sid: string, tokens: unknown, o: { sample?: boolean } = {}): Promise<boolean> {
+export async function recordContext(h: Host, id: string, sid: string, tokens: unknown, o: { sample?: boolean; window?: unknown } = {}): Promise<boolean> {
   if (!/^t\d+$/.test(id) || !sid || typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return false
   try {
     const home = await homeDir(h)
@@ -71,7 +82,8 @@ export async function recordContext(h: Host, id: string, sid: string, tokens: un
     const old = await readJson<Partial<ContextRec> | null>(h, contextFile(home, id), null)
     let hist = old && old.sid === sid && Array.isArray(old.hist) ? old.hist.filter(x => x && typeof x.at === 'number' && typeof x.tokens === 'number') : []
     if (o.sample) hist = [...hist, { at, tokens: Math.round(tokens) }].slice(-HIST_MAX)
-    const rec: ContextRec = { tokens: Math.round(tokens), at, sid, ...(hist.length ? { hist } : {}) }
+    const window = windowOk(o.window) || (old && old.sid === sid ? windowOk(old.window) : 0) // (a write with no window keeps the one this session reported)
+    const rec: ContextRec = { tokens: Math.round(tokens), at, sid, ...(hist.length ? { hist } : {}), ...(window ? { window } : {}) }
     await writeJson(h, contextFile(home, id), rec) // atomic: tmp file + mv
     return true
   } catch {
@@ -126,7 +138,7 @@ export async function ctxOf(h: Host, home: string, t: { id: string; sid?: string
   const parts = rec ? await readParts(h, home, t.id).catch(() => null) : null
   const fixed = parts && parts.sid === rec!.sid ? parts.first?.fixed : undefined // only the breakdown of the session the size belongs to
   const own = await readJson<{ tokenLimit?: unknown } | null>(h, `${threadsDir(home)}/${t.id}/thread.json`, null).catch(() => null) // the thread's own limit (lean_thread limit) wins over the shared one
-  return ctxView(rec, overrideOk(own?.tokenLimit) ? await threadLimitsFor(h, t.id) : (l ?? (await threadLimits(h))), fixed)
+  return ctxView(rec, overrideOk(own?.tokenLimit) || windowOk(await readJson<{ window?: unknown } | null>(h, contextFile(home, t.id), null).then(r => r?.window, () => 0)) ? await threadLimitsFor(h, t.id) : (l ?? (await threadLimits(h))), fixed)
 }
 
 // ---- the decision ----

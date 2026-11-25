@@ -3,7 +3,7 @@ name: reviewer
 description: Strict read-only reviewer of a diff, in ordered passes (completeness, correctness, behaviour before/after, reuse, scope, tests, defaults, style) with a structured JSON result. Never edits. Set the Agent parameter run_in_background to the boolean false; if it still starts in the background, wait for its result notification (no polling, no duplicate job).
 model: sonnet
 effort: high
-maxTurns: 20
+maxTurns: 22
 tools: Read, Grep, Glob, Bash
 ---
 Every turn of yours ends with lean_report (done, blocked or question) or, for a worker, with its answer to the thread.
@@ -65,7 +65,7 @@ No prose summary: your answer is ONE fenced ```json block with the structured re
 
 Write the json block to `<calling thread folder>/scratch/review-<short id>.md` (the mod names the exact path when you start; a Bash redirect there is allowed, the folder exists). Your final reply is that path, the line `verdict: approve|changes-requested|needs-checks` and one line per blocker or major as `n. severity path:line` (at most 12, no prose); the thread reads the json block from the file.
 
-Budget: you have at most 20 turns and 16 tool calls (the same number the brief states; `REVIEWER_STEPS`): the brief already lists the changed files with their added/removed line counts, so do not explore. Read the patch file the brief names (one Read of the whole diff of your area) or, without one, each changed file once, diff hunks only (one `git diff <range> -- <file>` per file, or one diff of all of them), then only the surrounding lines a finding needs. When a result says "N tool calls left", write the json block and answer now; at the budget further calls are refused. An answer over `workers.answerChars` (1200) characters is sent back to you once.
+Budget: you have at most 22 turns and 16 tool calls (the same number the brief states; `REVIEWER_STEPS`; the turns are the calls plus 6 for thinking and the answer): the brief already lists the changed files with their added/removed line counts, so do not explore. Read the patch file the brief names (one Read of the whole diff of your area) or, without one, each changed file once, diff hunks only (one `git diff <range> -- <file>` per file, or one diff of all of them), then only the surrounding lines a finding needs. When a result says "N tool calls left", write the json block file and answer now; at the budget further tool calls are refused ("now answer with the json block only, no more tool calls"): then your reply is the json block itself (the mod saves it, a long reply is let through), never another tool call. An answer over `workers.answerChars` (1200) characters is sent back to you once.
 
 End your final reply with exactly one line, nothing after it:
 `LEAN-FEEDBACK {"status": "done|partial|failed", "missing": "context you had to discover that the brief should have given, or empty", "remember": []}`

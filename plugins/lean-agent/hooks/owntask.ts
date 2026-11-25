@@ -7,11 +7,12 @@
 // A failed read is NEVER ok. `ownTask` is pure about policy (no config, no override): the config `workitems.onlyOwn` and the user's own words are `moveAllowed`.
 import { homeDir, leanDir, readJson } from './state'
 import type { Host } from './state'
-import { readerOf } from './deskactions'
+import { readerOf, rows, stateOf } from './deskactions'
 import { recentPrompts } from './humanprompts'
 
 // `link`: the request is a LINK of the PR to the work item (ado-pr-workitem-link), so its refusal says "not linking it" (a state move says "not moving it")
-export type OwnTarget = { pr?: { org: string; project: string; repo: string; number: number }; workItem?: { org: string; project: string; id: number }; link?: boolean }
+// `links` (1.0.35): how many link requests wait for the desk, this one included; the plain words "link it anyway" lift a refusal only when it is exactly 1
+export type OwnTarget = { pr?: { org: string; project: string; repo: string; number: number }; workItem?: { org: string; project: string; id: number }; link?: boolean; links?: number }
 export type OwnResult = { ok: boolean; why: string }
 type Who = { id?: string; unique?: string; name: string }
 const enc = encodeURIComponent
@@ -51,7 +52,8 @@ function identity(h: Host, org: string): Promise<Who | null> {
 }
 
 export const CANT = 'could not verify the owner/assignee: not moving it'
-const SAY_LINK = "(say 'link it anyway' in the chat to allow once)" // (userSaidAnyway accepts these words for a link request)
+// the words that lift a refused link NAME the work item (1.0.35, the stricter form): "link WI 4210 anyway" (userSaidAnyway)
+const SAY_LINK = (wi: number) => `(say 'link WI ${wi} anyway' in the chat to allow once)`
 export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
   const org = t.workItem?.org ?? t.pr?.org
   if (!org || (!t.workItem && !t.pr)) return { ok: false, why: CANT }
@@ -63,8 +65,8 @@ export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
     const g = (await rd.az('GET', `https://dev.azure.com/${enc(w.org)}/${enc(w.project)}/_apis/wit/workitems/${w.id}?fields=System.AssignedTo&api-version=7.1`).catch(() => null)) as { fields?: Record<string, unknown> } | null
     if (!g || typeof g !== 'object' || !g.fields || typeof g.fields !== 'object') return { ok: false, why: CANT }
     const a = whoOf(g.fields['System.AssignedTo'])
-    if (!a) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item that is unassigned, not yours: not linking it ${SAY_LINK}` : `WI ${w.id} is unassigned: not moving it` }
-    if (!same(who, a)) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item assigned to ${a.name}, not you: not linking it ${SAY_LINK}` : `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
+    if (!a) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item that is unassigned, not yours: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is unassigned: not moving it` }
+    if (!same(who, a)) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item assigned to ${a.name}, not you: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
   }
   if (t.pr) {
     const p = t.pr
@@ -82,13 +84,27 @@ export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
 type Req = { kind: string; params: Record<string, unknown> }
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v))
-export async function checkMove(h: Host, kind: string, params: Record<string, unknown>): Promise<string | null> {
+const linksIn = (kind: string, params: Record<string, unknown>): number => (kind === 'batch' ? (Array.isArray(params.items) ? (params.items as Req[]) : []) : [{ kind, params }]).filter(i => i?.kind === 'ado-pr-workitem-link').length
+// the link requests that wait for the desk (pending, or approved and not sent yet), without `exceptId` (the request being checked at send time)
+async function pendingLinks(h: Host, exceptId: string | undefined, same: string): Promise<number> {
+  const now = await h.clock.now()
+  let n = 0
+  for (const r of await rows(h).catch(() => [])) {
+    if (r.id === exceptId || now > r.exp || JSON.stringify({ kind: r.kind, params: r.params }) === same) continue // (the very same request again is the one that is there)
+    const k = linksIn(r.kind, r.params as Record<string, unknown>)
+    if (k && ['pending', 'approved'].includes(await stateOf(h, r, now))) n += k
+  }
+  return n
+}
+export async function checkMove(h: Host, kind: string, params: Record<string, unknown>, requestId?: string): Promise<string | null> {
   const items: Req[] = kind === 'batch' ? (Array.isArray(params.items) ? (params.items as Req[]) : []) : [{ kind, params }]
   const home = await homeDir(h)
+  const mine = linksIn(kind, params)
+  const links = mine ? (await pendingLinks(h, requestId, JSON.stringify({ kind, params }))) + mine : 0 // (this request counts: the plain words fit only when it is the one link request waiting)
   for (const it of items) {
     const p = it?.params ?? {}
     let target: OwnTarget | null = null
-    if (it?.kind === 'ado-pr-workitem-link') target = { link: true, workItem: { org: str(p.org), project: str(p.project), id: num(p.workitem) }, pr: { org: str(p.org), project: str(p.project), repo: str(p.repo), number: num(p.pr) } }
+    if (it?.kind === 'ado-pr-workitem-link') target = { link: true, links, workItem: { org: str(p.org), project: str(p.project), id: num(p.workitem) }, pr: { org: str(p.org), project: str(p.project), repo: str(p.repo), number: num(p.pr) } }
     else if (it?.kind === 'ado-workitem-update' && p.fields && typeof p.fields === 'object' && 'state' in (p.fields as object)) target = { workItem: { org: str(p.org), project: str(p.project), id: num(p.id) } }
     if (!target || !(target.workItem!.id > 0)) continue // (a work item a create step of the same batch is making has no number yet: the user approves that whole batch)
     const r = await moveAllowed(h, home, target)
@@ -104,9 +120,11 @@ export async function onlyOwn(h: Host, home: string): Promise<boolean> {
   return v !== false
 }
 // the user's OWN typed words lift the rule for the one work item they name ("move WI 4210 anyway"); a thread cannot pass anything that does
-export async function userSaidAnyway(h: Host, wi: number, link = false): Promise<boolean> {
+// The words name the work item: "link WI 4210 anyway", "move WI 4210 anyway". The plain "link it anyway" (1.0.35: it used to lift EVERY refused link of the next
+// minutes) counts only for a LINK request and only when exactly ONE link request waits for the desk (`links`), and then only for that one.
+export async function userSaidAnyway(h: Host, wi: number, link = false, links = 0): Promise<boolean> {
   const named = new RegExp(`(?:\\bWI|work\\s?items?|_workitems/edit/|#)\\s*${wi}\\b`, 'i')
-  return (await recentPrompts(h).catch(() => [])).some(p => (named.test(p.text) && /\banyway\b|\bregardless\b|\beven though\b/i.test(p.text)) || (link && /\blink it anyway\b/i.test(p.text))) // (a link refusal says "say 'link it anyway'": those words count for a link request)
+  return (await recentPrompts(h).catch(() => [])).some(p => (named.test(p.text) && /\banyway\b|\bregardless\b|\beven though\b/i.test(p.text)) || (link && links === 1 && /\blink it anyway\b/i.test(p.text)))
 }
 // the check the typed actions and the after-PR batch use: config off or the user's words -> allowed; else ownTask
 // the specs of the executor (deskactions, standing, ownpr ...) test the writes, not the owner: they call this once at the top of the file (a spec file runs in its own process)
@@ -119,6 +137,6 @@ export async function moveAllowed(h: Host, home: string, t: OwnTarget): Promise<
   if (relaxed || !(await onlyOwn(h, home))) return { ok: true, why: '' }
   const r = await ownTask(h, t)
   if (r.ok) return r
-  if (t.workItem && r.why !== CANT && (await userSaidAnyway(h, t.workItem.id, t.link === true))) return { ok: true, why: '' } // (a failed read is never lifted: the words do not make the read succeed)
+  if (t.workItem && r.why !== CANT && (await userSaidAnyway(h, t.workItem.id, t.link === true, t.links ?? 0))) return { ok: true, why: '' } // (a failed read is never lifted: the words do not make the read succeed)
   return r // (the refusal is exactly the why: nothing is added to it)
 }

@@ -13,9 +13,9 @@ export const DATA = /(?:^|\s)(?:(?:-d|-F|-T)(?=[\s='"@{]|$)|--(?:data(?:-binary|
 const GH_FIELD = /(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?=[\s='"]|$)/
 // `gh api graphql` that only READS: the one gh api in the text, a query text that starts with `query` or `{`, no mutation / subscription, no other method, no --input
 const GQL_QUERY = /(?:^|\s)(?:-f|-F|--field|--raw-field)[\s=]*['"]?query=\s*['"]?\s*(?:query\b|\{)/
-const AZ_GROUPS = new Set(['repos', 'boards', 'devops', 'pipelines', 'artifacts'])
-const AZ_READ = /^(?:list|show|query|get|download|diff|search|(?:list|show|get)-[\w-]+)$/
-const GH_GROUPS = new Set(['pr', 'issue', 'release', 'repo', 'workflow', 'run', 'secret', 'variable', 'label', 'gist', 'ruleset', 'project', 'org', 'cache', 'codespace', 'ssh-key', 'gpg-key', 'extension', 'attestation'])
+export const AZ_GROUPS = new Set(['repos', 'boards', 'devops', 'pipelines', 'artifacts'])
+export const AZ_READ = /^(?:list|show|query|get|download|diff|search|(?:list|show|get)-[\w-]+)$/
+export const GH_GROUPS = new Set(['pr', 'issue', 'release', 'repo', 'workflow', 'run', 'secret', 'variable', 'label', 'gist', 'ruleset', 'project', 'org', 'cache', 'codespace', 'ssh-key', 'gpg-key', 'extension', 'attestation'])
 const GH_READ = /^(?:(?:[a-z]+-)*(?:list|view|show|get)|diff|checks|status|watch|download|clone|checkout|ls)$/
 // flags that take no value (so the word after them is still a path word); an unknown flag takes the next word that is no flag as its value
 const NO_VALUE = new Set(['--debug', '--verbose', '--only-show-errors', '--help', '-h', '--no-wait', '--yes', '-y', '--web', '-w', '--draft', '--fill', '--squash', '--merge', '--rebase', '--admin', '--auto', '--delete-branch', '--approve', '--comment', '--request-changes', '--force', '--recursive'])

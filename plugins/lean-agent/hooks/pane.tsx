@@ -13,6 +13,7 @@ import { ACTION_CARD_MAX, OVER_PCT, READ_SHOWN, ackRows, loadView, resetViewCach
 import { CONFIRM_MS, confirming, isOpen, patchUi, readUi, resetPaneUi } from './panestate'
 import type { ClosedRow, NeedRow, NoticeRow, ThreadRow, View } from './view'
 import { leanThread } from './threads'
+import { olderDeps, olderRowCount, restartLabel, restartOlderNow } from './olderrestart'
 import { homeDir } from './state'
 import { dismissedKeys, dkey, recordDismiss } from './dismissstore'
 import type { DItem } from './dismissstore'
@@ -39,7 +40,7 @@ import { revokeOwn, revokeWrites } from './deskwrites'
 import { ARROW, SORTS, SORT_LABEL, ageText, canHide, capItems, effectiveDir, isHidden, itemsOf, modelChip, paneConfig, readHidden, saveHidden, saveSort, saveSortDir, sortItems } from './panelist'
 import type { Item, SortKey } from './panelist'
 import { closedText, deskText, fmtTokens, foldedText, headerText } from './formatusage'
-import { healthSummary } from './panehealth'
+import { healthSummary, staleAreasLine } from './panehealth'
 import { setNotice } from './notices'
 import { grantByHuman, paneLine, revokeSelfEdit } from './selfedit'
 import { NARROW as NARROW_BRIEF, RETRY_LABEL, selfEditLabel } from './denial'
@@ -406,6 +407,13 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
       }
       $.ui.invalidate('ui.render')
     }
+    // the Health row of threads that run an older plugin (threads.restartOlder = ask): ONE press restarts the idle ones from their handover, the working ones are listed (olderrestart.ts)
+    const runOlder = setupPress('restart older threads', async () => {
+      resetViewCache()
+      const o = await restartOlderNow(host, $.plugin.root, olderDeps(host, $.plugin.root))
+      chk = null // the doctor is asked again: the row is gone for the threads that restarted
+      return { ok: o.ok, text: o.text }
+    })
     const runSetup = setupPress('setup', async () => {
       resetViewCache()
       const o = await setupFix(host, $.plugin.root)
@@ -1228,7 +1236,7 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     if (overDesk && !desk?.restarting) fixItems.push(row('h-restart', 'restart desk', 'warning', ctx >= limit ? `above its limit (${kTokens(ctx)} of ${kTokens(limit)}): press Restart desk when it suits you (the handover is ready)` : `desk context ${kTokens(ctx)} of ${kTokens(limit)}: press Restart desk when it suits you (the handover is ready)`))
     // the desk runs another model than its pin and the mod could not change it (deskmodel.ts): what to pick
     if (v?.deskModel && !v.deskModelRed) fixItems.push(row('h-deskmodel', 'desk model', 'warning', v.deskModel))
-    for (const [i, m] of fixes.entries()) fixItems.push(row(`df-${i}`, 'fix', 'warning', short(m, 160), [<Button key={`doctor-dismiss-fix-${i}`} label="Dismiss" onPress={dismissLine([docId(m)])} />]))
+    for (const [i, m] of fixes.entries()) fixItems.push(row(`df-${i}`, 'fix', 'warning', short(m, 160), [...(olderRowCount(m) > 0 && /Restart \d+ older thread/.test(m) ? [<Button key={`doctor-older-${i}`} label={restartLabel(olderRowCount(m))} onPress={runOlder} />] : []), <Button key={`doctor-dismiss-fix-${i}`} label="Dismiss" onPress={dismissLine([docId(m)])} />]))
     for (const n of looseNeeds) fixItems.push(needCard(n)) // (a script waiting, the desk's own model request: no thread card to carry them)
     const unreadGroups = cardless.filter(g => g.unread.length > 0)
     fixItems.push(...unreadGroups.map(inboxGroup)) // (messages from senders without a thread: the desk, the mod, an unknown id; each group says "N unread")
@@ -1245,6 +1253,8 @@ export function registerPane(on: any, roleOf: () => Role = () => ({ kind: 'plain
     const infoItems: any[] = []
     for (const [i, m] of info.entries()) infoItems.push(row(`di-${i}`, '', undefined, short(m, 160), [<Button key={`doctor-dismiss-info-${i}`} label="Dismiss" onPress={dismissLine([docId(m)])} />], true))
     if (showSetNote) infoItems.push(row('h-setnote', '', undefined, setNote, [], true))
+    const staleLine = staleAreasLine(v?.projects) // the count that lost its home with the More card (1.0.35): one grey line, nothing at 0
+    if (staleLine) infoItems.push(row('h-stale-areas', '', undefined, staleLine, [], true))
     // which case applies, in words (pin applied at start / the app chose it and the pin could not be applied / you chose it by hand); the red row carries the failure
     if (v?.deskModelStatus && !v.deskModel && !showSetNote) infoItems.push(row('h-modelstatus', '', undefined, v.deskModelStatus, [], true))
     if (overDesk && desk?.restarting) infoItems.push(row('h-restarting', '', undefined, `restarting the desk (context ${kTokens(ctx)} of ${kTokens(limit)}): a new session opens by itself`, [], true))

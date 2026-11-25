@@ -11,6 +11,7 @@ import { deskModelStatus } from './deskmodel'
 import { worktreeProjects } from './projects'
 import { seenNames, skillStat } from './skilltrim'
 import { compareVersions, installedVersion, running, runsText, skewRow, skewText, skewedThreads } from './skew'
+import { modeAdvice, restartOlderMode } from './olderrestart'
 import { OPUS_SHARE_FIX, modelRows, opusShare } from './stats'
 import { fmtTokens } from './formatusage'
 import { closedOwnerRows, pruneStale, staleEntries } from './worktreereg'
@@ -160,7 +161,8 @@ export async function check(h: Host, root: string): Promise<string[]> {
   // an older one is ONE FIX row holding the cause and what the user can do (never a pointer to another row); a newer one (a dev copy) only a note
   const skewed = await skewedThreads(h, root).catch(() => [])
   // (the cause and advice are in the row itself: `fix` prints FIX rows only, so a separate note row never reached the user; several threads share ONE row, skew.ts skewRow)
-  const olderRow = skewRow(skewed.filter(s => compareVersions(s.run, s.installed) < 0))
+  const olderThreads = skewed.filter(s => compareVersions(s.run, s.installed) < 0)
+  const olderRow = skewRow(olderThreads, modeAdvice(await restartOlderMode(h, home).catch(() => 'ask' as const), olderThreads.length)) // (threads.restartOlder: the one step that restarts them, olderrestart.ts)
   if (olderRow) row(false, olderRow)
   for (const s of skewed) if (compareVersions(s.run, s.installed) >= 0) out.push(`note thread ${s.id} ${runsText(s.run, s.installed)}: a newer copy than the installed plugin (a dev copy?)`)
   const fb = await feedbackRow(h).catch(() => null) // config.json feedback.destination / folder (feedbackdest.ts): shown once set or wrong

@@ -14,8 +14,8 @@ test('growth per turn: the mean of the steps up over the kept turn-end samples; 
   expect(growthPerTurn(h(80_000, 84_000))).toBeNull()
   expect(growthPerTurn(h(80_000, 80_100, 80_200))).toBeNull()
   expect(growthPerTurn(undefined)).toBeNull()
-  expect(ctxView({ tokens: 96_000, at: 1, sid: 's', hist: h(88_000, 92_000, 96_000) }, L).text).toBe('ctx 96k/120k, +4k/turn')
-  expect(ctxView({ tokens: 96_000, at: 1, sid: 's' }, L).text).toBe('ctx 96k/120k')
+  expect(ctxView({ tokens: 96_000, at: 1, sid: 's', hist: h(88_000, 92_000, 96_000) }, L).text).toBe('ctx 96k/200k, +4k/turn')
+  expect(ctxView({ tokens: 96_000, at: 1, sid: 's' }, L).text).toBe('ctx 96k/200k')
 })
 
 test('context.json keeps the last 20 turn-end samples of the session; a mid-turn write keeps them; another session starts again', async () => {
@@ -30,7 +30,7 @@ test('context.json keeps the last 20 turn-end samples of the session; a mid-turn
   expect(r.tokens).toBe(99_000)
   expect(r.hist).toHaveLength(HIST_MAX)
   expect(r.hist![HIST_MAX - 1]!.tokens).toBe(50_000 + 24 * 2_000)
-  expect(ctxView(r, L).text).toBe('ctx 99k/120k, +2k/turn')
+  expect(ctxView(r, L).text).toBe('ctx 99k/200k, +2k/turn')
   await recordContext(h.host, 't1', 'sess-y', 10_000, { sample: true })
   expect(JSON.parse(h.files.get('/h/.lean-agent/threads/t1/context.json') as string).hist).toHaveLength(1)
 })

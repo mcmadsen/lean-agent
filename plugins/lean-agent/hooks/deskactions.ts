@@ -1631,7 +1631,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
   }
   try {
     // the check right before sending: what goes out is exactly what the user saw
-    const notMine = hashOf(renderingOf(plan)) === r.hash ? await checkMove(h, r.kind, r.params).catch(() => 'could not verify the owner/assignee: not moving it') : null // (again right before the send: the assignee may have changed)
+    const notMine = hashOf(renderingOf(plan)) === r.hash ? await checkMove(h, r.kind, r.params, r.id).catch(() => 'could not verify the owner/assignee: not moving it') : null // (again right before the send: the assignee may have changed)
     if (notMine) sent = { ok: false, text: notMine, refused: true }
     else if (hashOf(renderingOf(plan)) !== r.hash) sent = { ok: false, text: 'the text to send no longer matches its check code: nothing was sent' }
     else if (plan.steps) {
@@ -1664,7 +1664,7 @@ export async function approveAction(h: Host, id: string, tell?: Tell): Promise<{
     if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but only partly done: ${sent.text}. Nothing is repeated: make a NEW request for what failed or did not run, if it is still needed.`).catch(() => undefined)
     return { ok: false, text: `partly done: ${sent.text}. The request is marked used (never repeated whole); ${r.thread} was told to ask again for the rest` }
   }
-  if (sent.refused && /: not (moving|linking) it(?: \(say 'link it anyway'[^)]*\))?$/.test(sent.text)) { // (the link wording ends with how to allow it once)
+  if (sent.refused && /: not (moving|linking) it(?: \(say 'link WI \d+ anyway'[^)]*\))?$/.test(sent.text)) { // (the link wording ends with how to allow it once)
     if (tell) await tell(r.thread, `Your request ${id} (${r.kind}) was approved but NOT sent, nothing was written: ${sent.text}. Only the user's own tasks are moved: leave the work item as it is.`).catch(() => undefined)
     return { ok: false, text: `not sent: ${sent.text}. Nothing was written; the request is closed, ${r.thread} was told` }
   }

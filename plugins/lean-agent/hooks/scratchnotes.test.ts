@@ -9,6 +9,7 @@ import { HANDOVER_RULE, listText, scratchList, scratchNotes, takeWarn, warnLine,
 
 const L = '/h/.lean-agent'
 const T1 = `${L}/threads/t1`
+const OLD_LIMITS = { threadTokens: 120_000, threads: { softCheckpointTokens: 80_000 } }
 const THREAD = { id: 't1', title: 'plan the docs', project: 'app', state: 'open', sid: 's1', created: 1, lastWake: 0, delivered: 0 }
 const LIM = { limit: 120_000, warn: 100_000 }
 
@@ -98,6 +99,7 @@ test('through the engine: a tool result of a thread at the warn level carries th
   on('session.usage', (() => ({ value: { context: { tokens, window: 200_000, percent: 50 }, rateLimits: [] } })) as any)
   on('session.id', () => ({ value: 'sess-x' }))
   h.files.set(`${T1}/thread.json`, JSON.stringify({ ...THREAD, sid: 'sess-x' }))
+  h.files.set(`${L}/config.json`, JSON.stringify(OLD_LIMITS)) // (1.0.35: the default limit is 200k; these specs keep the 120k / 80k pair they were written for)
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
@@ -123,6 +125,7 @@ test('1.0.28: one result that jumps over the warn level inside a turn (two revie
   on('session.usage', (() => ({ value: { context: { tokens, window: 200_000, percent: 50 }, rateLimits: [] } })) as any) // (the engine's figure does not hold the result being returned)
   on('session.id', () => ({ value: 'sess-y' }))
   h.files.set(`${T1}/thread.json`, JSON.stringify({ ...THREAD, sid: 'sess-y' }))
+  h.files.set(`${L}/config.json`, JSON.stringify(OLD_LIMITS))
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
@@ -146,6 +149,7 @@ test('1.0.28: a jump nobody saw (the last call of a turn, the engine figure alon
   on('session.usage', (() => ({ value: { context: { tokens, window: 200_000, percent: 50 }, rateLimits: [] } })) as any)
   on('session.id', () => ({ value: 'sess-z' }))
   h.files.set(`${T1}/thread.json`, JSON.stringify({ ...THREAD, sid: 'sess-z' }))
+  h.files.set(`${L}/config.json`, JSON.stringify(OLD_LIMITS))
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))

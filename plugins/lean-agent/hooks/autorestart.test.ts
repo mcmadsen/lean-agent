@@ -49,13 +49,13 @@ const end = (h: any, o: Partial<{ sid: string; tokens: number | null; since: num
 test('turn end over the limit with work left: snapshot, a mod-authored inbox record, a pending marker', async () => {
   const { h } = setup()
   const out = await end(h)
-  expect(out).toEqual({ snapshot: true, action: 'checkpoint', stop: { tokens: 205_000, limit: 120_000 } })
+  expect(out).toEqual({ snapshot: true, action: 'checkpoint', stop: { tokens: 205_000, limit: 200_000 } }) // (the default limit, 1.0.35)
   expect(JSON.parse(h.files.get(`${T1}/state.json`)!).tokens).toBe(205_000)
   const r = inbox(h)
   expect(r).toHaveLength(1)
-  expect(r[0]).toMatchObject({ from: 't1', kind: 'report', state: 'checkpoint', mod: true, restart: { tokens: 205_000, limit: 120_000, sid: S1 } })
-  expect(r[0].text).toBe(stopRecordText(205_000, 120_000))
-  expect(r[0].text).toMatch(/context 205k over the limit 120k: state saved, restart me/)
+  expect(r[0]).toMatchObject({ from: 't1', kind: 'report', state: 'checkpoint', mod: true, restart: { tokens: 205_000, limit: 200_000, sid: S1 } })
+  expect(r[0].text).toBe(stopRecordText(205_000, 200_000))
+  expect(r[0].text).toMatch(/context 205k over the limit 200k: state saved, restart me/)
   expect(marker(h).pending).toMatchObject({ ts: 1_000_000, sid: S1, tokens: 205_000 })
   // the same session ending another turn does not write a second checkpoint
   expect((await end(h)).action).toBe('none')
@@ -123,7 +123,7 @@ test('desk tick: restarts after 20 s idle with a notice naming size and cost; ne
   h.clock.t = 1_000_000 + IDLE_MS
   const notes = await autoRestartTick(h.host, deps)
   expect(calls).toHaveLength(1)
-  expect(calls[0]).toContain('t1|Its context was 205000 tokens (limit 120000)')
+  expect(calls[0]).toContain('t1|Its context was 205000 tokens (limit 200000)')
   expect(notes).toHaveLength(1)
   expect(notes[0]!.text).toMatch(/^t1: context .* was over the limit .*: restarted as a new session by script/)
   expect(notes[0]!.text).toContain('handover about 3.2k usage tokens (first turn, estimate)')
@@ -297,8 +297,8 @@ test('desk tick: a session that still shows as working is restarted threads.stop
 
 test('desk tick: a session that keeps taking turns over the limit is still restarted (a later turn end over the limit does not drop the record)', async () => {
   const { h } = setup()
-  await end(h, { tokens: 123_000 })
-  h.files.set(`${T1}/context.json`, JSON.stringify({ tokens: 130_000, at: 1_100_000, sid: S1 }))
+  await end(h, { tokens: 203_000 })
+  h.files.set(`${T1}/context.json`, JSON.stringify({ tokens: 210_000, at: 1_100_000, sid: S1 }))
   h.clock.t = 1_200_000
   expect(await autoRestartTick(h.host, { agents: rows('working'), restart: async () => ok })).toHaveLength(1)
 })

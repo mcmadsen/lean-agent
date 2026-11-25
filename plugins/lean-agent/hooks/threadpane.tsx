@@ -310,7 +310,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role, decide?: ty
     <Box key="status-body" flexDirection="column">
       {`▾ ${fullTitle}`.length > Math.max(14, cols - 4 - stChipLen - 1) ? <Text key="full-title" wrap="wrap">{d.title}</Text> : null}
       <Text key="what" dimColor wrap="wrap">
-        {`${d.state} · ${runLabel}${d.finished ? (d.keep ? ' · finished (keep mode: the next message resumes it until the context limit)' : ' · finished (the next message starts a new session)') : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'} · project: ${d.project || 'none'}${t?.keepGoing ? ' · keep-going' : ''}`}
+        {`${d.state} · ${runLabel}${d.finished ? (d.keep ? ' · finished (keep mode: the next message resumes it until the context limit)' : ' · finished (the next message starts a new session)') : ''} · ${d.model ? `${d.model}/${d.effort ?? '?'}` : 'model not recorded'}${d.lastRestart ? ` · ${d.lastRestart}` : ''} · project: ${d.project || 'none'}${t?.keepGoing ? ' · keep-going' : ''}`}
       </Text>
       {d.ctx?.level === 'over' ? <Text key="over" color="error" wrap="wrap">{`${d.ctx.text}: over the limit, the next message starts a new session`}</Text> : null}
       {t?.pausedUntil ? <Text key="paused" color="warning">{`paused until ${fmtUntil(t.pausedUntil, now)}`}</Text> : null}

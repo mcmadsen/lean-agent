@@ -5,7 +5,7 @@ import { fakeHost } from './fake'
 import { leanThread, resetLocks } from './threads'
 import { resetFinish, sweepFinished } from './finish'
 import { loadThreadDetail, resetThreadCache } from './threaddetail'
-import { DEFAULT_LIMIT, DEFAULT_WARN, ctxText, ctxView, decide, levelOf, limitsOf, overText, readContext, recordContext, resumedText, threadLimits } from './threadcontext'
+import { DEFAULT_LIMIT, ctxText, ctxView, decide, levelOf, limitsOf, overText, readContext, recordContext, resumedText, softOf, threadLimits, threadLimitsFor } from './threadcontext'
 
 const SID = '11111111-2222-3333-4444-555555555555'
 const OLD = '00000000-2222-3333-4444-555555555555'
@@ -33,8 +33,9 @@ function setup(o: Opts = {}) {
   if (o.queued !== false) h.files.set(`${T1}/inbox.jsonl`, QUEUED)
   if (o.done) h.files.set(INBOX, DONE)
   if (o.ctx !== null && o.ctx !== undefined) h.files.set(CTX, JSON.stringify({ tokens: o.ctx, at: 9_000_000, sid: o.ctxSid ?? SID }))
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
-  const st = { rows: [{ sessionId: SID, name: 't1 · fix login', cwd: T1, status: 'idle', startedAt: 1, pid: 42, id: 'abcd1234', ...o.row }] as any[] }
+  // (1.0.35: the default limit is 200000; these specs test the mechanics at 120000, the default itself is pinned in the config specs below)
+  h.files.set(`${L}/config.json`, JSON.stringify(o.config !== undefined ? o.config : { threadTokens: 120_000 }))
+  const st ={ rows: [{ sessionId: SID, name: 't1 · fix login', cwd: T1, status: 'idle', startedAt: 1, pid: 42, id: 'abcd1234', ...o.row }] as any[] }
   h.claude.handler = (a: string[]) => {
     if (a[0] === '--bg') return { exitCode: 0, stdout: `started ${NEW}\n` }
     if (a[0] === 'agents' && a[1] === '--json') return { exitCode: 0, stdout: JSON.stringify(st.rows) }
@@ -51,34 +52,68 @@ function setup(o: Opts = {}) {
 }
 
 // ---- config ----
-test('config: threadTokens defaults to 120000 and the warn level to the soft checkpoint size 80000 (threads.softCheckpointTokens, 1.0.31), never above 83% of the limit', () => {
-  expect(limitsOf({})).toEqual({ limit: DEFAULT_LIMIT, warn: DEFAULT_WARN })
-  expect(limitsOf(null)).toEqual({ limit: 120_000, warn: 80_000 })
-  expect(limitsOf({ threadTokens: 200_000 })).toEqual({ limit: 200_000, warn: 80_000 }) // the soft line stays where it is
-  expect(limitsOf({ threadTokens: 60_000 })).toEqual({ limit: 60_000, warn: 50_000 }) // 83% of a small limit
-  expect(limitsOf({ threads: { softCheckpointTokens: 70_000 } })).toEqual({ limit: 120_000, warn: 70_000 })
-  expect(limitsOf({ 'threads.softCheckpointTokens': 90_000 })).toEqual({ limit: 120_000, warn: 90_000 })
+test('config (1.0.35): threadTokens defaults to 200000; the soft checkpoint is 80% of the effective limit and the warn level is the soft size, never above 83% of the limit', () => {
+  expect(DEFAULT_LIMIT).toBe(200_000)
+  expect(limitsOf({})).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(limitsOf(null)).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(softOf(200_000)).toBe(160_000)
+  expect(limitsOf({ threadTokens: 120_000 })).toEqual({ limit: 120_000, warn: 96_000 }) // the old default, lowered again by the user
+  expect(limitsOf({ threadTokens: 60_000 })).toEqual({ limit: 60_000, warn: 48_000 })
+  expect(limitsOf({ threads: { softCheckpointTokens: 70_000 } })).toEqual({ limit: 200_000, warn: 70_000 }) // an explicit soft size wins
+  expect(limitsOf({ 'threads.softCheckpointTokens': 90_000 })).toEqual({ limit: 200_000, warn: 90_000 })
   expect(limitsOf({ threadTokens: 150_000, threadWarnTokens: 90_000 })).toEqual({ limit: 150_000, warn: 90_000 })
-  expect(limitsOf({ threadWarnTokens: 80_000 })).toEqual({ limit: 120_000, warn: 80_000 })
+  expect(limitsOf({ threadWarnTokens: 80_000 })).toEqual({ limit: 200_000, warn: 80_000 })
   expect(limitsOf({ threadTokens: 50_000, threadWarnTokens: 70_000 })).toEqual({ limit: 50_000, warn: 50_000 }) // a warn level never passes the limit
+  expect(limitsOf({ threadTokens: 100_000, threads: { softCheckpointTokens: 99_000 } })).toEqual({ limit: 100_000, warn: 83_000 }) // an explicit soft line never sits above 83%
+})
+
+test('config (1.0.35): the effective limit is never more than 90% of the real window once the session reported it (200k window: 180k, soft 144k); an own limit moves the soft line with it', () => {
+  expect(limitsOf({}, null, 200_000)).toEqual({ limit: 180_000, warn: 144_000 })
+  expect(limitsOf({}, null, 1_000_000)).toEqual({ limit: 200_000, warn: 160_000 }) // a big window caps nothing
+  expect(limitsOf({}, null, 0)).toEqual({ limit: 200_000, warn: 160_000 }) // unknown: nothing is capped on a guess
+  expect(limitsOf({}, null, undefined)).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(limitsOf({ threadTokens: 150_000 }, null, 200_000)).toEqual({ limit: 150_000, warn: 120_000 }) // a lower setting stays
+  expect(limitsOf({}, 100_000)).toEqual({ limit: 100_000, warn: 80_000 }) // a thread's own limit (lean_thread limit): its soft line is 80% of it
+  expect(limitsOf({}, 200_000, 200_000)).toEqual({ limit: 180_000, warn: 144_000 })
+  expect(limitsOf({ threads: { softCheckpointTokens: 100_000 } }, 100_000)).toEqual({ limit: 100_000, warn: 50_000 }) // an explicit soft size is scaled by the own limit's share of the shared one
+  expect(limitsOf({ threadTokens: 100_000 }, null, 200_000)).toEqual({ limit: 100_000, warn: 80_000 })
 })
 
 test('config: a value that is not a number (or too small, negative, NaN) is ignored: the default applies', () => {
   for (const bad of ['150000', '', null, undefined, {}, [], true, NaN, Infinity, -1, 0, 9_999]) {
-    expect(limitsOf({ threadTokens: bad, threadWarnTokens: bad, threads: { softCheckpointTokens: bad } })).toEqual({ limit: 120_000, warn: 80_000 })
+    expect(limitsOf({ threadTokens: bad, threadWarnTokens: bad, threads: { softCheckpointTokens: bad } })).toEqual({ limit: 200_000, warn: 160_000 })
   }
   expect(limitsOf({ threadTokens: 150_000.9 }).limit).toBe(150_000) // whole tokens
 })
 
 test('config: threadLimits reads config.json; a damaged file gives the defaults', async () => {
   const a = fakeHost(null)
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 200_000, warn: 160_000 })
   a.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 60_000, threadWarnTokens: 40_000 }))
   expect(await threadLimits(a.host)).toEqual({ limit: 60_000, warn: 40_000 })
   a.files.set(`${L}/config.json`, '{ not json')
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 200_000, warn: 160_000 })
   a.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 'lots' }))
-  expect(await threadLimits(a.host)).toEqual({ limit: 120_000, warn: 80_000 })
+  expect(await threadLimits(a.host)).toEqual({ limit: 200_000, warn: 160_000 })
+})
+
+test('config (1.0.35): the window a session reported (context.json) caps its thread: 180k on a 200k window; a write without a window keeps it; another session drops it', async () => {
+  const h = fakeHost(null)
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0 }))
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(await recordContext(h.host, 't1', SID, 51_000, { window: 200_000 })).toBe(true)
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 180_000, warn: 144_000 })
+  expect(await recordContext(h.host, 't1', SID, 60_000, { sample: true })).toBe(true) // (the turn end writes no window)
+  expect(JSON.parse(h.files.get(CTX)!).window).toBe(200_000)
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 180_000, warn: 144_000 })
+  expect(await recordContext(h.host, 't1', NEW, 10_000)).toBe(true) // another session: its own record, no window yet
+  expect(JSON.parse(h.files.get(CTX)!).window).toBeUndefined()
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 200_000, warn: 160_000 })
+  await recordContext(h.host, 't1', NEW, 10_000, { window: 'big' })
+  expect(JSON.parse(h.files.get(CTX)!).window).toBeUndefined() // junk is no window
+  h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: NEW, created: 1, lastWake: 0, delivered: 0, tokenLimit: 100_000 }))
+  await recordContext(h.host, 't1', NEW, 10_000, { window: 200_000 })
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 100_000, warn: 80_000 }) // the thread's own limit stays possible
 })
 
 // ---- level and text ----
@@ -97,6 +132,11 @@ test('text: "ctx 108k/120k" (the card and the list), "ctx unknown" without a siz
   const l = { limit: 120_000, warn: 100_000 }
   expect(ctxText(108_000, l)).toBe('ctx 108k/120k')
   expect(ctxText(null, l)).toBe('ctx unknown')
+  expect(ctxText(51_000, limitsOf({}))).toBe('ctx 51k/200k') // the default limit (1.0.35)
+  expect(ctxText(51_000, limitsOf({}, null, 200_000))).toBe('ctx 51k/180k') // capped by a 200k window
+  expect(ctxView({ tokens: 150_000, at: 1, sid: SID }, limitsOf({})).level).toBe('ok') // under the warn level (160k)
+  expect(ctxView({ tokens: 170_000, at: 1, sid: SID }, limitsOf({})).level).toBe('warn')
+  expect(ctxView({ tokens: 200_001, at: 1, sid: SID }, limitsOf({})).level).toBe('over')
   expect(ctxView({ tokens: 108_000, at: 1, sid: SID }, l)).toEqual({ text: 'ctx 108k/120k', level: 'warn', tokens: 108_000 })
   expect(ctxView({ tokens: 40_000, at: 1, sid: SID }, l).level).toBe('ok')
   expect(ctxView({ tokens: 130_000, at: 1, sid: SID }, l).level).toBe('over')

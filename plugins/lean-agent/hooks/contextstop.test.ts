@@ -18,6 +18,7 @@ function setup() {
   resetLocks()
   const h = fakeHost(null)
   h.clock.t = 1_000_000
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 120_000 })) // (1.0.35: the default limit is 200k; these specs stop at 120k)
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'app', state: 'open', sid: S1, created: 1, lastWake: 0, delivered: 0 }))
   return h
 }
@@ -86,6 +87,7 @@ function modSession($: any, on: any, usage: { tokens: number }) {
   resetLocks()
   h.files.set(`/p/templates/thread.md`, '# {{id}}')
   h.files.set(`/p/templates/front-desk.md`, 'desk {{lean}}')
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 120_000 })) // (the specs below stop at 120k: the default is 200k, and a 200k window caps it at 180k since 1.0.35)
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: '', state: 'open', sid: 'sess-x', created: 1, lastWake: 0, delivered: 0 }))
   h.claude.handler = () => ({ exitCode: 0, stdout: '[]' })
   on('tool.register', (_: any, e: any) => ({ value: { tool: `mcp__lean-agent__${e.name}` } }))
@@ -100,6 +102,19 @@ function modSession($: any, on: any, usage: { tokens: number }) {
   return h
 }
 const refused = async (h: any) => (h.files.get(`${L}/refusals.jsonl`) ?? '').split('\n').filter(Boolean).map((l: string) => JSON.parse(l)).filter((r: any) => r.rule === 'context-limit')
+
+test('mod (1.0.35): with the default limit (200k) a session on a 200k window stops at the effective limit 180k, which its own record names; below it nothing stops', { timeoutMs: 20_000 }, async ($, on) => {
+  const h = modSession($, on, { tokens: 175_000 })
+  h.files.set(`${L}/config.json`, JSON.stringify({})) // the defaults
+  await $.session.start({ cwd: T1, surface: 'desktop', isInteractive: true } as any)
+  await $.session.measure({ context: { tokens: 175_000, window: 200_000, percent: 87 }, rateLimits: [], changed: ['context'] } as any)
+  expect(JSON.parse(h.files.get(`${T1}/context.json`)!).window).toBe(200_000) // the window the session reported is recorded with the size
+  expect(inbox(h)).toHaveLength(0) // 175k is under 180k
+  await $.session.measure({ context: { tokens: 183_000, window: 200_000, percent: 91 }, rateLimits: [], changed: ['context'] } as any)
+  expect(inbox(h)).toHaveLength(1)
+  expect(inbox(h)[0].text).toBe('context 183k over the limit 180k: state saved, restart me')
+  expect(JSON.stringify(await $.tool.call({ tool: 'Bash', command: 'ls' } as any))).toContain('context limit reached (183k of 180k)')
+})
 
 test('mod: a turn end over the limit stops the thread: one record, Bash and Agent refused (refusal rule context-limit), lean_report still goes through', { timeoutMs: 20_000 }, async ($, on) => {
   const h = modSession($, on, { tokens: 123_000 })

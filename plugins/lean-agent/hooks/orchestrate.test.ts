@@ -2,7 +2,7 @@
 import { expect, test } from 'claude-code/testing'
 import { fakeHost } from './fake'
 import { decide } from './guard'
-import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, tried, triedWords } from './orchestrate'
+import { DESK_ROUTE, SPLIT, THREAD_STEP, bashOk, hitBudget, orchConfig, orchDecide, orchEnd, orchReset, orchTurnStart, stepsOf, tried, triedWords } from './orchestrate'
 import { REVIEWER_STEPS } from './jobs'
 import { capTo } from './cap'
 import { RUN_TIMEOUT_MS, runSummary, runText } from './runjob'
@@ -252,7 +252,13 @@ test('the reviewer has its own budget (REVIEWER_STEPS = 16 tool calls, the numbe
   for (let n = 1; n <= 16; n++) expect(call(rv, bash, orchConfig({ workers: { steps: 24 } })), `call ${n}`).toBeNull()
   const over = call(rv, bash, orchConfig({ workers: { steps: 24 } }))
   expect(over).toContain("the reviewer's budget (16 tool calls")
-  expect(over).toContain('write the json block')
+  expect(over).toContain('now answer with the json block only, no more tool calls')
+  // the hand-back is the answer, not a tool call (1.0.35, field: 61 refusals): never refused, never counted, at any call number
+  for (let n = 0; n < 30; n++) expect(call(rv, { tool: 'SubagentHandback' }, orchConfig({ workers: { steps: 24 } })), `handback ${n}`).toBeNull()
+  expect(stepsOf('rv1')).toBe(17) // 16 allowed + the one refused call; the 30 hand-backs added none
+  expect(hitBudget('rv1')).toBe(true)
+  expect(call({ ...worker, agentId: 'w9' }, { tool: 'SubagentHandback' })).toBeNull()
+  expect(call(rv, bash, orchConfig({ workers: { steps: 24 } }))).toContain('now answer') // a real tool call past the budget is still refused
   expect(call({ ...rv, agentId: 'rv2' }, bash, orchConfig({ workers: { stepsByJob: { check: 3 } } }))).toBeNull() // (the check job's own number does not apply to it)
   const small = orchConfig({ workers: { steps: 2 } })
   expect([call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small), call({ ...rv, agentId: 'rv3' }, bash, small)].map(x => x === null)).toEqual([true, true, false])

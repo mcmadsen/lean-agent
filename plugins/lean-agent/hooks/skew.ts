@@ -117,14 +117,16 @@ export const SKEW_CAUSE =
 // 600 characters, one per thread). One thread: its own row. Several: one row naming each with the version it runs, the restart step for every
 // one of them (lean_thread restart <id>: a new session with its handover; only open threads are listed, a closed one is never reopened and a
 // parked one has no session), and the one thing that makes the restart useless (the service still holds the old plugin).
-export function skewRow(older: { id: string; run: string; installed: string }[]): string {
+// `action` (1.0.35, threads.restartOlder: olderrestart.ts modeAdvice): the one step that restarts them, appended; '' = nothing more (config off)
+export function skewRow(older: { id: string; run: string; installed: string }[], action = ''): string {
   if (!older.length) return ''
   const first = older[0]!
-  if (older.length === 1) return `thread ${first.id} ${runsText(first.run, first.installed)}: its session loaded the older plugin; do not ask it for what ${first.installed} added. ${SKEW_CAUSE}`
+  const tail = action ? ` ${action}` : ''
+  if (older.length === 1) return `thread ${first.id} ${runsText(first.run, first.installed)}: its session loaded the older plugin; do not ask it for what ${first.installed} added. ${SKEW_CAUSE}${tail}`
   const names = older.map(s => `${s.id} (${s.run})`).join(', ')
   const ids = older.map(s => s.id).join(' ')
   const latest = older.map(s => s.installed).sort(compareVersions).pop()!
-  return `${older.length} threads run an older plugin than the installed ${latest}: ${names}; their sessions loaded the older plugin: do not ask them for what ${latest} added. ${SKEW_CAUSE.replace('restart the thread from the pane', `restart each one (lean_thread restart <id> for ${ids}: a new session with its handover; if it still runs the older version after that, the service was not restarted)`)}`
+  return `${older.length} threads run an older plugin than the installed ${latest}: ${names}; their sessions loaded the older plugin: do not ask them for what ${latest} added. ${SKEW_CAUSE.replace('restart the thread from the pane', `restart each one (lean_thread restart <id> for ${ids}: a new session with its handover; if it still runs the older version after that, the service was not restarted)`)}${tail}`
 }
 
 export const skewText = (run: string, installed: string) =>

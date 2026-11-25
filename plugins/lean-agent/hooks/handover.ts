@@ -13,6 +13,7 @@ import { HANDOVER_RULE, NOTES_FILE, reviewBlock, scratchList, scratchNotes } fro
 import { NOTE_FILES_MAX, READ_FIRST, lookupNotes, noteLine } from './threadnotes'
 import type { Inbox, Thread } from './threads'
 import { refsLine } from './workitems'
+import { oldWorkersNote, readWorkers } from './oldworkers'
 
 export const REPORT_DIGESTS = 3 // 1.0.27: the restart prompt carries the last 3 reports as digests (state, first 200 characters, file path), the rest is a count
 export const DIGEST_CHARS = 200
@@ -189,6 +190,8 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const unans = await unansweredBlock(h, home, t.id, recs, queuedAll, mode === 'core' ? corr.lines.slice(-CORE_CORRECTIONS) : corr.lines)
   const unv = t.sid && recs.length ? unverifiedLine(now) : ''
   if (unv && !preview) await markUnverified(h, home, t.id, { at: now, sid: t.sid })
+  // the replaced session's running background workers cannot report to the new one (oldworkers.ts): said in every restart prompt, not only the checkpoint's
+  const oldWorkers = oldWorkersNote(await readWorkers(h, home, t.id, t.sid), dir)
   if (mode === 'core') {
     // only what changes behaviour; every other source is one line in the pull list, with its size
     const last3 = recs.slice(-REPORT_DIGESTS)
@@ -211,6 +214,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
       { name: 'intro', body: `[lean-agent] You are thread ${t.id} (${t.title}), started again as a NEW session. ${why} The earlier conversation is not available to you; this prompt holds only what changes your behaviour.`, mode: 'fixed' },
       { name: 'unanswered', head: '## Unanswered corrections', body: unans, mode: 'fixed' },
       { name: 'unverified', body: unv, mode: 'fixed' },
+      { name: 'oldworkers', body: oldWorkers, mode: 'fixed' },
       { name: 'memory', head: '## Standing orders', body: memText, mode: 'fixed' },
       { name: 'brief', head: `## Brief (first ${CORE_BRIEF} characters)`, body: cut(flagForeignPaths(brief, t.id), CORE_BRIEF), file: `${dir}/brief.md`, mode: 'head' },
       { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS) ? `\n(${corr.older + Math.max(0, corr.lines.length - CORE_CORRECTIONS)} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.slice(-CORE_CORRECTIONS).map(l => cut(l, CORE_EACH)).join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
@@ -232,6 +236,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
     { name: 'check', body: wait ? '' : `Before you continue, check the real state yourself${wt?.path ? ` (git -C ${wt.path} status -sb, git -C ${wt.path} log -5 --oneline)` : ''}: the reports below can be older than the files. Then carry on and report with lean_report.`, mode: 'fixed' },
     { name: 'unanswered', head: '## Unanswered corrections', body: unans, mode: 'fixed' },
     { name: 'unverified', body: unv, mode: 'fixed' },
+    { name: 'oldworkers', body: oldWorkers, mode: 'fixed' },
     { name: 'brief', head: '## Brief', body: cut(flagForeignPaths(brief, t.id), BRIEF_MAX), file: `${dir}/brief.md`, mode: 'head' },
     { name: 'corrections', head: `## Corrections since the brief\n${CORRECTIONS_HEAD}${corr.older ? `\n(${corr.older} older messages omitted: ${dir}/inbox.jsonl)` : ''}`, body: corr.lines.join('\n'), file: `${dir}/inbox.jsonl`, mode: 'lines' },
     { name: 'where', head: '## Where the work lives', body: where, mode: 'fixed' },

@@ -113,7 +113,13 @@ export async function deliverToThread(h: Host, home: string, t: Thread, row: Age
     await watchDelivery(h, home, t.id, { sid: row.sid, from: o.from, upTo: o.upTo, kind: o.kind })
     await answered(h, home, t.id)
   }
-  return { delivered: true, text: `${t.id}: delivered straight to its running session (${row.state || 'alive'})${o.kind === 'fyi' ? '' : '; the mod restarts it by itself if it does not react'}` }
+  return { delivered: true, text: `${t.id}: ${sessionWords(row)}${o.kind === 'fyi' ? '' : '; the mod restarts it by itself if it does not react'}` }
+}
+// What the reply says about the session the message went to. 1.0.35, field: "delivered straight to its running session (blocked)" - a session in state blocked is not running:
+// it may not start a turn for the message (a restarted thread stood there 12 minutes). Only a working or idle session is called running.
+export const sessionWords = (row: AgentRow): string => {
+  const s = row.state || 'alive'
+  return s === 'working' || s === 'idle' || s === 'busy' || s === 'alive' || s === 'running' ? `delivered straight to its running session (${s})` : `sent to its session, which is ${s}, not running: it may not start a turn for it`
 }
 
 // ---- the desk's timer ------------------------------------------------------------------------------------------------------------

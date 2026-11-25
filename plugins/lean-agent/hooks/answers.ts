@@ -106,12 +106,14 @@ export const answerBlock = (n: number, path: string): string =>
 
 export type StopAnswer = { block?: string; tooLong?: { chars: number; path: string } } | null
 // null: nothing to say. `block`: the first long answer (sent back once). `tooLong`: the second long answer of the same subagent, let through and counted.
-export function stopAnswer(threadDir: string, agentId: string, agentType: string, text: unknown, limit: number): StopAnswer {
+// `usedBudget`: the subagent used its whole tool-call budget (orchestrate.ts hitBudget): its answer IS the report (the json block, it cannot write a
+// file any more), and a block there would cost the turn it no longer has (1.0.35): the first long answer is let through and counted.
+export function stopAnswer(threadDir: string, agentId: string, agentType: string, text: unknown, limit: number, usedBudget = false): StopAnswer {
   if (!agentId || !isLeanAgent(agentType) || typeof text !== 'string') return null
   const n = answerLength(text)
   if (n <= limit) return null
   const path = paths.get(agentId) ?? scratchPath(threadDir, bare(agentType), agentId)
-  if (asked.has(agentId)) return { tooLong: { chars: n, path } }
+  if (asked.has(agentId) || usedBudget) return { tooLong: { chars: n, path } }
   trim(asked)
   asked.add(agentId)
   return { block: answerBlock(n, path) }

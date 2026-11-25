@@ -94,13 +94,13 @@ test('request time: a link or a state change of a work item that is not yours is
   const w = world(undefined, { assignee: ANN })
   const r = await w.ask(LINK)
   // 1.0.34: a LINK request says what a link does ("not linking it", and how to allow it once); a state change keeps the "not moving it" wording
-  const LINK_WHY = "linking this PR to WI 4210 changes a work item assigned to Ann Example, not you: not linking it (say 'link it anyway' in the chat to allow once)"
+  const LINK_WHY = "linking this PR to WI 4210 changes a work item assigned to Ann Example, not you: not linking it (say 'link WI 4210 anyway' in the chat to allow once)"
   expect(r).toMatchObject({ ok: false, text: LINK_WHY })
   expect((await w.ask(STATE)).text).toBe('WI 4210 is assigned to Ann Example, not you: not moving it')
   expect((await w.ask({ kind: 'batch', items: [LINK, STATE] })).text).toBe(LINK_WHY) // (the first item that is refused speaks)
   expect((await w.ask({ kind: 'batch', items: [STATE, LINK] })).text).toBe('WI 4210 is assigned to Ann Example, not you: not moving it')
   const unassigned = world(undefined, { assignee: null })
-  expect((await unassigned.ask(LINK)).text).toBe("linking this PR to WI 4210 changes a work item that is unassigned, not yours: not linking it (say 'link it anyway' in the chat to allow once)")
+  expect((await unassigned.ask(LINK)).text).toBe("linking this PR to WI 4210 changes a work item that is unassigned, not yours: not linking it (say 'link WI 4210 anyway' in the chat to allow once)")
   expect((await unassigned.ask(STATE)).text).toBe('WI 4210 is unassigned: not moving it')
   expect(await listActions(w.h.host)).toHaveLength(0)
   expect((await w.ask(COMMENT)).ok).toBe(true) // a comment is not a move
@@ -123,7 +123,7 @@ test('send time: the assignee changed after the request: the approved request is
   const told: string[] = []
   const out = await approveAction(w.h.host, made.request!.id, async (_t, text) => void told.push(text))
   expect(out.ok).toBe(false)
-  expect(out.text).toContain("not sent: linking this PR to WI 4210 changes a work item assigned to Ann Example, not you: not linking it (say 'link it anyway' in the chat to allow once)")
+  expect(out.text).toContain("not sent: linking this PR to WI 4210 changes a work item assigned to Ann Example, not you: not linking it (say 'link WI 4210 anyway' in the chat to allow once)")
   expect(w.writes).toEqual([])
   expect(told.join('\n')).toContain('leave the work item as it is')
   // unchanged: it goes out
@@ -148,6 +148,31 @@ test('the user lifts it for ONE work item with their typed words; config workite
   lk.h.store.set('desk.human.prompts', [{ text: 'link it anyway', ts: lk.h.clock.t }])
   expect((await lk.ask(STATE)).ok).toBe(false)
   expect((await lk.ask(LINK)).ok).toBe(true)
+  // 1.0.35, the stricter form: the plain words fit only ONE pending link request (the one waiting), never a second; the words naming the work item always fit theirs
+  const LINK2 = { kind: 'ado-pr-workitem-link', params: { ...T, pr: 4271, workitem: 4211 } }
+  expect((await lk.ask(LINK2)).ok).toBe(false) // LINK is waiting: two link requests, "link it anyway" names nothing
+  expect((await lk.ask(LINK2)).text).toContain("(say 'link WI 4211 anyway' in the chat to allow once)")
+  lk.h.store.set('desk.human.prompts', [{ text: 'link WI 4211 anyway', ts: lk.h.clock.t }])
+  expect((await lk.ask(LINK2)).ok).toBe(true) // the words name it
+  const two = world(undefined, { assignee: ANN })
+  two.h.store.set('desk.human.prompts', [{ text: 'link it anyway', ts: two.h.clock.t }])
+  expect((await two.ask({ kind: 'batch', items: [LINK, LINK2] })).ok).toBe(false) // one batch with two links is two link requests
+  expect((await two.ask({ kind: 'batch', items: [LINK] })).ok).toBe(true) // exactly one
+  // send time: the approved request is the one waiting: the plain words still fit it; a second one waiting made them void
+  const sw = world(undefined, { assignee: ANN })
+  sw.h.store.set('desk.human.prompts', [{ text: 'link it anyway', ts: sw.h.clock.t }])
+  const m1 = await sw.ask(LINK)
+  expect(m1.ok).toBe(true)
+  await answerAction(sw.h.host, m1.request!.id, 'approve', 'pane')
+  expect((await approveAction(sw.h.host, m1.request!.id)).text).not.toContain('not linking it') // (past the owner check; the executor of this spec cannot read the project id, that is its own line)
+  const sw2 = world() // two link requests wait (made while the work item was still mine), then the assignee changed and the user typed the plain words: not for either
+  const a1 = await sw2.ask(LINK)
+  const a2 = await sw2.ask({ kind: 'ado-pr-workitem-link', params: { ...T, pr: 4271, workitem: 4211 } })
+  expect([a1.ok, a2.ok]).toEqual([true, true])
+  sw2.forge.assignee = ANN
+  sw2.h.store.set('desk.human.prompts', [{ text: 'link it anyway', ts: sw2.h.clock.t }])
+  await answerAction(sw2.h.host, a1.request!.id, 'approve', 'pane')
+  expect((await approveAction(sw2.h.host, a1.request!.id)).text).toContain("not linking it (say 'link WI 4210 anyway'")
   // a failed read is not lifted by words
   const down = world(undefined, { fail: ['/wit/workitems/'] })
   down.h.store.set('desk.human.prompts', [{ text: 'move WI 4210 anyway', ts: down.h.clock.t }])

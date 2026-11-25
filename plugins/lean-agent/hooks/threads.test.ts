@@ -515,7 +515,7 @@ test('start, new and reopen say the model and effort the session got; the thread
   h.files.set('/h/.lean-agent/config.json', '{"threads":{"plugins":"all","skills":"all"}}') // the pre-1.0.20 behaviour (the lean defaults: threadlean.test.ts)
   h.files.set(`${ROOT}/templates/thread.md`, '# {{id}}\nmodel: {{model}}, effort: {{effort}} (from thread.json)')
   const r = await call({ action: 'new', title: 'a', text: 'brief' })
-  const FREE = 'free context 80k (limit 120k, base ~40k assumed)' // the start reply states the free context (briefsize.ts)
+  const FREE = 'free context 160k (limit 200k, base ~40k assumed)' // the start reply states the free context (briefsize.ts)
   expect(r.text).toBe(`t1 started (${SID}) · sonnet/high · ${FREE}`)
   expect(h.files.get('/h/.lean-agent/threads/t1/CLAUDE.md')).toContain('model: sonnet, effort: high (from thread.json)')
   const o = await call({ action: 'new', title: 'b', text: 'brief', model: 'haiku', effort: 'low' })

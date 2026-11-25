@@ -70,7 +70,7 @@ test('sessionBreakdown reads the session transcript; lean_doctor context tN carr
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'x', project: 'p', state: 'open', sid: 's1', created: 1, lastWake: 0, delivered: 0 }))
   h.files.set(`${L}/threads/t1/context.json`, JSON.stringify({ tokens: 98_000, at: 1, sid: 's1' }))
   const rep = await contextReport(h.host, '/h', 't1')
-  expect(rep).toContain('ctx 98k of 120k: tool results 39k')
+  expect(rep).toContain('ctx 98k of 200k: tool results 39k') // (the default limit, 1.0.35)
   expect(rep).toContain('top sources:')
   h.exec.handler = () => ({ exitCode: 1, stdout: '' })
   expect(await sessionBreakdown(h.host, '/h', 's1', 98_000, 120_000)).toBe('')

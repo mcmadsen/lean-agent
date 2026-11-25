@@ -10,6 +10,7 @@ import { auditorPromptProblem, unauditedRun } from './scripts'
 import { addRequest, agentModel, claudeModelIn, familyOf, isExpensiveModel, modelAllowed, needsApprovalText } from './expensive'
 import { DESK_ROUTE, isSmall, loadOrch, orchDecide, tried } from './orchestrate'
 import { forgeHint, forgeRefusal, forgeCommandWrite } from './forgewrite'
+import { scriptForgeWrite } from './scriptfile'
 import { forgeReadOk, forgeReadRefusal, forgeTempOk, isForgeFetch } from './forgeread'
 import { WHY_SONNET, jobOf } from './jobs'
 import { haikuRecord } from './workerruns'
@@ -886,6 +887,13 @@ export function tagWrite(c: string): boolean {
     const w = m[1]!.split(/\s+/).map(x => x.replace(/^['"`(]+|['"`)]+$/g, '')).filter(Boolean)
     let i = 0
     while (i < w.length && w[i]!.startsWith('-')) i += GIT_VALUE_OPTS.has(w[i]!) ? 2 : 1
+    // the other ways to make or delete a tag (1.0.35): `git update-ref [-d] refs/tags/x`, `git push <remote> <ref>:refs/tags/x` (or `:refs/tags/x` to delete),
+    // `git push <remote> tag x` and `git push --delete <remote> tag x`; a push of a branch, `git update-ref refs/heads/x` and `git update-ref HEAD` are no tag write
+    if (w[i] === 'update-ref' && w.slice(i + 1).some(a => /(^|:|\+)refs\/tags\//.test(a))) return true
+    if (w[i] === 'push') {
+      const pos = w.slice(i + 1).filter(a => !a.startsWith('-'))
+      if (pos.some(a => /(^|:|\+)refs\/tags\//.test(a)) || (pos[1] === 'tag' && pos.length >= 3)) return true
+    }
     if (w[i] !== 'tag') continue
     const args = w.slice(i + 1)
     let list = false
@@ -913,7 +921,21 @@ const SETTINGS_CMD = /\bclaude\s+(config|mcp|plugin|permissions|settings|login|l
 const SETTINGS_PATH = /(^|\/)\.claude\/settings(\.local)?\.json$|(^|\/)managed-settings\.json$/
 const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr|stdout)$|\$\{?TMPDIR\}?\/|[^\0]*\/\.claude\/jobs\/[^/]+\/tmp\/|[^\0]*\/\.lean-agent\/tmp\/)/
 // `scratch`: the calling thread's own `<thread folder>/scratch` (the one place under the lean home a subagent may write notes and drafts)
-const tempFile = (w: string, scratch?: string): boolean => (TEMP_OK.test(w) || (!!scratch && w.startsWith(`${scratch}/`))) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
+// A path with $VAR parts (1.0.35: `> /tmp/t160b/$d/$f` was refused): allowed when its LITERAL prefix is a temp folder (or the thread's scratch folder) and every
+// variable is a WHOLE path segment after that prefix (`/$name`, `/${name}`): not the first segment (`$HOME/x`, `$d/..`), not a part of one (`$d.txt`,
+// `x$d`), and no literal `..` anywhere. A command substitution or a backtick is never a variable. `$TMPDIR` as the first segment is a temp folder as before.
+const VAR_SEG = /^\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})$/
+const TMPDIR_SEG = /^\$\{?TMPDIR\}?$/
+const tempRoot = (p: string, scratch?: string): boolean => TEMP_OK.test(p) || (!!scratch && p.startsWith(`${scratch}/`))
+const tempFile = (w: string, scratch?: string): boolean => {
+  if (/`|\$\(/.test(w) || w.split('/').includes('..')) return false
+  const segs = w.split('/')
+  const k = segs.findIndex((s, i) => s.includes('$') && !(i === 0 && TMPDIR_SEG.test(s)))
+  if (k < 0) return tempRoot(w, scratch)
+  if (k === 0) return false // a variable as the first segment: nothing says where it points
+  if (!tempRoot(`${segs.slice(0, k).join('/')}/`, scratch)) return false
+  return segs.slice(k).every(s => !s.includes('$') || VAR_SEG.test(s))
+}
 // the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
 // A heredoc body and a `# comment` are text, not commands: a `>` in them ("# result > no-token", "if v > 3.4.0" in a python heredoc)
 // is no redirect (1.0.33: readers were refused with "redirect to ON" / "redirect to 3.4.0"). The rest of the `<<WORD` line stays scanned
@@ -972,7 +994,7 @@ const WRITING_GIT = CMD_AT('git(?:\\s+-C\\s+\\S+)?\\s+(?:commit|add|checkout|swi
 export function readerWrite(c: string, scratch?: string): string | null {
   const bad = redirectTargets(c).find(w => !tempFile(w, scratch))
   const u = UNQUOTED(c)
-  if (bad !== undefined) return `lean-agent: a reader writes no file (redirect to ${bad.slice(0, 80) || 'a command'}); only a temp folder${scratch ? ` or ${scratch}` : ''} may be written, or give the step to a worker`
+  if (bad !== undefined) return `lean-agent: a reader writes no file (redirect to ${bad.slice(0, 80) || 'a command'}); only a temp folder${scratch ? ` or ${scratch}` : ''} may be written (a $variable only as a whole path segment after it, like /tmp/dir/$name; no ..), or give the step to a worker`
   if (/\btee\b/.test(u) && /\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(u) && !tempFile(/\btee\b\s+(?:-\S+\s+)*(\S+)/.exec(c)?.[1]?.replace(/^['"]|['"]$/g, '') ?? '', scratch)) return 'lean-agent: a reader writes no file (tee); only a temp folder may be written, or give the step to a worker'
   if (/\b(sed|perl)\b[^;&|\n]*\s(-[a-zA-Z]*i\S*|--in-place\S*)(\s|$)/.test(u) || WRITING_PROGS.test(u) || WRITING_GIT.test(u)) return 'lean-agent: a reader changes nothing in the project (no rm / mv / cp / touch / sed -i / git write); give the step to a worker'
   return null
@@ -1080,6 +1102,8 @@ async function workerDenial($: Host, ctx: Ctx, e: Call): Promise<string | null> 
     const never = await neverDenial($, c)
     if (never) return never
     const ownId = ctx.role.kind === 'thread' ? ctx.role.id : ''
+    const inFile = await scriptForgeWrite($, { thread: ownId, cwd: ctx.cwd }, c) // a script file this command runs (python3 f.py ...) that holds a forge write (scriptfile.ts)
+    if (inFile) return inFile
     const lean = leanDir(await homeDir($))
     const scratch = ownId ? `${lean}/threads/${ownId}/scratch` : undefined // the one place under the lean home a subagent writes notes and drafts, created on demand
     if (scratch && c.includes(scratch)) await mkdirp($, scratch).catch(() => undefined)
@@ -1256,6 +1280,8 @@ async function decideRaw($: Host, ctx: Ctx, e: Call): Promise<string | null> {
   if (ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'Bash') {
     const fw = forgeCommandWrite(String(e.command ?? ''))
     if (fw) return (await pushDenial($, String(e.command ?? ''), ctx.cwd, ctx.role)) ?? forgeRefusal() + forgeHint(String(e.command ?? '')) + tried(fw) // (a private project's own line first)
+    const inFile = fw ? null : await scriptForgeWrite($, { thread: ctx.role.id, cwd: ctx.cwd }, String(e.command ?? '')) // `python3 f.py` whose file holds a forge write (scriptfile.ts)
+    if (inFile) return (await pushDenial($, String(e.command ?? ''), ctx.cwd, ctx.role)) ?? inFile
   }
   const orch = await loadOrch($)
   const ownGit = ctx.role.kind === 'thread' && !ctx.agentType && !ctx.agentId && e.tool === 'Bash' && orch.on && (await threadReadOnly($, ctx, String(e.command ?? '')))

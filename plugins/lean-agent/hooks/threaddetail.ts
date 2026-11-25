@@ -20,6 +20,7 @@ import { ENDED_AT_ONCE, endedAtOnce, isStuck, lastActivity, readWaiting, request
 import type { Word } from './threadstate'
 import type { AgentRow, Inbox, Thread } from './threads'
 import { ctxOf } from './threadcontext'
+import { lastRestartLine } from './restartmodel'
 import type { CtxView } from './threadcontext'
 
 export const REPORTS_MAX = 10 // reports drawn (newest first)
@@ -41,6 +42,7 @@ export type ThreadDetail = {
   state: string // open | parked | closing | closed
   model?: string
   effort?: string
+  lastRestart?: string // "last restart: sonnet/high", only when it differs from the first start or the current model (restartmodel.ts)
   brief: string
   goal: string
   run: 'running' | 'idle' | 'parked' | 'unknown' // unknown: `claude agents` could not be read
@@ -175,7 +177,7 @@ export async function loadThreadDetail(h: Host, id: string): Promise<ThreadDetai
   const dir = `${threadsDir(home)}/${id}`
   const t = await readJson<Thread | null>(h, `${dir}/thread.json`, null)
   if (!t || t.id !== id) return null
-  const d: ThreadDetail = { id, title: String(t.title ?? ''), project: String(t.project ?? ''), state: t.state, model: t.model, effort: t.effort, brief: '', goal: '', run: 'unknown', liveNote: '', working: false, needsYou: false, finished: typeof t.finished === 'number' && t.finished > 0, approval: '', cost: null, reports: [], reportsTotal: 0, queued: [], queuedTotal: 0, errors: [] }
+  const d: ThreadDetail = { id, title: String(t.title ?? ''), project: String(t.project ?? ''), state: t.state, model: t.model, effort: t.effort, ...(lastRestartLine(t) ? { lastRestart: lastRestartLine(t) } : {}), brief: '', goal: '', run: 'unknown', liveNote: '', working: false, needsYou: false, finished: typeof t.finished === 'number' && t.finished > 0, approval: '', cost: null, reports: [], reportsTotal: 0, queued: [], queuedTotal: 0, errors: [] }
   if (t.state === 'closed') return d
   const guard = async (what: string, f: () => Promise<void>) => {
     try {

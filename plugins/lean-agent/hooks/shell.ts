@@ -12,7 +12,7 @@ export type Push = { args: string[]; known: boolean }
 export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[]; forge: string | null; dynamic: boolean }
 
 import { forgeReadOk } from './forgeread'
-import { azWrite, ghWrite, textForgeWrite } from './forgecli'
+import { AZ_GROUPS, AZ_READ, GH_GROUPS, azWrite, ghWrite, textForgeWrite } from './forgecli'
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
@@ -38,7 +38,8 @@ const LEAN_OUT = /\blean-agent\b[^;&|\n]*(\bworktree\s+push\b|\bpr\s+create\b|\b
 const GHAZ = /(^|[^\w./-])(gh|az)($|[^\w-])/
 const DYNAMIC = /(^|[;&|(`\n]|\$\()\s*(\w+=\S*\s+)*["']?\$[\w{(]/
 const VALUE_FLAGS = new Set(['-R', '--repo', '--hostname', '--subscription', '-o', '--output', '--query', '--organization', '--org', '--project', '--resource-group', '-g'])
-const GH_READ: Record<string, string[]> = { pr: ['view', 'list', 'diff', 'checks', 'status'], issue: ['view', 'list', 'status'], search: ['prs', 'issues', 'repos', 'commits', 'code'], repo: ['view', 'list'], run: ['view', 'list'], release: ['view', 'list'], auth: ['status'] }
+// the gh groups forgecli.ts judges (GH_GROUPS: pr issue release repo run workflow ...) have ONE read list, the one there (1.0.35); only these two are not forge groups
+const GH_OTHER_READ: Record<string, string[]> = { search: ['prs', 'issues', 'repos', 'commits', 'code'], auth: ['status'] }
 const KW = new Set(['if', 'then', 'do', 'else', 'elif', 'while', 'until', '!', '{', '}', 'time'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash'])
 const INTERP = /^(python[\d.]*|node(js)?|ruby|perl|php|deno|bun|lua)$/
@@ -64,8 +65,9 @@ function ghDenied(rest: string[]): boolean {
     if (m) return !/^GET$/i.test(m)
     return rest.some(x => /^(-f|-F|--field|--raw-field|--input)(=|$)/.test(x) || /^-[fF]\S/.test(x))
   }
-  if (pos.length === 1 && GH_READ[pos[0]!]) return false // `gh pr`: help text
-  return !(GH_READ[pos[0]!]?.includes(pos[1] ?? ''))
+  if (GH_GROUPS.has(pos[0]!)) return ghWrite(rest) !== null // the forge groups: the read allow-list of forgecli.ts (`gh pr` alone is the help text)
+  if (pos.length === 1 && GH_OTHER_READ[pos[0]!]) return false
+  return !(GH_OTHER_READ[pos[0]!]?.includes(pos[1] ?? '')) // (any other program of gh: not a read)
 }
 function azDenied(rest: string[]): boolean {
   if (forgeReadOk(['az', ...rest])) return false
@@ -74,7 +76,8 @@ function azDenied(rest: string[]): boolean {
   const pos: string[] = []
   for (; i < rest.length && !rest[i]!.startsWith('-'); i++) pos.push(rest[i]!)
   if (!pos.length || pos[0] === 'version' || pos[0] === 'help') return false
-  return !/^(list|show|query|get|list-.*|show-.*)$/.test(pos[pos.length - 1]!)
+  if (AZ_GROUPS.has(pos[0]!)) return azWrite(rest) !== null // the forge groups: the read allow-list of forgecli.ts
+  return !AZ_READ.test(pos[pos.length - 1]!) // (any other az command: its last word must be a read verb, forgecli's AZ_READ)
 }
 
 // The desk's read-only forge commands (strict mode): ONE plain command whose program is gh or az and that the SAME classification
@@ -319,7 +322,22 @@ function scan(c: string, depth: number, v: Verdict) {
   for (const s of lex(c, depth, v)) segEval(s, depth, v)
 }
 
+// analyze is pure and a Bash call asks for it up to three times (the orchestrator, the never-list, forgeCommandWrite): the last answers are kept by command string
+// (1.0.35), each caller gets its own copy. `analyzeRuns` counts the real scans (a spec pins "once per command").
+const memo = new Map<string, Verdict>()
+const MEMO_MAX = 16
+let runs = 0
+export const analyzeRuns = (): number => runs
 export function analyze(c: string): Verdict {
+  const hit = memo.get(c)
+  if (hit) return { ...hit, pushes: hit.pushes.map(p => ({ ...p, args: [...p.args] })) }
+  const v = analyzeOnce(c)
+  if (memo.size >= MEMO_MAX) memo.delete(memo.keys().next().value as string)
+  memo.set(c, v)
+  return { ...v, pushes: v.pushes.map(p => ({ ...p, args: [...p.args] })) }
+}
+function analyzeOnce(c: string): Verdict {
+  runs++
   const v: Verdict = { push: false, write: false, unsure: false, pushes: [], forge: null, dynamic: false }
   try {
     scan(c, 0, v)

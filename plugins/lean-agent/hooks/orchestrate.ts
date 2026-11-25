@@ -116,7 +116,9 @@ export function takeStepNote(workerKey: string): string | null {
   notes.delete(workerKey)
   return n
 }
-const slots = new Map<string, { key: string; at: number }>() // subagent id -> the thread whose worker slot it holds (a background worker outlives its Agent call)
+const slots = new Map<string, { key: string; at: number; type?: string }>() // subagent id -> the thread whose worker slot it holds (a background worker outlives its Agent call)
+// the background workers a thread's session has running now (launched, not ended): what a restarted session must not wait for (oldworkers.ts)
+export const liveWorkers = (threadKey: string): { id: string; type?: string }[] => [...slots].filter(([, s]) => s.key === threadKey).map(([id, s]) => ({ id, ...(s.type ? { type: s.type } : {}) }))
 const stopped = new Set<string>() // subagents that ended before their launch result was seen
 const MAX_TRACKED = 500
 const budgetHit = new Set<string>() // subagent ids whose call past the step budget was refused
@@ -128,6 +130,7 @@ export function takeOver(workerKey: string | undefined): { calls: number; budget
   if (workerKey) over.delete(workerKey)
   return o
 }
+export const stepsOf = (agentId: string | undefined): number => (agentId && steps.get(agentId)) || 0 // tool calls the guard counted for this subagent so far
 export const orchTurnStart = (key: string): void => void reads.delete(key)
 export function orchReset(): void {
   reads.clear()
@@ -340,7 +343,13 @@ function threadDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
   return null
 }
 
+// The engine's own tool a subagent hands its answer back with (field, 1.0.35: 61 refusals in the reviewer runs that "ended without a report":
+// past call 16 the hand-back itself was counted and refused with "write the json block and answer", so the answer could never be delivered).
+// It is the answer, not a tool call: never counted, never refused, whatever the budget.
+export const HANDBACK_TOOL = 'SubagentHandback'
+export const REVIEWER_ANSWER_NOW = 'now answer with the json block only, no more tool calls'
 function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
+  if (e.tool === HANDBACK_TOOL) return null
   if (isAgentTool(e)) return 'a worker never spawns workers; answer `split: <rest>` and the thread starts the next step'
   const k = ctx.agentId ?? ctx.agentType ?? '?'
   const n = (steps.get(k) ?? 0) + 1
@@ -355,7 +364,7 @@ function workerDenial(c: OrchConfig, ctx: OCtx, e: Call): string | null {
     budgetHit.add(k)
     over.set(k, { calls: n, budget }) // for the refusal record (register.tsx takeOver): how many calls the run made, against which budget
   }
-  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, REVIEWER_STEPS) is used: write the json block with what you have and answer; list what you could not check in unverified`
+  if (n > budget && bare(ctx.agentType) === 'reviewer') return `the reviewer's budget (${budget} tool calls, REVIEWER_STEPS) is used: ${REVIEWER_ANSWER_NOW} (your reply is the json block, list what you could not check in unverified; the thread saves it)`
   return n > budget ? (ctx.job && budget < c.steps ? `step budget of a ${ctx.job} job (${budget} tool calls) is used: return what you have in the ${ctx.job} schema; the thread splits the rest` : SPLIT) : null
 }
 
@@ -381,7 +390,7 @@ export function orchEnd(ctx: OCtx, e: Call, launch?: { async: boolean; agentId?:
   if (!isAgentTool(e) || ctx.agentType || ctx.agentId || ctx.kind !== 'thread' || !isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) return
   const k = key(ctx)
   if (launch?.async && launch.agentId && !stopped.delete(launch.agentId)) {
-    slots.set(launch.agentId, { key: k, at: Date.now() })
+    slots.set(launch.agentId, { key: k, at: Date.now(), type: bare(typeof e.subagent_type === 'string' ? e.subagent_type : '') })
     return
   }
   inflight.set(k, Math.max(0, (inflight.get(k) ?? 0) - 1))

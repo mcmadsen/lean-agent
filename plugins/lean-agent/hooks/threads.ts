@@ -1,4 +1,7 @@
 import { writeApproval } from './reviews'
+import { noteRestart } from './restartmodel'
+import { noteFirstTurn } from './firstturn'
+import type { Restart } from './restartmodel'
 import { deskPush } from './push'
 import type { PrInput } from './push'
 import { appendJsonl, atomicWrite, homeDir, leanDir, mkdirp, readJson, readJsonl, realPath, threadsDir, writeJson } from './state'
@@ -82,6 +85,7 @@ export type Thread = {
   budgetTokens?: number // lean_thread budget tN <tokens>: this thread's own soft budget in usage tokens (budgetthread.ts), over config threads.softTokens
   model?: string // haiku | sonnet | opus, as started (a resume keeps the session's saved options)
   effort?: string // low | medium | high
+  restarts?: Restart[] // the model / effort / time of each session start and restart, newest last, at most 20 (restartmodel.ts)
   lite?: boolean // started as haiku / low with a one-step brief (firstrequest.ts isLite): a lite first request while it still runs haiku / low (liteHolds)
   effortSet?: boolean // a call named the effort (lean_thread new / start ... effort:); an effort that was only the default is recomputed at every start (models.ts)
   needs?: string[] // MCP servers / plugins this thread asked for on top of its project's profile (profile.ts)
@@ -466,6 +470,7 @@ async function startSession(h: Host, home: string, t: Thread, prompt: string, gi
   if (req0 === null) delete t.req0
   else t.req0 = req0
   delete t.finished // a new session is a new piece of work
+  t.restarts = noteRestart(t.restarts, { model: choice.model, effort: choice.effort, ts: t.lastWake }) // what this start really ran on (the unfolded card)
   if (installed) t.version = installed
   await save(h, home, t)
   await dropRequests(h, t.id, 'tool').catch(() => undefined) // a session started: what a call asked for earlier (an expensive model) is moot
@@ -632,7 +637,13 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   }
   const waiting = (await hardStopped(h, home, t))?.waiting === true // restarted at the context limit while it waited: the prompt names the open question
   const ho = await buildHandover(h, home, t, why, u.msgs, waiting)
-  const r = await startSession(h, home, t, ho.prompt, given, installed, root)
+  // The prompt carries the inbox position of the messages it holds (the same mark a wake prompt has): the new session's mod marks them consumed when the model answered
+  // this first request (delivery.ts wakeUpTo, register.tsx takeWake). 1.0.35, field: a restarted thread's messages stayed "delivered" for good, because only a wake
+  // prompt had the mark and the handover's did not.
+  // (on the FIRST line: the desk's instruction stays the last thing the prompt says)
+  const nl = ho.prompt.indexOf('\n')
+  const prompt = !u.msgs.length ? ho.prompt : nl < 0 ? `${ho.prompt} ${wakeMark(u.upTo)}` : `${ho.prompt.slice(0, nl)} ${wakeMark(u.upTo)}${ho.prompt.slice(nl)}`
+  const r = await startSession(h, home, t, prompt, given, installed, root)
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo
     await save(h, home, t)
@@ -1052,11 +1063,13 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       }
     }
     let carried: { ts: number; chars: number; id: string; home: string } | null = null
+    let carriedText = '' // the instruction a restart carried (the first-turn watch kicks the new session with it, firstturn.ts)
     if (CARRY.has(i.action) && ID.test(i.tN ?? '') && typeof i.text === 'string' && i.text.trim()) {
       const home = await homeDir(h)
       const id = i.tN!
       if (await load(h, home, id)) {
         const text = i.text.trim()
+        carriedText = text
         const ts = await h.clock.now()
         await serial(id, () => appendJsonl(h, `${tpath(home, id)}/inbox.jsonl`, { ts, text, instr: true } satisfies Inbox))
         carried = { ts, chars: text.length, id, home }
@@ -1084,6 +1097,11 @@ export async function leanThread(h: Host, root: string, i: Input): Promise<Out> 
       if (hot.refuse) return err(`${i.action} ${hot.refuse}`)
     }
     let out = await leanThreadCore(h, root, i)
+    // a restart BY SCRIPT (checkpoint, context limit, stall) started a session: the first-turn watch (firstturn.ts) sees to it that it starts working
+    if ((i.action === 'auto-restart' || i.action === 'stall-restart') && fresh(out) && ID.test(i.tN ?? '')) {
+      const t2 = await load(h, await homeDir(h), i.tN!).catch(() => null)
+      if (t2?.sid) await noteFirstTurn(h, i.tN!, { sid: t2.sid, text: carriedText || 'Continue with the task from your handover now.', why: i.action === 'stall-restart' ? 'stall' : carriedText ? 'checkpoint' : 'limit' })
+    }
     if (out.ok && (i.action === 'new' || i.action === 'start')) {
       const warn = await holdWarning(h, await homeDir(h))
       if (warn) out = { ...out, text: `${out.text}\n${warn}` }

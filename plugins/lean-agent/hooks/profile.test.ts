@@ -8,7 +8,7 @@ import { threadTool } from './delivery'
 
 const L = '/h/.lean-agent'
 const SID = '11111111-2222-3333-4444-555555555555'
-const FREE = 'free context 80k (limit 120k, base ~40k assumed)' // the start reply states it (briefsize.ts); no fixed base is recorded in these specs
+const FREE = 'free context 160k (limit 200k, base ~40k assumed)' // the start reply states it (briefsize.ts); no fixed base is recorded in these specs
 const ROOT = '/p'
 
 function setup() {

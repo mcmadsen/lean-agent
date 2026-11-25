@@ -18,18 +18,21 @@ import { NOTES_FILE } from './scratchnotes'
 import { autoRestartOn, markerFile, MAX_TRIES, MIN_GAP_MS, stopGraceMs } from './autorestart'
 import { isWorking } from './threads'
 import type { AgentRow, Out, Thread } from './threads'
+import { continueText, readWorkers } from './oldworkers'
+import type { WorkerRef } from './oldworkers'
 
 export const CHECKPOINT_IDLE_MS = 10_000 // the session must have ended its turn this long ago (the thread is told to end it at once)
 export const NEXT_MAX = 600
 export const NEXT_FILE = 'next.md'
 
-export type CheckpointRec = { reason: 'checkpoint'; ts: number; sid: string; tokens: number; next: string; source: 'call' | 'announce' | 'report'; notes: boolean; tries?: number }
+export type CheckpointRec = { reason: 'checkpoint'; ts: number; sid: string; tokens: number; next: string; source: 'call' | 'announce' | 'report'; notes: boolean; tries?: number; workers?: WorkerRef[] /* background workers the old session had running (oldworkers.ts) */ }
 export const checkpointFile = (home: string, id: string) => `${threadsDir(home)}/${id}/checkpoint.json`
 export const warnFile = (home: string, id: string) => `${threadsDir(home)}/${id}/warn-at.json`
 
 export const savedText = (next: string) => `checkpoint saved. End your turn now: you are restarted automatically and continue with: ${next}`
 export const restartedText = (id: string, tokens: number) => `${id} restarted itself${tokens > 0 ? ` at ${kTokens(tokens)}` : ''} (checkpoint)`
-export const restartInstruction = (next: string) => `Continue now with: ${next}`
+// the LAST instruction of the fresh session. 1.0.35: never "wait for a worker of the old session" (oldworkers.ts): such a worker cannot report to the new one
+export const restartInstruction = (next: string, workers?: WorkerRef[], dir = '') => continueText(next, workers, dir)
 const guardText = (min: number) => `checkpoint refused: this thread was restarted ${min} min ago (one automatic restart per 10 minutes). Keep working from your notes; the mod restarts you at the context limit. Never end your turn asking the desk or the user for a restart.`
 
 // ---- what announces a restart (pure; change the tables here, nowhere else) ----------------------------------------------------------
@@ -94,7 +97,8 @@ export async function requestCheckpoint(h: Host, id: string, o: CheckpointIn): P
     if (o.snapshot) await writeSnapshot(h, home, await buildSnapshot(h, home, id, { sid: t.sid, tokens: ctx || null, edited: o.snapshot.edited, tasks: o.snapshot.tasks }))
     const notes = await notesFresh(h, dir, await warnAt(h, home, id, t.sid))
     if (!notes) await h.fs.write(`${dir}/scratch/${NEXT_FILE}`, `Next: ${next}\n\n(written by the mod at the checkpoint: no notes were written since the context warning; the first line is the next step)\n`)
-    await writeJson(h, checkpointFile(home, id), { reason: 'checkpoint', ts: now, sid: t.sid, tokens: ctx, next, source: o.source, notes } satisfies CheckpointRec)
+    const workers = await readWorkers(h, home, id, t.sid) // the old session's running background workers: the new one must not wait for them
+    await writeJson(h, checkpointFile(home, id), { reason: 'checkpoint', ts: now, sid: t.sid, tokens: ctx, next, source: o.source, notes, ...(workers.length ? { workers } : {}) } satisfies CheckpointRec)
     return { ok: true, text: savedText(next) }
   } catch (e) {
     return { ok: false, text: `checkpoint failed: ${(e as Error)?.message ?? e}` }
@@ -147,7 +151,7 @@ async function tickOnce(h: Host, deps: CheckpointDeps): Promise<CheckpointNotice
     }
     if (row.waitingFor) continue // a real open prompt is the user's
     if (isWorking(row) && now - p.ts < grace) continue // idle first; after the grace minutes a session that still works is stopped (it was told to end its turn)
-    const r = await deps.restart(id, `Checkpoint at ${kTokens(p.tokens ?? 0)}: the thread asked for a fresh session and continues with its next step (restarted by script).`, isWorking(row), restartInstruction(p.next))
+    const r = await deps.restart(id, `Checkpoint at ${kTokens(p.tokens ?? 0)}: the thread asked for a fresh session and continues with its next step (restarted by script).`, isWorking(row), restartInstruction(p.next, p.workers ?? (await readWorkers(h, home, id, p.sid)), `${threadsDir(home)}/${id}`))
     if (r.ok && (r.data as { fresh?: boolean } | undefined)?.fresh) {
       await drop()
       const mk = await readJson<Record<string, unknown> | null>(h, markerFile(home, id), null)

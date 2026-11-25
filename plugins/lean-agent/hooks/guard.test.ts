@@ -898,6 +898,27 @@ test('1.0.22: a worker and a reader write under <thread folder>/scratch (and tem
   expect(readerWrite(`rg x > ${T}/scratch/a`)).toContain('writes no file') // no scratch known: only temp
 })
 
+test('a reader may redirect to a temp or scratch path with $VAR segments: only whole segments after a literal temp / scratch prefix (1.0.35)', () => {
+  const S = '/h/.lean-agent/threads/t1/scratch'
+  const ok = ['/tmp/t160b/$d/$f', '/tmp/t160b/${d}/${f}.x'.replace('${f}.x', '${f}'), '/tmp/$d/out.txt', '/tmp/a/$d/b/$f', `${S}/$d/$f`, `${S}/$d`, '/private/tmp/x/$a/$b', '$TMPDIR/$d/$f', '${TMPDIR}/$d', '/tmp/a_b/$_x1/y']
+  const bad = [
+    '$d/out.txt', '$HOME/x', '/tmp/x/$d/../y', '/tmp/x/../$d', '/tmp/$d/..', '$d/..', // a variable first, or any literal ..
+    '/tmp/x/$d.txt', '/tmp/x/a$d', '/tmp/x/$d$e', '/tmp/x/${d}x', // a variable that is only a part of a segment
+    '/r/app/$d', '/h/.lean-agent/threads/t2/scratch/$d', '/h/.lean-agent/threads/t1/notes/$d', '/h/.lean-agent/config.json/$d', '/etc/$d', '/$d/tmp/x', // not a temp or scratch prefix
+    '/tmp/x/$(date)', '/tmp/x/`date`', '/tmp/x/$1x', '$(pwd)/x', '/tmp/x/$', '/tmp/x/${', '/tmp/x/${d:-..}', '/tmp/x/$d/$(cat f)',
+  ]
+  for (const w of ok) expect([w, readerWrite(`rg x /r/app > ${w}`, S)]).toEqual([w, null])
+  for (const w of bad) expect([w, typeof readerWrite(`rg x /r/app > ${w}`, S)]).toEqual([w, 'string'])
+  expect(readerWrite('rg x /r/app > /tmp/t160b/$d/$f')).toBeNull() // no scratch known: a temp prefix is enough
+  expect(readerWrite(`rg x /r/app > ${S}/$d/$f`)).toContain('writes no file') // (scratch unknown: not temp)
+  expect(readerWrite('rg x /r/app > /r/app/$d')).toContain('a $variable only as a whole path segment after it, like /tmp/dir/$name; no ..') // the message names what is allowed
+  expect(readerWrite('rg x > /tmp/ok/$d', S) ?? '').toBe('')
+  expect(readerWrite('for f in a b; do rg x /r/$f > /tmp/t/$f; done', S)).toBeNull() // the loop shape of the field report
+  expect(typeof readerWrite('for f in a b; do rg x /r/$f > /r/out/$f; done', S)).toBe('string')
+  expect(readerWrite('rg x | tee /tmp/t/$d', S)).toBeNull() // tee follows the same rule
+  expect(typeof readerWrite('rg x | tee $d/out', S)).toBe('string')
+})
+
 test('a reader: a > in a shell comment or a quoted heredoc body is text, not a redirect; the heredoc line itself and a body substitution still count', async () => {
   // field (1.0.32 export): "a reader writes no file (redirect to ON / 3.4.0 / no-token)" for comments and python heredoc text
   for (const c of ['rg x /r/app # result -> ON', 'rg x /r/app\n# the answer > no-token\nls /r', "python3 - <<'PY'\nif v > 3.4.0: pass\nPY", 'python3 - <<EOF\nprint(1 > 0)\nEOF', 'rg "a#b" /r/app', 'rg x /r/app > /tmp/o # copy > ON'])
@@ -932,6 +953,20 @@ const TAG_WRITES = [
   'git tag -m msg v1', 'git tag -u key v1', 'git -C /r/app tag v1', 'git --no-pager tag v1', 'bash -c "git tag v1"', '/usr/bin/git tag v1', 'x=1 git tag v1', 'git status && git tag v1',
 ]
 const TAG_OTHER = ['git push origin --tags', 'git push origin :refs/tags/v1', 'git push origin refs/tags/v1', 'gh release create v1', 'gh release delete v1', 'gh release edit v1 --notes x', 'gh release upload v1 a.zip']
+
+test('1.0.35: git update-ref refs/tags/..., a push of a refspec into refs/tags and the push --delete tag forms are tag writes; branch refs, HEAD and reads are not', () => {
+  const W = [
+    'git update-ref refs/tags/v1 HEAD', 'git update-ref -d refs/tags/v1', 'git -C /r/app update-ref refs/tags/v1 abc1234', 'git update-ref --no-deref refs/tags/v1 HEAD', 'git update-ref -m msg refs/tags/v1 HEAD',
+    'git push origin HEAD:refs/tags/v1', 'git push origin abc1234:refs/tags/v1', 'git push origin :refs/tags/v1', 'git push origin +HEAD:refs/tags/v1', 'git push origin refs/tags/v1', 'git push --force origin HEAD:refs/tags/v1',
+    'git push origin --delete tag v1', 'git push --delete origin tag v1', 'git push origin tag v1', 'git status && git push origin HEAD:refs/tags/v2',
+  ]
+  const R = [
+    'git update-ref refs/heads/x HEAD', 'git update-ref HEAD abc1234', 'git update-ref -d refs/heads/x', 'git push origin HEAD:refs/heads/x', 'git push origin main', 'git push origin --delete feature', 'git push origin --tags',
+    'git rev-parse refs/tags/v1', 'git show-ref refs/tags/v1', 'git log refs/tags/v1..HEAD', 'git for-each-ref refs/tags', 'git push origin feature/tag-fix', 'git push origin tagger',
+  ]
+  for (const c of W) expect([c, tagWrite(c)]).toEqual([c, true])
+  for (const c of R) expect([c, tagWrite(c)]).toEqual([c, false])
+})
 
 test('1.0.34: tag reads are allowed for a worker and the reviewer; creating or deleting a tag or a release stays refused (a table)', { timeoutMs: 20_000 }, async () => {
   expect(TAG_READS.length + TAG_WRITES.length + TAG_OTHER.length).toBeGreaterThanOrEqual(40)

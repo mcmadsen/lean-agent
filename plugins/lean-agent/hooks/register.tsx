@@ -38,7 +38,9 @@ import { readConfig } from './budget'
 import { hostOf } from './host'
 import { resetSkillStat, isMcpInstructions, isSkillAttachment, noteAttachment, noteCarried, noteSection, offeredTo, skillsCarried, skillsSeen, trimListing } from './skilltrim'
 import { deepReal, hasGrants, parseGrants, pathsOf, recordGrant, releaseAgent, releaseGrant, sweepGrants } from './guard'
-import { jobOf, jobResult, retryCount } from './jobs'
+import { jobOf, jobResult, retryCount, REVIEWER_STEPS, reviewerBudget } from './jobs'
+import { noteReviewerEnd, notDeliveredLine } from './reviewdelivery'
+import { olderDeps, olderTick, restartOlderNow } from './olderrestart'
 import { recordWorkerCall } from './workerruns'
 import { overheadReport } from './overhead'
 import { readLiteSetup, threadSkillsLean } from './threadlean'
@@ -70,7 +72,9 @@ import { finishedText, resetFinish, sweepFinished } from './finish'
 import { capResult, capTo, resetCap } from './cap'
 import { bindSelfEditAnswers, selfEditRoots, revokeSelfEditByWords } from './selfedit'
 import { bindDeliverAnswers } from './deliver'
-import { clearDenied, fallbackUsed, isSmall, launchOf, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, takeDeniedHint, takeOver, takeSliceNote, takeStepNote } from './orchestrate'
+import { writeWorkers } from './oldworkers'
+import { firstTurnTick, markFirstSeen } from './firstturn'
+import { clearDenied, fallbackUsed, hitBudget, isSmall, launchOf, liveWorkers, loadOrch, noteDelegationDenied, noteReaderDenied, orchAgentEnd, orchEnd, orchRan, orchTurnStart, readerCategory, stepsOf, takeDeniedHint, takeOver, takeSliceNote, takeStepNote } from './orchestrate'
 import { broadBrief, classifierDenial, denialKind, isLeanAgentType, noteDenialRec, worktreeRoots } from './denial'
 import type { OCtx } from './orchestrate'
 import { runCi, runSummary, runText } from './runjob'
@@ -170,6 +174,13 @@ let loaded: Loaded | null = null // a thread's profile (profile.ts): the MCP ser
 let started: { model?: string; effort?: string } = {} // a thread's model and effort as it was started (thread.json): written into its ledger rows
 let facts: TurnFacts = emptyFacts() // what the main-loop turn that is running did so far (turnreason.ts): model requests, tool calls, refusals
 let wakeAt: number | null = null // the inbox position the prompt of the running turn named (delivery.ts wakeUpTo): marked consumed when the model answered, not before
+// the session's first sign of work (a model answer or a tool call of the main loop): written once per session for the desk's first-turn watch (firstturn.ts)
+let firstSeenSid = ''
+const seenFirst = async (host: Host, id: string): Promise<void> => {
+  if (!lastSid || firstSeenSid === lastSid) return
+  firstSeenSid = lastSid
+  await markFirstSeen(host, id, lastSid)
+}
 // the model answered a request that started with `carried` pending: those lines were in it (a position that arrived while the request ran stays pending)
 const takeWake = async (host: Host, id: string, carried: number | null): Promise<void> => {
   if (carried === null) return
@@ -213,7 +224,7 @@ const stopTimers = () => {
 export const currentRole = () => role
 
 const DOCTOR = 'lean_doctor'
-const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover', 'memory', 'budget-reset'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
+const DOCTOR_SCHEMA = { type: 'object', properties: { action: { type: 'string', enum: ['check', 'fix', 'restart-older', 'migrate', 'stats', 'compare', 'export', 'mcp-env', 'dismiss-old-desk', 'refusals', 'context', 'overhead', 'handover', 'memory', 'budget-reset'] }, session: { type: 'string', description: 'overhead, context: a session id or thread id tN (its recorded context by part, largest first, with what shrinks each); context desk: what the desk\'s own conversation consists of (by source, the ten largest items, growth per turn); overhead: "probe" or "probe tN" runs a few one-word haiku calls (about 5 cents)' }, name: { type: 'string', description: 'mcp-env: the variable name, never a secret; handover: the thread id' }, value: { type: 'string', description: 'mcp-env: its NON-secret value; without name and value it lists the servers that need one' }, replace: { type: 'boolean', description: 'mcp-env: true ONLY when the user asked to change a value that is set' }, days: { type: 'number', description: 'stats, refusals: days back (default 7)' }, project: { type: 'string', description: 'stats, compare: the registered project' }, mode: { type: 'string', enum: ['overhead', 'history'], description: 'compare: overhead (default) or history' }, notes: { type: 'string', description: 'export: free text for a Notes section' } }, required: ['action'] }
 // settings (configtool.ts, the config skill): the desk's only way to change ~/.lean-agent/config.json; a thread or worker never has it
 const CONFIG = 'lean_config'
 const CONFIG_SPEC = { name: CONFIG, description: 'Settings (config skill): list [group], get, set, unset, validate. A safety-loosening key changes only on the user\'s typed words.', inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['list', 'get', 'set', 'unset', 'validate'] }, group: { type: 'string', description: 'list: one group' }, key: { type: 'string', description: 'get, set, unset: dotted key' }, value: { type: ['string', 'number', 'boolean', 'array'], description: 'set: the new value' } }, required: ['action'] } }
@@ -689,6 +700,24 @@ export async function applyRole($: any, host: Host, newRole: Role): Promise<stri
           pending.push(`[lean-agent] ${n.text}`)
         }
       })
+      // a session a restart by script started that made no model request / tool call within threads.firstTurnSeconds (default 90): ONE internal kick with its instruction, then ONE desk
+      // alert with the reason line (firstturn.ts; the kick counts in the shared nudge counter)
+      every($, 10_000, 'desk', async host2 => {
+        const notes = await firstTurnTick(host2, { agents: async () => (await listAgents(host2)) as any, send: (id, text) => leanThread(host2, $.plugin.root, { action: 'send', tN: id, text, internal: true }) })
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: `lean-firstturn-${n.id}` })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
+      // threads that run an older plugin than the installed one (threads.restartOlder = auto): the idle ones are restarted from their handover, once per thread
+      // per installed version, never in the first 2 minutes after an update; ONE notice for the batch (olderrestart.ts)
+      every($, 30_000, 'desk', async host2 => {
+        const notes = await olderTick(host2, $.plugin.root, olderDeps(host2, $.plugin.root))
+        for (const n of notes) {
+          $.ui.notify(n.text, { key: 'lean-restart-older' })
+          pending.push(`[lean-agent] ${n.text}`)
+        }
+      })
       // a thread that called lean_run {checkpoint} (or announced / asked for a restart) is restarted by script 10 s after its turn ended, with its `next` as the
       // last instruction of the fresh session (checkpoint.ts): one desk line, no desk model turn
       every($, 10_000, 'desk', async host2 => {
@@ -992,14 +1021,17 @@ export const register: Register = on => {
       try {
         const type = String(e?.agent_type ?? e?.agentType ?? '')
         const dir = `${threadsDir(await homeDir(host))}/${role.id}`
-        const v = stopAnswer(dir, id, type, e?.last_assistant_message ?? e?.result, await loadAnswerChars(host))
+        const v = stopAnswer(dir, id, type, e?.last_assistant_message ?? e?.result, await loadAnswerChars(host), hitBudget(id))
         if (v?.block) return { ...(await next(e)), block: v.block } as any
         if (v?.tooLong) await countLongAnswer(host, { agent: type, chars: v.tooLong.chars, thread: role.id }) // let through: a counter in `lean_doctor stats`, not a refusal row
+        // a reviewer's end: how big its run was, for "review not delivered" when its Agent result has no report (reviewdelivery.ts)
+        if (/(^|:)reviewer$/.test(type)) noteReviewerEnd(role.id, { calls: stepsOf(id), budget: reviewerBudget((await loadOrch(host).catch(() => undefined))?.steps ?? REVIEWER_STEPS), hit: hitBudget(id), last: String(e?.last_assistant_message ?? e?.result ?? '') })
       } catch {
         /* the stop goes through as before */
       }
       answersEnd(id)
       orchAgentEnd(id)
+      if (lastSid) await writeWorkers(host, role.id, lastSid, liveWorkers(`${threadsDir(await homeDir(host))}/${role.id}`)).catch(() => undefined) // the list of running background workers, without the one that ended
       // a worker that ended after the context limit stopped the thread: its result goes into the snapshot's pending list (by script, never acted on)
       if (stopped && typeof (e?.last_assistant_message ?? e?.result) === 'string') await notePending(host, role.id, stopped.sid, { agent: String(e?.agent_type ?? id), text: String(e.last_assistant_message ?? e.result) }).catch(() => false)
       await releaseAgent(host, role, id, { sid: lastSid || undefined, ttlMin: (await loadOrch(host).catch(() => undefined))?.grantTtlMin }).catch(() => undefined)
@@ -1154,7 +1186,7 @@ export const register: Register = on => {
         const host = hostOf($)
         const tokens = usage?.context?.tokens
         const sid = lastSid || String(await bounded($, Promise.resolve($.session.id()), 'session.id').catch(() => ''))
-        await recordContext(host, id, sid, tokens)
+        await recordContext(host, id, sid, tokens, { window: usage?.context?.window }) // (the model's real window: the effective limit never passes 90% of it, threadcontext.ts)
         lastTokens = typeof tokens === 'number' ? tokens : null
         // the state snapshot and the restart checkpoint belong to a turn END: a measure in the middle of a turn only records the size
         if (!inTurn) await threadEnd(host, id, tokens, sid, () => noteParts($, host, id, sid), () => lastTextOf($))
@@ -1177,6 +1209,7 @@ export const register: Register = on => {
       if (r?.usage) {
         facts.usage = true
         await takeWake(host, role.id, carried)
+        await seenFirst(host, role.id) // the session's first model answer: the desk's first-turn watch (firstturn.ts) is satisfied
       }
     }
     if (!e.agentId && role.kind === 'desk') noteUsage(r?.usage) // the desk's context size, for its compaction (deskcompact.ts)
@@ -1410,6 +1443,10 @@ export const register: Register = on => {
         const live = await deskModelStatus(host).catch(() => null)
         return { result: setupText(o, true) + (live ? `\ndesk session model: ${live.text}` : '') } as any
       }
+      if (e.action === 'restart-older') { // threads that run an older plugin than the installed one: ONE step (olderrestart.ts; config threads.restartOlder)
+        const o = await restartOlderNow(host, $.plugin.root, olderDeps(host, $.plugin.root))
+        return { result: o.text, ...(o.ok ? {} : { isError: true as const }) } as any
+      }
       if (e.action === 'migrate') return { result: (await migrate(host, $.plugin.root)).lines.join('\n') } as any
       if (e.action === 'stats') return { result: await statsText(host, { days: e.days, project: typeof e.project === 'string' && e.project ? e.project : undefined }) } as any
       if (e.action === 'handover') {
@@ -1593,6 +1630,7 @@ export const register: Register = on => {
     const host = hostOf($)
     if (role.kind === 'thread') await touchActivity(host, await homeDir(host), role.id, e.agentId ? 'worker' : 'tool') // the stall watchdog's clock (stall.ts): the thread's or a worker's tool call
     if (role.kind === 'thread' && !e.agentId) facts.calls++ // the turn record's tool-call count (turnreason.ts)
+    if (role.kind === 'thread' && !e.agentId) await seenFirst(host, role.id) // a tool call is the session at work too (firstturn.ts)
     const halted = await stopCheck($, e)
     if (halted) {
       if (role.kind === 'thread' && !e.agentId) {
@@ -1653,6 +1691,8 @@ export const register: Register = on => {
       if (gcall) await releaseGrant(host, role, gcall, { ...gopts, async: launch?.async, agentId: launch?.agentId }).catch(() => undefined)
       if (octx) orchEnd(octx, e, launch) // a worker's slot (threads.workers) is free again, a background worker's when it ends
     }
+    // a background worker was launched by this thread's session: the list of running ones is kept for the handover and a checkpoint restart (a new session must not wait for it, oldworkers.ts)
+    if (octx?.threadDir && role.kind === 'thread' && !e.agentId && launch?.async && lastSid) await writeWorkers(host, role.id, lastSid, liveWorkers(octx.threadDir)).catch(() => undefined)
     // the worker RAN (a real result, or a background launch accepted): one try of this brief is used; a denied, rejected or errored call uses none
     if (octx && !e.agentId && r?.deny === undefined && !r?.isError && !r?.result?.isError) {
       // the run record (workerruns.ts: stats by tier and job, the haiku record of a project); written before orchRan counts this try
@@ -1668,6 +1708,11 @@ export const register: Register = on => {
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined) await noteWorkerLines(host, role.id, atype, e, texts(r?.result).join('\n')) // `split:` / `missing:` / `refused:` answers
     // the reviewer's JSON block is saved to scratch/review-<area>-<pass>.json before anything cuts the result: a restart of the thread keeps it (reviewsave.ts)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && /(^|:)reviewer$/.test(String(e.subagent_type ?? '')) && r?.deny === undefined && !launch?.async) await saveReviewerBlock(host, role.id, String(e.prompt ?? ''), texts(r?.result).join('\n')).catch(() => undefined)
+    // a reviewer that ended with no report: the thread is told by script, never left with an empty result (reviewdelivery.ts, synthesised line)
+    if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && /(^|:)reviewer$/.test(String(e.subagent_type ?? '')) && r?.deny === undefined && !launch?.async) {
+      const line = notDeliveredLine(role.id, texts(r?.result).join('\n'))
+      if (line) r = { ...r, context: [...(r?.context ?? []), line] }
+    }
     await feedbackOf(host, e, r).catch(() => undefined)
     // a worker brief over 1500 characters while the thread has notes / scratch files: one soft hint, point at the file (briefsize.ts)
     if (role.kind === 'thread' && !e.agentId && (e.tool === 'Agent' || e.tool === 'Task') && r?.deny === undefined && octx?.threadDir && isSmall(typeof e.subagent_type === 'string' ? e.subagent_type : '')) {
@@ -1723,7 +1768,7 @@ export const register: Register = on => {
     if (e.agentId || r?.deny !== undefined) return r
     const lines: string[] = []
     try {
-      const batch = role.kind === 'thread' ? await takeBatch(host, role.id) : role.kind === 'desk' ? await takeReports(host) : null
+      const batch = role.kind === 'thread' ? await takeBatch(host, role.id, { defer: n => void (wakeAt = Math.max(wakeAt ?? 0, n)) }) : role.kind === 'desk' ? await takeReports(host) : null
       if (batch) lines.push(batch)
       const hint = octx?.threadDir ? takeDeniedHint(octx.threadDir) : null // a worker call was denied by the permission check: said once
       if (hint) lines.push(hint)
@@ -1806,7 +1851,7 @@ export const register: Register = on => {
         if (upTo !== null) {
           wakeAt = upTo
           more = null
-        } else more = await takeBatch(host, role.id)
+        } else more = await takeBatch(host, role.id, { defer: n => void (wakeAt = Math.max(wakeAt ?? 0, n)) }) // (consumed when the model answered the request that carries it)
       }
       else if (role.kind === 'desk') {
         more = await takeReports(host)

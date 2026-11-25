@@ -15,14 +15,14 @@ const T = (id: string) => `${L}/threads/${id}`
 const thread = (h: ReturnType<typeof fakeHost>, id: string, o: Record<string, unknown> = {}) =>
   h.files.set(`${T(id)}/thread.json`, JSON.stringify({ id, title: id, project: 'shop', state: 'open', sid: `s-${id}`, created: 1, lastWake: 1, delivered: 0, ...o }))
 
-test('limitsOf: the soft line is 80k of the default 120k; a per-thread limit moves it with the same share; config keys move it; old threadWarnTokens wins', () => {
-  expect(limitsOf(null)).toEqual({ limit: 120_000, warn: 80_000 })
-  expect(limitsOf(null, 90_000)).toEqual({ limit: 90_000, warn: 60_000 })
-  expect(limitsOf(null, 200_000)).toEqual({ limit: 200_000, warn: 133_000 })
-  expect(limitsOf(null, 40_000)).toEqual({ limit: 40_000, warn: 27_000 })
-  expect(limitsOf(null, 30_000)).toEqual({ limit: 120_000, warn: 80_000 }) // outside 40k-200k: ignored
-  expect(limitsOf({ threads: { softCheckpointTokens: 60_000 } }, 90_000)).toEqual({ limit: 90_000, warn: 45_000 })
-  expect(limitsOf({ threadWarnTokens: 100_000 })).toEqual({ limit: 120_000, warn: 100_000 })
+test('limitsOf: the soft line is 80% of the default 200k; a per-thread limit moves it with the same share; config keys move it; old threadWarnTokens wins', () => {
+  expect(limitsOf(null)).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(limitsOf(null, 90_000)).toEqual({ limit: 90_000, warn: 72_000 })
+  expect(limitsOf(null, 200_000)).toEqual({ limit: 200_000, warn: 160_000 })
+  expect(limitsOf(null, 40_000)).toEqual({ limit: 40_000, warn: 32_000 })
+  expect(limitsOf(null, 30_000)).toEqual({ limit: 200_000, warn: 160_000 }) // outside 40k-200k: ignored
+  expect(limitsOf({ threads: { softCheckpointTokens: 60_000 } }, 90_000)).toEqual({ limit: 90_000, warn: 27_000 }) // an explicit soft size is scaled by the own limit's share (90k of 200k)
+  expect(limitsOf({ threadWarnTokens: 100_000 })).toEqual({ limit: 200_000, warn: 100_000 })
 })
 
 test('parseTokens: 90000, 90k, off; outside 40k-200k and words are refused with the reason', () => {
@@ -42,52 +42,57 @@ test('lean_thread limit tN <tokens>: stored on the thread, survives a restart (t
   const r = await leanThread(h.host, '/plug', { action: 'limit', tN: 't1', text: '90k' })
   expect(r).toMatchObject({ ok: true })
   expect(r.text).toContain('own context limit 90k (hard)')
-  expect(r.text).toContain('checkpoint at 60k (soft)')
+  expect(r.text).toContain('checkpoint at 72k (soft)')
   expect(JSON.parse(h.files.get(`${T('t1')}/thread.json`)!).tokenLimit).toBe(90_000)
-  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 90_000, warn: 60_000 })
-  expect(await threadLimitsFor(h.host, 't2')).toEqual({ limit: 120_000, warn: 80_000 }) // another thread: the shared limits
+  expect(await threadLimitsFor(h.host, 't1')).toEqual({ limit: 90_000, warn: 72_000 })
+  expect(await threadLimitsFor(h.host, 't2')).toEqual({ limit: 200_000, warn: 160_000 }) // another thread: the shared limits
   expect((await leanThread(h.host, '/plug', { action: 'limit', tN: 't1', text: '300000' })).ok).toBe(false)
   h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 85_000, at: h.clock.t, sid: 's-t1' }))
   const list = await leanThread(h.host, '/plug', { action: 'list', verbose: true })
-  expect(list.text).toContain('ctx 85k/90k · soft limit 60k')
+  expect(list.text).toContain('ctx 85k/90k · soft limit 72k')
   expect(limitReply('t1', null, {})).toContain('shared limit applies again')
   const off = await leanThread(h.host, '/plug', { action: 'limit', tN: 't1', text: 'off' })
   expect(off.ok).toBe(true)
   expect(JSON.parse(h.files.get(`${T('t1')}/thread.json`)!).tokenLimit).toBeUndefined()
-  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 85k/120k · soft limit 80k')
+  const back = (await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text
+  expect(back).toContain('ctx 85k/200k') // the shared limit (1.0.35: 200k): 85k is under its 160k soft line
+  expect(back).not.toContain('soft limit')
 })
 
-test('ctxText stays "ctx 85k/120k" (the card); the list adds "soft limit 80k" once the size is over it', async () => {
-  expect(ctxText(85_000, { limit: 120_000, warn: 80_000 })).toBe('ctx 85k/120k')
+test('ctxText stays "ctx 85k/200k" (the card); the list adds "soft limit 160k" once the size is over it', async () => {
+  expect(ctxText(85_000, { limit: 200_000, warn: 160_000 })).toBe('ctx 85k/200k')
   const h = fakeHost(null)
   thread(h, 't1')
-  h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 70_000, at: h.clock.t, sid: 's-t1' }))
+  h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 150_000, at: h.clock.t, sid: 's-t1' }))
   expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).not.toContain('soft limit')
+  h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 170_000, at: h.clock.t, sid: 's-t1' }))
+  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 170k/200k · soft limit 160k')
 })
 
 test('the warn line moves with the per-thread limit: told once at the soft size, "next natural boundary", the checkpoint call', () => {
   warnReset()
-  const own = limitsOf(null, 90_000) // soft 60k
-  expect(takeWarn('s1', 60_000, own)).toBeNull()
-  const line = takeWarn('s1', 61_000, own)!
-  expect(line).toBe(warnLine(61_000, 90_000, 60_000))
-  expect(line).toContain('(soft limit 60k)')
+  const own = limitsOf(null, 90_000) // soft 72k
+  expect(takeWarn('s1', 72_000, own)).toBeNull()
+  const line = takeWarn('s1', 73_000, own)!
+  expect(line).toBe(warnLine(73_000, 90_000, 72_000))
+  expect(line).toContain('(soft limit 72k)')
   expect(line).toContain('at your next natural boundary')
   expect(line).toContain('lean_run checkpoint {next:')
-  expect(takeWarn('s1', 62_000, own)).toBeNull() // once
-  expect(takeWarn('s2', 79_000, limitsOf(null))).toBeNull() // the shared 80k line
-  expect(takeWarn('s2', 85_000, limitsOf(null))).toContain('ctx 85k of 120k (soft limit 80k)')
+  expect(takeWarn('s1', 74_000, own)).toBeNull() // once
+  expect(takeWarn('s2', 159_000, limitsOf(null))).toBeNull() // the shared 160k line
+  expect(takeWarn('s2', 165_000, limitsOf(null))).toContain('ctx 165k of 200k (soft limit 160k)')
 })
 
 test('softCheckpointTick: an idle thread with work left over its soft size is checkpointed by script once per session; working, waiting, under the line and an own bigger limit are left', async () => {
   const h = fakeHost(null)
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 120_000 })) // (soft line 96k; the default 200k limit has no own limit above it any more)
   const ctx = (id: string, tokens: number, ago = 600_000) => h.files.set(`${T(id)}/context.json`, JSON.stringify({ tokens, at: h.clock.t - ago, sid: `s-${id}` }))
-  thread(h, 't1'); ctx('t1', 85_000)
-  thread(h, 't2'); ctx('t2', 85_000)
+  thread(h, 't1'); ctx('t1', 100_000)
+  thread(h, 't2'); ctx('t2', 100_000)
   thread(h, 't3'); ctx('t3', 70_000)
-  thread(h, 't4', { tokenLimit: 200_000 }); ctx('t4', 85_000)
-  thread(h, 't5'); ctx('t5', 85_000, 30_000) // its turn ended 30 s ago
-  thread(h, 't6'); ctx('t6', 85_000)
+  thread(h, 't4', { tokenLimit: 200_000 }); ctx('t4', 100_000)
+  thread(h, 't5'); ctx('t5', 100_000, 30_000) // its turn ended 30 s ago
+  thread(h, 't6'); ctx('t6', 100_000)
   const rows = [t('t1', 'idle'), t('t2', 'working'), t('t3', 'idle'), t('t4', 'idle'), t('t5', 'idle'), t('t6', 'idle')]
   function t(id: string, state: string) { return { sid: `s-${id}`, name: id, cwd: '', status: state === 'working' ? 'busy' : 'idle', startedAt: 0, pid: state === 'working' ? 1 : 0, id: `a-${id}`, state, waitingFor: '' } }
   h.files.set(`${L}/desk/inbox.jsonl`, JSON.stringify({ ts: h.clock.t - 400_000, from: 't6', kind: 'report', state: 'done', text: 'done' }) + '\n')
@@ -95,8 +100,8 @@ test('softCheckpointTick: an idle thread with work left over its soft size is ch
   const deps = { agents: async () => rows as any, thread: async (i: any) => (calls.push(i), { ok: true, text: 'restarted', data: { fresh: true } }) }
   const notes = await softCheckpointTick(h.host, deps)
   expect(calls.map(c => `${c.action} ${c.tN}`)).toEqual(['auto-restart t1'])
-  expect(calls[0]!.reason).toContain('over the soft checkpoint size 80000')
-  expect(notes).toEqual(['t1: context 85k passed the soft checkpoint size 80k while idle: checkpointed and restarted as a new session by script'])
+  expect(calls[0]!.reason).toContain('over the soft checkpoint size 96000')
+  expect(notes).toEqual(['t1: context 100k passed the soft checkpoint size 96k while idle: checkpointed and restarted as a new session by script'])
   expect(await softCheckpointTick(h.host, deps)).toEqual([]) // once per session (and the 10 minute gap)
   expect(calls).toHaveLength(1)
 })
@@ -263,8 +268,8 @@ test('lean_thread budget: parse (2m, 500k, 0 = none, off = the shared one); the 
   thread(h, 't1', { budgetUsd: 1 }) // a 1.0.33 USD budget: not read
   h.files.set(`${L}/ledger.jsonl`, row({ tN: 't1', in: 6400 }) + '\n')
   h.files.set(`${L}/config.json`, JSON.stringify({ threads: { softTokens: 8000 } }))
-  h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 85_000, at: h.clock.t, sid: 's-t1' }))
-  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 85k/120k · soft limit 80k · 6.4k/8k tokens')
+  h.files.set(`${T('t1')}/context.json`, JSON.stringify({ tokens: 170_000, at: h.clock.t, sid: 's-t1' }))
+  expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).toContain('ctx 170k/200k · soft limit 160k · 6.4k/8k tokens')
   expect((await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: '0' })).text).toContain('no soft budget')
   expect((await leanThread(h.host, '/plug', { action: 'list', verbose: true })).text).not.toContain('6.4k/8k')
   await leanThread(h.host, '/plug', { action: 'budget', tN: 't1', text: 'off' })

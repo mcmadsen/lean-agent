@@ -24,7 +24,7 @@ test('list and get: grouped, current against the default, non-defaults marked, t
   expect(all.text).toMatch(/^desk:\n/)
   for (const g of ['desk:', 'threads:', 'workers:', 'review:', 'budget:', 'pane:', 'feedback:', 'safety:', 'other:']) expect(all.text).toMatch(new RegExp(`(^|\\n)${g}\\n`))
   expect(all.text).toContain('desk.model = opus * (default sonnet) — Which model the desk session runs on.')
-  expect(all.text).toContain('threadTokens = 150000 * (default 120000)')
+  expect(all.text).toContain('threadTokens = 150000 * (default 200000)')
   expect(all.text).toContain('desk.autoRestart = false (default)')
   expect(all.text).toContain('lean.orchestrate (sensitive) = true (default)')
   expect(all.text).toContain('(2 in this list)')

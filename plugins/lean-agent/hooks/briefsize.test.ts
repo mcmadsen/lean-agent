@@ -134,6 +134,7 @@ function threads() {
   h.clock.t = 10_000_000
   h.files.set('/p/templates/thread.md', '# {{id}} {{title}}')
   h.files.set('/p/templates/front-desk.md', 'desk {{lean}}')
+  h.files.set(`${L}/config.json`, JSON.stringify({ threadTokens: 120_000 })) // (these specs count the free context against 120k; the default limit is 200k since 1.0.35)
   h.files.set(`${L}/threads/t1/thread.json`, JSON.stringify({ id: 't1', title: 'plan', project: 'app', state: 'open', sid: SID, created: 1, lastWake: 0, delivered: 0, model: 'sonnet', effort: 'medium' }))
   h.files.set(`${L}/threads/t1/context-parts.json`, JSON.stringify({ sid: SID, at: 1, first: { fixed: 28_200, full: true } }))
   const rows = [{ sessionId: SID, name: 't1 · plan', cwd: `${L}/threads/t1`, status: 'idle', startedAt: 1, pid: 42, id: 'abcd1234' }]

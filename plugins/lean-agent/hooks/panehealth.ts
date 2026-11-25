@@ -13,3 +13,10 @@ export function healthSummary(c: HealthCounts): HealthLook {
   if (c.fix > 0) return { label: `Health: ${plural(c.fix, 'finding')}`, tone: c.blocker ? 'error' : 'warning', chip: c.fix === 1 ? '1 fix' : `${c.fix} fixes`, extra }
   return { label: 'Health: all good', tone: 'quiet', chip: '', extra }
 }
+
+// "3 projects have stale rule areas": ONE grey info line for the count of registered projects with a stale learned rule area (1.0.35; the More card that held
+// it is gone since 1.0.35). Nothing when none is stale.
+export function staleAreasLine(projects: { stale?: number }[] | undefined): string {
+  const n = (projects ?? []).filter(p => Number(p?.stale) > 0).length
+  return n === 0 ? '' : `${n} ${n === 1 ? 'project has' : 'projects have'} stale rule areas (lean_rules check names them; learn re-learns an area)`
+}

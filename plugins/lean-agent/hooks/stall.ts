@@ -16,7 +16,7 @@ import { haltedSince } from './continuepending'
 import { readTurn } from './turnreason'
 import { waitingOn } from './waitevent'
 import { alertText, endDue, endNudgeOn, markAlerted, wasNudged } from './endnudge'
-import { kTokens, readContext, threadLimits } from './threadcontext'
+import { kTokens, readContext, threadLimitsFor } from './threadcontext'
 import type { AgentRow, Out, Thread } from './threads'
 
 export const CAP_SHARE = 0.8 // a stalled thread at this share of the context limit is restarted at once
@@ -108,7 +108,7 @@ async function tickOnce(h: Host, deps: StallDeps): Promise<StallNotice[]> {
     const base = stallText(id, ms, truth.unread)
     // at 80% of the context limit a stalled thread is restarted at once (1.0.28; field: stalled at 112k of 120k, flagged only after 20 minutes)
     const ctx = t ? await readContext(h, home, t) : null
-    const limit = (await threadLimits(h)).limit
+    const limit = (await threadLimitsFor(h, id)).limit // (the thread's own limit and the window its session reported)
     const nearCap = !!ctx && ctx.tokens >= limit * CAP_SHARE
     if (!cfg.restart && !nearCap) {
       if (fresh && !halted) out.push({ id, text: `${base}: wake or restart it` })

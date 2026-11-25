@@ -26,7 +26,7 @@ function setup(o: { thread?: Record<string, unknown>; config?: unknown; activity
   h.files.set(`${T1}/thread.json`, JSON.stringify({ id: 't1', title: 'fix login', project: 'app', state: 'open', sid: S1, created: 1, lastWake: T0 - 120 * MIN, delivered: 0, model: 'sonnet', effort: 'medium', ...o.thread }))
   h.files.set(`${T1}/brief.md`, 'fix the login bug\n')
   h.files.set(`${T1}/activity.json`, JSON.stringify({ at: T0 - (o.activityMinAgo ?? 6) * MIN, kind: 'tool' }))
-  if (o.config !== undefined) h.files.set(`${L}/config.json`, JSON.stringify(o.config))
+  h.files.set(`${L}/config.json`, JSON.stringify(o.config !== undefined ? o.config : { threadTokens: 120_000 })) // (1.0.35: the default limit is 200k; the stall rule is specced at 120k)
   if (o.tokens) h.files.set(`${T1}/context.json`, JSON.stringify({ tokens: o.tokens, at: T0 - 20 * MIN, sid: S1 }))
   return h
 }

@@ -82,6 +82,17 @@ for (const n of ['reader-sonnet', 'reader-haiku', 'explorer']) {
   if (!/Absolute paths only, never `cd`/.test(text.slice(0, 400))) fail(`agents/${n}.md: the first lines of the body must say "Absolute paths only, never \`cd\`"`)
 }
 
+//  4b. the reviewer's turn limit sits above its tool-call budget (jobs.ts REVIEWER_STEPS + 6, 1.0.35): the answer, the thinking turns and the
+//      refused calls need turns after the last allowed call, or the reviewer ends without a report
+{
+  const steps = Number(/export const REVIEWER_STEPS = (\d+)/.exec(readFileSync(`${here}/jobs.ts`, 'utf8'))?.[1])
+  const md = readFileSync(`${root}/agents/reviewer.md`, 'utf8')
+  const turns = Number(/^maxTurns:\s*(\d+)\s*$/m.exec(md)?.[1])
+  if (!steps || turns !== steps + 6) fail(`agents/reviewer.md: maxTurns is ${turns}, it must be REVIEWER_STEPS + 6 = ${steps + 6}`)
+  if (!md.includes(`at most ${turns} turns and ${steps} tool calls`)) fail(`agents/reviewer.md: the Budget line must say "at most ${turns} turns and ${steps} tool calls"`)
+  if (!md.includes('now answer with the json block only, no more tool calls')) fail('agents/reviewer.md: the Budget line must carry the refusal words "now answer with the json block only, no more tool calls"')
+}
+
 //  5. direct commands: `/lean-agent:<name> <args>` works for every flow the desk offers. Each skill offered on the desk and each commands/*.md
 //     has a one-line description and an argument-hint (a command whose body takes $ARGUMENTS needs one; `list` takes none).
 for (const name of readdirSync(`${root}/skills`).sort()) {
