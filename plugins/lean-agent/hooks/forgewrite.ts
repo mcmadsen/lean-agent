@@ -65,8 +65,8 @@ export const forgeRefusalHead = /^forge writes go through the desk/
 
 // curl / wget at a forge host with a method that is not GET or a body (text based: the host and the flags may be anywhere in the command)
 function fetchWrite(t: string): string | null {
-  const fetch = /(?:^|[^\w./-])(?:curl|wget)(?![\w-])/.exec(t)
-  return fetch && HOST.test(t) && (METHOD.test(t) || DATA.test(t)) ? fetch[0].replace(/^[^\w]/, '') : null
+  const fetch = /(?:^|[^\w.-])(?:[\w.~-]*\/)*(curl|wget)(?![\w-])/.exec(t) // (a path to the program counts: /usr/bin/curl)
+  return fetch && HOST.test(t) && (METHOD.test(t) || DATA.test(t)) ? fetch[1]! : null
 }
 const clean = (c: string): string => c.replace(/\\\r?\n/g, ' ')
 

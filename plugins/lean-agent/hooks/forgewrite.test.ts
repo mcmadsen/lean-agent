@@ -245,6 +245,17 @@ const REFUSED = [
   `curl -sS --data '{}' "${WI}"`,
   `curl -X POST https://api.github.com/repos/acme/app/issues -d '{}'`,
   `wget --method=DELETE ${WI}`,
+  `/usr/bin/curl -X POST https://api.github.com/repos/acme/app/issues/3/comments -d '{}'`,
+  `~/bin/wget --post-data=x ${WI}`,
+  // gh groups beyond pr / issue / release (every group but a read is a write)
+  'gh cache delete --all',
+  'gh codespace create --repo acme/app',
+  'gh ssh-key add key.pub',
+  'gh gpg-key add key.gpg',
+  'gh extension install acme/gh-x',
+  // wrappers
+  'xargs az repos pr update --status abandoned',
+  'echo 4321 | xargs gh pr close',
 ]
 
 test('1.0.34: the read allow-list for az / gh / curl: every allowed command passes, every other forge command is a write (a table of commands)', () => {

@@ -51,7 +51,7 @@ function identity(h: Host, org: string): Promise<Who | null> {
 }
 
 export const CANT = 'could not verify the owner/assignee: not moving it'
-const SAY_LINK = (_id: number): string => "(say 'link it anyway' in the chat to allow once)" // (userSaidAnyway accepts these words for a link request)
+const SAY_LINK = "(say 'link it anyway' in the chat to allow once)" // (userSaidAnyway accepts these words for a link request)
 export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
   const org = t.workItem?.org ?? t.pr?.org
   if (!org || (!t.workItem && !t.pr)) return { ok: false, why: CANT }
@@ -63,8 +63,8 @@ export async function ownTask(h: Host, t: OwnTarget): Promise<OwnResult> {
     const g = (await rd.az('GET', `https://dev.azure.com/${enc(w.org)}/${enc(w.project)}/_apis/wit/workitems/${w.id}?fields=System.AssignedTo&api-version=7.1`).catch(() => null)) as { fields?: Record<string, unknown> } | null
     if (!g || typeof g !== 'object' || !g.fields || typeof g.fields !== 'object') return { ok: false, why: CANT }
     const a = whoOf(g.fields['System.AssignedTo'])
-    if (!a) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item that is unassigned, not yours: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is unassigned: not moving it` }
-    if (!same(who, a)) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item assigned to ${a.name}, not you: not linking it ${SAY_LINK(w.id)}` : `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
+    if (!a) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item that is unassigned, not yours: not linking it ${SAY_LINK}` : `WI ${w.id} is unassigned: not moving it` }
+    if (!same(who, a)) return { ok: false, why: t.link ? `linking this PR to WI ${w.id} changes a work item assigned to ${a.name}, not you: not linking it ${SAY_LINK}` : `WI ${w.id} is assigned to ${a.name}, not you: not moving it` }
   }
   if (t.pr) {
     const p = t.pr
