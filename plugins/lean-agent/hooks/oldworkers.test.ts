@@ -26,8 +26,8 @@ function setup(files: Record<string, string> = {}) {
 }
 
 test('waitsForWorker: waiting for a worker, agent, background job or monitor; a plain step is not', () => {
-  for (const t of [WAIT, 'wait for the background job to finish', 'waiting on the monitor', 'until the subagent returns, do nothing', 'the worker finishes, then merge', 'Await the agent result', 'hold off until the build is done']) expect([t, waitsForWorker(t)]).toEqual([t, true])
-  for (const t of ['run the parser specs for step 4, then open the draft PR', 'wait, no: rename the file first', 'start a worker for the docs', 'read notes.md', '', undefined]) expect([t, waitsForWorker(t)]).toEqual([t, false])
+  for (const t of [WAIT, 'wait for the background job to finish', 'waiting on the monitor', 'until the subagent returns, do nothing', 'the worker finishes, then merge', 'Await the agent result']) expect([t, waitsForWorker(t)]).toEqual([t, true])
+  for (const t of ['poll until the pipeline run completes', 'wait for the build to finish, then merge', 'hold off until the job is done', 'run the parser specs for step 4, then open the draft PR', 'wait, no: rename the file first', 'start a worker for the docs', 'read notes.md', '', undefined]) expect([t, waitsForWorker(t)]).toEqual([t, false])
 })
 
 test('the note names the worker, says it cannot report, and gives the two ways out: its result file or a new worker', () => {
@@ -65,6 +65,7 @@ test('workers.json is believed only for the session that wrote it', async () => 
   await writeWorkers(h.host, 't1', S1, [W])
   expect(await readWorkers(h.host, '/h', 't1', S1)).toEqual([W])
   expect(await readWorkers(h.host, '/h', 't1', 'another-session')).toEqual([])
+  expect(await readWorkers(h.host, '/h', 't1', ['recorded-by-the-desk', S1])).toEqual([W]) // the session's own id is among the thread's ids (thread.json sids)
   await writeWorkers(h.host, 't1', S1, [])
   expect(await readWorkers(h.host, '/h', 't1', S1)).toEqual([])
 })

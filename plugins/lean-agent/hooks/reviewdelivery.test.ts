@@ -27,7 +27,9 @@ test('the first long answer of a reviewer that used its budget is let through (c
 test('hasReport: a verdict line, a review json block or the review file path is a report; silence and the engine\'s limit text are not', () => {
   expect(hasReport(`${DIR}/scratch/review-ab12cd.md\nverdict: approve`)).toBe(true)
   expect(hasReport('```json\n{"verdict":"approve","findings":[]}\n```')).toBe(true)
-  expect(hasReport(`wrote ${DIR}/scratch/review-ab12cd.md`)).toBe(true)
+  expect(hasReport(`${DIR}/scratch/review-ab12cd.md`)).toBe(true)
+  expect(hasReport(`wrote ${DIR}/scratch/review-ab12cd.md`)).toBe(false) // a mention is not a report
+  expect(hasReport('I could not write review-x.md: the redirect was refused')).toBe(false)
   expect(hasReport('')).toBe(false)
   expect(hasReport('agent hit its turn limit with no report')).toBe(false)
   expect(hasReport('{"unrelated": 1}')).toBe(false)

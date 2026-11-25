@@ -191,7 +191,7 @@ export async function buildHandover(h: Host, home: string, t: Thread, why: strin
   const unv = t.sid && recs.length ? unverifiedLine(now) : ''
   if (unv && !preview) await markUnverified(h, home, t.id, { at: now, sid: t.sid })
   // the replaced session's running background workers cannot report to the new one (oldworkers.ts): said in every restart prompt, not only the checkpoint's
-  const oldWorkers = oldWorkersNote(await readWorkers(h, home, t.id, t.sid), dir)
+  const oldWorkers = oldWorkersNote(await readWorkers(h, home, t.id, [t.sid, ...(t.sids ?? []).slice(-2)]), dir)
   if (mode === 'core') {
     // only what changes behaviour; every other source is one line in the pull list, with its size
     const last3 = recs.slice(-REPORT_DIGESTS)

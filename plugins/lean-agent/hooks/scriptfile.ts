@@ -71,7 +71,8 @@ export async function scriptForgeWrite($: Host, o: { thread?: string; cwd: strin
       if (typeof st.size === 'number' && st.size > SCRIPT_MAX) continue
       const text = await $.fs.read(abs).catch(() => null)
       if (typeof text !== 'string' || text.length > SCRIPT_MAX || text.includes('\u0000')) continue
-      const fw = forgeTextWrite(text)
+      // (a whole-line comment is no command: `# gh pr create` in a script's header or a test fixture's notes is not a write; everything else is scanned as the -c string is)
+      const fw = forgeTextWrite(text.split('\n').filter(l => !/^\s*(#(?!!)|\/\/)/.test(l)).join('\n'))
       if (fw) return forgeRefusal() + forgeHint(text) + ` (the script ${f.split('/').pop()} makes a forge write: ${fw})` + tried(fw)
     }
   } catch {

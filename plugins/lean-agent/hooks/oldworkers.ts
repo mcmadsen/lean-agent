@@ -19,13 +19,15 @@ export async function writeWorkers(h: Host, id: string, sid: string, workers: Wo
     /* display only */
   }
 }
-export async function readWorkers(h: Host, home: string, id: string, sid: string | undefined): Promise<WorkerRef[]> {
+export async function readWorkers(h: Host, home: string, id: string, sid: string | (string | undefined)[] | undefined): Promise<WorkerRef[]> {
   const r = await readJson<{ sid?: string; workers?: WorkerRef[] } | null>(h, workersFile(home, id), null).catch(() => null)
-  return r && sid && r.sid === sid && Array.isArray(r.workers) ? r.workers.filter(w => w && typeof w.id === 'string' && w.id) : []
+  // `sid`: the thread's session id(s): the one the desk recorded and the ids the session itself reported (thread.json sids), which can differ (role.ts recordSid)
+  const mine = (Array.isArray(sid) ? sid : [sid]).filter((x): x is string => typeof x === 'string' && !!x)
+  return r && typeof r.sid === 'string' && mine.includes(r.sid) && Array.isArray(r.workers) ? r.workers.filter(w => w && typeof w.id === 'string' && w.id) : []
 }
 
 // a `next` / brief line that waits for a worker, an agent, a background job or a monitor (the new session cannot be told by anything that finished in the old one)
-const WAITS = /\b(?:wait(?:ing)?|await(?:ing)?|hold(?:ing)? (?:off )?until|until)\b[^.\n]{0,60}\b(?:worker|sub-?agent|agents?|background|bg|monitor|job|task|process|build|run)\b|\b(?:worker|sub-?agent|background (?:job|task|agent|worker)|monitor)\b[^.\n]{0,60}\b(?:finish|finishes|finished|complete|completes|completed|done|returns?|reports?)\b/i
+const WAITS = /\b(?:wait(?:ing)?|await(?:ing)?|hold(?:ing)? (?:off )?until|until)\b[^.\n]{0,60}\b(?:worker|sub-?agent|agents?|background|bg|monitor)\b|\b(?:worker|sub-?agent|background (?:job|task|agent|worker)|monitor)\b[^.\n]{0,60}\b(?:finish|finishes|finished|complete|completes|completed|done|returns?|reports?)\b/i
 export const waitsForWorker = (text: unknown): boolean => typeof text === 'string' && WAITS.test(text)
 
 const name = (w: WorkerRef): string => `worker ${w.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 20)}${w.type ? ` (${w.type.replace(/^lean-agent:/, '')})` : ''}`

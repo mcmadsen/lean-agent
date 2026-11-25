@@ -77,6 +77,7 @@ test('config (1.0.35): the effective limit is never more than 90% of the real wi
   expect(limitsOf({}, 200_000, 200_000)).toEqual({ limit: 180_000, warn: 144_000 })
   expect(limitsOf({ threads: { softCheckpointTokens: 100_000 } }, 100_000)).toEqual({ limit: 100_000, warn: 50_000 }) // an explicit soft size is scaled by the own limit's share of the shared one
   expect(limitsOf({ threadTokens: 100_000 }, null, 200_000)).toEqual({ limit: 100_000, warn: 80_000 })
+  expect(limitsOf({ threads: { softCheckpointTokens: 80_000 } }, null, 200_000)).toEqual({ limit: 180_000, warn: 80_000 }) // a value the user set stays as written, whatever the window
 })
 
 test('config: a value that is not a number (or too small, negative, NaN) is ignored: the default applies', () => {

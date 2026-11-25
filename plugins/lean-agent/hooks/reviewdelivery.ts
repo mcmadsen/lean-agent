@@ -20,7 +20,7 @@ const flat = (s: string) => s.replace(/\s+/g, ' ').trim()
 export function hasReport(text: string): boolean {
   if (/^\s*`?verdict\s*:\s*(approve|changes-requested|needs-checks)\b/im.test(text)) return true
   if (blockFrom(text)) return true
-  return /\breview-[\w.-]+\.(md|json)\b/.test(text)
+  return /^\s*`?\S*review-[\w.-]+\.(?:md|json)`?\s*$/m.test(text) // the path on a line of its own (a reviewer that says it "could not write review-x.md" has no report)
 }
 
 // the line for an Agent result of the reviewer that has no report; null when it has one (or the run is unknown and the text says something)

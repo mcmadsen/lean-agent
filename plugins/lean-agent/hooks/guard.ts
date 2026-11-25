@@ -923,7 +923,8 @@ const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr
 // `scratch`: the calling thread's own `<thread folder>/scratch` (the one place under the lean home a subagent may write notes and drafts)
 // A path with $VAR parts (1.0.35: `> /tmp/t160b/$d/$f` was refused): allowed when its LITERAL prefix is a temp folder (or the thread's scratch folder) and every
 // variable is a WHOLE path segment after that prefix (`/$name`, `/${name}`): not the first segment (`$HOME/x`, `$d/..`), not a part of one (`$d.txt`,
-// `x$d`), and no literal `..` anywhere. A command substitution or a backtick is never a variable. `$TMPDIR` as the first segment is a temp folder as before.
+// `x$d`), and no literal `..` anywhere. (Residual, accepted: a variable's VALUE can hold `..` or an absolute path; the guard cannot know it. It is a reader's temp
+// file, and the case the field report names is a loop variable over file names.) A command substitution or a backtick is never a variable. `$TMPDIR` as the first segment is a temp folder as before.
 const VAR_SEG = /^\$(?:[A-Za-z_]\w*|\{[A-Za-z_]\w*\})$/
 const TMPDIR_SEG = /^\$\{?TMPDIR\}?$/
 const tempRoot = (p: string, scratch?: string): boolean => TEMP_OK.test(p) || (!!scratch && p.startsWith(`${scratch}/`))

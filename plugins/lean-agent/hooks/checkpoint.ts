@@ -97,7 +97,7 @@ export async function requestCheckpoint(h: Host, id: string, o: CheckpointIn): P
     if (o.snapshot) await writeSnapshot(h, home, await buildSnapshot(h, home, id, { sid: t.sid, tokens: ctx || null, edited: o.snapshot.edited, tasks: o.snapshot.tasks }))
     const notes = await notesFresh(h, dir, await warnAt(h, home, id, t.sid))
     if (!notes) await h.fs.write(`${dir}/scratch/${NEXT_FILE}`, `Next: ${next}\n\n(written by the mod at the checkpoint: no notes were written since the context warning; the first line is the next step)\n`)
-    const workers = await readWorkers(h, home, id, t.sid) // the old session's running background workers: the new one must not wait for them
+    const workers = await readWorkers(h, home, id, [t.sid, ...(t.sids ?? []).slice(-2)]) // the old session's running background workers: the new one must not wait for them
     await writeJson(h, checkpointFile(home, id), { reason: 'checkpoint', ts: now, sid: t.sid, tokens: ctx, next, source: o.source, notes, ...(workers.length ? { workers } : {}) } satisfies CheckpointRec)
     return { ok: true, text: savedText(next) }
   } catch (e) {

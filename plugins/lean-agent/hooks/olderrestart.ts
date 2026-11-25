@@ -50,7 +50,7 @@ export function planOf(cands: Cand[], rows: AgentRow[] | null, o: { auto: boolea
   if (!rows) return plan
   for (const c of cands) {
     const row = rows.find(a => a.sid === c.sid)
-    if (o.auto && c.parked) continue // parked on purpose: only the user's press reopens it
+    if (o.auto && (c.parked || c.finished)) continue // parked on purpose, or finished (a restart would start new work on it): only the user's press does that
     if (o.auto && o.done?.includes(c.id)) continue // once per thread per installed version
     // (a prompt nobody answers is judged first: the engine lists such a session with a state word that counts as running)
     if (row && (row.waitingFor || row.state === 'blocked')) plan.skip.push({ id: c.id, why: `${c.id} waits for you (an open prompt): restart it from its card when you have answered` })
@@ -116,7 +116,8 @@ export async function olderTick(h: Host, root: string, deps: RestartDeps): Promi
     return []
   }
   if (now - (s.seen ?? 0) < AFTER_UPDATE_MS) return []
-  const cands = await olderCandidates(h, root)
+  // (only what the tick may restart is looked for: no `claude agents` call every 30 s for threads that are done, parked or already tried for this version)
+  const cands = (await olderCandidates(h, root)).filter(c => !c.parked && !c.finished && !(s.done ?? []).includes(c.id))
   if (!cands.length) return []
   const plan = planOf(cands, await deps.agents(), { auto: true, done: s.done })
   if (!plan.go.length) return []

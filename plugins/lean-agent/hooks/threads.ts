@@ -640,9 +640,9 @@ async function freshSession(h: Host, root: string, home: string, t: Thread, inst
   // The prompt carries the inbox position of the messages it holds (the same mark a wake prompt has): the new session's mod marks them consumed when the model answered
   // this first request (delivery.ts wakeUpTo, register.tsx takeWake). 1.0.35, field: a restarted thread's messages stayed "delivered" for good, because only a wake
   // prompt had the mark and the handover's did not.
-  // (on the FIRST line: the desk's instruction stays the last thing the prompt says)
+  // (on the line after the first: the task-first line stays whole, the desk's instruction stays the last thing the prompt says)
   const nl = ho.prompt.indexOf('\n')
-  const prompt = !u.msgs.length ? ho.prompt : nl < 0 ? `${ho.prompt} ${wakeMark(u.upTo)}` : `${ho.prompt.slice(0, nl)} ${wakeMark(u.upTo)}${ho.prompt.slice(nl)}`
+  const prompt = !u.msgs.length ? ho.prompt : nl < 0 ? `${ho.prompt}\n${wakeMark(u.upTo)}` : `${ho.prompt.slice(0, nl)}\n${wakeMark(u.upTo)}${ho.prompt.slice(nl)}`
   const r = await startSession(h, home, t, prompt, given, installed, root)
   if (r.ok && u.msgs.length) {
     t.delivered = u.upTo

@@ -45,6 +45,7 @@ test('a script file with a forge write refuses the run (thread and worker), with
   h.files.set('/r/other/vote.py', POST_AZ) // not the thread's worktree
   h.files.set(`${WT}/big.py`, POST_GH + '#'.repeat(SCRIPT_MAX))
   h.files.set(`${WT}/bin.py`, POST_GH + '\u0000\u0001')
+  h.files.set(`${WT}/notes.py`, '# the release step runs: gh pr create --title x\n// az repos pr create\nprint("hello")\n')
   for (const agent of [undefined, 'lean-agent:worker-sonnet']) {
     const why = (c: string) => run(h, c, agent)
     const vote = await why('python3 tools/vote.py')
@@ -61,6 +62,7 @@ test('a script file with a forge write refuses the run (thread and worker), with
     expect(String(await why('python3 big.py'))).not.toContain('forge writes') // over 200 KB
     expect(String(await why('python3 bin.py'))).not.toContain('forge writes') // binary
     expect(String(await why('python3 missing.py'))).not.toContain('forge writes')
+    expect(String(await why('python3 notes.py'))).not.toContain('forge writes') // a forge write in a whole-line comment is text
     expect(String(await why('python3 tools/'))).not.toContain('forge writes') // a folder
     expect(String(await why('python3 $F'))).not.toContain('forge writes')
   }
@@ -79,7 +81,7 @@ test('scriptForgeWrite: needs the thread; a path that climbs out of the folders 
 
 test('one gh / az read list: shell.ts judges the forge groups by forgecli.ts, everything outside them stays refused as before', () => {
   const WRITE = ['gh pr create --title x', 'gh pr merge 3', 'gh pr comment 3 -b x', 'gh issue create', 'gh api -X POST repos/o/r/issues', 'gh api repos/o/r/issues -f title=x', 'gh auth login', 'gh config set a b', 'gh browse', 'gh workflow run x.yml', 'gh secret set X', 'gh release create v1', 'gh repo delete o/r --yes', 'gh alias set a b',
-    'az repos pr create', 'az repos pr set-vote --id 1 --vote approve', 'az boards work-item update --id 1', 'az login', 'az group delete -n x', 'az account set -s x', 'az rest --method post --url https://x', 'az pipelines run --name p', 'az devops invoke --http-method POST --area git']
+    'az repos pr create', 'az repos pr set-vote --id 1 --vote approve', 'az boards work-item update --id 1', 'az login', 'az group delete -n x', 'az account set -s x', 'az aks get-credentials -n x -g y', 'az storage blob download -n x', 'az rest --method post --url https://x', 'az pipelines run --name p', 'az devops invoke --http-method POST --area git']
   const READ = ['gh pr view 3', 'gh pr list', 'gh pr diff 3', 'gh pr checks 3', 'gh pr status', 'gh pr', 'gh issue view 1', 'gh issue list', 'gh search prs x', 'gh repo view', 'gh run list', 'gh run view 1', 'gh release view v1', 'gh release list', 'gh auth status', 'gh --version',
     'az repos pr list', 'az repos pr show --id 1', 'az account show', 'az group list', 'az boards work-item show --id 1', 'az pipelines runs list', 'az version', 'az repos pr reviewer list --id 1',
     'gh workflow list', 'gh label list'] // (the last two: a read verb of a forge group is a read in every group now)

@@ -48,7 +48,7 @@ export function limitsOf(cfg: LimitCfg | null | undefined, override?: number | n
   const configured = overrideOk(override) ? Math.floor(override) : base
   const limit = effectiveLimit(configured, typeof window === 'number' ? window : 0)
   const softRaw = cfg?.threads?.softCheckpointTokens ?? cfg?.['threads.softCheckpointTokens']
-  const scaled = valid(softRaw) ? (overrideOk(override) || limit < base ? Math.round((limit * Math.floor(softRaw)) / base / 1000) * 1000 : Math.floor(softRaw)) : softOf(limit)
+  const scaled = valid(softRaw) ? (overrideOk(override) ? Math.round((limit * Math.floor(softRaw)) / base / 1000) * 1000 : Math.floor(softRaw)) : softOf(limit)
   const share83 = Math.round((limit * WARN_SHARE) / 1000) * 1000 // a soft line never sits above 83% of the limit
   const asked = valid(cfg?.threadWarnTokens) ? Math.floor(cfg!.threadWarnTokens as number) : Math.min(scaled, share83)
   return { limit, warn: Math.min(asked, limit) }

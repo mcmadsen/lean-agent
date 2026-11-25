@@ -85,10 +85,21 @@ test('auto: nothing in the first 2 minutes after the installed version changed, 
   expect(w.calls).toEqual([])
   w.h.clock.t += 2000
   const notes = await olderTick(w.h.host, '/plug', w.deps)
-  expect(w.calls.map(c => c.id)).toEqual(['t1', 't4', 't8'])
+  expect(w.calls.map(c => c.id)).toEqual(['t1', 't4']) // (t8 is finished: only the user's press starts new work on it)
   expect(w.calls.every(c => !c.parked)).toBe(true)
   expect(notes).toHaveLength(1)
-  expect(notes[0]!.text).toBe('restarted 3 threads that ran an older plugin than the installed 1.0.35: t1 (was 1.0.34), t4 (was 1.0.34), t8 (was 1.0.34) (new sessions from their handovers; threads.restartOlder auto)')
+  expect(notes[0]!.text).toBe('restarted 2 threads that ran an older plugin than the installed 1.0.35: t1 (was 1.0.34), t4 (was 1.0.34) (new sessions from their handovers; threads.restartOlder auto)')
+  // nothing left to restart: the listing of sessions is not asked for again
+  let listed = 0
+  w.h.clock.t += 60_000
+  await olderTick(w.h.host, '/plug', { ...w.deps, agents: async () => (listed++, ROWS) })
+  expect(listed).toBe(1) // (t2 works and t3 waits: still candidates, so one listing; the ones tried, parked and finished are not)
+  const quiet = world({ t5: { state: 'parked', run: '1.0.34' }, t8: { state: 'open', run: '1.0.34', finished: 5 } }, ROWS, { threads: { restartOlder: 'auto' } })
+  await olderTick(quiet.h.host, '/plug', quiet.deps)
+  quiet.h.clock.t += AFTER_UPDATE_MS + 1000
+  let asked = 0
+  expect(await olderTick(quiet.h.host, '/plug', { ...quiet.deps, agents: async () => (asked++, ROWS) })).toEqual([])
+  expect(asked).toBe(0)
 })
 
 test('auto: at most once per thread per installed version; a thread that was working is restarted when it goes idle; a new version starts over', async () => {

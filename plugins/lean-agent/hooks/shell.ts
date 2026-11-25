@@ -12,7 +12,7 @@ export type Push = { args: string[]; known: boolean }
 export type Verdict = { push: boolean; write: boolean; unsure: boolean; pushes: Push[]; forge: string | null; dynamic: boolean }
 
 import { forgeReadOk } from './forgeread'
-import { AZ_GROUPS, AZ_READ, GH_GROUPS, azWrite, ghWrite, textForgeWrite } from './forgecli'
+import { AZ_GROUPS, GH_GROUPS, azWrite, ghWrite, textForgeWrite } from './forgecli'
 
 const EXP = '\u0001' // stands for any expansion inside a word
 const PUSH_TEXT = /\bgit\b[^;&|\n]*\bpush\b/
@@ -77,7 +77,7 @@ function azDenied(rest: string[]): boolean {
   for (; i < rest.length && !rest[i]!.startsWith('-'); i++) pos.push(rest[i]!)
   if (!pos.length || pos[0] === 'version' || pos[0] === 'help') return false
   if (AZ_GROUPS.has(pos[0]!)) return azWrite(rest) !== null // the forge groups: the read allow-list of forgecli.ts
-  return !AZ_READ.test(pos[pos.length - 1]!) // (any other az command: its last word must be a read verb, forgecli's AZ_READ)
+  return !/^(list|show|query|get|list-.*|show-.*)$/.test(pos[pos.length - 1]!) // (any other az command: the narrow list as before: `get-credentials`, `download` and the like are not reads here; forgeread.ts lists the few fixed reads before this)
 }
 
 // The desk's read-only forge commands (strict mode): ONE plain command whose program is gh or az and that the SAME classification
