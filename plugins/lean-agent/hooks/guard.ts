@@ -882,18 +882,31 @@ const TEMP_OK = /^(\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\/dev\/(null|stderr
 const tempFile = (w: string, scratch?: string): boolean => (TEMP_OK.test(w) || (!!scratch && w.startsWith(`${scratch}/`))) && !w.split('/').includes('..') && !/[`]|\$(?!\{?TMPDIR)/.test(w)
 // the words that follow a `>` / `>>` / `&>` outside quotes (a `>&2` fd copy is no file)
 // A heredoc body and a `# comment` are text, not commands: a `>` in them ("# result > no-passkey", "if v > 3.4.0" in a python heredoc)
-// is no redirect (1.0.33: readers were refused with "redirect to ON" / "redirect to 3.4.0"). The `<<WORD` line itself stays (`cat > f <<EOF`).
-const HEREDOC_BODY = /(?<!<)<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1[^\n]*\n[\s\S]*?(\n[ \t]*\2[ \t]*(?=\n|$)|$)/g
-export function redirectTargets(c0: string): string[] {
-  // (an UNQUOTED heredoc whose body has a substitution still runs that command: it stays in the scan)
-  const c = c0.replace(HEREDOC_BODY, (m, qt: string) => (!qt && /\$\(|`/.test(m) ? m : m.slice(0, m.indexOf('\n')) + '\n'))
+// is no redirect (1.0.33: readers were refused with "redirect to ON" / "redirect to 3.4.0"). The rest of the `<<WORD` line stays scanned
+// (`cat <<EOF > f`); a `<<` inside quotes starts nothing; an UNQUOTED heredoc whose body has a substitution still runs that command: scanned.
+const HEREDOC_AT = /<<-?[ \t]*(['"]?)([A-Za-z_]\w*)\1/y
+export function redirectTargets(c: string): string[] {
   const out: string[] = []
   let q = ''
+  let body: { from: number; to: number } | null = null // the lines of a heredoc body, once the line of its `<<WORD` is done
   for (let i = 0; i < c.length; i++) {
     const ch = c[i]!
+    if (body && i >= body.from) { i = body.to - 1; body = null; continue }
     if (q) { if (ch === q) q = ''; else if (ch === '\\' && q === '"') i++; continue }
     if (ch === '\\') { i++; continue }
     if (ch === '#' && (i === 0 || /[\s;&|(]/.test(c[i - 1]!))) { while (i + 1 < c.length && c[i + 1] !== '\n') i++; continue }
+    if (ch === '<' && c[i + 1] === '<' && c[i + 2] !== '<' && c[i - 1] !== '<' && !body) {
+      HEREDOC_AT.lastIndex = i
+      const m = HEREDOC_AT.exec(c)
+      const nl = m ? c.indexOf('\n', i) : -1
+      if (m && nl >= 0) {
+        const end = new RegExp(`\\n[ \\t]*${m[2]}[ \\t]*(?=\\n|$)`).exec(c.slice(nl))
+        const to = end ? nl + end.index + end[0].length : c.length
+        if (m[1] || !/\$\(|`/.test(c.slice(nl, to))) body = { from: nl, to }
+        i += m[0].length - 1
+        continue
+      }
+    }
     if (ch === "'" || ch === '"') { q = ch; continue }
     if (ch !== '>') continue
     let j = i + 1

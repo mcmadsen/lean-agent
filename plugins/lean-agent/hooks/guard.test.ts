@@ -905,4 +905,8 @@ test('a reader: a > in a shell comment or a quoted heredoc body is text, not a r
   expect(redirectTargets('cat <<EOF\n$(echo x > /r/out.md)\nEOF')).toEqual(['/r/out.md']) // an unquoted body that runs a substitution
   expect(redirectTargets('rg x /r/app\n> /r/out.md')).toEqual(['/r/out.md']) // a comment ends at the newline
   expect(redirectTargets('echo a#b > /r/out.md')).toEqual(['/r/out.md']) // # inside a word is no comment
+  expect(redirectTargets("cat <<'EOF' > /r/out.md\nhello > x\nEOF")).toEqual(['/r/out.md']) // the rest of the heredoc line is scanned, the body is not
+  expect(redirectTargets('echo "<<EOF"\n> /r/out.md\nEOF')).toEqual(['/r/out.md']) // a << inside quotes starts no heredoc
+  expect(redirectTargets('cat <<< x\n> /r/out.md')).toEqual(['/r/out.md']) // a here-string is no heredoc
+  expect(redirectTargets("cat <<'EOF'\nbody\nEOF\n> /r/out.md")).toEqual(['/r/out.md']) // after the terminator line the scan goes on
 })
