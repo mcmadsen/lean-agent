@@ -30,7 +30,7 @@ export type Item = { id: string; title: string; activity: number; cost: number; 
 const WAITING_WORDS = ['waiting', 'waiting for answer', 'approval', 'asking', 'blocked', 'stuck', 'stalled']
 export const needsUser = (t: ThreadRow, needs: Pick<NeedRow, 'thread'>[] = []): boolean => WAITING_WORDS.includes(stateOf(t).word) || !!t.pending || !!t.noReport /* "idle, no report N min" (endnudge.ts) */ || needs.some(n => n.thread === t.id)
 const num = (id: string) => Number(id.replace(/^\D+/, '')) || 0
-// the thread number of an id ("t90" is 199); NaN for an id with no number (it sorts last, whatever the direction)
+// the thread number of an id ("t90" is 90); NaN for an id with no number (it sorts last, whatever the direction)
 const numOrNaN = (id: string): number => (/\d/.test(id) ? Number(id.replace(/^\D+/, '')) : NaN)
 
 export function itemsOf(threads: ThreadRow[], closed: ClosedRow[], needs: Pick<NeedRow, 'thread'>[] = []): Item[] {
