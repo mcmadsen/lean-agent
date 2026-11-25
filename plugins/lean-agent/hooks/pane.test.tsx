@@ -115,9 +115,9 @@ test('pane renders on every surface; Resume presses one claude --bg --resume', {
     if (surface === 'terminal') expect(await ui.find({ type: 'Button', key: 'card-t1' })).toBeFalsy() // 1.0.35: the session cards are inside the folded Sessions card
     await openSessions(ui)
     expect((await ui.find({ type: 'Button', key: 'card-t1' }))?.text).toContain('t1 one')
-    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /1\.0\.34/ })).toBeFalsy() // the version line is on the unfolded header card (the fold is kept across mounts)
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /1\.0\.35/ })).toBeFalsy() // the version line is on the unfolded header card (the fold is kept across mounts)
     await openHeader(ui)
-    expect(await ui.find({ type: 'Text', text: /1\.0\.34/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /1\.0\.35/ })).toBeTruthy()
     await ui.unmount()
   }
   const ui = await $.ui.mount(PANE as any)

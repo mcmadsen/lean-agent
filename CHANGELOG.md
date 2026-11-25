@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.35
+
+### Changed
+
+- The desk pane is three cards: header, Health and Sessions. The Sessions card is the container of every session: folded it is one line (`Sessions (4) · sorted by thread ↓`) with the chips `N needs you`, `N unread` and `N hidden` (each only above 0); the session cards are drawn only when you unfold it. The same needs-you chip is on the header (a tap unfolds Sessions). The More card and the loose footer buttons are gone: **New thread**, **Feedback export** and **Setup / repair** are buttons in the unfolded header card; goals, projects and scripts stay reachable through `/lean-agent:goals`, `lean_thread projects` and `/lean-agent:scripts`.
+- A folded session card is short on a narrow pane: line 2 is the model chip, `N new`, usage as one figure (`7.7M`), age, then Hide and Open; the window text and the reviews / restarts breakdown are in the unfolded card. Every session card (closed ones too) shows model and effort (`sonnet/high`, `haiku/low`); the unfolded card shows `last restart: sonnet/high` when it differs.
+- The thread session limit is 200000, like the desk (was 120000): one value, capped at 90% of the model's real window once known (180000 on 200k), the soft checkpoint is 80% of it (was a fixed 80000). `threadTokens` lowers it, `lean_thread limit tN` sets one thread's own. A higher limit means each turn re-reads a bigger cached context.
+
+### Fixed
+
+- The reviewer agent could never deliver its report: past call 16 the guard counted and refused the reviewer's own hand-back (61 refusals in one export). The hand-back is never counted; `maxTurns` is 22; the refusal at the budget says "answer with the json block only"; a reviewer that still ends with no report gets a synthesised "review not delivered" line.
+- A thread restarted at its checkpoint did nothing for 12+ minutes: it was told to wait for a worker of the old session, whose result can never reach it. Every handover now says a worker of the previous session cannot report (read its result file or redo the step). A checkpoint / limit / stall restart must show a model request or tool call within `threads.firstTurnSeconds` (90), otherwise it gets one internal kick and then one desk alert with the reason. The messages a restart prompt carries are consumed once the model answers it (they stayed "delivered" before). A message to a blocked session no longer says "running".
+- Approving a remote write by the desk's pasted question no longer fails when only the wording of an option description differs; the labels (exact, in order), request id, check code and text are compared, and a mismatch names the part.
+- `lean_review record` is no longer refused twice for the same kind of reason: the refusal carries the exact `fixed` and `coverage` formats and a script-prefilled JSON (earlier open findings, removed or deleted tests). A "ready to push" report runs the PR guide check and returns the template skeleton with the stored work item.
+- A held reply the desk cancels tells the thread "cancelled by the desk before sending: <reason>"; `actions.holdSeconds` is 5 to 600 and one `action-cancel ... on: true` extends the hold.
+- The mod's own messages to a thread (chaser, scheduled sends, budget and hold notices, approval results) never unpark or reopen it.
+- Guard: a reader may redirect to `/tmp/<dir>/$d/$f` (literal temp or scratch prefix, variables as whole path segments, no `..`); `python3|node|bash|sh <file>` inside the worktree or scratch is scanned for forge writes like `python3 -c`; `git update-ref refs/tags/...`, a refspec push into `refs/tags/` and `git push --delete <remote> tag <name>` are tag writes; "link WI 4210 anyway" must name the work item (the plain words count only for exactly one pending link request).
+
+### Added
+
+- Threads on an older plugin: `threads.restartOlder` ask (default) | auto | off. The Health row has "Restart N older threads" (also `lean_doctor restart-older`): idle, done-not-closed and parked threads restart from the handover, working ones are listed and skipped, closed ones are never reopened; `auto` restarts idle open threads once per version, never in the first 2 minutes after an update.
+- One path to continue a thread: a desk `lean_thread send` to a parked thread wakes it, to a closed one reopens it, and says what it did. `lean_thread set tN model|effort <value>` is applied by one restart when the session goes idle ("model sonnet -> haiku at next restart"). Repeated "still waiting" reports are recorded and not forwarded ("waiting ... (N repeats)"). `lean_thread save-draft` writes a draft into `feedback.folder` without a thread.
+- `lean_run {command: "gates"}` runs the configured gates (`gates.commands`, or package.json typecheck / lint / test with `gates.auto`), returns a short pass / fail summary and with `gates.commitOnGreen` commits the worker's own files (never amends, never pushes).
+- Azure DevOps text rules (`ado.textRules` warn | convert | off, default warn): on an Azure DevOps origin `#<id>` is a work item and `!<id>` a pull request; PR text, PR / work item comment requests and `git commit -m` are checked for `#id`, `@mentions`, bare hashes, emoji, HTML, headings, single newlines, non-http links and the 4000-character description limit; the findings show on the request card before approval.
+- Feedback drafts carry the plugin version they were written against; the export and `deliver` of a draft say "written against X, installed Y: this may be fixed already", `OLD:` past 3 releases and "possibly fixed in 1.0.N" from the CHANGELOG. The Health card has a grey line "N projects have stale rule areas".
+
 ## 1.0.34
 
 ### Fixed
