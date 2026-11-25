@@ -267,10 +267,11 @@ test('RULES: the thread\'s standing rules with Remove (two presses); a change go
   expect((await texts(ui)).some(x => /never touch the vendored folder/.test(x))).toBe(true)
   const rm = (await ui.findAll({ type: 'Button' })).find((b: any) => /^rule-remove-/.test(String(b.key)))!
   expect(rm.text).toBe('Remove')
-  await ui.press({ key: rm.key })
-  expect((await ui.find({ type: 'Button', key: rm.key }))?.text).toMatch(/^Confirm remove/)
+  const rmKey = String(rm.key)
+  await ui.press({ key: rmKey })
+  expect((await ui.find({ type: 'Button', key: rmKey }))?.text).toMatch(/^Confirm remove/)
   expect(await ruleCount(h)).toBe(1) // the first press changed nothing
-  await ui.press({ key: rm.key })
+  await ui.press({ key: rmKey })
   expect(await ruleCount(h)).toBe(0)
   await ui.unmount()
   ui = await $.ui.mount(pane('t2'))

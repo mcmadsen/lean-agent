@@ -578,7 +578,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role, decide?: ty
     apprNodes.push(
       <Box key={`std-sent-${s.ts}`} flexWrap="wrap" columnGap={1}>
         <Text wrap="wrap">{s.text}</Text>
-        {!!s.grant && D ? <Button key={`std-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={D.revokeStanding(s.grant)} /> : null}
+        {s.grant && D ? <Button key={`std-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={D.revokeStanding(s.grant)} /> : null}
       </Box>,
     )
   for (const g of (stand?.grants ?? []).filter(g => g.thread === id && !sentGrants.has(g.id)))
@@ -592,7 +592,7 @@ async function paint($: any, e: any, id: string, roleOf: () => Role, decide?: ty
     apprNodes.push(
       <Box key={`wr-sent-${s.ts}`} flexWrap="wrap" columnGap={1}>
         <Text wrap="wrap">{s.text}</Text>
-        {!!s.grant && D ? <Button key={`wr-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={D.revokeWritten(s.grant)} /> : null}
+        {s.grant && D ? <Button key={`wr-revoke-${s.grant}-${s.ts}`} label="Revoke" onPress={D.revokeWritten(s.grant)} /> : null}
       </Box>,
     )
   for (const g of (wr?.grants ?? []).filter(g => g.thread === id && !wrSent.has(g.id)))
